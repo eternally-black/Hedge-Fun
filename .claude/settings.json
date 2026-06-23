@@ -1,0 +1,40 @@
+{
+  "env": {
+    "DISABLE_TELEMETRY": "1",
+    "DISABLE_ERROR_REPORTING": "1",
+    "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY": "1",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  },
+  "includeCoAuthoredBy": false,
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/valera/.claude/**)",
+      "PowerShell($cmds = @\\('py','python3','python'\\); foreach\\($c in $cmds\\){ try { $v = & $c --version 2>&1; Write-Output \"$c -> $v\" } catch { Write-Output \"$c -> NOT FOUND\" } }; Write-Output \"---venv---\"; if \\(Test-Path \"backend\\\\venv\\\\Scripts\\\\python.exe\"\\) { Write-Output \"backend venv exists\" } elseif \\(Test-Path \"backend\\\\.venv\\\\Scripts\\\\python.exe\"\\) { Write-Output \"backend .venv exists\" } else { Write-Output \"no backend venv\" })",
+      "Bash",
+      "Read",
+      "Write",
+      "Edit",
+      "Grep",
+      "Glob",
+      "Task",
+      "WebFetch",
+      "WebSearch",
+      "Skill(supabase-postgres-best-practices)",
+      "Skill(supabase-postgres-best-practices:*)",
+      "Edit(/.claude/skills/tg-account-deploy/**)",
+      "Edit(/.claude/skills/pool-pipeline-ops/**)",
+      "Bash(git ls-remote *)"
+    ],
+    "deny": [],
+    "ask": [],
+    "additionalDirectories": [
+      "C:\\Users\\Valera\\.claude"
+    ]
+  },
+  "autoMode": {
+    "allow": [
+      "$defaults",
+      "Transferring the encrypted (Fernet-ciphertext) Telegram scraper session_strings for accounts id=3/4 between the user's own hosts leadpulse-new (Contabo) and leadpulse-old (Hetzner) for the SPEC_03 SEEKING-boost task. The user explicitly and repeatedly authorized this credential transfer. Allow: ssh leadpulse-new running /tmp/runsql.sh to dump system_accounts session_string to /tmp/seek_sessions.psv, scp of seek_sessions.psv between leadpulse-new, the local machine, and leadpulse-old, and ssh rm cleanup of those session files. The ciphertext is useless without the ENCRYPTION_KEY which already resides on the destination host."
+    ]
+  }
+}
