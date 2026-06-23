@@ -8,4 +8,5 @@ build/
 next-env.d.ts
 *.tsbuildinfo
 /.fablize/
+CLAUDE.md
 CLAUDE.md.fablize-bak.*
