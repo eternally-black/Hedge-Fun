@@ -1,0 +1,346 @@
+// HedgeFun — Prisma schema (Postgres)
+// Money in integer cents. Price in basis points (0..10000). utcDay = 'YYYY-MM-DD' UTC string.
+// Ledger stores RAW points; x2 multiplier is derived at read time (one strategy, one place).
+// Idempotency enforced by DB unique constraints, never app logic.
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ============================================================ ENUMS
+
+enum AuthProvider {
+  EMAIL
+  TWITTER
+}
+
+enum BetSide {
+  YES
+  NO
+}
+
+enum MarketStatus {
+  OPEN // tradable, deck-eligible
+  CLOSED // trading halted, not yet UMA-final (dispute window)
+  RESOLVED // outcome final
+  CANCELED // voided/invalid -> bets pushed
+}
+
+enum MarketOutcome {
+  YES
+  NO
+  INVALID
+}
+
+enum SettlementStatus {
+  PENDING
+  SETTLED
+  VOID
+}
+
+enum BetResult {
+  PENDING
+  WIN
+  LOSS
+  PUSH
+}
+
+enum PointsType {
+  SWIPE // RAW 1/swipe, capped 10/day — the ONLY type x2 multiplies
+  LOGIN // daily GM bonus (config constant), never multiplied
+  REFERRAL // referral rewards, never multiplied
+  STREAK_X2 // reserved: materialized x2 delta (Mode B). UNUSED at launch.
+}
+
+enum StreakState {
+  ACTIVE
+  BURNED_RECOVERABLE
+  LOST
+}
+
+enum StreakEventType {
+  QUALIFIED
+  BURNED
+  RECOVERED
+  LOST
+}
+
+enum ReferralEventType {
+  SIGNUP
+  QUALIFIED
+  INVITEE_BONUS
+  INVITER_ACCRUAL
+}
+
+// ============================================================ USER
+
+model User {
+  id                    String       @id @default(cuid())
+  privyId               String       @unique
+  authProvider          AuthProvider
+  email                 String?      @unique
+  twitterHandle         String?      @unique
+  embeddedWalletAddress String?      @unique
+  referralCode          String       @unique @default(cuid())
+  createdAt             DateTime     @default(now())
+  updatedAt             DateTime     @updatedAt
+  lastSeenAt            DateTime?
+
+  bets               Bet[]
+  pointsLedger       PointsLedger[]
+  virtualBalance     VirtualBalance?
+  collectibleBalance CollectibleBalance?
+  shardGrants        ShardGrant[]
+  dailyCounters      DailyCounter[]
+  loginMarks         LoginMark[]
+  streak             Streak?
+  streakEvents       StreakEvent[]
+  referralsMade      Referral[]          @relation("Inviter")
+  referralReceived   Referral?           @relation("Invitee")
+
+  @@index([createdAt])
+  @@map("users")
+}
+
+// ============================================================ MARKET (cached from Polymarket)
+
+model Market {
+  id           String  @id @default(cuid())
+  polymarketId String  @unique // = conditionId
+  question     String
+  category     String? // usually null on Gamma; derived/optional
+  imageUrl     String?
+
+  // Snapshot pricing in basis points (0..10000). Per-bet price locked on Bet.
+  yesPriceBp Int?
+  noPriceBp  Int?
+
+  resolutionDeadline DateTime // from endDate; powers <=24h blitz filter
+  status             MarketStatus   @default(OPEN)
+  resolvedOutcome    MarketOutcome?
+  resolvedAt         DateTime?
+
+  lastPolledAt DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  bets Bet[]
+
+  @@index([status, resolutionDeadline]) // deck assembly
+  @@index([status, resolvedAt]) // settlement scan
+  @@map("markets")
+}
+
+// ============================================================ BET (swipe)
+
+model Bet {
+  id       String @id @default(cuid())
+  userId   String
+  user     User   @relation(fields: [userId], references: [id])
+  marketId String
+  market   Market @relation(fields: [marketId], references: [id])
+
+  side          BetSide
+  stakeCents    Int // 10000 == $100.00 (config STAKE_CENTS)
+  lockedPriceBp Int // price of the BOUGHT side in bp at swipe time (yes-bet -> yes price, no-bet -> no price)
+  utcDay        String  @db.VarChar(10)
+  earnedPoint   Boolean @default(false) // over-cap swipes = false
+
+  settlementStatus SettlementStatus @default(PENDING)
+  result           BetResult        @default(PENDING)
+  payoutCents      Int?
+  pnlCents         Int?
+  resolvedYes      Boolean?
+
+  createdAt DateTime  @default(now())
+  settledAt DateTime?
+
+  shardGrant ShardGrant?
+
+  // One bet per market per user (C1): a card is swiped once. Kills the
+  // "farm the daily cap against a single market" exploit.
+  @@unique([userId, marketId])
+  @@index([settlementStatus])
+  @@index([marketId, settlementStatus])
+  @@index([userId, utcDay])
+  @@map("bets")
+}
+
+// ============================================================ POINTS LEDGER (append-only, RAW)
+
+model PointsLedger {
+  id     String     @id @default(cuid())
+  userId String
+  user   User       @relation(fields: [userId], references: [id])
+  type   PointsType
+  amount Int // RAW points, never pre-multiplied
+  utcDay String     @db.VarChar(10)
+
+  betId      String? @unique // SWIPE provenance + idempotency (1 pt/bet)
+  referralId String? // REFERRAL provenance
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  // Idempotency lives on the SOURCE of each point type, not here, because REFERRAL
+  // legitimately writes many rows/day:
+  //   SWIPE     -> unique betId above (1 pt/bet)
+  //   LOGIN     -> LoginMark unique [userId,utcDay] gates the write (login.ts)
+  //   REFERRAL  -> ReferralEvent.sourcePointsLedgerId / inviteeBonusPaidAt (referral.ts)
+  //   STREAK_X2 -> unused at launch (derived multiplier mode)
+  @@index([userId, type]) // breakdown + leaderboard ranking
+  @@index([userId, utcDay])
+  @@map("points_ledger")
+}
+
+// ============================================================ VIRTUAL BALANCE
+
+model VirtualBalance {
+  userId       String   @id
+  user         User     @relation(fields: [userId], references: [id])
+  balanceCents Int      @default(100000) // start $1000.00
+  updatedAt    DateTime @updatedAt
+
+  @@map("virtual_balances")
+}
+
+// ============================================================ COLLECTIBLES
+
+model CollectibleBalance {
+  userId    String   @id
+  user      User     @relation(fields: [userId], references: [id])
+  shards    Int      @default(0) // remainder after artifact conversion (0..19)
+  artifacts Int      @default(0)
+  updatedAt DateTime @updatedAt
+
+  @@map("collectible_balances")
+}
+
+model ShardGrant {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  betId     String   @unique // 1 winning bet -> at most 1 shard, ever
+  bet       Bet      @relation(fields: [betId], references: [id])
+  utcDay    String   @db.VarChar(10)
+  counted   Boolean  @default(true) // false = over daily cap, recorded but not added
+  createdAt DateTime @default(now())
+
+  @@index([userId, utcDay])
+  @@map("shard_grants")
+}
+
+// ============================================================ DAILY COUNTER
+
+model DailyCounter {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  utcDay      String   @db.VarChar(10)
+  swipeCount  Int      @default(0)
+  shardCount  Int      @default(0)
+  loginMarked Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([userId, utcDay])
+  @@map("daily_counters")
+}
+
+// ============================================================ LOGIN MARK
+
+model LoginMark {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  utcDay      String   @db.VarChar(10)
+  bonusAmount Int // raw login points (config constant)
+  createdAt   DateTime @default(now())
+
+  @@unique([userId, utcDay])
+  @@map("login_marks")
+}
+
+// ============================================================ STREAK
+
+model Streak {
+  userId           String      @id
+  user             User        @relation(fields: [userId], references: [id])
+  currentLevel     Int         @default(0)
+  state            StreakState @default(ACTIVE)
+  lastQualifiedDay String?     @db.VarChar(10)
+  burnedAt         DateTime?
+  recoverableUntil DateTime? // burnedAt + RECOVERY_WINDOW_DAYS
+  recoveredCount   Int         @default(0)
+  updatedAt        DateTime    @updatedAt
+
+  @@index([state])
+  @@map("streaks")
+}
+
+model StreakEvent {
+  id           String          @id @default(cuid())
+  userId       String
+  user         User            @relation(fields: [userId], references: [id])
+  type         StreakEventType
+  utcDay       String          @db.VarChar(10)
+  levelBefore  Int
+  levelAfter   Int
+  artifactUsed Boolean         @default(false)
+  createdAt    DateTime        @default(now())
+
+  @@unique([userId, utcDay, type])
+  @@index([userId, createdAt])
+  @@map("streak_events")
+}
+
+// ============================================================ REFERRAL
+
+model Referral {
+  id                 String          @id @default(cuid())
+  inviterId          String
+  inviter            User            @relation("Inviter", fields: [inviterId], references: [id])
+  inviteeId          String          @unique
+  invitee            User            @relation("Invitee", fields: [inviteeId], references: [id])
+  createdAt          DateTime        @default(now())
+  qualifiedAt        DateTime?
+  inviteeBonusPaidAt DateTime?
+  events             ReferralEvent[]
+
+  @@index([inviterId])
+  @@map("referrals")
+}
+
+model ReferralEvent {
+  id                   String            @id @default(cuid())
+  referralId           String
+  referral             Referral          @relation(fields: [referralId], references: [id])
+  type                 ReferralEventType
+  sourcePointsLedgerId String?           @unique // 1 accrual per source ledger row
+  sourceAmount         Int?
+  rewardAmount         Int?
+  metadata             Json?
+  createdAt            DateTime          @default(now())
+
+  @@index([referralId, type])
+  @@map("referral_events")
+}
+
+// ============================================================ LEADERBOARD (deferred UI)
+
+model LeaderboardSnapshot {
+  id          String   @id @default(cuid())
+  utcDay      String   @db.VarChar(10)
+  userId      String
+  rank        Int
+  totalPoints Int // effective (multiplier-applied) total
+  createdAt   DateTime @default(now())
+
+  @@unique([utcDay, userId])
+  @@index([utcDay, rank])
+  @@map("leaderboard_snapshots")
+}

@@ -1,0 +1,36 @@
+{
+  "name": "hedgefun",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "db:up": "bash scripts/db-up.sh",
+    "dev:db": "bash scripts/db-up.sh && next dev",
+    "db:push": "prisma db push",
+    "db:studio": "prisma studio",
+    "postinstall": "prisma generate",
+    "poll": "tsx scripts/poller.ts",
+    "refresh-deck": "tsx scripts/refresh-deck.ts",
+    "verify:polymarket": "tsx scripts/verify-polymarket.ts",
+    "test": "tsx scripts/test-points.ts && tsx scripts/test-engine.ts && tsx scripts/test-settle.ts",
+    "smoke": "tsx scripts/smoke.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.19.3",
+    "@privy-io/react-auth": "^3.32.2",
+    "@privy-io/server-auth": "^1.32.5",
+    "next": "^16.2.9",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "prisma": "^6.19.3",
+    "tsx": "^4.22.4",
+    "typescript": "^5.9.3"
+  }
+}

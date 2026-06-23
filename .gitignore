@@ -4,3 +4,8 @@ node_modules/
 dist/
 build/
 .DS_Store
+.next/
+next-env.d.ts
+*.tsbuildinfo
+/.fablize/
+CLAUDE.md.fablize-bak.*

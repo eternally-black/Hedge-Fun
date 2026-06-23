@@ -1,0 +1,123 @@
+// F4 settlement poller. Standalone daemon (later a VPS cron). Run: npm run poll
+//   - finds markets with PENDING bets
+//   - fetches real Polymarket resolution
+//   - settles in an idempotent transaction (P&L + shard on win)
+//   - sweeps streak burns each tick
+// Rule: thrown error = transient -> backoff/retry; a returned decision = commit it.
+import { PrismaClient } from "@prisma/client";
+import { fetchResolution } from "../src/lib/polymarket";
+import { settleMarket, type Resolution } from "./settle";
+import { evaluateStreak } from "../src/lib/streak";
+import { refreshDeck } from "./refresh-deck";
+
+const prisma = new PrismaClient();
+
+const POLL_INTERVAL_MS = 60_000;
+const CONCURRENCY = 4;
+
+let running = true;
+
+function toResolution(m: Awaited<ReturnType<typeof fetchResolution>>): Resolution {
+  if (!m) return { kind: "open" };
+  if (m.status === "RESOLVED" && m.resolvedOutcome === "YES") return { kind: "resolved", resolvedYes: true };
+  if (m.status === "RESOLVED" && m.resolvedOutcome === "NO") return { kind: "resolved", resolvedYes: false };
+  // Polymarket has no explicit "void" in the fields we read; CANCELED would come from
+  // an invalid resolution. For now anything not cleanly resolved -> still open.
+  return { kind: "open" };
+}
+
+async function settleOne(market: { id: string; polymarketId: string }) {
+  const remote = await fetchResolution(market.polymarketId); // may throw -> transient
+  const resolution = toResolution(remote);
+  if (resolution.kind === "open") return;
+  const r = await settleMarket(prisma, market.id, resolution);
+  await prisma.market.update({ where: { id: market.id }, data: { lastPolledAt: new Date() } });
+  if (r.settled + r.voided > 0) {
+    console.log(
+      `[settle] ${market.polymarketId.slice(0, 10)}… settled=${r.settled} void=${r.voided} shards=${r.shardsAwarded}`,
+    );
+  }
+}
+
+// Process an array with a bounded concurrency, isolating per-item errors.
+async function mapLimit<T>(items: T[], limit: number, fn: (t: T) => Promise<void>) {
+  const queue = [...items];
+  const workers = Array.from({ length: Math.min(limit, queue.length) }, async () => {
+    while (queue.length) {
+      const item = queue.shift()!;
+      try {
+        await fn(item);
+      } catch (e) {
+        console.warn("[poll] item error (will retry next tick):", (e as Error).message);
+      }
+    }
+  });
+  await Promise.all(workers);
+}
+
+async function tick() {
+  // Keep the deck cache warm so swipes lock fresh prices and expired markets drop (M4).
+  try {
+    const n = await refreshDeck(24, 100);
+    console.log(`[deck] refreshed ${n} markets`);
+  } catch (e) {
+    console.warn("[deck] refresh error:", (e as Error).message);
+  }
+
+  // Markets that still have unsettled bets.
+  const pending = await prisma.bet.findMany({
+    where: { settlementStatus: "PENDING" },
+    distinct: ["marketId"],
+    select: { market: { select: { id: true, polymarketId: true } } },
+  });
+  const markets = pending.map((p) => p.market);
+  if (markets.length) {
+    console.log(`[poll] ${markets.length} market(s) with pending bets`);
+    await mapLimit(markets, CONCURRENCY, settleOne);
+  }
+
+  // Streak sweep — only streaks that can actually transition (M1): ACTIVE that missed a
+  // day, or BURNED_RECOVERABLE whose window has expired. Everything else is a no-op the
+  // read-path handles. Avoids one transaction per user per tick.
+  const twoDaysAgo = new Date(Date.now() - 2 * 86_400_000).toISOString().slice(0, 10);
+  const due = await prisma.streak.findMany({
+    where: {
+      OR: [
+        { state: "ACTIVE", lastQualifiedDay: { lte: twoDaysAgo } },
+        { state: "BURNED_RECOVERABLE", recoverableUntil: { lt: new Date() } },
+      ],
+    },
+    select: { userId: true },
+  });
+  for (const s of due) {
+    try {
+      await evaluateStreak(s.userId);
+    } catch (e) {
+      console.warn("[streak] sweep error:", (e as Error).message);
+    }
+  }
+}
+
+async function loop() {
+  console.log("poller started. interval", POLL_INTERVAL_MS, "ms");
+  while (running) {
+    const start = Date.now();
+    try {
+      await tick();
+    } catch (e) {
+      console.error("[poll] tick failed:", (e as Error).message);
+    }
+    const elapsed = Date.now() - start;
+    await new Promise((r) => setTimeout(r, Math.max(0, POLL_INTERVAL_MS - elapsed)));
+  }
+}
+
+for (const sig of ["SIGINT", "SIGTERM"] as const) {
+  process.on(sig, () => {
+    console.log(`\n${sig} -> stopping…`);
+    running = false;
+    prisma.$disconnect().then(() => process.exit(0));
+  });
+}
+
+loop();
