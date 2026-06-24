@@ -30,6 +30,17 @@ async function main() {
     assert.ok(Math.abs(sum - 10000) < 1500, `yes+no ~ 10000bp (got ${sum})`);
     console.log("   ✓ blitz invariants hold");
 
+    // Contested-price gate: every returned card must be in the 15%..85% band — no decided/live
+    // matches (the ~100%/0% cards). This is the real fix; startDate can't tell live from future.
+    for (const card of deck) {
+      assert.ok(
+        card.yesPriceBp! >= 1500 && card.yesPriceBp! <= 8500 &&
+          card.noPriceBp! >= 1500 && card.noPriceBp! <= 8500,
+        `price gate: ${card.question.slice(0, 40)} is ${card.yesPriceBp}/${card.noPriceBp}bp (decided/lopsided)`,
+      );
+    }
+    console.log("   ✓ every card is contested (15%..85% band, no 100%/0% cards)");
+
     console.log("2. fetchResolution(sample id)...");
     const r = await fetchResolution(c.polymarketId);
     assert.ok(r, "resolution lookup returns the market");
@@ -60,6 +71,58 @@ async function main() {
   assert.strictEqual(synthetic?.status, "RESOLVED");
   assert.strictEqual(synthetic?.resolvedOutcome, "YES");
   console.log("3. ✓ mapMarket resolves YES on [1,0] + umaResolutionStatus=resolved");
+
+  // 3b. startsAt mapping: a market WITH startDate maps startsAt to that exact ISO; a market
+  //     WITHOUT startDate maps startsAt to null (crypto/Yes-No have no meaningful start).
+  const startIso = "2026-07-01T18:00:00Z";
+  const withStart = mapMarket({
+    conditionId: "0xstart",
+    question: "Match starts later?",
+    startDate: startIso,
+    endDate: new Date(Date.now() + 3_600_000).toISOString(),
+    outcomes: '["Team A","Team B"]',
+    outcomePrices: '["0.5","0.5"]',
+  });
+  assert.strictEqual(withStart?.startsAt, startIso, "startDate present -> startsAt = that ISO");
+  const noStart = mapMarket({
+    conditionId: "0xnostart",
+    question: "Crypto up or down?",
+    endDate: new Date(Date.now() + 3_600_000).toISOString(),
+    outcomes: '["Up","Down"]',
+    outcomePrices: '["0.5","0.5"]',
+  });
+  assert.strictEqual(noStart?.startsAt, null, "no startDate -> startsAt = null");
+  console.log("3b. ✓ mapMarket maps startsAt from startDate (ISO when present, null when absent)");
+
+  // 4. Binary markets keep their REAL side labels (index 0 = YES side, index 1 = NO side).
+  //    The card shows these, not a forced Yes/No. Covers Up/Down, teams, and Over/Under.
+  const cases: { label: string; outcomes: string; prices: string; yesL: string; noL: string; yesBp: number; noBp: number }[] = [
+    { label: "Up/Down", outcomes: '["Up", "Down"]', prices: '["0.7", "0.3"]', yesL: "Up", noL: "Down", yesBp: 7000, noBp: 3000 },
+    { label: "teams", outcomes: '["L1ga Team", "4ikibamboni"]', prices: '["0.625", "0.375"]', yesL: "L1ga Team", noL: "4ikibamboni", yesBp: 6250, noBp: 3750 },
+    { label: "Over/Under", outcomes: '["Over", "Under"]', prices: '["0.465", "0.535"]', yesL: "Over", noL: "Under", yesBp: 4650, noBp: 5350 },
+  ];
+  for (const c of cases) {
+    const mk = mapMarket({
+      conditionId: "0x" + c.label,
+      question: `Binary: ${c.label}?`,
+      endDate: new Date(Date.now() + 3_600_000).toISOString(),
+      outcomes: c.outcomes,
+      outcomePrices: c.prices,
+    });
+    assert.ok(mk, `${c.label} must map (binary with real labels)`);
+    assert.strictEqual(mk!.outcomeYesLabel, c.yesL, `${c.label}: side-A label`);
+    assert.strictEqual(mk!.outcomeNoLabel, c.noL, `${c.label}: side-B label`);
+    assert.strictEqual(mk!.yesPriceBp, c.yesBp, `${c.label}: side-A price`);
+    assert.strictEqual(mk!.noPriceBp, c.noBp, `${c.label}: side-B price`);
+  }
+  // Multi-outcome (>2) is still rejected — we don't model n-way bets.
+  const multi = mapMarket({
+    conditionId: "0xmulti", question: "Who wins?",
+    endDate: new Date(Date.now() + 3_600_000).toISOString(),
+    outcomes: '["A","B","C"]', outcomePrices: '["0.3","0.3","0.4"]',
+  });
+  assert.strictEqual(multi, null, "3-way market must be rejected");
+  console.log("4. ✓ mapMarket keeps real labels for Up/Down, teams, Over/Under; rejects 3-way");
 
   console.log("\npolymarket: VERIFIED");
 }

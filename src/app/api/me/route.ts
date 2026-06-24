@@ -4,7 +4,7 @@ import { authUser } from "@/lib/privy";
 import { effectivePoints } from "@/lib/points";
 import { evaluateStreak } from "@/lib/streak";
 import { utcDay } from "@/lib/time";
-import { SWIPE_CAP } from "@/lib/config";
+import { SWIPE_CAP, FREE_SKIPS_PER_DAY, SKIP_SHARD_COST } from "@/lib/config";
 
 // Account snapshot: balance, points (multiplier-applied), today's swipe count, shards,
 // artifacts, streak, login state.
@@ -29,6 +29,11 @@ export async function GET(req: Request) {
     balanceCents: balance?.balanceCents ?? 0,
     points: { total: points.total, breakdown: points.breakdown, bonusFromX2: points.bonusFromX2 },
     swipes: { used: counter?.swipeCount ?? 0, cap: SWIPE_CAP },
+    skips: {
+      usedToday: counter?.skipCount ?? 0,
+      nextIsFree: (counter?.skipCount ?? 0) < FREE_SKIPS_PER_DAY,
+      shardCost: SKIP_SHARD_COST, // cost of the next skip once free ones are used
+    },
     shards: collectibles?.shards ?? 0,
     artifacts: collectibles?.artifacts ?? 0,
     streak: {

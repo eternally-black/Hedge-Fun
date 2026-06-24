@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { usePrivy } from "@privy-io/react-auth";
 import { useApi } from "./useApi";
+import { SwipeCard, type SwipeAction } from "./SwipeCard";
 
 const PRIVY_ON = !!process.env.NEXT_PUBLIC_PRIVY_APP_ID;
 
@@ -10,6 +11,7 @@ type Me = {
   balanceCents: number;
   points: { total: number; bonusFromX2: number };
   swipes: { used: number; cap: number };
+  skips: { usedToday: number; nextIsFree: boolean; shardCost: number };
   shards: number;
   artifacts: number;
   streak: { level: number; state: string };
@@ -18,13 +20,22 @@ type Me = {
 type Card = {
   id: string;
   question: string;
+  outcomeYesLabel: string;
+  outcomeNoLabel: string;
   yesPriceBp: number;
   noPriceBp: number;
   resolutionDeadline: string;
 };
 
 const usd = (cents: number) => `$${(cents / 100).toFixed(0)}`;
-const pct = (bp: number) => `${(bp / 100).toFixed(0)}%`;
+// Price as Polymarket shows it: cents per share (= probability). A side priced at 0.515 is 52¢.
+// We deliberately show CENTS, not a percentage — that's how prediction markets quote, and the
+// app's goal is to teach that. The two sides need NOT sum to 100¢ (the spread is real), so we
+// never normalise. 1bp = 0.01¢; show whole cents (Polymarket-style), .5 kept when present.
+const cents = (bp: number) => {
+  const c = bp / 100; // bp -> cents (5150bp = 51.5¢)
+  return `${Number.isInteger(c) ? c : c.toFixed(1)}¢`;
+};
 
 export default function Home() {
   if (!PRIVY_ON) return <ConfigNotice />;
@@ -70,18 +81,68 @@ function App() {
     }
   }, [api, refresh]);
 
-  const swipe = useCallback(
-    async (card: Card, side: "YES" | "NO") => {
+  // Top up the deck when it runs low so the user never hits an empty card mid-session. Called
+  // from the swipe handler (not an effect — this is interaction-driven, so it belongs in the
+  // event per react best practices). topping ref guards against overlapping top-ups.
+  const topping = useRef(false);
+  const topUpIfLow = useCallback(
+    async (remaining: number) => {
+      if (remaining > 3 || topping.current) return;
+      topping.current = true;
+      try {
+        const d: { cards: Card[] } = await api("/api/deck");
+        setDeck((cur) => {
+          const have = new Set(cur.map((c) => c.id));
+          return [...cur, ...d.cards.filter((c) => !have.has(c.id))];
+        });
+      } catch (e) {
+        console.error(e);
+      } finally {
+        topping.current = false;
+      }
+    },
+    [api],
+  );
+
+  // Drop the swiped/skipped card and advance to the next. SKIP posts to /api/skip (first free,
+  // then 1 shard; blocked with no shards). YES/NO post a bet. The card is removed and replaced
+  // by the next in the deck — never re-shown.
+  const act = useCallback(
+    async (card: Card, action: SwipeAction) => {
       setBusy(true);
       try {
-        await api("/api/swipe", { method: "POST", body: JSON.stringify({ marketId: card.id, side }) });
-        setDeck((d) => d.filter((c) => c.id !== card.id)); // advance the deck
-        await refresh();
+        if (action === "SKIP") {
+          // Only advance if the skip is allowed (a paid skip with no shards is blocked: 402).
+          await api("/api/skip", { method: "POST" });
+        } else {
+          await api("/api/swipe", {
+            method: "POST",
+            body: JSON.stringify({ marketId: card.id, side: action }),
+          });
+        }
+        setDeck((d) => {
+          const next = d.filter((c) => c.id !== card.id);
+          void topUpIfLow(next.length);
+          return next;
+        });
+        await refresh(); // stats (balance, shards, skip counter)
+      } catch (e) {
+        // 409 on a swipe = already bet this market (it's done) -> advance anyway, don't trap the
+        // user on it. 402 on a paid skip (no shards) keeps the card -> SwipeCard springs back.
+        if (action !== "SKIP" && (e as { status?: number }).status === 409) {
+          setDeck((d) => {
+            const next = d.filter((c) => c.id !== card.id);
+            void topUpIfLow(next.length);
+            return next;
+          });
+        } else {
+          console.error(e);
+        }
       } finally {
         setBusy(false);
       }
     },
-    [api, refresh],
+    [api, refresh, topUpIfLow],
   );
 
   if (!ready) return <main style={S.main}>Loading…</main>;
@@ -122,21 +183,33 @@ function App() {
       </p>
 
       {top ? (
-        <div style={S.card}>
-          <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 16 }}>{top.question}</div>
-          <div style={{ color: "#9aa3b2", marginBottom: 16 }}>
-            Yes {pct(top.yesPriceBp)} · No {pct(top.noPriceBp)} · resolves{" "}
-            {new Date(top.resolutionDeadline).toLocaleString()}
-          </div>
-          <div style={{ display: "flex", gap: 12 }}>
-            <button style={S.no} disabled={busy} onClick={() => swipe(top, "NO")}>
-              ✗ No
+        // key=top.id so a fresh SwipeCard mounts per card (resets drag state cleanly).
+        <SwipeCard key={top.id} onAction={(a) => act(top, a)} disabled={busy}>
+          <div style={S.card}>
+            <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 8 }}>{top.question}</div>
+            <div style={{ color: "#9aa3b2", marginBottom: 20, fontSize: 13 }}>
+              resolves {new Date(top.resolutionDeadline).toLocaleString()}
+            </div>
+            {/* Polymarket-style: each side's button shows its label + price in cents (= the
+                share price you'd pay). No percentage row — cents IS the probability, and the
+                two sides need not sum to 100¢. */}
+            <div style={{ display: "flex", gap: 12 }}>
+              <button style={S.no} disabled={busy} onClick={() => act(top, "NO")}>
+                <span>{top.outcomeNoLabel}</span>
+                <span style={S.price}>{cents(top.noPriceBp)}</span>
+              </button>
+              <button style={S.yes} disabled={busy} onClick={() => act(top, "YES")}>
+                <span>{top.outcomeYesLabel}</span>
+                <span style={S.price}>{cents(top.yesPriceBp)}</span>
+              </button>
+            </div>
+            <button style={S.skip} disabled={busy} onClick={() => act(top, "SKIP")}>
+              {me?.skips.nextIsFree
+                ? "Skip (free today)"
+                : `Skip (−${me?.skips.shardCost ?? 1} shard${me && me.shards < (me.skips.shardCost ?? 1) ? " — none left" : ""})`}
             </button>
-            <button style={S.yes} disabled={busy} onClick={() => swipe(top, "YES")}>
-              ✓ Yes
-            </button>
           </div>
-        </div>
+        </SwipeCard>
       ) : (
         <div style={S.card}>
           <p style={{ color: "#9aa3b2" }}>
@@ -144,6 +217,12 @@ function App() {
           </p>
         </div>
       )}
+
+      {top ? (
+        <p style={{ color: "#5a6478", fontSize: 12, textAlign: "center", marginTop: 4 }}>
+          Swipe → {top.outcomeYesLabel} · ← {top.outcomeNoLabel} · ↑ skip
+        </p>
+      ) : null}
     </main>
   );
 }
@@ -164,6 +243,8 @@ const S: Record<string, React.CSSProperties> = {
   ghost: { padding: "8px 12px", background: "transparent", color: "#9aa3b2", border: "1px solid #2a3040", borderRadius: 8, cursor: "pointer" },
   ghostWide: { padding: "14px 20px", fontSize: 16, background: "#1a1f2e", color: "#6ee7a8", border: "1px solid #2a3040", borderRadius: 12 },
   card: { background: "#141925", border: "1px solid #2a3040", borderRadius: 16, padding: 24 },
-  yes: { flex: 1, padding: "16px", fontSize: 16, fontWeight: 700, background: "#16a34a", color: "#fff", border: 0, borderRadius: 12, cursor: "pointer" },
-  no: { flex: 1, padding: "16px", fontSize: 16, fontWeight: 700, background: "#dc2626", color: "#fff", border: 0, borderRadius: 12, cursor: "pointer" },
+  yes: { flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4, padding: "16px", fontSize: 16, fontWeight: 700, background: "#16a34a", color: "#fff", border: 0, borderRadius: 12, cursor: "pointer" },
+  no: { flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4, padding: "16px", fontSize: 16, fontWeight: 700, background: "#dc2626", color: "#fff", border: 0, borderRadius: 12, cursor: "pointer" },
+  price: { fontSize: 22, fontWeight: 800, fontVariantNumeric: "tabular-nums" },
+  skip: { width: "100%", marginTop: 12, padding: "12px", fontSize: 14, fontWeight: 600, background: "transparent", color: "#d97706", border: "1px solid #d97706", borderRadius: 12, cursor: "pointer" },
 };

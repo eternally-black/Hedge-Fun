@@ -14,7 +14,7 @@
     "poll": "tsx scripts/poller.ts",
     "refresh-deck": "tsx scripts/refresh-deck.ts",
     "verify:polymarket": "tsx scripts/verify-polymarket.ts",
-    "test": "tsx scripts/test-points.ts && tsx scripts/test-engine.ts && tsx scripts/test-settle.ts && tsx scripts/test-referral.ts",
+    "test": "tsx scripts/test-points.ts && tsx scripts/test-engine.ts && tsx scripts/test-settle.ts && tsx scripts/test-referral.ts && tsx scripts/test-deck-mix.ts && tsx scripts/test-skip.ts",
     "smoke": "tsx scripts/smoke.ts"
   },
   "dependencies": {

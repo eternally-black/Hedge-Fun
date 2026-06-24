@@ -19,7 +19,11 @@ export function useApi() {
           ...(token ? { authorization: `Bearer ${token}` } : {}),
         },
       });
-      if (!res.ok) throw new Error(`${path} -> ${res.status}`);
+      if (!res.ok) {
+        const err = new Error(`${path} -> ${res.status}`) as Error & { status?: number };
+        err.status = res.status; // let callers branch on it (e.g. swipe 409 = already bet)
+        throw err;
+      }
       return res.json();
     },
     [getAccessToken],

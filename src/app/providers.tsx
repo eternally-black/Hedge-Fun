@@ -13,7 +13,9 @@ export default function Providers({ children }: { children: React.ReactNode }) {
     <PrivyProvider
       appId={appId}
       config={{
-        loginMethods: ["email", "twitter"],
+        // ponytail: twitter off until X OAuth keys are added in the Privy dashboard;
+        // re-add "twitter" here once enabled there.
+        loginMethods: ["email"],
         // Lead-capture wallet provisioned on signup. EVM for now (Sep trading is
         // Polygon/pUSD); not used transactionally in July paper-mode.
         embeddedWallets: { ethereum: { createOnLogin: "all-users" } },
