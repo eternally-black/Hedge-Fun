@@ -90,7 +90,7 @@ function App() {
     return (
       <main style={S.main}>
         <h1>Hedge Fun</h1>
-        <p style={{ color: "#9aa3b2" }}>Swipe real markets. Play money. Collect points.</p>
+        <p style={{ color: "#9aa3b2" }}>Test app — swipe real markets, play money, stack points.</p>
         <button style={S.primary} onClick={login}>
           Log in
         </button>

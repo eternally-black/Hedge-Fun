@@ -1,5 +1,6 @@
 import type { Prisma, PointsType } from "@prisma/client";
 import { ACTIVE_MULTIPLIER, type MultiplierContext } from "./multiplier";
+import { diffDays } from "./time";
 
 // Any Prisma client or transaction handle.
 type Db = Prisma.TransactionClient | import("@prisma/client").PrismaClient;
@@ -59,22 +60,36 @@ export function scorePoints(
     }
   }
 
-  const base: Omit<MultiplierContext, "utcDay" | "swipePointsOnDay"> = {
-    userId,
-    streakLevel: streak.currentLevel,
-    streakState: streak.state,
-    cumulativeSwipePoints: breakdown.SWIPE, // lifetime raw swipe, drives the 70-pt trigger
-  };
-
-  let multipliedSwipe = 0;
-  for (const [day, raw] of swipeByDay) {
-    const m = ACTIVE_MULTIPLIER.multiplierForDay({
-      ...base,
-      utcDay: day,
-      swipePointsOnDay: raw,
-    });
-    multipliedSwipe += raw * m;
+  // The current streak spans the last `currentLevel` consecutive UTC days (ending at the
+  // most recent activity). Its swipe-days are the trailing swipe-days within that calendar
+  // span — anchored to the latest swipe-day, include any swipe-day no more than
+  // currentLevel-1 days older. Swiping is sparse vs qualifying (a streak day can have no
+  // swipe), so we bound by calendar span, not strict day-adjacency. Reconstructing this
+  // from the ledger means the one-time window bonus needs no extra streak fields / no
+  // migration.
+  const allDays = [...swipeByDay.keys()].sort(); // ascending 'YYYY-MM-DD'
+  const anchor = allDays[allDays.length - 1]; // latest swipe-day = streak's end
+  const streakSwipeDays: MultiplierContext["streakSwipeDays"] = [];
+  if (anchor && streak.currentLevel > 0) {
+    for (const day of allDays) {
+      if (diffDays(anchor, day) <= streak.currentLevel - 1) {
+        streakSwipeDays.push({ utcDay: day, raw: swipeByDay.get(day)! });
+      }
+    }
   }
+
+  // The strategy scores only the current-streak days. Swipe points on days OUTSIDE the
+  // current streak (older / non-consecutive) are never doubled — they count raw.
+  const streakRaw = streakSwipeDays.reduce((sum, d) => sum + d.raw, 0);
+  const outsideStreakSwipe = breakdown.SWIPE - streakRaw;
+  const multipliedSwipe =
+    outsideStreakSwipe +
+    ACTIVE_MULTIPLIER.multipliedSwipePoints({
+      userId,
+      streakLevel: streak.currentLevel,
+      streakState: streak.state,
+      streakSwipeDays,
+    });
 
   const nonSwipe = breakdown.LOGIN + breakdown.REFERRAL + breakdown.STREAK_X2;
   return {

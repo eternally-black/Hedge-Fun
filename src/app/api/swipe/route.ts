@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 import { recordSwipe } from "@/lib/swipe";
+import { maybeQualifyReferralOnSwipe } from "@/lib/referral";
 
 // Swipe = paper bet Yes/No on a deck market. Locks the BOUGHT side's price for P&L.
 // ponytail: no request rate-limit (L2). The point cap (10/day) + one-bet-per-market (C1)
@@ -36,6 +37,13 @@ export async function POST(req: Request) {
       side: body.side,
       lockedPriceBp,
     });
+    // Q7: once this user hits 10 LIFETIME swipes, qualify their referral and back-pay the
+    // inviter's 20%. Counts lifetime bets itself — result.swipeCountToday is per-DAY, not the
+    // gate. Called here (not in swipe.ts) to avoid a swipe<->referral circular import. Best-
+    // effort: a failure here must not fail the swipe the user already made, so swallow + log.
+    await maybeQualifyReferralOnSwipe(user.id).catch((e) =>
+      console.error("referral qualify/accrue failed", e),
+    );
     return NextResponse.json(result);
   } catch (e) {
     // P2002 on [userId, marketId] = already bet this market (one bet per card).

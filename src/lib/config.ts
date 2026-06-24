@@ -15,15 +15,17 @@ export const SHARDS_PER_ARTIFACT = 20; // 20 shards -> 1 artifact
 // ---- Streak (DECIDED) ----
 export const RECOVERY_WINDOW_DAYS = 3; // burn -> 3-day recovery window
 
-// ---- Login bonus (OPEN — size unspecified in spec) ----
-export const LOGIN_BONUS = 5; // OPEN: raw login points/day. Change here only.
+// ---- Login bonus (DECIDED) ----
+export const LOGIN_BONUS = 1; // raw login (GM tap) points/day. Change here only.
 
-// ---- Referral (amounts DECIDED; cadence/eligibility OPEN — see referral.ts) ----
+// ---- Referral (DECIDED) ----
 export const REFERRAL_INVITEE_BONUS = 20; // one-time points to invitee
 export const REFERRAL_INVITER_RATE = 0.2; // inviter gets 20% of referral's points
-// OPEN: which point types count toward inviter share, one-time vs ongoing, anti-abuse gate.
+// DECIDED: inviter earns 20% of ALL the invitee's directly-earned points (SWIPE + LOGIN),
+//          ongoing forever, counted only after the invitee qualifies (10 lifetime swipes).
+//          Single-level only: the invitee's own REFERRAL income is excluded (see referral.ts).
 //       -> ReferralRewardParams in referral.ts, computed retroactively over logged events.
 
-// ---- x2 multiplier (OPEN — trigger + cadence) ----
-// The strategy itself lives in src/lib/multiplier.ts. Ships as Identity (no-op).
-// OPEN: trigger (7-day streak vs 70 cumulative swipe points) + cadence (one-time vs continuous).
+// ---- x2 multiplier (DECIDED) ----
+// The strategy itself lives in src/lib/multiplier.ts (ACTIVE = SevenDayWindowOneTime).
+// DECIDED: trigger = 7-day streak; cadence = one-time per completed 7-day window. Swipe-only.
