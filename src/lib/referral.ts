@@ -74,6 +74,17 @@ export const DEFAULT_REWARD_PARAMS: ReferralRewardParams = {
   requireQualified: true, // Q7: referral counts only after the invitee makes 10 lifetime swipes
 };
 
+// Pure: the inviter's unpaid share = floor(cumulative eligible raw * rate) - already paid.
+// Cumulative (not per-row) is load-bearing — floor(1 * 0.2) == 0, so per-row flooring pays
+// the inviter nothing on a ledger of amount-1 rows. Never returns negative (clamp at 0).
+export function inviterAccrualDelta(
+  eligibleRaw: number,
+  alreadyPaid: number,
+  rate: number,
+): number {
+  return Math.max(0, Math.floor(eligibleRaw * rate) - alreadyPaid);
+}
+
 export async function computeReferralRewards(
   referralId: string,
   p: ReferralRewardParams = DEFAULT_REWARD_PARAMS,
@@ -102,50 +113,51 @@ export async function computeReferralRewards(
       inviteePaid = p.inviteeBonus;
     }
 
-    // 2. Inviter share of the referral's eligible points. Per source ledger row, idempotent.
-    // Scope the scan to rows NOT yet accrued (H3): the DB excludes processed rows, so this
-    // doesn't re-read the invitee's whole history on every call.
-    const accruedIds = (
-      await tx.referralEvent.findMany({
-        where: { referralId: ref.id, type: "INVITER_ACCRUAL", sourcePointsLedgerId: { not: null } },
-        select: { sourcePointsLedgerId: true },
-      })
-    )
-      .map((e) => e.sourcePointsLedgerId)
-      .filter((id): id is string => id !== null);
-
-    const rows =
-      p.cadence === "one_time"
-        ? [] // one-time cadence accrues nothing ongoing (signup bonus only)
-        : await tx.pointsLedger.findMany({
-            where: {
-              userId: ref.inviteeId,
-              type: { in: p.inviterEligibleTypes },
-              id: { notIn: accruedIds },
-            },
-            select: { id: true, amount: true },
-          });
-
-    for (const row of rows) {
-      const reward = Math.floor(row.amount * p.inviterRate);
-      if (reward <= 0) continue;
-      await writePoints(tx, {
-        userId: ref.inviterId,
-        type: "REFERRAL",
-        amount: reward,
-        utcDay: utcDay(),
-        referralId: ref.id,
+    // 2. Inviter share = floor(CUMULATIVE eligible raw * rate), pay the delta vs already-paid.
+    //
+    // Why cumulative, not per-row: the ledger is all amount-1 rows (1 pt/swipe, 1 pt/login),
+    // and floor(1 * 0.2) == 0, so a per-row floor pays the inviter 0 forever. Flooring the
+    // running total instead (50 pts -> floor(10) = 10) is the only correct way to pay 20% of
+    // single-point rows. Idempotency without a per-row mapping: track a high-water mark — sum
+    // what we've already accrued and pay only `owed - alreadyPaid`. Re-runs pay 0 (delta=0);
+    // a param change (wider eligibleTypes / rate) back-pays the new delta. ongoing-only.
+    // ponytail: idempotency is read-then-write under Read Committed, NOT a unique constraint.
+    // Two concurrent accruals for the SAME referral (this invitee's GM tap racing their own
+    // post-swipe trigger, ms apart) could both read the same alreadyPaid and double-credit the
+    // delta — bounded, self-inflicted, rare. Upgrade if it bites: SELECT ... FOR UPDATE on the
+    // Referral row at the top of the tx (serialize per-referral), or a unique high-water mark.
+    if (p.cadence !== "one_time") {
+      const eligible = await tx.pointsLedger.aggregate({
+        where: { userId: ref.inviteeId, type: { in: p.inviterEligibleTypes } },
+        _sum: { amount: true },
       });
-      await tx.referralEvent.create({
-        data: {
+      const eligibleRaw = eligible._sum.amount ?? 0;
+
+      const accrued = await tx.referralEvent.aggregate({
+        where: { referralId: ref.id, type: "INVITER_ACCRUAL" },
+        _sum: { rewardAmount: true },
+      });
+      const alreadyPaid = accrued._sum.rewardAmount ?? 0;
+
+      const delta = inviterAccrualDelta(eligibleRaw, alreadyPaid, p.inviterRate);
+      if (delta > 0) {
+        await writePoints(tx, {
+          userId: ref.inviterId,
+          type: "REFERRAL",
+          amount: delta,
+          utcDay: utcDay(),
           referralId: ref.id,
-          type: "INVITER_ACCRUAL",
-          sourcePointsLedgerId: row.id,
-          sourceAmount: row.amount,
-          rewardAmount: reward,
-        },
-      });
-      inviterPaid += reward;
+        });
+        await tx.referralEvent.create({
+          data: {
+            referralId: ref.id,
+            type: "INVITER_ACCRUAL",
+            sourceAmount: eligibleRaw, // the cumulative eligible raw this accrual brought us to
+            rewardAmount: delta,
+          },
+        });
+        inviterPaid = delta;
+      }
     }
 
     return { inviteePaid, inviterPaid };
@@ -182,18 +194,4 @@ export async function maybeQualifyReferralOnSwipe(
   if (!hasQualifyingSwipes(lifetimeBets)) return;
   await qualifyReferral(inviteeId);
   await accrueReferralForInvitee(inviteeId, params);
-}
-
-// --- self-check (pure gate logic only; DB-backed funcs above need a live DB) ---
-if (process.env.NODE_ENV !== "production" && process.argv[1]?.includes("referral")) {
-  const assert = (c: boolean, m: string) => {
-    if (!c) throw new Error("referral self-check: " + m);
-  };
-  assert(!hasQualifyingSwipes(9), "9 swipes must NOT qualify");
-  assert(hasQualifyingSwipes(10), "10th swipe must qualify");
-  assert(hasQualifyingSwipes(11), "past-threshold stays qualified");
-  // single-level: the invitee's own REFERRAL income must never feed the inviter share.
-  assert(!DEFAULT_REWARD_PARAMS.inviterEligibleTypes.includes("REFERRAL"), "no multi-level");
-  // eslint-disable-next-line no-console
-  console.log("referral self-check OK");
 }

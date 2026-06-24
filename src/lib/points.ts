@@ -60,13 +60,20 @@ export function scorePoints(
     }
   }
 
-  // The current streak spans the last `currentLevel` consecutive UTC days (ending at the
-  // most recent activity). Its swipe-days are the trailing swipe-days within that calendar
-  // span — anchored to the latest swipe-day, include any swipe-day no more than
-  // currentLevel-1 days older. Swiping is sparse vs qualifying (a streak day can have no
-  // swipe), so we bound by calendar span, not strict day-adjacency. Reconstructing this
-  // from the ledger means the one-time window bonus needs no extra streak fields / no
-  // migration.
+  // The current streak's swipe-days = the trailing swipe-days within a `currentLevel`-day
+  // calendar span anchored to the LATEST swipe-day. Reconstructed from the ledger so the
+  // one-time window bonus needs no extra streak fields / no migration.
+  //
+  // ponytail: heuristic with a known ceiling. The streak is held by the GM tap, NOT by
+  // swiping (streak.ts: login + deck-open are one action), so swipe-days are sparser than
+  // streak-days and the anchor (latest swipe-day) can sit behind the streak's true end. The
+  // strategy then doubles the earliest floor(L/7)*7 *swipe-days* rather than the swipe-days
+  // falling in the first floor(L/7)*7 *calendar* days of the streak. On sparse-swipe streaks
+  // this can slightly OVER-pay the x2 bonus (e.g. count an open-window or just-out-of-streak
+  // swipe-day as doubled) — bounded, always in the user's favor, never claws back. Accepted
+  // for MVP (swiping is the core farm action; sparse-swipe streaks are the rare case).
+  // Upgrade path if it ever matters: add streak start-day to MultiplierContext and bound the
+  // window by calendar day, not by swipe-day ordinal.
   const allDays = [...swipeByDay.keys()].sort(); // ascending 'YYYY-MM-DD'
   const anchor = allDays[allDays.length - 1]; // latest swipe-day = streak's end
   const streakSwipeDays: MultiplierContext["streakSwipeDays"] = [];
