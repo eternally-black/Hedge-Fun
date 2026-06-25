@@ -19,4 +19,7 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_KEY }}
           port: ${{ secrets.SSH_PORT }}
+          # A no-cache rebuild (e.g. package.json change) on this VPS can exceed the
+          # action's 10m default — give it room so the run doesn't die mid-deploy.
+          command_timeout: 25m
           script: cd /opt/hedgefun && bash deploy.sh
