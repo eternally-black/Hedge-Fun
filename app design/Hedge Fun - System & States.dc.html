@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Anton&family=Unbounded:wght@600;700;800;900&family=Space+Mono:wght@400;700&family=Hanken+Grotesk:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+.hfc-card{position:relative;width:264px;height:430px;border-radius:24px;overflow:hidden;border:1px solid rgba(255,255,255,.09);box-shadow:0 22px 44px -18px rgba(0,0,0,.7)}
+.hfc-chip{display:flex;align-items:center;gap:6px;background:rgba(0,0,0,.42);backdrop-filter:blur(4px);padding:5px 10px;border-radius:18px;font-size:9px;letter-spacing:.13em;text-transform:uppercase;font-weight:700;color:#fff}
+.hfc-stamp{position:absolute;font-family:'Anton',sans-serif;border-width:4px;border-style:solid;padding:1px 12px;border-radius:9px;font-size:38px;line-height:1.1}
+.hfc-cap{font:600 12px/1.4 'Hanken Grotesk',sans-serif;color:#0d0b08;margin-top:12px}
+.hfc-cap b{display:block;font-size:13px}
+.hfc-cap span{color:rgba(13,11,8,.55);font-weight:500}
+</style>
+</helmet>
+
+<!-- ===== TITLE ===== -->
+<div style="position:absolute;left:80px;top:40px;width:900px">
+  <div style="font:700 13px/1 'Space Mono',monospace;letter-spacing:.34em;text-transform:uppercase;color:#b06" data-drags-parent="1">Hedge Fun</div>
+  <div style="font-family:'Anton',sans-serif;font-size:58px;line-height:.92;color:#17140f;margin-top:10px">VISUAL SYSTEM &amp; SWIPE STATES</div>
+  <div style="font:500 15px/1.5 'Hanken Grotesk',sans-serif;color:rgba(23,20,15,.6);margin-top:8px;max-width:640px">A Tinder × TikTok prediction arcade. Tactile card-swipe physics, full-bleed immersion, paper-trading only. The interactive prototype lives in <b style="color:#b06">Hedge Fun.dc.html</b> — this board specs the system and the gesture states.</div>
+  <a href="Hedge Fun.dc.html" style="display:inline-flex;align-items:center;gap:8px;margin-top:14px;background:#17140f;color:#fff;font:700 13px 'Hanken Grotesk',sans-serif;padding:11px 18px;border-radius:12px;text-decoration:none">▶ Open the interactive prototype</a>
+</div>
+
+<!-- ===== COLOR SYSTEM ===== -->
+<div style="position:absolute;left:80px;top:250px;width:380px">
+  <div data-drags-parent="1" style="position:absolute;top:-24px;font:700 11px 'Space Mono',monospace;letter-spacing:.16em;text-transform:uppercase;color:rgba(23,20,15,.55)">01 · Color</div>
+  <div style="background:#0a0a0f;border-radius:16px;box-shadow:0 1px 3px rgba(0,0,0,.1);padding:18px">
+    <div style="font:600 11px 'Hanken Grotesk',sans-serif;color:#8b8b9e;letter-spacing:.1em;text-transform:uppercase">Signal · locked semantics</div>
+    <div style="display:flex;flex-direction:column;gap:9px;margin-top:12px">
+      <div style="display:flex;align-items:center;gap:12px"><div style="width:48px;height:48px;border-radius:12px;background:#b6ff2e;box-shadow:0 0 18px #b6ff2e66"></div><div><div style="font:700 14px 'Hanken Grotesk';color:#f4f4fa">YES · swipe right</div><div style="font:400 12px 'Space Mono';color:#8b8b9e">#B6FF2E lime</div></div></div>
+      <div style="display:flex;align-items:center;gap:12px"><div style="width:48px;height:48px;border-radius:12px;background:#ff3b4e;box-shadow:0 0 18px #ff3b4e66"></div><div><div style="font:700 14px 'Hanken Grotesk';color:#f4f4fa">NO · swipe left</div><div style="font:400 12px 'Space Mono';color:#8b8b9e">#FF3B4E red</div></div></div>
+      <div style="display:flex;align-items:center;gap:12px"><div style="width:48px;height:48px;border-radius:12px;background:#4d9bff;box-shadow:0 0 18px #4d9bff66"></div><div><div style="font:700 14px 'Hanken Grotesk';color:#f4f4fa">SKIP · swipe up</div><div style="font:400 12px 'Space Mono';color:#8b8b9e">#4D9BFF blue</div></div></div>
+      <div style="display:flex;align-items:center;gap:12px"><div style="width:48px;height:48px;border-radius:12px;background:#ffc24b;box-shadow:0 0 18px #ffc24b66"></div><div><div style="font:700 14px 'Hanken Grotesk';color:#f4f4fa">Shards · artifacts</div><div style="font:400 12px 'Space Mono';color:#8b8b9e">#FFC24B gold</div></div></div>
+    </div>
+    <div style="font:600 11px 'Hanken Grotesk',sans-serif;color:#8b8b9e;letter-spacing:.1em;text-transform:uppercase;margin-top:18px">Energy accent · per direction</div>
+    <div style="display:flex;gap:9px;margin-top:11px">
+      <div style="flex:1;text-align:center"><div style="height:40px;border-radius:10px;background:#ff3dcd"></div><div style="font:400 10px 'Space Mono';color:#8b8b9e;margin-top:5px">#FF3DCD</div></div>
+      <div style="flex:1;text-align:center"><div style="height:40px;border-radius:10px;background:#18d6c4"></div><div style="font:400 10px 'Space Mono';color:#8b8b9e;margin-top:5px">#18D6C4</div></div>
+      <div style="flex:1;text-align:center"><div style="height:40px;border-radius:10px;background:#22e3a0"></div><div style="font:400 10px 'Space Mono';color:#8b8b9e;margin-top:5px">#22E3A0</div></div>
+    </div>
+    <div style="font:600 11px 'Hanken Grotesk',sans-serif;color:#8b8b9e;letter-spacing:.1em;text-transform:uppercase;margin-top:18px">Dark base</div>
+    <div style="display:flex;gap:8px;margin-top:11px">
+      <div style="flex:1;height:34px;border-radius:9px;background:#0a0a0f;border:1px solid #ffffff14"></div>
+      <div style="flex:1;height:34px;border-radius:9px;background:#15151f;border:1px solid #ffffff14"></div>
+      <div style="flex:1;height:34px;border-radius:9px;background:#1c1c2a;border:1px solid #ffffff14"></div>
+      <div style="flex:1;height:34px;border-radius:9px;background:#f4f4fa"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== TYPOGRAPHY ===== -->
+<div style="position:absolute;left:500px;top:250px;width:430px">
+  <div data-drags-parent="1" style="position:absolute;top:-24px;font:700 11px 'Space Mono',monospace;letter-spacing:.16em;text-transform:uppercase;color:rgba(23,20,15,.55)">02 · Type</div>
+  <div style="background:#fff;border-radius:16px;box-shadow:0 1px 3px rgba(0,0,0,.1);padding:20px">
+    <div style="border-bottom:1px solid #eee;padding-bottom:14px">
+      <div style="font:600 10px 'Hanken Grotesk';letter-spacing:.12em;text-transform:uppercase;color:#b06">Neon Arcade · Display</div>
+      <div style="font-family:'Anton',sans-serif;font-size:34px;line-height:1;color:#17140f;margin-top:4px">WILL BTC HIT $112K?</div>
+      <div style="font:400 11px 'Space Mono';color:#999;margin-top:3px">Anton — heavy condensed grotesque</div>
+    </div>
+    <div style="border-bottom:1px solid #eee;padding:14px 0">
+      <div style="font:600 10px 'Hanken Grotesk';letter-spacing:.12em;text-transform:uppercase;color:#0b9">Soft Toy · Display</div>
+      <div style="font-family:'Unbounded',sans-serif;font-weight:800;font-size:24px;line-height:1.05;color:#17140f;margin-top:5px">Will BTC hit $112k?</div>
+      <div style="font:400 11px 'Space Mono';color:#999;margin-top:5px">Unbounded — rounded geometric</div>
+    </div>
+    <div style="border-bottom:1px solid #eee;padding:14px 0">
+      <div style="font:600 10px 'Hanken Grotesk';letter-spacing:.12em;text-transform:uppercase;color:#1a9">Degen Terminal · Display</div>
+      <div style="font-family:'Space Mono',monospace;font-weight:700;font-size:22px;line-height:1.1;color:#17140f;margin-top:5px">Will BTC hit $112k?</div>
+      <div style="font:400 11px 'Space Mono';color:#999;margin-top:5px">Space Mono — industrial monospace</div>
+    </div>
+    <div style="padding-top:14px">
+      <div style="font:600 10px 'Hanken Grotesk';letter-spacing:.12em;text-transform:uppercase;color:#999">Body · Hanken Grotesk</div>
+      <div style="font:500 14px/1.5 'Hanken Grotesk';color:#444;margin-top:5px">Predict real markets with virtual cash. Fast, low-stakes, zero risk.</div>
+      <div style="font:600 10px 'Hanken Grotesk';letter-spacing:.12em;text-transform:uppercase;color:#999;margin-top:14px">Numerals · Space Mono</div>
+      <div style="font-family:'Space Mono',monospace;font-weight:700;font-size:22px;color:#17140f;margin-top:4px">63% · 4h 12m · $172</div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== MOTION PRINCIPLES ===== -->
+<div style="position:absolute;left:970px;top:250px;width:380px">
+  <div data-drags-parent="1" style="position:absolute;top:-24px;font:700 11px 'Space Mono',monospace;letter-spacing:.16em;text-transform:uppercase;color:rgba(23,20,15,.55)">03 · Motion language</div>
+  <div style="background:#fff;border-radius:16px;box-shadow:0 1px 3px rgba(0,0,0,.1);padding:20px;display:flex;flex-direction:column;gap:15px">
+    <div style="display:flex;gap:12px"><div style="font-family:'Anton';font-size:18px;color:#b06;width:24px">↻</div><div><div style="font:700 13px 'Hanken Grotesk';color:#17140f">Follow + rotate</div><div style="font:500 12px/1.4 'Hanken Grotesk';color:#666">Card tracks the finger 1:1; rotation = drag·0.05°, capped ~18°.</div></div></div>
+    <div style="display:flex;gap:12px"><div style="font-family:'Anton';font-size:18px;color:#b06;width:24px">▣</div><div><div style="font:700 13px 'Hanken Grotesk';color:#17140f">Directional overlay</div><div style="font:500 12px/1.4 'Hanken Grotesk';color:#666">A color wash grows with drag distance — lime right, red left, blue up.</div></div></div>
+    <div style="display:flex;gap:12px"><div style="font-family:'Anton';font-size:18px;color:#b06;width:24px">◆</div><div><div style="font:700 13px 'Hanken Grotesk';color:#17140f">Stamp snap</div><div style="font:500 12px/1.4 'Hanken Grotesk';color:#666">YES/NO/SKIP label pops in at 35% with a slight overshoot.</div></div></div>
+    <div style="display:flex;gap:12px"><div style="font-family:'Anton';font-size:18px;color:#b06;width:24px">⤴</div><div><div style="font:700 13px 'Hanken Grotesk';color:#17140f">Fling vs spring</div><div style="font:500 12px/1.4 'Hanken Grotesk';color:#666">Past threshold → flings off with momentum. Below → springs back (bounce).</div></div></div>
+    <div style="display:flex;gap:12px"><div style="font-family:'Anton';font-size:18px;color:#b06;width:24px">▤</div><div><div style="font:700 13px 'Hanken Grotesk';color:#17140f">Next-card reveal</div><div style="font:500 12px/1.4 'Hanken Grotesk';color:#666">The card behind scales 0.93→1 as the top one leaves. Deck never empty.</div></div></div>
+    <div style="display:flex;gap:12px"><div style="font-family:'Anton';font-size:18px;color:#b06;width:24px">✸</div><div><div style="font:700 13px 'Hanken Grotesk';color:#17140f">Bet-placed burst</div><div style="font:500 12px/1.4 'Hanken Grotesk';color:#666">Ring pulse + side stamp + floating points. Implied haptic on commit.</div></div></div>
+  </div>
+</div>
+
+<!-- ===== SECTION: SWIPE STATES ===== -->
+<div data-drags-parent="0" style="position:absolute;left:80px;top:700px;font-family:'Anton',sans-serif;font-size:34px;color:#17140f">THE SWIPE · CARD STATES</div>
+<div style="position:absolute;left:80px;top:744px;font:500 14px 'Hanken Grotesk';color:rgba(23,20,15,.55)">One real market per card. Resting → mid-drag (each direction) → committed → confirmation.</div>
+
+<!-- STATE 1 · RESTING -->
+<div style="position:absolute;left:80px;top:800px;width:264px">
+  <div data-drags-parent="1" class="hfc-card" style="background:radial-gradient(120% 80% at 80% 0%, #ff8a3d2e, transparent 55%), linear-gradient(170deg,#1c1c2a,#15151f)">
+    <div style="position:absolute;inset:0;padding:14px 15px;display:flex;flex-direction:column">
+      <div style="display:flex;align-items:center;gap:8px"><div class="hfc-chip"><span style="width:7px;height:7px;border-radius:50%;background:#ff8a3d;box-shadow:0 0 8px #ff8a3d"></span>Crypto</div><div class="hfc-chip" style="margin-left:auto">⏱ 4h 12m</div></div>
+      <div style="flex:1;display:flex;align-items:center"><div style="font-family:'Anton',sans-serif;font-size:28px;line-height:1.02;color:#fff">Will BTC close above $112,000 today?</div></div>
+      <div><div style="display:flex;justify-content:space-between;font:700 11px 'Space Mono';margin-bottom:5px"><span style="color:#b6ff2e">YES 58%</span><span style="color:#ff3b4e">42% NO</span></div><div style="display:flex;height:10px;border-radius:7px;overflow:hidden;background:#0006"><div style="width:58%;background:#b6ff2e"></div><div style="flex:1;background:#ff3b4e"></div></div></div>
+      <div style="display:flex;gap:6px;margin-top:11px"><div style="background:#0006;border:1px solid #ffffff14;padding:6px 9px;border-radius:11px"><div style="font:400 7px 'Space Mono';color:#8b8b9e;letter-spacing:.1em">STAKE</div><div style="font:700 13px 'Space Mono';color:#fff">$100</div></div><div style="flex:1;text-align:center;background:#b6ff2e22;border:1px solid #b6ff2e55;padding:6px;border-radius:11px"><div style="font:400 7px 'Space Mono';color:#b6ff2e">WIN YES</div><div style="font:700 12px 'Space Mono';color:#b6ff2e">$172</div></div><div style="flex:1;text-align:center;background:#ff3b4e22;border:1px solid #ff3b4e55;padding:6px;border-radius:11px"><div style="font:400 7px 'Space Mono';color:#ff3b4e">WIN NO</div><div style="font:700 12px 'Space Mono';color:#ff3b4e">$238</div></div></div>
+      <div style="text-align:center;margin-top:9px;font:400 10px 'Hanken Grotesk';color:#ffffff8c">Tap for details · swipe to call</div>
+    </div>
+  </div>
+  <div class="hfc-cap"><b>Resting</b><span>At ease in the deck. Affordance hint shown.</span></div>
+</div>
+
+<!-- STATE 2 · YES (right) -->
+<div style="position:absolute;left:396px;top:800px;width:264px">
+  <div style="position:absolute;inset:0;border-radius:24px;background:#1c1c2a;border:1px solid #ffffff14;transform:scale(.93) translateY(-8px)"></div>
+  <div data-drags-parent="1" class="hfc-card" style="background:radial-gradient(120% 80% at 80% 0%, #ff8a3d2e, transparent 55%), linear-gradient(170deg,#1c1c2a,#15151f);transform:rotate(11deg) translateX(28px)">
+    <div style="position:absolute;inset:0;background:linear-gradient(270deg,#b6ff2eb3,transparent 62%)"></div>
+    <div class="hfc-stamp" style="top:38px;left:22px;border-color:#b6ff2e;color:#b6ff2e;transform:rotate(-15deg);box-shadow:0 0 22px #b6ff2e66">YES</div>
+    <div style="position:absolute;inset:0;padding:14px 15px;display:flex;flex-direction:column">
+      <div style="display:flex;align-items:center;gap:8px"><div class="hfc-chip"><span style="width:7px;height:7px;border-radius:50%;background:#ff8a3d"></span>Crypto</div><div class="hfc-chip" style="margin-left:auto">⏱ 4h 12m</div></div>
+      <div style="flex:1;display:flex;align-items:center"><div style="font-family:'Anton',sans-serif;font-size:28px;line-height:1.02;color:#fff">Will BTC close above $112,000 today?</div></div>
+      <div><div style="display:flex;justify-content:space-between;font:700 11px 'Space Mono';margin-bottom:5px"><span style="color:#b6ff2e">YES 58%</span><span style="color:#ff3b4e">42% NO</span></div><div style="display:flex;height:10px;border-radius:7px;overflow:hidden;background:#0006"><div style="width:58%;background:#b6ff2e"></div><div style="flex:1;background:#ff3b4e"></div></div></div>
+    </div>
+  </div>
+  <div class="hfc-cap"><b>Mid-drag → YES</b><span>Right. Lime wash + stamp, card tilts toward commit.</span></div>
+</div>
+
+<!-- STATE 3 · NO (left) -->
+<div style="position:absolute;left:712px;top:800px;width:264px">
+  <div style="position:absolute;inset:0;border-radius:24px;background:#1c1c2a;border:1px solid #ffffff14;transform:scale(.93) translateY(-8px)"></div>
+  <div data-drags-parent="1" class="hfc-card" style="background:radial-gradient(120% 80% at 80% 0%, #ff8a3d2e, transparent 55%), linear-gradient(170deg,#1c1c2a,#15151f);transform:rotate(-11deg) translateX(-28px)">
+    <div style="position:absolute;inset:0;background:linear-gradient(90deg,#ff3b4eb3,transparent 62%)"></div>
+    <div class="hfc-stamp" style="top:38px;right:22px;border-color:#ff3b4e;color:#ff3b4e;transform:rotate(15deg);box-shadow:0 0 22px #ff3b4e66">NO</div>
+    <div style="position:absolute;inset:0;padding:14px 15px;display:flex;flex-direction:column">
+      <div style="display:flex;align-items:center;gap:8px"><div class="hfc-chip"><span style="width:7px;height:7px;border-radius:50%;background:#ff8a3d"></span>Crypto</div><div class="hfc-chip" style="margin-left:auto">⏱ 4h 12m</div></div>
+      <div style="flex:1;display:flex;align-items:center"><div style="font-family:'Anton',sans-serif;font-size:28px;line-height:1.02;color:#fff">Will BTC close above $112,000 today?</div></div>
+      <div><div style="display:flex;justify-content:space-between;font:700 11px 'Space Mono';margin-bottom:5px"><span style="color:#b6ff2e">YES 58%</span><span style="color:#ff3b4e">42% NO</span></div><div style="display:flex;height:10px;border-radius:7px;overflow:hidden;background:#0006"><div style="width:58%;background:#b6ff2e"></div><div style="flex:1;background:#ff3b4e"></div></div></div>
+    </div>
+  </div>
+  <div class="hfc-cap"><b>Mid-drag → NO</b><span>Left. Red wash + stamp, opposite tilt.</span></div>
+</div>
+
+<!-- STATE 4 · SKIP (up) -->
+<div style="position:absolute;left:1028px;top:800px;width:264px">
+  <div style="position:absolute;inset:0;border-radius:24px;background:#1c1c2a;border:1px solid #ffffff14;transform:scale(.93) translateY(-8px)"></div>
+  <div data-drags-parent="1" class="hfc-card" style="background:radial-gradient(120% 80% at 80% 0%, #ff8a3d2e, transparent 55%), linear-gradient(170deg,#1c1c2a,#15151f);transform:translateY(-30px) rotate(-2deg)">
+    <div style="position:absolute;inset:0;background:radial-gradient(120% 70% at 50% 38%, #4d9bff99, transparent 62%)"></div>
+    <div class="hfc-stamp" style="top:40%;left:50%;margin-left:-58px;border-color:#4d9bff;color:#4d9bff;box-shadow:0 0 22px #4d9bff66">SKIP</div>
+    <div style="position:absolute;inset:0;padding:14px 15px;display:flex;flex-direction:column">
+      <div style="display:flex;align-items:center;gap:8px"><div class="hfc-chip"><span style="width:7px;height:7px;border-radius:50%;background:#ff8a3d"></span>Crypto</div><div class="hfc-chip" style="margin-left:auto">⏱ 4h 12m</div></div>
+      <div style="flex:1;display:flex;align-items:center"><div style="font-family:'Anton',sans-serif;font-size:28px;line-height:1.02;color:#fff">Will BTC close above $112,000 today?</div></div>
+      <div><div style="display:flex;justify-content:space-between;font:700 11px 'Space Mono';margin-bottom:5px"><span style="color:#b6ff2e">YES 58%</span><span style="color:#ff3b4e">42% NO</span></div><div style="display:flex;height:10px;border-radius:7px;overflow:hidden;background:#0006"><div style="width:58%;background:#b6ff2e"></div><div style="flex:1;background:#ff3b4e"></div></div></div>
+    </div>
+  </div>
+  <div class="hfc-cap"><b>Mid-drag ↑ SKIP</b><span>Up. Cool blue glow, no bet placed.</span></div>
+</div>
+
+<!-- STATE 5 · COMMITTED (fly) -->
+<div style="position:absolute;left:1344px;top:800px;width:264px">
+  <div class="hfc-card" style="background:radial-gradient(120% 80% at 80% 0%, #3d7bff2e, transparent 55%), linear-gradient(170deg,#1c1c2a,#15151f);overflow:visible">
+    <div style="position:absolute;inset:0;border-radius:24px;overflow:hidden">
+      <div style="position:absolute;inset:0;padding:14px 15px;display:flex;flex-direction:column;opacity:.92">
+        <div style="display:flex;align-items:center;gap:8px"><div class="hfc-chip"><span style="width:7px;height:7px;border-radius:50%;background:#3d7bff"></span>Sports</div><div class="hfc-chip" style="margin-left:auto">⏱ 6h 03m</div></div>
+        <div style="flex:1;display:flex;align-items:center"><div style="font-family:'Anton',sans-serif;font-size:28px;line-height:1.02;color:#fff">Lakers to beat the Celtics tonight?</div></div>
+        <div style="font:400 10px 'Hanken Grotesk';color:#ffffff8c;text-align:center">next card scales up from behind →</div>
+      </div>
+    </div>
+    <div style="position:absolute;top:-14px;right:-30px;width:200px;height:280px;border-radius:24px;background:linear-gradient(170deg,#241a2f,#15151f);border:1px solid #b6ff2e88;box-shadow:0 24px 50px -18px #000;transform:rotate(22deg);overflow:hidden">
+      <div style="position:absolute;inset:0;background:linear-gradient(270deg,#b6ff2ecc,transparent 55%)"></div>
+      <div class="hfc-stamp" style="top:24px;left:18px;font-size:30px;border-color:#b6ff2e;color:#b6ff2e;transform:rotate(-15deg)">YES</div>
+    </div>
+  </div>
+  <div class="hfc-cap"><b>Committed · fling-off</b><span>Past threshold the card flies; next one is already live.</span></div>
+</div>
+
+<!-- STATE 6 · BET PLACED BURST -->
+<div style="position:absolute;left:1660px;top:800px;width:264px">
+  <div data-drags-parent="1" class="hfc-card" style="background:radial-gradient(120% 90% at 50% 50%, #b6ff2e22, transparent 60%), linear-gradient(170deg,#13160f,#0c0d09);display:flex;align-items:center;justify-content:center">
+    <div style="position:absolute;width:130px;height:130px;border-radius:50%;border:4px solid #b6ff2e;opacity:.7"></div>
+    <div style="position:absolute;width:170px;height:170px;border-radius:50%;border:2px solid #b6ff2e;opacity:.35"></div>
+    <div style="position:absolute;top:70px;font:700 18px 'Space Mono';color:#ff3dcd">+50 pts</div>
+    <div style="text-align:center"><div style="font-family:'Anton',sans-serif;font-size:54px;color:#b6ff2e;text-shadow:0 0 26px #b6ff2e">YES</div><div style="background:#0008;border:1px solid #b6ff2e;border-radius:18px;padding:7px 14px;margin-top:6px;font:700 13px 'Space Mono';color:#fff">$100 → $172</div></div>
+  </div>
+  <div class="hfc-cap"><b>Bet placed</b><span>Quick confirmation: side, stake, points. Then the card is gone.</span></div>
+</div>
+
+<!-- ===== SECTION: 3 DIRECTIONS ===== -->
+<div data-drags-parent="0" style="position:absolute;left:80px;top:1330px;font-family:'Anton',sans-serif;font-size:34px;color:#17140f">3 WHOLE-SYSTEM DIRECTIONS</div>
+<div style="position:absolute;left:80px;top:1374px;font:500 14px 'Hanken Grotesk';color:rgba(23,20,15,.55)">Same locked signal colors; display face, energy accent and base tone shift. Switchable live in the prototype.</div>
+
+<!-- DIR A · ARCADE -->
+<div style="position:absolute;left:80px;top:1430px;width:264px">
+  <div data-drags-parent="1" class="hfc-card" style="background:radial-gradient(120% 80% at 80% 0%, #ff8a3d2e, transparent 55%), linear-gradient(170deg,#1c1c2a,#15151f)">
+    <div style="position:absolute;inset:0;padding:14px 15px;display:flex;flex-direction:column">
+      <div style="display:flex;align-items:center;gap:8px"><div class="hfc-chip"><span style="width:7px;height:7px;border-radius:50%;background:#ff8a3d"></span>Crypto</div><div class="hfc-chip" style="margin-left:auto;color:#ff3dcd">⚡ 12,480</div></div>
+      <div style="flex:1;display:flex;align-items:center"><div style="font-family:'Anton',sans-serif;font-size:30px;line-height:1.02;color:#fff">Will BTC hit $112k today?</div></div>
+      <div style="display:flex;height:10px;border-radius:7px;overflow:hidden;background:#0006"><div style="width:58%;background:#b6ff2e"></div><div style="flex:1;background:#ff3b4e"></div></div>
+    </div>
+  </div>
+  <div class="hfc-cap"><b style="color:#0d0b08">Neon Arcade</b><span>Anton · magenta energy · violet-black base</span></div>
+</div>
+
+<!-- DIR B · TOY -->
+<div style="position:absolute;left:420px;top:1430px;width:264px">
+  <div data-drags-parent="1" class="hfc-card" style="background:radial-gradient(120% 80% at 80% 0%, #ff8a3d2e, transparent 55%), linear-gradient(170deg,#1e2438,#171b2b)">
+    <div style="position:absolute;inset:0;padding:14px 15px;display:flex;flex-direction:column">
+      <div style="display:flex;align-items:center;gap:8px"><div class="hfc-chip"><span style="width:7px;height:7px;border-radius:50%;background:#ff8a3d"></span>Crypto</div><div class="hfc-chip" style="margin-left:auto;color:#18d6c4">⚡ 12,480</div></div>
+      <div style="flex:1;display:flex;align-items:center"><div style="font-family:'Unbounded',sans-serif;font-weight:800;font-size:21px;line-height:1.08;color:#eef1fb">Will BTC hit $112k today?</div></div>
+      <div style="display:flex;height:10px;border-radius:7px;overflow:hidden;background:#0006"><div style="width:58%;background:#b6ff2e"></div><div style="flex:1;background:#ff3b4e"></div></div>
+    </div>
+  </div>
+  <div class="hfc-cap"><b style="color:#0d0b08">Soft Toy</b><span>Unbounded · teal energy · indigo base</span></div>
+</div>
+
+<!-- DIR C · TERMINAL -->
+<div style="position:absolute;left:760px;top:1430px;width:264px">
+  <div data-drags-parent="1" class="hfc-card" style="background:radial-gradient(120% 80% at 80% 0%, #ff8a3d22, transparent 55%), linear-gradient(170deg,#161b20,#101317)">
+    <div style="position:absolute;inset:0;padding:14px 15px;display:flex;flex-direction:column">
+      <div style="display:flex;align-items:center;gap:8px"><div class="hfc-chip"><span style="width:7px;height:7px;border-radius:50%;background:#ff8a3d"></span>Crypto</div><div class="hfc-chip" style="margin-left:auto;color:#22e3a0">⚡ 12,480</div></div>
+      <div style="flex:1;display:flex;align-items:center"><div style="font-family:'Space Mono',monospace;font-weight:700;font-size:20px;line-height:1.12;color:#e6f0ea">Will BTC hit $112k today?</div></div>
+      <div style="display:flex;height:10px;border-radius:7px;overflow:hidden;background:#0006"><div style="width:58%;background:#b6ff2e"></div><div style="flex:1;background:#ff3b4e"></div></div>
+    </div>
+  </div>
+  <div class="hfc-cap"><b style="color:#0d0b08">Degen Terminal</b><span>Space Mono · acid-green energy · pure black</span></div>
+</div>
+
+<!-- post-it -->
+<div style="position:absolute;left:1090px;top:1440px;width:230px;background:#fef4a8;padding:14px 16px;font:500 12px/1.5 'Hanken Grotesk',sans-serif;color:#5a4a10;box-shadow:0 1px 3px rgba(0,0,0,.12);transform:rotate(-1.5deg)">
+  <b style="font-size:13px">All 8 surfaces are built &amp; live</b><br>Onboarding, Blitz Deck, card detail, GM check-in, Profile/Wallet, Vault (shards + streak recovery), Referral and Leaderboard — open the interactive prototype to swipe through them.
+</div>
+</x-dc>
+</body>
+</html>

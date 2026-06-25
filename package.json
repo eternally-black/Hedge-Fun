@@ -15,15 +15,23 @@
     "refresh-deck": "tsx scripts/refresh-deck.ts",
     "verify:polymarket": "tsx scripts/verify-polymarket.ts",
     "test": "tsx scripts/test-points.ts && tsx scripts/test-engine.ts && tsx scripts/test-settle.ts && tsx scripts/test-referral.ts && tsx scripts/test-deck-mix.ts && tsx scripts/test-skip.ts",
+    "dev:reset": "tsx scripts/dev-reset.ts",
     "smoke": "tsx scripts/smoke.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.19.3",
     "@privy-io/react-auth": "^3.32.2",
     "@privy-io/server-auth": "^1.32.5",
+    "@solana-program/memo": "0.9.0",
+    "@solana-program/system": "0.10.0",
+    "@solana-program/token": "0.9.0",
+    "@solana/kit": "5.5.1",
     "next": "^16.2.9",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
+  },
+  "overrides": {
+    "@solana-program/memo": { "@solana/kit": "5.5.1" }
   },
   "devDependencies": {
     "@types/node": "^26.0.0",

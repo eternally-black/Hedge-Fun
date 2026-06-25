@@ -1,0 +1,633 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Anton&family=Unbounded:wght@600;700;800;900&family=Space+Mono:wght@400;700&family=Hanken+Grotesk:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;padding:0;height:100%}
+body{background:#060608;font-family:'Hanken Grotesk',system-ui,sans-serif;overflow:hidden}
+*{user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+@keyframes hfStamp{0%{transform:scale(.4) rotate(var(--rot,-12deg));opacity:0}60%{transform:scale(1.12) rotate(var(--rot,-12deg))}100%{transform:scale(1) rotate(var(--rot,-12deg));opacity:1}}
+@keyframes hfRing{0%{transform:scale(.2);opacity:.9}100%{transform:scale(2.4);opacity:0}}
+@keyframes hfFloat{0%{transform:translateY(0);opacity:0}20%{opacity:1}100%{transform:translateY(-90px);opacity:0}}
+@keyframes hfPts{0%{transform:translateY(7px) scale(.8);opacity:0}28%{opacity:1;transform:translateY(0) scale(1)}100%{transform:translateY(-22px) scale(1);opacity:0}}
+@keyframes hfPop{0%{transform:scale(0)}70%{transform:scale(1.25)}100%{transform:scale(1)}}
+@keyframes hfFlame{0%,100%{transform:scale(1) rotate(-2deg)}50%{transform:scale(1.12) rotate(2deg)}}
+@keyframes hfShimmer{0%{background-position:-120% 0}100%{background-position:220% 0}}
+@keyframes hfConfetti{0%{transform:translateY(-20px) rotate(0);opacity:1}100%{transform:translateY(560px) rotate(720deg);opacity:0}}
+@keyframes hfRise{0%{transform:translateY(24px);opacity:0}100%{transform:translateY(0);opacity:1}}
+@keyframes hfPulse{0%,100%{box-shadow:0 0 0 0 rgba(255,194,75,.45)}50%{box-shadow:0 0 0 10px rgba(255,194,75,0)}}
+@keyframes hfSpin{to{transform:rotate(360deg)}}
+.hf-scroll::-webkit-scrollbar{display:none}
+.hf-scroll{scrollbar-width:none}
+</style>
+</helmet>
+<div ref="{{ rootRef }}" style="--bg:#0a0a0f;--bg2:#101019;--panel:#15151f;--panel2:#1c1c2a;--line:rgba(255,255,255,.09);--text:#f4f4fa;--muted:#8b8b9e;--energy:#ff3dcd;--yes:#b6ff2e;--no:#ff3b4e;--skip:#4d9bff;--gold:#ffc24b;--df:'Anton',sans-serif;--bf:'Hanken Grotesk',sans-serif;--nf:'Space Mono',monospace;position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:radial-gradient(120% 80% at 50% -10%, color-mix(in srgb, var(--energy) 14%, transparent), transparent 60%), var(--bg);font-family:var(--bf);color:var(--text)">
+
+  <div ref="{{ deviceRef }}" style="position:relative;width:402px;height:872px;border-radius:48px;padding:11px;background:linear-gradient(160deg,#23232e,#0c0c12);box-shadow:0 40px 120px -20px rgba(0,0,0,.8), 0 0 0 1px rgba(255,255,255,.05) inset, 0 2px 0 rgba(255,255,255,.06) inset;transform-origin:center">
+    <div style="position:absolute;top:18px;left:50%;transform:translateX(-50%);width:108px;height:30px;background:#000;border-radius:18px;z-index:60"></div>
+    <div style="position:relative;width:100%;height:100%;border-radius:38px;overflow:hidden;background:var(--bg);display:flex;flex-direction:column">
+
+      <!-- ====== HUD ====== -->
+      <div style="position:relative;z-index:30;padding:46px 16px 10px;background:linear-gradient(180deg, color-mix(in srgb, var(--bg) 92%, transparent), transparent)">
+        <div style="display:flex;align-items:center;gap:8px">
+          <div style="position:relative;display:flex;align-items:center;gap:7px;background:var(--panel);border:1px solid var(--line);padding:6px 11px 6px 8px;border-radius:30px">
+            <sc-if value="{{ popOpen }}" hint-placeholder-val="{{ false }}"><div style="position:absolute;left:0;right:0;top:-3px;text-align:center;font-family:var(--nf);font-weight:700;font-size:15px;color:{{ pop.color }};animation:hfPts .65s ease-out forwards;pointer-events:none;text-shadow:0 1px 6px rgba(0,0,0,.6);z-index:5">+{{ pop.amt }}</div></sc-if>
+            <div style="width:22px;height:22px;border-radius:50%;background:color-mix(in srgb,var(--energy) 22%,transparent);display:flex;align-items:center;justify-content:center;border:1px solid color-mix(in srgb,var(--energy) 50%,transparent)"><div style="width:9px;height:9px;border-radius:50%;background:var(--energy);box-shadow:0 0 10px var(--energy)"></div></div>
+            <div style="line-height:1"><div style="font-family:var(--nf);font-weight:700;font-size:14px;color:var(--text)">{{ pointsFmt }}</div><div style="font-size:8px;letter-spacing:.14em;color:var(--muted);text-transform:uppercase;margin-top:1px">Points</div></div>
+          </div>
+          <div onClick="{{ goGM }}" style="display:flex;align-items:center;gap:6px;background:var(--panel);border:1px solid var(--line);padding:6px 12px;border-radius:30px;cursor:pointer">
+            <div style="font-size:15px;animation:hfFlame 1.6s ease-in-out infinite">🔥</div>
+            <div style="line-height:1"><div style="font-family:var(--nf);font-weight:700;font-size:14px">{{ streak }}</div><div style="font-size:8px;letter-spacing:.14em;color:var(--muted);text-transform:uppercase;margin-top:1px">Streak</div></div>
+          </div>
+          <div style="margin-left:auto;display:flex;align-items:center;gap:7px;background:var(--panel);border:1px solid var(--line);padding:6px 11px;border-radius:30px">
+            <div style="line-height:1;text-align:right"><div style="font-family:var(--nf);font-weight:700;font-size:14px;color:var(--yes)">{{ vbalFmt }}</div><div style="font-size:8px;letter-spacing:.14em;color:var(--muted);text-transform:uppercase;margin-top:1px">Virtual $</div></div>
+          </div>
+        </div>
+        <!-- shard strip -->
+        <div onClick="{{ goShards }}" style="margin-top:9px;display:flex;align-items:center;gap:9px;cursor:pointer">
+          <div style="font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--gold);font-weight:700;white-space:nowrap;display:flex;align-items:center;gap:4px">◆ {{ shards }}/20</div>
+          <div style="flex:1;height:7px;border-radius:6px;background:var(--panel2);overflow:hidden;border:1px solid var(--line)">
+            <div style="height:100%;width:{{ shardPct }}%;background:linear-gradient(90deg,#c98a1e,var(--gold));border-radius:6px"></div>
+          </div>
+          <div style="font-size:9px;color:var(--muted);white-space:nowrap">→ artifact</div>
+        </div>
+      </div>
+
+      <!-- ====== SCREEN BODY ====== -->
+      <div style="position:relative;flex:1;min-height:0">
+
+        <!-- ===== DECK ===== -->
+        <sc-if value="{{ showDeck }}" hint-placeholder-val="{{ true }}">
+        <div style="position:absolute;inset:0;display:flex;flex-direction:column">
+          <div style="position:relative;flex:1;margin:6px 14px 0">
+            <!-- third card -->
+            <div style="position:absolute;inset:0;border-radius:26px;background:var(--panel);border:1px solid var(--line);transform:scale({{ thirdScale }}) translateY(-14px);opacity:.5"></div>
+            <!-- next card -->
+            <div style="position:absolute;inset:0;border-radius:26px;overflow:hidden;background:var(--panel2);border:1px solid var(--line);transform:scale({{ nextScale }}) translateY(-7px)">
+              <div style="position:absolute;inset:0;background:{{ next.bgGrad }}"></div>
+              <div style="position:absolute;top:16px;left:16px;display:flex;align-items:center;gap:7px;background:rgba(0,0,0,.35);padding:5px 10px;border-radius:20px"><div style="width:7px;height:7px;border-radius:50%;background:{{ next.color }}"></div><span style="font-size:10px;letter-spacing:.12em;text-transform:uppercase;font-weight:700;color:#fff">{{ next.label }}</span></div>
+              <div style="position:absolute;left:18px;right:18px;top:50px;font-family:var(--df);font-size:24px;line-height:1.05;color:rgba(255,255,255,.85)">{{ next.q }}</div>
+            </div>
+
+            <!-- TOP card (interactive) -->
+            <div ref="{{ cardRef }}" onPointerDown="{{ onDown }}" onPointerMove="{{ onMove }}" onPointerUp="{{ onUp }}" style="position:absolute;inset:0;border-radius:26px;overflow:hidden;background:var(--panel2);border:1px solid var(--line);box-shadow:0 24px 50px -18px rgba(0,0,0,.7);touch-action:none;cursor:grab;transform:{{ topTransform }};transition:{{ topTransition }};opacity:{{ topOpacity }};will-change:transform">
+              <div style="position:absolute;inset:0;background:{{ top.bgGrad }}"></div>
+              <div style="position:absolute;right:-30px;bottom:-30px;opacity:.10;transform:rotate(-12deg)">{{ top.watermark }}</div>
+
+              <!-- direction overlays -->
+              <div style="position:absolute;inset:0;background:linear-gradient(270deg, color-mix(in srgb,var(--yes) 70%, transparent), transparent 65%);opacity:{{ yesOp }};pointer-events:none"></div>
+              <div style="position:absolute;inset:0;background:linear-gradient(90deg, color-mix(in srgb,var(--no) 70%, transparent), transparent 65%);opacity:{{ noOp }};pointer-events:none"></div>
+              <div style="position:absolute;inset:0;background:radial-gradient(120% 70% at 50% 34%, color-mix(in srgb,var(--skip) 60%, transparent), transparent 62%);opacity:{{ skipOp }};pointer-events:none"></div>
+
+              <!-- stamps -->
+              <div style="position:absolute;top:42px;left:26px;--rot:-15deg;border:5px solid var(--no);color:var(--no);font-family:var(--df);font-size:46px;padding:2px 16px;border-radius:12px;transform:rotate(-15deg) scale({{ noStampS }});opacity:{{ noStampO }};text-shadow:0 2px 12px rgba(0,0,0,.4);box-shadow:0 0 24px color-mix(in srgb,var(--no) 40%,transparent)">NO</div>
+              <div style="position:absolute;top:42px;right:26px;--rot:15deg;border:5px solid var(--yes);color:var(--yes);font-family:var(--df);font-size:46px;padding:2px 16px;border-radius:12px;transform:rotate(15deg) scale({{ yesStampS }});opacity:{{ yesStampO }};text-shadow:0 2px 12px rgba(0,0,0,.4);box-shadow:0 0 24px color-mix(in srgb,var(--yes) 40%,transparent)">YES</div>
+              <div style="position:absolute;top:30px;left:50%;margin-left:-62px;border:5px solid var(--skip);color:var(--skip);font-family:var(--df);font-size:40px;padding:2px 18px;border-radius:12px;transform:scale({{ skipStampS }});opacity:{{ skipStampO }};box-shadow:0 0 24px color-mix(in srgb,var(--skip) 40%,transparent);text-align:center">SKIP</div>
+
+              <!-- card content -->
+              <div style="position:absolute;inset:0;display:flex;flex-direction:column;padding:16px 18px 18px">
+                <div style="display:flex;align-items:center;gap:8px">
+                  <div style="display:flex;align-items:center;gap:7px;background:rgba(0,0,0,.4);backdrop-filter:blur(6px);padding:6px 11px;border-radius:20px"><div style="width:7px;height:7px;border-radius:50%;background:{{ top.color }};box-shadow:0 0 8px {{ top.color }}"></div><span style="font-size:10px;letter-spacing:.13em;text-transform:uppercase;font-weight:700;color:#fff">{{ top.label }}</span></div>
+                  <div style="margin-left:auto;display:flex;align-items:center;gap:6px;background:rgba(0,0,0,.4);backdrop-filter:blur(6px);padding:6px 11px;border-radius:20px;border:1px solid {{ top.urgentBorder }}">
+                    <span style="font-size:12px">⏱</span><span style="font-family:var(--nf);font-weight:700;font-size:13px;color:{{ top.urgentText }}">{{ top.countdown }}</span>
+                  </div>
+                </div>
+
+                <div style="flex:1;display:flex;align-items:center;padding:14px 0">
+                  <div style="font-family:var(--df);font-weight:700;font-size:34px;line-height:1.02;letter-spacing:.2px;text-wrap:balance;color:#fff;text-shadow:0 2px 20px rgba(0,0,0,.5)">{{ top.q }}</div>
+                </div>
+
+                <!-- odds split -->
+                <div style="margin-bottom:14px">
+                  <div style="display:flex;justify-content:space-between;font-family:var(--nf);font-weight:700;font-size:13px;margin-bottom:6px"><span style="color:var(--no)">NO {{ top.no }}%</span><span style="color:var(--yes)">{{ top.yes }}% YES</span></div>
+                  <div style="display:flex;height:12px;border-radius:8px;overflow:hidden;background:rgba(0,0,0,.4)"><div style="width:{{ top.no }}%;background:linear-gradient(90deg,color-mix(in srgb,var(--no) 60%,#000),var(--no))"></div><div style="flex:1;background:linear-gradient(90deg,var(--yes),color-mix(in srgb,var(--yes) 60%,#000))"></div></div>
+                </div>
+
+                <!-- stake + payout + hints -->
+                <div style="display:flex;align-items:center;gap:8px">
+                  <div style="background:rgba(0,0,0,.4);backdrop-filter:blur(6px);border:1px solid var(--line);padding:8px 12px;border-radius:14px"><div style="font-size:8px;letter-spacing:.12em;color:var(--muted);text-transform:uppercase">Stake</div><div style="font-family:var(--nf);font-weight:700;font-size:15px;color:#fff">$100</div></div>
+                  <div style="flex:1;display:flex;gap:6px">
+                    <div style="flex:1;text-align:center;background:color-mix(in srgb,var(--no) 14%,transparent);border:1px solid color-mix(in srgb,var(--no) 35%,transparent);padding:8px 6px;border-radius:14px"><div style="font-size:8px;letter-spacing:.1em;color:var(--no);text-transform:uppercase">Win No</div><div style="font-family:var(--nf);font-weight:700;font-size:14px;color:var(--no)">${{ top.payNo }}</div></div>
+                    <div style="flex:1;text-align:center;background:color-mix(in srgb,var(--yes) 14%,transparent);border:1px solid color-mix(in srgb,var(--yes) 35%,transparent);padding:8px 6px;border-radius:14px"><div style="font-size:8px;letter-spacing:.1em;color:var(--yes);text-transform:uppercase">Win Yes</div><div style="font-family:var(--nf);font-weight:700;font-size:14px;color:var(--yes)">${{ top.payYes }}</div></div>
+                  </div>
+                </div>
+                <div style="text-align:center;margin-top:12px;font-size:11px;color:rgba(255,255,255,.55);letter-spacing:.02em">Tap for details · swipe to call</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- fallback buttons -->
+          <div style="display:flex;align-items:center;justify-content:center;gap:18px;padding:14px 0 10px">
+            <div onClick="{{ btnNo }}" style="width:56px;height:56px;border-radius:50%;background:var(--panel);border:1.5px solid color-mix(in srgb,var(--no) 55%,var(--line));display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--no);font-size:24px;font-weight:800">✕</div>
+            <div onClick="{{ btnSkip }}" style="width:46px;height:46px;border-radius:50%;background:var(--panel);border:1.5px solid color-mix(in srgb,var(--skip) 55%,var(--line));display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--skip);font-size:20px">↑</div>
+            <div onClick="{{ btnYes }}" style="width:56px;height:56px;border-radius:50%;background:var(--panel);border:1.5px solid color-mix(in srgb,var(--yes) 55%,var(--line));display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--yes);font-size:26px;font-weight:800">✓</div>
+          </div>
+        </div>
+        </sc-if>
+
+        <!-- ===== PROFILE / WALLET ===== -->
+        <sc-if value="{{ showProfile }}" hint-placeholder-val="{{ false }}">
+        <div class="hf-scroll" style="position:absolute;inset:0;overflow-y:auto;padding:4px 16px 20px">
+          <div style="display:flex;align-items:center;gap:12px;margin-top:6px">
+            <div style="width:58px;height:58px;border-radius:18px;background:linear-gradient(140deg,var(--energy),color-mix(in srgb,var(--energy) 30%,#000));display:flex;align-items:center;justify-content:center;font-family:var(--df);font-size:26px;color:#fff">DG</div>
+            <div><div style="font-family:var(--df);font-size:24px;line-height:1">degen_dana</div><div style="font-size:12px;color:var(--muted)">Joined Apr 2026 · Rank #418</div></div>
+            <div onClick="{{ goLeaderboard }}" style="margin-left:auto;background:var(--panel);border:1px solid var(--line);padding:9px 13px;border-radius:14px;text-align:center;cursor:pointer"><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em">Rank</div><div style="font-family:var(--nf);font-weight:700;color:var(--gold)">#418</div></div>
+          </div>
+
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:16px">
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:14px"><div style="font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)">Points</div><div style="font-family:var(--nf);font-weight:700;font-size:24px;color:var(--energy);margin-top:3px">{{ pointsFmt }}</div></div>
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:14px"><div style="font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)">Virtual P&L</div><div style="font-family:var(--nf);font-weight:700;font-size:24px;color:var(--yes);margin-top:3px">{{ vbalFmt }}</div></div>
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:14px;display:flex;align-items:center;gap:10px"><div style="font-size:22px;animation:hfFlame 1.6s ease-in-out infinite">🔥</div><div><div style="font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)">Streak</div><div style="font-family:var(--nf);font-weight:700;font-size:24px;color:var(--text)">{{ streak }}d</div></div></div>
+            <div onClick="{{ goShards }}" style="background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:14px;cursor:pointer"><div style="font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--gold)">◆ Shards</div><div style="font-family:var(--nf);font-weight:700;font-size:24px;color:var(--gold);margin-top:3px">{{ shards }}/20</div></div>
+          </div>
+
+          <div style="display:flex;gap:9px;margin-top:14px">
+            <div onClick="{{ goGM }}" style="flex:1;background:linear-gradient(135deg,color-mix(in srgb,var(--energy) 30%,var(--panel)),var(--panel));border:1px solid color-mix(in srgb,var(--energy) 40%,var(--line));border-radius:16px;padding:13px;text-align:center;cursor:pointer;font-weight:700;font-size:13px">☀ Daily GM</div>
+            <div onClick="{{ goInvite }}" style="flex:1;background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:13px;text-align:center;cursor:pointer;font-weight:700;font-size:13px">＋ Invite</div>
+          </div>
+
+          <!-- theme switcher -->
+          <div style="margin-top:18px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);font-weight:700">Visual direction</div>
+          <div style="display:flex;gap:8px;margin-top:9px">
+            <div onClick="{{ setArcade }}" style="flex:1;background:{{ tArcadeBg }};border:1.5px solid {{ tArcadeBd }};border-radius:14px;padding:11px 8px;text-align:center;cursor:pointer"><div style="width:100%;height:26px;border-radius:8px;background:radial-gradient(circle at 50% 40%,#ff3dcd,#1a1020);margin-bottom:7px"></div><div style="font-size:10px;font-weight:700">Neon Arcade</div></div>
+            <div onClick="{{ setToy }}" style="flex:1;background:{{ tToyBg }};border:1.5px solid {{ tToyBd }};border-radius:14px;padding:11px 8px;text-align:center;cursor:pointer"><div style="width:100%;height:26px;border-radius:8px;background:radial-gradient(circle at 50% 40%,#18d6c4,#0b1620);margin-bottom:7px"></div><div style="font-size:10px;font-weight:700">Soft Toy</div></div>
+            <div onClick="{{ setTerminal }}" style="flex:1;background:{{ tTermBg }};border:1.5px solid {{ tTermBd }};border-radius:14px;padding:11px 8px;text-align:center;cursor:pointer"><div style="width:100%;height:26px;border-radius:8px;background:radial-gradient(circle at 50% 40%,#22e3a0,#06120c);margin-bottom:7px"></div><div style="font-size:10px;font-weight:700">Degen Terminal</div></div>
+          </div>
+
+          <!-- history -->
+          <div style="margin-top:20px;display:flex;align-items:center;justify-content:space-between"><div style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);font-weight:700">Prediction history</div></div>
+          <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px">
+            <sc-for list="{{ history }}" as="h" hint-placeholder-count="4">
+              <div style="display:flex;align-items:center;gap:11px;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:11px 12px">
+                <div style="width:34px;height:34px;border-radius:10px;background:{{ h.sideBg }};display:flex;align-items:center;justify-content:center;font-family:var(--df);font-size:13px;color:{{ h.sideColor }};flex-shrink:0">{{ h.side }}</div>
+                <div style="flex:1;min-width:0"><div style="font-size:13px;font-weight:600;line-height:1.2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ h.q }}</div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-top:2px">{{ h.cat }}</div></div>
+                <div style="text-align:right"><div style="font-size:11px;font-weight:700;color:{{ h.statusColor }};text-transform:uppercase">{{ h.status }}</div><div style="font-family:var(--nf);font-size:12px;color:{{ h.statusColor }}">{{ h.delta }}</div></div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+        </sc-if>
+
+        <!-- ===== GM CHECK-IN ===== -->
+        <sc-if value="{{ showGM }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;text-align:center;background:radial-gradient(120% 70% at 50% 30%, color-mix(in srgb,var(--energy) 22%,transparent), transparent 60%)">
+          <sc-if value="{{ gmConfetti }}" hint-placeholder-val="{{ false }}"><div style="position:absolute;inset:0;pointer-events:none;overflow:hidden">{{ confettiEls }}</div></sc-if>
+          <div style="font-size:64px;animation:hfFlame 1.6s ease-in-out infinite">🔥</div>
+          <div style="font-family:var(--df);font-size:54px;line-height:.95;margin-top:10px">GM, DEGEN</div>
+          <div style="font-size:14px;color:var(--muted);max-width:260px;margin-top:8px;text-wrap:pretty">Check in to keep your streak burning. Day {{ gmNextDay }} bonus is ready.</div>
+          <div style="display:flex;align-items:center;gap:8px;margin-top:24px">
+            <sc-for list="{{ weekDots }}" as="d" hint-placeholder-count="7">
+              <div style="display:flex;flex-direction:column;align-items:center;gap:5px"><div style="width:30px;height:30px;border-radius:10px;background:{{ d.bg }};border:1.5px solid {{ d.bd }};display:flex;align-items:center;justify-content:center;font-size:13px;color:{{ d.fg }}">{{ d.mark }}</div><div style="font-size:8px;color:var(--muted)">{{ d.label }}</div></div>
+            </sc-for>
+          </div>
+          <div style="margin-top:26px;background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:14px 22px;display:flex;gap:22px">
+            <div><div style="font-family:var(--nf);font-weight:700;font-size:22px;color:var(--energy)">+100</div><div style="font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)">Points</div></div>
+            <div style="width:1px;background:var(--line)"></div>
+            <div><div style="font-family:var(--nf);font-weight:700;font-size:22px;color:var(--gold)">+1 ◆</div><div style="font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)">Shard</div></div>
+          </div>
+          <div onClick="{{ doGM }}" style="margin-top:26px;width:100%;max-width:300px;background:linear-gradient(135deg,var(--energy),color-mix(in srgb,var(--energy) 55%,#000));color:#fff;font-family:var(--df);font-size:24px;padding:16px;border-radius:18px;cursor:pointer;box-shadow:0 14px 30px -8px color-mix(in srgb,var(--energy) 60%,transparent)">{{ gmBtnLabel }}</div>
+        </div>
+        </sc-if>
+
+        <!-- ===== SHARDS / ARTIFACT / RECOVERY ===== -->
+        <sc-if value="{{ showShards }}" hint-placeholder-val="{{ false }}">
+        <div class="hf-scroll" style="position:absolute;inset:0;overflow-y:auto;padding:8px 18px 20px;text-align:center">
+          <div style="font-family:var(--df);font-size:30px;margin-top:6px">The Vault</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:2px">Correct calls drop shards. 20 shards forge 1 artifact.</div>
+
+          <div style="margin:20px auto 0;width:150px;height:150px;position:relative;display:flex;align-items:center;justify-content:center">
+            <svg viewBox="0 0 120 120" style="position:absolute;inset:0;transform:rotate(-90deg)"><circle cx="60" cy="60" r="52" fill="none" stroke="var(--panel2)" stroke-width="10"/><circle cx="60" cy="60" r="52" fill="none" stroke="var(--gold)" stroke-width="10" stroke-linecap="round" stroke-dasharray="{{ shardDash }}" stroke-dashoffset="0"/></svg>
+            <div style="position:relative"><div style="font-size:40px;filter:drop-shadow(0 0 12px var(--gold))">◆</div><div style="font-family:var(--nf);font-weight:700;font-size:20px;color:var(--gold);margin-top:2px">{{ shards }}/20</div></div>
+          </div>
+          <div style="font-size:13px;color:var(--muted);margin-top:6px">{{ shardsLeft }} more shards to forge your next artifact</div>
+
+          <!-- artifacts owned -->
+          <div style="margin-top:22px;text-align:left;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);font-weight:700">Artifacts · revive a burned streak</div>
+          <div style="display:flex;gap:10px;margin-top:10px">
+            <div style="flex:1;aspect-ratio:1;border-radius:18px;background:linear-gradient(150deg,color-mix(in srgb,var(--gold) 30%,var(--panel)),var(--panel));border:1px solid color-mix(in srgb,var(--gold) 40%,var(--line));display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;animation:hfPulse 2.4s ease-in-out infinite"><div style="font-size:30px">🛡</div><div style="font-size:10px;color:var(--gold);font-weight:700">Ember Sigil</div></div>
+            <div style="flex:1;aspect-ratio:1;border-radius:18px;background:var(--panel);border:1px dashed var(--line);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;opacity:.5"><div style="font-size:30px">＋</div><div style="font-size:10px;color:var(--muted)">Locked</div></div>
+            <div style="flex:1;aspect-ratio:1;border-radius:18px;background:var(--panel);border:1px dashed var(--line);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;opacity:.5"><div style="font-size:30px">＋</div><div style="font-size:10px;color:var(--muted)">Locked</div></div>
+          </div>
+
+          <!-- streak recovery -->
+          <div style="margin-top:22px;border-radius:20px;overflow:hidden;border:1px solid {{ burnBorder }}">
+            <div style="padding:16px;background:{{ burnBg }};text-align:left">
+              <div style="display:flex;align-items:center;gap:10px"><div style="font-size:26px">{{ burnIcon }}</div><div><div style="font-family:var(--df);font-size:20px;color:{{ burnTitleColor }}">{{ burnTitle }}</div><div style="font-size:11px;color:var(--muted)">{{ burnSub }}</div></div></div>
+              <sc-if value="{{ streakBurned }}" hint-placeholder-val="{{ false }}">
+                <div onClick="{{ reviveStreak }}" style="margin-top:14px;background:linear-gradient(135deg,var(--gold),#c98a1e);color:#1a1205;font-family:var(--df);font-size:18px;text-align:center;padding:13px;border-radius:14px;cursor:pointer">🛡 Spend 1 Artifact → Revive {{ revivedStreak }}-day streak</div>
+              </sc-if>
+              <sc-if value="{{ streakAlive }}" hint-placeholder-val="{{ true }}">
+                <div onClick="{{ burnDemo }}" style="margin-top:12px;font-size:11px;color:var(--muted);text-decoration:underline;cursor:pointer">Preview: simulate a burned streak →</div>
+              </sc-if>
+            </div>
+          </div>
+        </div>
+        </sc-if>
+
+        <!-- ===== REFERRAL ===== -->
+        <sc-if value="{{ showReferral }}" hint-placeholder-val="{{ false }}">
+        <div class="hf-scroll" style="position:absolute;inset:0;overflow-y:auto;padding:8px 18px 20px;text-align:center">
+          <div style="font-size:56px;margin-top:10px">🤝</div>
+          <div style="font-family:var(--df);font-size:34px;line-height:1;margin-top:6px">Farm faster<br>with friends</div>
+          <div style="font-size:13px;color:var(--muted);margin-top:8px;max-width:280px;margin-left:auto;margin-right:auto;text-wrap:pretty">Every friend who makes their first call earns you both bonus points and a shard.</div>
+
+          <div style="margin-top:22px;background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:6px 6px 6px 16px;display:flex;align-items:center;gap:10px">
+            <div style="flex:1;text-align:left;font-family:var(--nf);font-size:13px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">hedge.fun/r/dana-{{ refCode }}</div>
+            <div onClick="{{ copyInvite }}" style="background:var(--energy);color:#fff;font-weight:700;padding:11px 18px;border-radius:12px;cursor:pointer;font-size:13px">{{ copyLabel }}</div>
+          </div>
+
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:9px;margin-top:12px">
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:13px 6px;font-size:12px;font-weight:700">𝕏 Share</div>
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:13px 6px;font-size:12px;font-weight:700">✈ Telegram</div>
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:13px 6px;font-size:12px;font-weight:700">⧉ More</div>
+          </div>
+
+          <div style="margin-top:22px;display:grid;grid-template-columns:1fr 1fr;gap:10px">
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:16px"><div style="font-family:var(--nf);font-weight:700;font-size:26px;color:var(--energy)">7</div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-top:2px">Friends joined</div></div>
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:16px"><div style="font-family:var(--nf);font-weight:700;font-size:26px;color:var(--gold)">+3,500</div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-top:2px">Points earned</div></div>
+          </div>
+
+          <div style="margin-top:16px;text-align:left;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);font-weight:700">Recent invites</div>
+          <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px">
+            <sc-for list="{{ invites }}" as="f" hint-placeholder-count="3">
+              <div style="display:flex;align-items:center;gap:11px;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:10px 12px"><div style="width:32px;height:32px;border-radius:50%;background:{{ f.av }};display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;color:#fff">{{ f.i }}</div><div style="flex:1;text-align:left;font-size:13px;font-weight:600">{{ f.name }}</div><div style="font-size:11px;color:{{ f.color }};font-weight:700">{{ f.status }}</div></div>
+            </sc-for>
+          </div>
+        </div>
+        </sc-if>
+
+        <!-- ===== LEADERBOARD ===== -->
+        <sc-if value="{{ showLeaderboard }}" hint-placeholder-val="{{ false }}">
+        <div class="hf-scroll" style="position:absolute;inset:0;overflow-y:auto;padding:8px 16px 20px">
+          <div style="text-align:center"><div style="font-family:var(--df);font-size:30px">Leaderboard</div><div style="font-size:11px;color:var(--muted)">Top farmers this week · resets in 2d 14h</div></div>
+          <div style="display:flex;align-items:flex-end;justify-content:center;gap:8px;margin-top:18px">
+            <sc-for list="{{ podium }}" as="p" hint-placeholder-count="3">
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center">
+                <div style="width:46px;height:46px;border-radius:50%;background:{{ p.av }};border:2px solid {{ p.ring }};display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff">{{ p.i }}</div>
+                <div style="font-size:11px;font-weight:700;margin-top:5px">{{ p.name }}</div>
+                <div style="font-family:var(--nf);font-size:11px;color:var(--energy)">{{ p.pts }}</div>
+                <div style="width:100%;height:{{ p.h }}px;margin-top:7px;border-radius:10px 10px 0 0;background:linear-gradient(180deg,{{ p.ring }},var(--panel));display:flex;align-items:flex-start;justify-content:center;padding-top:6px;font-family:var(--df);font-size:18px;color:#fff">{{ p.rank }}</div>
+              </div>
+            </sc-for>
+          </div>
+          <div style="margin-top:14px;display:flex;flex-direction:column;gap:7px">
+            <sc-for list="{{ board }}" as="b" hint-placeholder-count="6">
+              <div style="display:flex;align-items:center;gap:11px;background:{{ b.bg }};border:1px solid {{ b.bd }};border-radius:14px;padding:10px 13px">
+                <div style="font-family:var(--nf);font-weight:700;font-size:14px;color:var(--muted);width:24px">{{ b.rank }}</div>
+                <div style="width:30px;height:30px;border-radius:50%;background:{{ b.av }};display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;color:#fff">{{ b.i }}</div>
+                <div style="flex:1;font-size:13px;font-weight:600">{{ b.name }}</div>
+                <div style="display:flex;align-items:center;gap:5px"><span style="font-size:11px">🔥{{ b.streak }}</span><span style="font-family:var(--nf);font-weight:700;font-size:13px;color:var(--energy)">{{ b.pts }}</span></div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+        </sc-if>
+
+      </div>
+
+      <!-- ===== CARD DETAIL OVERLAY ===== -->
+      <sc-if value="{{ detailOpen }}" hint-placeholder-val="{{ false }}">
+      <div style="position:absolute;inset:0;z-index:50;background:rgba(4,4,8,.6);backdrop-filter:blur(8px);display:flex;flex-direction:column;justify-content:flex-end;animation:hfRise .28s ease">
+        <div onClick="{{ closeDetail }}" style="flex:1"></div>
+        <div style="background:var(--bg2);border-radius:28px 28px 0 0;border-top:1px solid var(--line);padding:8px 20px 22px;max-height:78%;overflow-y:auto" class="hf-scroll">
+          <div style="width:42px;height:5px;border-radius:4px;background:var(--line);margin:0 auto 14px"></div>
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px">
+            <div style="display:flex;align-items:center;gap:7px;background:var(--panel);padding:6px 11px;border-radius:20px"><div style="width:7px;height:7px;border-radius:50%;background:{{ detail.color }}"></div><span style="font-size:10px;letter-spacing:.12em;text-transform:uppercase;font-weight:700">{{ detail.label }}</span></div>
+            <div style="margin-left:auto;display:flex;align-items:center;gap:6px;background:var(--panel);padding:6px 11px;border-radius:20px"><span style="font-size:12px">⏱</span><span style="font-family:var(--nf);font-weight:700;font-size:13px;color:{{ detail.urgentText }}">{{ detail.countdown }}</span></div>
+          </div>
+          <div style="font-family:var(--df);font-size:30px;line-height:1.04;text-wrap:balance">{{ detail.q }}</div>
+          <div style="font-size:13px;color:var(--muted);margin-top:10px;line-height:1.5;text-wrap:pretty">{{ detail.desc }}</div>
+
+          <div style="display:flex;justify-content:space-between;font-family:var(--nf);font-weight:700;font-size:14px;margin:18px 0 7px"><span style="color:var(--no)">NO {{ detail.no }}%</span><span style="color:var(--yes)">{{ detail.yes }}% YES</span></div>
+          <div style="display:flex;height:16px;border-radius:9px;overflow:hidden;background:rgba(0,0,0,.4)"><div style="width:{{ detail.no }}%;background:linear-gradient(90deg,color-mix(in srgb,var(--no) 60%,#000),var(--no))"></div><div style="flex:1;background:linear-gradient(90deg,var(--yes),color-mix(in srgb,var(--yes) 60%,#000))"></div></div>
+
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:9px;margin-top:16px">
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:11px"><div style="font-size:8px;letter-spacing:.1em;color:var(--muted);text-transform:uppercase">Stake</div><div style="font-family:var(--nf);font-weight:700;font-size:15px">$100</div></div>
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:11px"><div style="font-size:8px;letter-spacing:.1em;color:var(--muted);text-transform:uppercase">Volume</div><div style="font-family:var(--nf);font-weight:700;font-size:15px">{{ detail.vol }}</div></div>
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:11px"><div style="font-size:8px;letter-spacing:.1em;color:var(--muted);text-transform:uppercase">Resolves</div><div style="font-family:var(--nf);font-weight:700;font-size:15px">{{ detail.resolveAt }}</div></div>
+          </div>
+
+          <div style="display:flex;gap:10px;margin-top:16px">
+            <div onClick="{{ btnNo }}" style="flex:1;text-align:center;background:color-mix(in srgb,var(--no) 16%,var(--panel));border:1.5px solid var(--no);border-radius:16px;padding:14px;cursor:pointer"><div style="font-family:var(--df);font-size:22px;color:var(--no)">NO</div><div style="font-family:var(--nf);font-size:12px;color:var(--no)">win ${{ detail.payNo }}</div></div>
+            <div onClick="{{ btnYes }}" style="flex:1;text-align:center;background:color-mix(in srgb,var(--yes) 16%,var(--panel));border:1.5px solid var(--yes);border-radius:16px;padding:14px;cursor:pointer"><div style="font-family:var(--df);font-size:22px;color:var(--yes)">YES</div><div style="font-family:var(--nf);font-size:12px;color:var(--yes)">win ${{ detail.payYes }}</div></div>
+          </div>
+        </div>
+      </div>
+      </sc-if>
+
+      <!-- ===== BOTTOM NAV ===== -->
+      <div style="position:relative;z-index:40;display:flex;align-items:center;justify-content:space-around;padding:10px 8px 22px;background:linear-gradient(0deg,var(--bg) 60%,transparent);border-top:1px solid var(--line)">
+        <div onClick="{{ goDeck }}" style="display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer;color:{{ navDeck }}"><span style="font-size:20px">⚡</span><span style="font-size:9px;letter-spacing:.06em;text-transform:uppercase;font-weight:700">Deck</span></div>
+        <div onClick="{{ goGM }}" style="display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer;color:{{ navGM }}"><span style="font-size:20px">☀</span><span style="font-size:9px;letter-spacing:.06em;text-transform:uppercase;font-weight:700">GM</span></div>
+        <div onClick="{{ goShards }}" style="display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer;color:{{ navVault }}"><span style="font-size:20px">◆</span><span style="font-size:9px;letter-spacing:.06em;text-transform:uppercase;font-weight:700">Vault</span></div>
+        <div onClick="{{ goInvite }}" style="display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer;color:{{ navInvite }}"><span style="font-size:20px">＋</span><span style="font-size:9px;letter-spacing:.06em;text-transform:uppercase;font-weight:700">Invite</span></div>
+        <div onClick="{{ goProfile }}" style="display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer;color:{{ navProfile }}"><span style="font-size:20px">◉</span><span style="font-size:9px;letter-spacing:.06em;text-transform:uppercase;font-weight:700">You</span></div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ===== ONBOARDING OVERLAY ===== -->
+  <sc-if value="{{ authOpen }}" hint-placeholder-val="{{ true }}">
+  <div style="position:absolute;inset:0;z-index:90;background:radial-gradient(120% 80% at 50% 0%, color-mix(in srgb,var(--energy) 26%,transparent), transparent 55%), var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:32px;text-align:center">
+    <div style="font-size:13px;letter-spacing:.3em;text-transform:uppercase;color:var(--energy);font-weight:700">Hedge Fun</div>
+    <div style="font-family:var(--df);font-size:68px;line-height:.9;margin-top:14px;text-wrap:balance">CALL IT.<br>FARM IT.</div>
+    <div style="font-size:15px;color:var(--muted);margin-top:14px;max-width:300px;text-wrap:pretty">Swipe real prediction markets. Play with virtual cash — zero risk, all dopamine.</div>
+    <div style="display:flex;gap:9px;margin-top:28px;font-size:11px;color:var(--muted)"><span style="background:var(--panel);padding:6px 12px;border-radius:20px;border:1px solid var(--line)">⟶ YES</span><span style="background:var(--panel);padding:6px 12px;border-radius:20px;border:1px solid var(--line)">⟵ NO</span><span style="background:var(--panel);padding:6px 12px;border-radius:20px;border:1px solid var(--line)">↑ SKIP</span></div>
+    <div style="width:100%;max-width:330px;margin-top:34px;display:flex;flex-direction:column;gap:10px">
+      <div onClick="{{ doAuth }}" style="display:flex;align-items:center;justify-content:center;gap:10px;background:#fff;color:#111;font-weight:700;padding:15px;border-radius:16px;cursor:pointer;font-size:15px">𝕏 Continue with Twitter</div>
+      <div onClick="{{ doAuth }}" style="display:flex;align-items:center;justify-content:center;gap:10px;background:var(--panel);color:var(--text);font-weight:700;padding:15px;border-radius:16px;cursor:pointer;border:1px solid var(--line);font-size:15px">✉ Continue with Email</div>
+    </div>
+    <div style="font-size:11px;color:var(--muted);margin-top:18px">No wallet. No seed phrase. No risk.</div>
+  </div>
+  </sc-if>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:&quot;100%&quot;,&quot;height&quot;:820},&quot;theme&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;arcade&quot;,&quot;toy&quot;,&quot;terminal&quot;],&quot;default&quot;:&quot;arcade&quot;,&quot;tsType&quot;:&quot;string&quot;}}">
+class Component extends DCLogic {
+  constructor(props){
+    super(props);
+    this.rootRef = React.createRef();
+    this.deviceRef = React.createRef();
+    this.cardRef = React.createRef();
+    this.drag = { active:false, sx:0, sy:0, dx:0, dy:0, t0:0, moved:false };
+    this.t0 = Date.now();
+    this.themes = {
+      arcade:   { bg:'#0a0a0f', bg2:'#101019', panel:'#15151f', panel2:'#1c1c2a', line:'rgba(255,255,255,.09)', text:'#f4f4fa', muted:'#8b8b9e', energy:'#ff3dcd', df:"'Anton',sans-serif" },
+      toy:      { bg:'#0c0e16', bg2:'#121524', panel:'#171b2b', panel2:'#1e2438', line:'rgba(255,255,255,.10)', text:'#eef1fb', muted:'#8891ad', energy:'#18d6c4', df:"'Unbounded',sans-serif" },
+      terminal: { bg:'#08090b', bg2:'#0d0f12', panel:'#101317', panel2:'#161b20', line:'rgba(120,255,180,.12)', text:'#e6f0ea', muted:'#7c8a82', energy:'#22e3a0', df:"'Space Mono',monospace" }
+    };
+    this.cats = {
+      crypto:   { label:'Crypto',   color:'#ff8a3d', icon:['M12 3a9 9 0 100 18 9 9 0 000-18','M12 7v10','M9.6 9.4h4.2a1.8 1.8 0 010 3.6H9.6','M9.6 13h4.6a1.8 1.8 0 010 3.6H9.6'] },
+      sports:   { label:'Sports',   color:'#3d7bff', icon:['M12 3a9 9 0 100 18 9 9 0 000-18','M3 12h18','M12 3v18','M6 5c3 4 3 10 0 14','M18 5c-3 4-3 10 0 14'] },
+      esports:  { label:'Esports',  color:'#b14dff', icon:['M7 9h10a4 4 0 014 4 3.5 3.5 0 01-6.6 1.6L13.5 14h-3l-.9.6A3.5 3.5 0 013 13a4 4 0 014-4z','M7.5 11.5v3','M6 13h3','M16 12h.01','M18 13.5h.01'] },
+      weather:  { label:'Weather',  color:'#19c8ff', icon:['M7 18h9a4 4 0 000-8 5 5 0 00-9.6-1.6A3.5 3.5 0 007 18z'] },
+      politics: { label:'Politics', color:'#94a3b8', icon:['M4 10l8-5 8 5','M5 10v7','M9 10v7','M15 10v7','M19 10v7','M3 20h18'] }
+    };
+    this.markets = [
+      { cat:'crypto',   yes:58, hrs:4.2,  q:'Will BTC close above $112,000 today?', desc:'Resolves YES if Binance BTC/USDT daily candle closes \u2265 $112,000 at 00:00 UTC.', vol:'$1.4M' },
+      { cat:'sports',   yes:47, hrs:6.1,  q:'Lakers to beat the Celtics tonight?', desc:'Resolves YES if the Lakers win the regular-season game outright (no overtime exclusions).', vol:'$890K' },
+      { cat:'esports',  yes:71, hrs:2.5,  q:'Will T1 win their Worlds group match?', desc:'Resolves YES if T1 wins the mapped best-of-one group stage match today.', vol:'$420K' },
+      { cat:'weather',  yes:64, hrs:9.0,  q:'Will Phoenix hit 95\u00b0F today?', desc:'Resolves YES if the official NWS Phoenix Sky Harbor high reaches 95\u00b0F.', vol:'$210K' },
+      { cat:'crypto',   yes:39, hrs:7.4,  q:'ETH gas under 5 gwei before midnight?', desc:'Resolves YES if the median Ethereum base fee dips below 5 gwei before 00:00 UTC.', vol:'$640K' },
+      { cat:'politics', yes:33, hrs:3.0,  q:"Will the Fed say 'rate cut' today?", desc:'Resolves YES if the phrase appears in the official FOMC statement released today.', vol:'$1.1M' },
+      { cat:'sports',   yes:55, hrs:8.2,  q:'Any NBA player to score 40+ tonight?', desc:'Resolves YES if at least one player records 40 or more points across tonight\u2019s slate.', vol:'$760K' },
+      { cat:'crypto',   yes:28, hrs:11.0, q:'Will SOL flip $250 before midnight?', desc:'Resolves YES if SOL/USDT trades at or above $250 on Binance before 00:00 UTC.', vol:'$980K' },
+      { cat:'esports',  yes:22, hrs:5.0,  q:'CS2 Major final to go to overtime?', desc:'Resolves YES if any map in the Major grand final reaches overtime.', vol:'$350K' },
+      { cat:'weather',  yes:48, hrs:4.0,  q:'Will NYC see rain before 9pm?', desc:'Resolves YES if NWS Central Park records measurable precipitation before 21:00 local.', vol:'$180K' }
+    ];
+    this.state = {
+      theme: this.props.theme || 'arcade',
+      screen: 'deck',
+      idx: 0,
+      points: 12480,
+      vbal: 4820,
+      streak: 6,
+      shards: 13,
+      now: Date.now(),
+      drag: { active:false, dx:0, dy:0, dir:null, progress:0 },
+      fly: null,
+      pop: null,
+      detail: null,
+      gmDone: false,
+      streakBurned: false,
+      copied: false,
+      auth: true,
+      history: [
+        { q:'Will BTC reclaim $108k by Friday?', side:'YES', cat:'Crypto', status:'won',  delta:'+$72' },
+        { q:'Real Madrid to win El Clasico?',     side:'NO',  cat:'Sports', status:'lost', delta:'-$100' },
+        { q:'Will GTA 6 trailer 3 drop today?',    side:'YES', cat:'Esports', status:'pending', delta:'$172' },
+        { q:'LA to exceed 80\u00b0F this weekend?',  side:'YES', cat:'Weather', status:'won', delta:'+$45' },
+        { q:'Fed to hold rates this meeting?',       side:'YES', cat:'Politics', status:'won', delta:'+$31' }
+      ]
+    };
+  }
+
+  componentDidMount(){
+    this.applyTheme(this.state.theme);
+    this.fit();
+    this._onResize = () => this.fit();
+    window.addEventListener('resize', this._onResize);
+    this._tick = setInterval(() => { if(!this.drag.active) this.setState({ now: Date.now() }); }, 1000);
+  }
+  componentWillUnmount(){ window.removeEventListener('resize', this._onResize); clearInterval(this._tick); }
+  componentDidUpdate(prev){ if(prev.theme !== this.state.theme) this.applyTheme(this.state.theme); }
+
+  applyTheme(name){
+    const t = this.themes[name]; const r = this.rootRef.current; if(!r||!t) return;
+    Object.entries({'--bg':t.bg,'--bg2':t.bg2,'--panel':t.panel,'--panel2':t.panel2,'--line':t.line,'--text':t.text,'--muted':t.muted,'--energy':t.energy,'--df':t.df}).forEach(([k,v])=>r.style.setProperty(k,v));
+  }
+  fit(){
+    const d = this.deviceRef.current; if(!d) return;
+    const s = Math.min(1, (window.innerHeight-24)/872, (window.innerWidth-24)/402);
+    d.style.transform = 'scale(' + s + ')';
+  }
+
+  buildIcon(cat, size, color){
+    const c = this.cats[cat]; if(!c) return null;
+    return React.createElement('svg', { viewBox:'0 0 24 24', width:size, height:size, fill:'none', stroke:color, strokeWidth:1.6, strokeLinecap:'round', strokeLinejoin:'round' },
+      c.icon.map((d,i) => React.createElement('path', { key:i, d })));
+  }
+
+  market(i){ return this.markets[((i % this.markets.length)+this.markets.length)%this.markets.length]; }
+  fmtCountdown(hrs){
+    const total = Math.max(0, Math.round((this.t0 + hrs*3600000 - this.state.now)/1000));
+    const h = Math.floor(total/3600), m = Math.floor((total%3600)/60), s = total%60;
+    if(h>0) return h+'h '+String(m).padStart(2,'0')+'m';
+    return m+'m '+String(s).padStart(2,'0')+'s';
+  }
+  pay(yes, side){ const p = side==='yes' ? yes/100 : (100-yes)/100; return Math.round(100/Math.max(0.02,p)); }
+  cardView(i){
+    const m = this.market(i); const c = this.cats[m.cat];
+    const urgent = (this.t0 + m.hrs*3600000 - this.state.now) < 3600000;
+    return {
+      cat:m.cat, label:c.label, color:c.color, q:m.q, desc:m.desc, vol:m.vol,
+      yes:m.yes, no:100-m.yes, countdown:this.fmtCountdown(m.hrs),
+      payYes:this.pay(m.yes,'yes'), payNo:this.pay(m.yes,'no'),
+      bgGrad:'radial-gradient(120% 80% at 80% 0%, '+c.color+'2e, transparent 55%), linear-gradient(170deg, var(--panel2), var(--panel))',
+      watermark:this.buildIcon(m.cat, 240, c.color),
+      urgentText: urgent ? 'var(--no)' : '#fff',
+      urgentBorder: urgent ? 'color-mix(in srgb,var(--no) 60%,transparent)' : 'transparent',
+      resolveAt: '<'+Math.ceil(m.hrs)+'h'
+    };
+  }
+
+  // ===== gestures =====
+  onDown(e){ try{ e.currentTarget.setPointerCapture && e.currentTarget.setPointerCapture(e.pointerId); }catch(_){} this.drag={active:true,sx:e.clientX,sy:e.clientY,dx:0,dy:0,t0:Date.now(),moved:false}; }
+  onMove(e){
+    if(!this.drag.active) return;
+    const dx=e.clientX-this.drag.sx, dy=e.clientY-this.drag.sy;
+    this.drag.dx=dx; this.drag.dy=dy;
+    const ax=Math.abs(dx), ay=Math.abs(dy); if(ax>5||ay>5) this.drag.moved=true;
+    let dir, progress;
+    if(ay>ax*1.15 && dy<0){ dir='skip'; progress=Math.min(1, ay/130); }
+    else { dir = dx>0?'yes':'no'; progress=Math.min(1, ax/130); }
+    this.setState({ drag:{active:true,dx,dy,dir,progress} });
+  }
+  onUp(e){
+    if(!this.drag.active) return;
+    const d=this.drag; const dt=Date.now()-d.t0; const ax=Math.abs(d.dx), ay=Math.abs(d.dy);
+    this.drag.active=false;
+    if(!d.moved && dt<300){ this.setState({drag:{active:false,dx:0,dy:0,dir:null,progress:0}}); this.openDetail(); return; }
+    const st=this.state.drag;
+    if(st.progress>=1){ this.commit(st.dir); }
+    else { this.setState({drag:{active:false,dx:0,dy:0,dir:null,progress:0}}); }
+  }
+  commit(dir){
+    const amt = dir==='skip'?5:50;
+    const color = dir==='skip'?'var(--skip)':(dir==='yes'?'var(--yes)':'var(--no)');
+    this.setState({ fly:dir, drag:{active:false,dx:0,dy:0,dir:null,progress:0}, points:this.state.points+amt, pop:{amt,color} });
+    clearTimeout(this._popT); this._popT=setTimeout(()=>this.setState({pop:null}), 700);
+    setTimeout(()=>this.finish(dir), 360);
+  }
+  finish(dir){
+    const m=this.market(this.state.idx);
+    const gain = dir==='skip'?0:(Math.random()<0.5?1:0);
+    let newShards=this.state.shards+gain; if(newShards>=20) newShards-=20;
+    const hist = this.state.history.slice();
+    if(dir!=='skip') hist.unshift({ q:m.q, side:dir.toUpperCase(), cat:this.cats[m.cat].label, status:'pending', delta:'$'+this.pay(m.yes,dir) });
+    this.setState({ idx:this.state.idx+1, fly:null, drag:{active:false,dx:0,dy:0,dir:null,progress:0}, shards:newShards, history:hist.slice(0,12) });
+  }
+  btnYes(){ if(this.state.detail) this.setState({detail:null}); this.commit('yes'); }
+  btnNo(){ if(this.state.detail) this.setState({detail:null}); this.commit('no'); }
+  btnSkip(){ this.commit('skip'); }
+  openDetail(){ this.setState({ detail:this.cardView(this.state.idx) }); }
+  closeDetail(){ this.setState({ detail:null }); }
+
+  go(s){ this.setState({ screen:s, detail:null }); }
+  doGM(){ if(this.state.gmDone) return; this.setState({ gmDone:true, streak:this.state.streak+1, points:this.state.points+100, shards:Math.min(20,this.state.shards+1) }); }
+  burnDemo(){ this.setState({ streakBurned:true }); }
+  reviveStreak(){ this.setState({ streakBurned:false, streak:6 }); }
+  copyInvite(){ this.setState({copied:true}); setTimeout(()=>this.setState({copied:false}),1600); }
+  doAuth(){ this.setState({ auth:false }); }
+
+  renderVals(){
+    const s=this.state, d=s.drag, fly=s.fly;
+    const top=this.cardView(s.idx), next=this.cardView(s.idx+1);
+    // transform
+    let topTransform, topTransition='none', topOpacity=1;
+    if(fly){
+      if(fly==='yes') topTransform='translate(150%,-12%) rotate(26deg)';
+      else if(fly==='no') topTransform='translate(-150%,-12%) rotate(-26deg)';
+      else topTransform='translate(0,-170%) rotate(-3deg)';
+      topTransition='transform .38s cubic-bezier(.45,0,.25,1), opacity .38s'; topOpacity=0;
+    } else if(d.active){
+      topTransform='translate('+d.dx+'px,'+d.dy+'px) rotate('+(d.dx*0.05)+'deg)';
+    } else {
+      topTransform='translate(0px,0px) rotate(0deg)';
+      topTransition='transform .45s cubic-bezier(.34,1.4,.5,1)';
+    }
+    const yesP = d.active&&d.dir==='yes'?d.progress:0;
+    const noP  = d.active&&d.dir==='no'?d.progress:0;
+    const skP  = d.active&&d.dir==='skip'?d.progress:0;
+    const stamp=(p)=>({o:Math.max(0,Math.min(1,(p-0.15)/0.5)), s:0.6+0.4*Math.min(1,p)});
+    const ys=stamp(yesP), ns=stamp(noP), ks=stamp(skP);
+    const dragMag = d.active?Math.min(1,(Math.abs(d.dx)+Math.abs(d.dy))/200):0;
+
+    const histColor=(st)=>st==='won'?'var(--yes)':st==='lost'?'var(--no)':'var(--muted)';
+    const history=s.history.map(h=>({ q:h.q, side:h.side, cat:h.cat, status:h.status, delta:h.delta,
+      sideColor: h.side==='YES'?'var(--yes)':'var(--no)',
+      sideBg: h.side==='YES'?'color-mix(in srgb,var(--yes) 18%,transparent)':'color-mix(in srgb,var(--no) 18%,transparent)',
+      statusColor: histColor(h.status) }));
+
+    const themeBtn=(name)=>({ bg: s.theme===name?'color-mix(in srgb,var(--energy) 14%,var(--panel))':'var(--panel)', bd: s.theme===name?'var(--energy)':'var(--line)' });
+    const a=themeBtn('arcade'), ty=themeBtn('toy'), te=themeBtn('terminal');
+
+    const weekDots=['M','T','W','T','F','S','S'].map((l,i)=>{
+      const done=i<(s.gmDone?s.streak%7+1:s.streak%7); const today=i===(s.streak%7);
+      return { label:l, mark: done?'🔥':(today&&!s.gmDone?'☀':''), bg: done?'color-mix(in srgb,var(--gold) 22%,transparent)':'var(--panel)', bd: today?'var(--energy)':(done?'var(--gold)':'var(--line)'), fg: done?'var(--gold)':'var(--muted)' };
+    });
+
+    const navColor=(sc)=>s.screen===sc?'var(--energy)':'var(--muted)';
+
+    const podium=[
+      { i:'AX', name:'apex_yield', pts:'48.2k', rank:'2', h:60, av:'linear-gradient(135deg,#3d7bff,#1a2f6e)', ring:'#c0c0c8' },
+      { i:'KL', name:'kelly_max', pts:'61.9k', rank:'1', h:80, av:'linear-gradient(135deg,#ff8a3d,#6e3a16)', ring:'var(--gold)' },
+      { i:'ZK', name:'zkdegen', pts:'44.1k', rank:'3', h:46, av:'linear-gradient(135deg,#b14dff,#4a1d6e)', ring:'#c98a4a' }
+    ];
+    const board=[
+      { rank:'4', i:'NV', name:'nova_calls', pts:'39.8k', streak:'21' },
+      { rank:'5', i:'TT', name:'tape_tilt', pts:'37.2k', streak:'14' },
+      { rank:'6', i:'RP', name:'rng_priest', pts:'33.0k', streak:'9' },
+      { rank:'418', i:'DG', name:'degen_dana (you)', pts:'12.5k', streak:'6', me:true },
+      { rank:'419', i:'MB', name:'mid_bull', pts:'12.4k', streak:'3' }
+    ].map(b=>({ ...b, bg: b.me?'color-mix(in srgb,var(--energy) 12%,var(--panel))':'var(--panel)', bd: b.me?'var(--energy)':'var(--line)', av:'linear-gradient(135deg,#555,#222)' }));
+
+    const invites=[
+      { i:'JM', name:'jaymoon', status:'+500 ✓', color:'var(--yes)', av:'linear-gradient(135deg,#ff3dcd,#6e1a5a)' },
+      { i:'KP', name:'kept_alpha', status:'+500 ✓', color:'var(--yes)', av:'linear-gradient(135deg,#3d7bff,#1a2f6e)' },
+      { i:'LO', name:'lowfloat', status:'pending', color:'var(--muted)', av:'linear-gradient(135deg,#94a3b8,#3a4150)' }
+    ];
+
+    const detail = s.detail;
+
+    return {
+      rootRef:this.rootRef, deviceRef:this.deviceRef, cardRef:this.cardRef,
+      onDown:(e)=>this.onDown(e), onMove:(e)=>this.onMove(e), onUp:(e)=>this.onUp(e),
+      btnYes:()=>this.btnYes(), btnNo:()=>this.btnNo(), btnSkip:()=>this.btnSkip(),
+      goDeck:()=>this.go('deck'), goProfile:()=>this.go('profile'), goGM:()=>this.go('gm'),
+      goShards:()=>this.go('shards'), goInvite:()=>this.go('referral'), goLeaderboard:()=>this.go('leaderboard'),
+      setArcade:()=>this.setState({theme:'arcade'}), setToy:()=>this.setState({theme:'toy'}), setTerminal:()=>this.setState({theme:'terminal'}),
+      doGM:()=>this.doGM(), burnDemo:()=>this.burnDemo(), reviveStreak:()=>this.reviveStreak(),
+      copyInvite:()=>this.copyInvite(), doAuth:()=>this.doAuth(), closeDetail:()=>this.closeDetail(),
+
+      authOpen:s.auth,
+      showDeck:s.screen==='deck', showProfile:s.screen==='profile', showGM:s.screen==='gm',
+      showShards:s.screen==='shards', showReferral:s.screen==='referral', showLeaderboard:s.screen==='leaderboard',
+      detailOpen:!!detail, popOpen:!!s.pop,
+
+      pointsFmt:s.points.toLocaleString('en-US'),
+      vbalFmt:'+$'+s.vbal.toLocaleString('en-US'),
+      streak:s.streak, shards:s.shards, shardPct:Math.round(s.shards/20*100),
+      shardDash:(s.shards/20*326.7).toFixed(0)+' 326.7', shardsLeft:20-s.shards,
+
+      top, next,
+      topTransform, topTransition, topOpacity,
+      nextScale:(0.93+0.07*dragMag).toFixed(3), thirdScale:(0.88+0.05*dragMag).toFixed(3),
+      yesOp:yesP.toFixed(2), noOp:noP.toFixed(2), skipOp:skP.toFixed(2),
+      yesStampO:ys.o.toFixed(2), yesStampS:ys.s.toFixed(2),
+      noStampO:ns.o.toFixed(2), noStampS:ns.s.toFixed(2),
+      skipStampO:ks.o.toFixed(2), skipStampS:ks.s.toFixed(2),
+
+      history,
+      tArcadeBg:a.bg, tArcadeBd:a.bd, tToyBg:ty.bg, tToyBd:ty.bd, tTermBg:te.bg, tTermBd:te.bd,
+
+      gmConfetti:s.gmDone, gmNextDay:s.streak+1, gmBtnLabel:s.gmDone?'\u2713 Checked in \u2014 see you tomorrow':'\u2600 Claim & keep streak',
+      weekDots,
+      confettiEls: s.gmDone ? React.createElement(React.Fragment, null, Array.from({length:26}).map((_,i)=>{
+        const cols=['var(--energy)','var(--gold)','var(--yes)','var(--skip)'];
+        return React.createElement('div',{key:i,style:{position:'absolute',top:'-10px',left:(Math.random()*100)+'%',width:'8px',height:(8+Math.random()*8)+'px',background:cols[i%4],borderRadius:'2px',animation:'hfConfetti '+(1.3+Math.random()*1.2)+'s '+(Math.random()*0.6)+'s ease-in forwards'}});
+      })) : null,
+
+      streakBurned:s.streakBurned, streakAlive:!s.streakBurned, revivedStreak:6,
+      burnIcon:s.streakBurned?'💀':'🛡',
+      burnTitle:s.streakBurned?'Streak burned out':'Streak protected',
+      burnTitleColor:s.streakBurned?'var(--no)':'var(--gold)',
+      burnSub:s.streakBurned?'You have 3 days to revive it with an artifact before it resets to 0.':'Hold an artifact and a missed day won\u2019t reset you.',
+      burnBg:s.streakBurned?'color-mix(in srgb,var(--no) 12%,var(--panel))':'var(--panel)',
+      burnBorder:s.streakBurned?'color-mix(in srgb,var(--no) 50%,var(--line))':'var(--line)',
+
+      refCode:'9F2X', copyLabel:s.copied?'Copied!':'Copy', invites,
+      podium, board,
+
+      navDeck:navColor('deck'), navGM:navColor('gm'), navVault:navColor('shards'), navInvite:navColor('referral'), navProfile:navColor('profile'),
+
+      detail: detail ? { ...detail, urgentText: detail.urgentText } : { label:'', color:'#fff', q:'', desc:'', yes:50, no:50, countdown:'', vol:'', resolveAt:'', payYes:0, payNo:0, urgentText:'#fff' },
+      pop: s.pop || { amt:'', color:'#fff' }
+    };
+  }
+}
+</script>
+</body>
+</html>

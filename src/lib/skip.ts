@@ -22,7 +22,8 @@ export function decideSkip(
   return { free: false, allowed, cost: allowed ? SKIP_SHARD_COST : 0 };
 }
 
-export async function recordSkip(userId: string, at?: Date): Promise<SkipResult> {
+// freeOverride: dev test account — always free, unlimited, never spends a shard or blocks.
+export async function recordSkip(userId: string, at?: Date, freeOverride = false): Promise<SkipResult> {
   const day = utcDay(at);
 
   return prisma.$transaction(async (tx) => {
@@ -41,7 +42,9 @@ export async function recordSkip(userId: string, at?: Date): Promise<SkipResult>
       select: { shards: true },
     });
 
-    const d = decideSkip(counter.skipCount, bal.shards);
+    const d = freeOverride
+      ? { free: true, allowed: true, cost: 0 } // dev: unlimited free skips
+      : decideSkip(counter.skipCount, bal.shards);
     if (!d.allowed) return { ok: false, reason: "no_shards", shards: bal.shards };
 
     const updated = await tx.dailyCounter.update({

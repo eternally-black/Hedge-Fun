@@ -1,6 +1,9 @@
 "use client";
 
 import { PrivyProvider } from "@privy-io/react-auth";
+import { toSolanaWalletConnectors } from "@privy-io/react-auth/solana";
+
+const solanaConnectors = toSolanaWalletConnectors();
 
 export default function Providers({ children }: { children: React.ReactNode }) {
   const appId = process.env.NEXT_PUBLIC_PRIVY_APP_ID ?? "";
@@ -13,12 +16,13 @@ export default function Providers({ children }: { children: React.ReactNode }) {
     <PrivyProvider
       appId={appId}
       config={{
-        // ponytail: twitter off until X OAuth keys are added in the Privy dashboard;
-        // re-add "twitter" here once enabled there.
-        loginMethods: ["email"],
+        loginMethods: ["email", "twitter"],
         // Lead-capture wallet provisioned on signup. EVM for now (Sep trading is
         // Polygon/pUSD); not used transactionally in July paper-mode.
         embeddedWallets: { ethereum: { createOnLogin: "all-users" } },
+        // Solana external wallets (Phantom etc.) enabled in the dashboard need
+        // their connectors passed here, else Privy warns and connect is a no-op.
+        externalWallets: { solana: { connectors: solanaConnectors } },
         appearance: { theme: "dark", accentColor: "#6366f1" },
       }}
     >

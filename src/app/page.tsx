@@ -3,39 +3,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { usePrivy } from "@privy-io/react-auth";
 import { useApi } from "./useApi";
-import { SwipeCard, type SwipeAction } from "./SwipeCard";
+import { DeckCard, CardPreview, type SwipeAction } from "./DeckCard";
+import { Hud } from "./screens/Hud";
+import { BottomNav } from "./screens/BottomNav";
+import { Onboarding } from "./screens/Onboarding";
+import { GmScreen } from "./screens/GmScreen";
+import { VaultScreen } from "./screens/VaultScreen";
+import { InviteScreen } from "./screens/InviteScreen";
+import { ProfileScreen } from "./screens/ProfileScreen";
+import { LeaderboardScreen } from "./screens/LeaderboardScreen";
+import { HistorySheet } from "./screens/HistorySheet";
+import { type Card, type Me, type Screen } from "./ui";
 
 const PRIVY_ON = !!process.env.NEXT_PUBLIC_PRIVY_APP_ID;
-
-type Me = {
-  balanceCents: number;
-  points: { total: number; bonusFromX2: number };
-  swipes: { used: number; cap: number };
-  skips: { usedToday: number; nextIsFree: boolean; shardCost: number };
-  shards: number;
-  artifacts: number;
-  streak: { level: number; state: string };
-  loginMarkedToday: boolean;
-};
-type Card = {
-  id: string;
-  question: string;
-  outcomeYesLabel: string;
-  outcomeNoLabel: string;
-  yesPriceBp: number;
-  noPriceBp: number;
-  resolutionDeadline: string;
-};
-
-const usd = (cents: number) => `$${(cents / 100).toFixed(0)}`;
-// Price as Polymarket shows it: cents per share (= probability). A side priced at 0.515 is 52¢.
-// We deliberately show CENTS, not a percentage — that's how prediction markets quote, and the
-// app's goal is to teach that. The two sides need NOT sum to 100¢ (the spread is real), so we
-// never normalise. 1bp = 0.01¢; show whole cents (Polymarket-style), .5 kept when present.
-const cents = (bp: number) => {
-  const c = bp / 100; // bp -> cents (5150bp = 51.5¢)
-  return `${Number.isInteger(c) ? c : c.toFixed(1)}¢`;
-};
 
 export default function Home() {
   if (!PRIVY_ON) return <ConfigNotice />;
@@ -44,50 +24,59 @@ export default function Home() {
 
 function ConfigNotice() {
   return (
-    <main style={S.main}>
-      <h1>Hedge Fun</h1>
-      <p style={{ color: "#9aa3b2" }}>
-        Set <code>NEXT_PUBLIC_PRIVY_APP_ID</code> and <code>PRIVY_APP_SECRET</code> in{" "}
-        <code>.env.local</code> to enable login.
-      </p>
-    </main>
+    <Frame>
+      <div style={{ padding: 28, textAlign: "center", marginTop: 120 }}>
+        <div style={{ fontFamily: "var(--df)", fontSize: 40 }}>Hedge Fun</div>
+        <p style={{ color: "var(--muted)", marginTop: 12 }}>
+          Set <code>NEXT_PUBLIC_PRIVY_APP_ID</code> and <code>PRIVY_APP_SECRET</code> in <code>.env.local</code>.
+        </p>
+      </div>
+    </Frame>
   );
 }
 
 function App() {
-  const { ready, authenticated, login, logout } = usePrivy();
+  const { ready, authenticated, login } = usePrivy();
   const api = useApi();
   const [me, setMe] = useState<Me | null>(null);
   const [deck, setDeck] = useState<Card[]>([]);
+  const [screen, setScreen] = useState<Screen>("deck");
   const [busy, setBusy] = useState(false);
+  const [pop, setPop] = useState<{ amt: number; color: string } | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const topping = useRef(false);
+  const popTimer = useRef<number | undefined>(undefined);
+  const toastTimer = useRef<number | undefined>(undefined);
 
+  // Each card owns its own countdown tick now (see DeckCard.useCountdown), so the clock no
+  // longer re-renders this whole component every second — only the visible cards refresh.
+  useEffect(() => () => { window.clearTimeout(popTimer.current); window.clearTimeout(toastTimer.current); }, []);
+
+  // Full reload: stats + a fresh deck. Used on mount / GM / dev-reset — NOT after a swipe.
   const refresh = useCallback(async () => {
     const [m, d] = await Promise.all([api("/api/me"), api("/api/deck")]);
     setMe(m);
-    setDeck(d.cards);
+    setDeck(d.cards as Card[]);
+  }, [api]);
+
+  // Stats only — never touches the deck. After a swipe we must NOT re-fetch /api/deck: it's
+  // re-shuffled with a fresh seed each call, so replacing the deck would make a DIFFERENT card
+  // (not the previewed one) snap into the top slot. Local advance() handles the deck; this just
+  // updates points/shards/balance/skip counters.
+  const refreshMe = useCallback(async () => {
+    setMe(await api("/api/me"));
   }, [api]);
 
   useEffect(() => {
     if (authenticated) refresh().catch(console.error);
   }, [authenticated, refresh]);
 
-  const gm = useCallback(async () => {
-    setBusy(true);
-    try {
-      await api("/api/login-mark", { method: "POST" });
-      await refresh();
-    } finally {
-      setBusy(false);
-    }
-  }, [api, refresh]);
-
-  // Top up the deck when it runs low so the user never hits an empty card mid-session. Called
-  // from the swipe handler (not an effect — this is interaction-driven, so it belongs in the
-  // event per react best practices). topping ref guards against overlapping top-ups.
-  const topping = useRef(false);
+  // Preload-ahead: refill well before the deck runs dry (threshold 8, not 1), so a fresh card is
+  // always buffered behind the current one. `topping` dedupes so only one fetch is in flight.
   const topUpIfLow = useCallback(
     async (remaining: number) => {
-      if (remaining > 3 || topping.current) return;
+      if (remaining > 8 || topping.current) return;
       topping.current = true;
       try {
         const d: { cards: Card[] } = await api("/api/deck");
@@ -104,147 +93,211 @@ function App() {
     [api],
   );
 
-  // Drop the swiped/skipped card and advance to the next. SKIP posts to /api/skip (first free,
-  // then 1 shard; blocked with no shards). YES/NO post a bet. The card is removed and replaced
-  // by the next in the deck — never re-shown.
+  const flashPop = useCallback((amt: number, color: string) => {
+    setPop({ amt, color });
+    window.clearTimeout(popTimer.current);
+    popTimer.current = window.setTimeout(() => setPop(null), 700);
+  }, []);
+
+  const flashToast = useCallback((msg: string) => {
+    setToast(msg);
+    window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(null), 2200);
+  }, []);
+
+  // Act on the top card: YES/NO post a bet, SKIP posts to /api/skip (first free then 1 shard,
+  // blocked at 402). The card advances; a swipe-409 (already bet) advances too. Backend contracts
+  // (cents, named-binary, points/shards/skip economy) unchanged.
   const act = useCallback(
-    async (card: Card, action: SwipeAction) => {
-      setBusy(true);
-      try {
-        if (action === "SKIP") {
-          // Only advance if the skip is allowed (a paid skip with no shards is blocked: 402).
-          await api("/api/skip", { method: "POST" });
-        } else {
-          await api("/api/swipe", {
-            method: "POST",
-            body: JSON.stringify({ marketId: card.id, side: action }),
-          });
-        }
+    (card: Card, action: SwipeAction) => {
+      const advance = () =>
         setDeck((d) => {
           const next = d.filter((c) => c.id !== card.id);
           void topUpIfLow(next.length);
           return next;
         });
-        await refresh(); // stats (balance, shards, skip counter)
-      } catch (e) {
-        // 409 on a swipe = already bet this market (it's done) -> advance anyway, don't trap the
-        // user on it. 402 on a paid skip (no shards) keeps the card -> SwipeCard springs back.
-        if (action !== "SKIP" && (e as { status?: number }).status === 409) {
-          setDeck((d) => {
-            const next = d.filter((c) => c.id !== card.id);
-            void topUpIfLow(next.length);
-            return next;
-          });
-        } else {
-          console.error(e);
-        }
-      } finally {
-        setBusy(false);
+      // Gate a blocked skip client-side so we don't fire a request we know will 402.
+      if (action === "SKIP" && me && !me.skips.nextIsFree && me.shards < me.skips.shardCost) {
+        flashToast("No shards — earn one (or wait for tomorrow's free skip)");
+        return;
       }
+      // OPTIMISTIC: advance the deck immediately so the next card rises in sync with the fly-out
+      // animation (the gesture already committed). The network call runs in the background — we
+      // do NOT block the UI on it, which is what made advancing feel laggy/network-coupled.
+      advance();
+      flashPop(action === "SKIP" ? 0 : 1, action === "SKIP" ? "var(--skip)" : action === "YES" ? "var(--yes)" : "var(--no)");
+
+      const req = action === "SKIP"
+        ? api("/api/skip", { method: "POST" })
+        : api("/api/swipe", { method: "POST", body: JSON.stringify({ marketId: card.id, side: action }) });
+      req
+        .then(() => refreshMe()) // stats only (points/shards/balance/skip counter); never the deck
+        .catch((e) => {
+          const status = (e as { status?: number }).status;
+          // 409 (already bet) is fine — the card's gone anyway. 402 (skip blocked) shouldn't
+          // happen since we gate above, but if it races, just surface it. Card already advanced.
+          if (status === 402) flashToast("No shards — earn one (or wait for tomorrow's free skip)");
+          else if (status !== 409) console.error(e);
+        });
     },
-    [api, refresh, topUpIfLow],
+    [api, me, refreshMe, topUpIfLow, flashPop, flashToast],
   );
 
-  if (!ready) return <main style={S.main}>Loading…</main>;
+  // Stable handlers for the keyed DeckCard so it isn't handed new function props each render.
+  // handleAction reads the current top via a ref (kept in sync below).
+  const topRef = useRef<Card | undefined>(undefined);
+  const handleAction = useCallback((a: SwipeAction) => { if (topRef.current) act(topRef.current, a); }, [act]);
+  const noop = useCallback(() => {}, []); // tap-for-detail: sheet TODO
 
-  if (!authenticated) {
-    return (
-      <main style={S.main}>
-        <h1>Hedge Fun</h1>
-        <p style={{ color: "#9aa3b2" }}>Test app — swipe real markets, play money, stack points.</p>
-        <button style={S.primary} onClick={login}>
-          Log in
-        </button>
-      </main>
-    );
-  }
+  const gm = useCallback(async () => {
+    setBusy(true);
+    try {
+      await api("/api/login-mark", { method: "POST" });
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  }, [api, refresh]);
+
+  // Stable nav callbacks so memo'd Hud/BottomNav don't re-render on unrelated state changes.
+  const goVault = useCallback(() => setScreen("vault"), []);
+  const goGmScreen = useCallback(() => setScreen("gm"), []);
+  const goLeaderboard = useCallback(() => setScreen("leaderboard"), []);
+  const openHistory = useCallback(() => setHistoryOpen(true), []);
+  const closeHistory = useCallback(() => setHistoryOpen(false), []);
+
+  if (!ready) return <Frame><div style={{ marginTop: 200, textAlign: "center", color: "var(--muted)" }}>Loading…</div></Frame>;
+  if (!authenticated) return <Frame><Onboarding onLogin={login} /></Frame>;
 
   const top = deck[0];
+  const next = deck[1];
+  topRef.current = top; // keep the stable handleAction pointed at the live top card
+  // Skip is blocked when the free daily skip is used AND the user can't afford the shard cost.
+  const skipBlocked = !!me && !me.skips.nextIsFree && me.shards < me.skips.shardCost;
 
   return (
-    <main style={S.main}>
-      <div style={S.bar}>
-        <Stat label="Balance" value={me ? usd(me.balanceCents) : "—"} />
-        <Stat label="Points" value={me ? String(me.points.total) : "—"} />
-        <Stat label="Streak" value={me ? `🔥 ${me.streak.level}` : "—"} />
-        <Stat label="Shards" value={me ? `${me.shards}/20` : "—"} />
-        <Stat label="Artifacts" value={me ? String(me.artifacts) : "—"} />
-        <button style={S.ghost} onClick={logout}>
-          Log out
-        </button>
-      </div>
-
-      <button style={me?.loginMarkedToday ? S.ghostWide : S.primary} onClick={gm} disabled={busy || me?.loginMarkedToday}>
-        {me?.loginMarkedToday ? "GM ✓ (today counted)" : "GM — claim daily bonus"}
-      </button>
-
-      <p style={{ color: "#9aa3b2", margin: "8px 0" }}>
-        Swipes today: {me ? `${me.swipes.used}/${me.swipes.cap}` : "—"}
-      </p>
-
-      {top ? (
-        // key=top.id so a fresh SwipeCard mounts per card (resets drag state cleanly).
-        <SwipeCard key={top.id} onAction={(a) => act(top, a)} disabled={busy}>
-          <div style={S.card}>
-            <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 8 }}>{top.question}</div>
-            <div style={{ color: "#9aa3b2", marginBottom: 20, fontSize: 13 }}>
-              resolves {new Date(top.resolutionDeadline).toLocaleString()}
-            </div>
-            {/* Polymarket-style: each side's button shows its label + price in cents (= the
-                share price you'd pay). No percentage row — cents IS the probability, and the
-                two sides need not sum to 100¢. */}
-            <div style={{ display: "flex", gap: 12 }}>
-              <button style={S.no} disabled={busy} onClick={() => act(top, "NO")}>
-                <span>{top.outcomeNoLabel}</span>
-                <span style={S.price}>{cents(top.noPriceBp)}</span>
-              </button>
-              <button style={S.yes} disabled={busy} onClick={() => act(top, "YES")}>
-                <span>{top.outcomeYesLabel}</span>
-                <span style={S.price}>{cents(top.yesPriceBp)}</span>
-              </button>
-            </div>
-            <button style={S.skip} disabled={busy} onClick={() => act(top, "SKIP")}>
-              {me?.skips.nextIsFree
-                ? "Skip (free today)"
-                : `Skip (−${me?.skips.shardCost ?? 1} shard${me && me.shards < (me.skips.shardCost ?? 1) ? " — none left" : ""})`}
-            </button>
-          </div>
-        </SwipeCard>
-      ) : (
-        <div style={S.card}>
-          <p style={{ color: "#9aa3b2" }}>
-            Deck empty. Run <code>npm run refresh-deck</code> to load blitz markets.
-          </p>
+    <Frame>
+      {toast && (
+        <div style={{ position: "absolute", left: 16, right: 16, bottom: 92, zIndex: 70, background: "rgba(10,10,15,.94)", border: "1px solid var(--line)", borderRadius: 14, padding: "12px 16px", textAlign: "center", fontSize: 13, color: "var(--text)", boxShadow: "0 12px 30px -8px rgba(0,0,0,.7)", animation: "hfRise .22s ease" }}>
+          {toast}
         </div>
       )}
+      {historyOpen && <HistorySheet api={api} onClose={closeHistory} />}
+      <Hud me={me} pop={pop} onShards={goVault} onGM={goGmScreen} onBalance={openHistory} />
 
-      {top ? (
-        <p style={{ color: "#5a6478", fontSize: 12, textAlign: "center", marginTop: 4 }}>
-          Swipe → {top.outcomeYesLabel} · ← {top.outcomeNoLabel} · ↑ skip
-        </p>
-      ) : null}
-    </main>
+      <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
+        {screen === "deck" && (
+          <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column" }}>
+            <div style={{ position: "relative", flex: 1, margin: "6px 14px 0" }}>
+              {/* next card — FULLY rendered behind the top one (not a gray stub) */}
+              {next && <CardPreview key={next.id} card={next} />}
+              {top ? (
+                <DeckCard key={top.id} card={top} busy={busy} onAction={handleAction} onTap={noop} />
+              ) : (
+                <div style={{ position: "absolute", inset: 0, borderRadius: 26, background: "var(--panel)", border: "1px solid var(--line)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, textAlign: "center" }}>
+                  <p style={{ color: "var(--muted)" }}>No more cards right now. Check back after the next batch resolves.</p>
+                </div>
+              )}
+            </div>
+
+            {/* fallback buttons */}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 18, padding: "14px 0 2px" }}>
+              <CircleBtn glyph="✕" color="var(--no)" size={56} disabled={busy || !top} onClick={() => top && act(top, "NO")} />
+              <CircleBtn glyph="↑" color="var(--skip)" size={46} disabled={busy || !top || skipBlocked} onClick={() => top && act(top, "SKIP")} />
+              <CircleBtn glyph="✓" color="var(--yes)" size={56} disabled={busy || !top} onClick={() => top && act(top, "YES")} />
+            </div>
+            <div style={{ textAlign: "center", fontSize: 10, color: "var(--muted)", paddingBottom: 8 }}>
+              {me?.skips.nextIsFree
+                ? "Skip free today"
+                : skipBlocked
+                  ? "Skip needs 1 ◆ — none left"
+                  : `Skip costs 1 ◆`}
+            </div>
+          </div>
+        )}
+
+        {screen === "gm" && <GmScreen me={me} busy={busy} onGM={gm} />}
+        {screen === "vault" && <VaultScreen me={me} api={api} onRefresh={refresh} />}
+        {screen === "invite" && <InviteScreen me={me} />}
+        {screen === "you" && <ProfileScreen me={me} api={api} onLeaderboard={goLeaderboard} onRefresh={refresh} onHistory={openHistory} />}
+        {screen === "leaderboard" && <LeaderboardScreen api={api} />}
+      </div>
+
+      <BottomNav screen={screen} onNav={setScreen} />
+    </Frame>
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+function CircleBtn({ glyph, color, size, disabled, onClick }: { glyph: string; color: string; size: number; disabled?: boolean; onClick: () => void }) {
   return (
-    <div style={{ textAlign: "center" }}>
-      <div style={{ fontSize: 11, color: "#9aa3b2", textTransform: "uppercase" }}>{label}</div>
-      <div style={{ fontSize: 16, fontWeight: 600 }}>{value}</div>
+    <div
+      onClick={disabled ? undefined : onClick}
+      style={{
+        width: size, height: size, borderRadius: "50%", background: "var(--panel)",
+        border: `1.5px solid color-mix(in srgb,${color} 55%,var(--line))`, display: "flex",
+        alignItems: "center", justifyContent: "center", cursor: disabled ? "default" : "pointer",
+        color, fontSize: size > 50 ? 25 : 20, fontWeight: 800, opacity: disabled ? 0.5 : 1,
+      }}
+    >
+      {glyph}
     </div>
   );
 }
 
-const S: Record<string, React.CSSProperties> = {
-  main: { maxWidth: 560, margin: "0 auto", padding: 24, display: "flex", flexDirection: "column", gap: 12 },
-  bar: { display: "flex", gap: 16, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" },
-  primary: { padding: "14px 20px", fontSize: 16, fontWeight: 600, background: "#6366f1", color: "#fff", border: 0, borderRadius: 12, cursor: "pointer" },
-  ghost: { padding: "8px 12px", background: "transparent", color: "#9aa3b2", border: "1px solid #2a3040", borderRadius: 8, cursor: "pointer" },
-  ghostWide: { padding: "14px 20px", fontSize: 16, background: "#1a1f2e", color: "#6ee7a8", border: "1px solid #2a3040", borderRadius: 12 },
-  card: { background: "#141925", border: "1px solid #2a3040", borderRadius: 16, padding: 24 },
-  yes: { flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4, padding: "16px", fontSize: 16, fontWeight: 700, background: "#16a34a", color: "#fff", border: 0, borderRadius: 12, cursor: "pointer" },
-  no: { flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4, padding: "16px", fontSize: 16, fontWeight: 700, background: "#dc2626", color: "#fff", border: 0, borderRadius: 12, cursor: "pointer" },
-  price: { fontSize: 22, fontWeight: 800, fontVariantNumeric: "tabular-nums" },
-  skip: { width: "100%", marginTop: 12, padding: "12px", fontSize: 14, fontWeight: 600, background: "transparent", color: "#d97706", border: "1px solid #d97706", borderRadius: 12, cursor: "pointer" },
-};
+// Mobile = the real device, so the app is the whole screen (no device mock — that was a
+// prototype artifact). Desktop = show the phone mock so a vertical mobile UI doesn't stretch
+// across a wide window. The breakpoint is "viewport too narrow to bother framing".
+const MOBILE_MAX = 480;
+
+function Frame({ children }: { children: React.ReactNode }) {
+  const deviceRef = useRef<HTMLDivElement>(null);
+  // Start mobile-first to match the common case; corrected on mount before paint.
+  const [isMobile, setIsMobile] = useState(true);
+
+  useEffect(() => {
+    const update = () => {
+      const mobile = window.innerWidth <= MOBILE_MAX;
+      setIsMobile(mobile);
+      const d = deviceRef.current;
+      if (d && !mobile) {
+        const s = Math.min(1, (window.innerHeight - 24) / 872, (window.innerWidth - 24) / 402);
+        d.style.transform = `scale(${s})`;
+      }
+    };
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
+
+  if (isMobile) {
+    // Fullscreen app surface. Safe-area padding keeps the HUD/nav clear of notch + home bar.
+    return (
+      <div
+        style={{
+          position: "fixed",
+          inset: 0,
+          background: "var(--bg)",
+          display: "flex",
+          flexDirection: "column",
+          // Clear the notch; min 8px so notch-less phones don't hug the very top edge.
+          paddingTop: "max(env(safe-area-inset-top), 8px)",
+          paddingBottom: "env(safe-area-inset-bottom)",
+        }}
+      >
+        {children}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ position: "fixed", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div ref={deviceRef} style={{ position: "relative", width: 402, height: 872, borderRadius: 48, padding: 11, background: "linear-gradient(160deg,#23232e,#0c0c12)", boxShadow: "0 40px 120px -20px rgba(0,0,0,.8), 0 0 0 1px rgba(255,255,255,.05) inset", transformOrigin: "center" }}>
+        <div style={{ position: "absolute", top: 18, left: "50%", transform: "translateX(-50%)", width: 108, height: 30, background: "#000", borderRadius: 18, zIndex: 60 }} />
+        {/* paddingTop clears the mock notch — on mobile the safe-area inset on Frame does this. */}
+        <div style={{ position: "relative", width: "100%", height: "100%", borderRadius: 38, overflow: "hidden", background: "var(--bg)", display: "flex", flexDirection: "column", paddingTop: 30 }}>
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+}

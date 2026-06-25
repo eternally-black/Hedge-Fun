@@ -14,6 +14,7 @@ export async function recordSwipe(input: {
   side: BetSide;
   lockedPriceBp: number;
   at?: Date;
+  capBypass?: boolean; // dev test account: earn a point on every swipe, ignoring the daily cap
 }): Promise<{
   betId: string;
   pointsAwarded: 0 | 1;
@@ -32,7 +33,8 @@ export async function recordSwipe(input: {
     });
 
     const overCap = counter.swipeCount > SWIPE_CAP;
-    const earnedPoint = !overCap;
+    // Dev bypass: earn a point on every swipe regardless of the cap (for testing accrual).
+    const earnedPoint = input.capBypass ? true : !overCap;
 
     const bet = await tx.bet.create({
       data: {

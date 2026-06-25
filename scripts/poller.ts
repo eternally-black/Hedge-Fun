@@ -57,8 +57,10 @@ async function mapLimit<T>(items: T[], limit: number, fn: (t: T) => Promise<void
 
 async function tick() {
   // Keep the deck cache warm so swipes lock fresh prices and expired markets drop (M4).
+  // 48h to match the deck route's window — otherwise the 24-48h half of the deck never gets
+  // price refreshes and shows stale (often 50/50) odds.
   try {
-    const n = await refreshDeck(24, 100);
+    const n = await refreshDeck(48, 100);
     console.log(`[deck] refreshed ${n} markets`);
   } catch (e) {
     console.warn("[deck] refresh error:", (e as Error).message);

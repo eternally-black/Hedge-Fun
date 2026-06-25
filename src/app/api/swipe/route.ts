@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 import { recordSwipe } from "@/lib/swipe";
 import { maybeQualifyReferralOnSwipe } from "@/lib/referral";
+import { isDevUser } from "@/lib/dev";
 
 // Swipe = paper bet Yes/No on a deck market. Locks the BOUGHT side's price for P&L.
 // ponytail: no request rate-limit (L2). The point cap (10/day) + one-bet-per-market (C1)
@@ -36,6 +37,7 @@ export async function POST(req: Request) {
       marketId: market.id,
       side: body.side,
       lockedPriceBp,
+      capBypass: isDevUser(user.email), // dev account earns a point on every swipe
     });
     // Q7: once this user hits 10 LIFETIME swipes, qualify their referral and back-pay the
     // inviter's 20%. Counts lifetime bets itself — result.swipeCountToday is per-DAY, not the
