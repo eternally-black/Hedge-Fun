@@ -31,6 +31,7 @@ RUN npx prisma generate
 ARG NEXT_PUBLIC_PRIVY_APP_ID
 ENV NEXT_PUBLIC_PRIVY_APP_ID=${NEXT_PUBLIC_PRIVY_APP_ID}
 ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 
 ############################
