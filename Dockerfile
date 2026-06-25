@@ -69,9 +69,15 @@ COPY --from=build --chown=nextjs:nodejs /app/dist/poller.cjs ./dist/poller.cjs
 COPY --from=build --chown=nextjs:nodejs /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=build --chown=nextjs:nodejs /app/node_modules/@prisma ./node_modules/@prisma
 COPY --from=build --chown=nextjs:nodejs /app/node_modules/prisma ./node_modules/prisma
-COPY --from=build --chown=nextjs:nodejs /app/node_modules/.bin/prisma ./node_modules/.bin/prisma
 COPY --from=build --chown=nextjs:nodejs /app/prisma ./prisma
 COPY --from=build --chown=nextjs:nodejs /app/package.json ./package.json
+# The prisma CLI's config loader (@prisma/config) needs effect/c12/deepmerge-ts/empathic, which
+# aren't traced into the standalone output. Install just those (npm resolves their transitives
+# correctly — hand-copying misses depth) so `prisma db push` works. Tiny vs the 2GB full tree.
+# Also recreates a working .bin/prisma symlink. Done before USER switch (needs write perms).
+RUN npm install --no-save --no-package-lock --ignore-scripts effect@3.21.0 c12@3.1.0 deepmerge-ts@7.1.5 empathic@2.0.0 \
+    && ln -sf ../prisma/build/index.js node_modules/.bin/prisma \
+    && chown -R nextjs:nodejs node_modules/effect node_modules/c12 node_modules/deepmerge-ts node_modules/empathic node_modules/.bin 2>/dev/null || true
 
 USER nextjs
 EXPOSE 3000
