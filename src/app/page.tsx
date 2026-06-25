@@ -82,13 +82,25 @@ function App() {
     setMe(await api("/api/me"));
   }, [api]);
 
-  // Mirror the hf_ref cookie (set by middleware on a /r/<code> click) into localStorage once, so
-  // attribution survives a cookie purge (Safari ITP / Brave). advanced-init-once: one run per load.
+  // On a /r/<code> click the middleware set the hf_ref cookie. Here (once per load) we (1) mirror
+  // it into localStorage so attribution survives a cookie purge (Safari ITP / Brave), and (2) log
+  // the click from the BROWSER to /api/ref-click — the server hashes our real IP/UA for the
+  // cross-browser fallback. Logging client-side (not from middleware) because a server-to-self
+  // fetch in self-hosted Next middleware doesn't round-trip. Guarded by a sessionStorage flag so
+  // we log each click once, not on every page load. advanced-init-once.
   useEffect(() => {
-    const fromCookie = readRefCookie();
-    if (fromCookie) {
-      try { localStorage.setItem("hf_ref", fromCookie); } catch { /* storage blocked */ }
-    }
+    const code = readRefCookie();
+    if (!code) return;
+    try { localStorage.setItem("hf_ref", code); } catch { /* storage blocked */ }
+    try {
+      if (sessionStorage.getItem("hf_ref_logged") !== code) {
+        void fetch("/api/ref-click", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ code }),
+        }).then(() => sessionStorage.setItem("hf_ref_logged", code)).catch(() => {});
+      }
+    } catch { /* storage blocked — skip the once-guard, still attempt below is fine */ }
   }, []);
 
   useEffect(() => {
