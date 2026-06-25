@@ -33,26 +33,15 @@ ENV NEXT_PUBLIC_PRIVY_APP_ID=${NEXT_PUBLIC_PRIVY_APP_ID}
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
-# Bundle the poller (+ its src/lib deps) into one CJS file so the runtime needs neither tsx nor
-# devDeps nor src/. @prisma/client stays external (native engine — can't be bundled).
+# Bundle the poller (+ its src/lib deps) into one CJS file. Its ONLY runtime require is
+# @prisma/client (verified) — so the runtime needs that, not the 2GB dep tree.
 RUN npm run build:poller
 
 ############################
-# 2b. prod-deps — a SEPARATE, thin node_modules (no devDeps) for the runtime. The build stage's
-# node_modules carries typescript/esbuild/tsx/@types (huge); the runtime must not. This is the
-# whole point of the speedup — the fat layer never reaches the final image.
-############################
-FROM node:22-bookworm-slim AS proddeps
-WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-COPY package.json package-lock.json ./
-COPY prisma ./prisma
-# --omit=dev → prod-only tree; postinstall still runs prisma generate against the schema above.
-RUN npm ci --omit=dev
-
-############################
-# 3. runtime — minimal, non-root, carries BOTH app + poller needs
+# 3. runtime — minimal, non-root. The big win (per Next docs): the standalone output ALREADY
+# traces just the node_modules the app imports (~tens of MB), so we DON'T copy the full 2GB tree.
+# We only add what's not traced: the bundled poller + @prisma/client/.prisma (engine + client)
+# + the prisma CLI for the migrate service's `prisma db push`.
 ############################
 FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
@@ -64,23 +53,25 @@ ENV NODE_ENV=production \
 RUN groupadd --system --gid 1001 nodejs \
     && useradd  --system --uid 1001 --gid nodejs nextjs
 
-# --- Next standalone app (ships its OWN traced node_modules subset for the server) ---
+# --- Next standalone app: ships its OWN traced node_modules subset (this is the size win) ---
 COPY --from=build --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=build --chown=nextjs:nodejs /app/.next/static ./.next/static
 COPY --from=build --chown=nextjs:nodejs /app/public ./public
 
-# --- Poller: just the bundled CJS + a PROD-ONLY node_modules (no tsx/devDeps/src). This is the
-#     fat layer that used to bloat the image; now it's the thin --omit=dev tree from proddeps. ---
-COPY --from=proddeps --chown=nextjs:nodejs /app/node_modules ./node_modules
+# --- Poller: the bundled CJS only (no src/, no tsx, no devDeps) ---
 COPY --from=build --chown=nextjs:nodejs /app/dist/poller.cjs ./dist/poller.cjs
+
+# --- Prisma: copy the FULL @prisma scope (client + engines + CLI deps) + .prisma (generated
+#     client/engine) + the prisma CLI + schema. This is the documented minimal set for both
+#     @prisma/client at runtime (app + poller) AND the migrate service's `prisma db push`.
+#     ~180MB total vs the 2GB full tree; the standalone trace can miss the engine .so, so we
+#     copy these explicitly. ---
+COPY --from=build --chown=nextjs:nodejs /app/node_modules/.prisma ./node_modules/.prisma
+COPY --from=build --chown=nextjs:nodejs /app/node_modules/@prisma ./node_modules/@prisma
+COPY --from=build --chown=nextjs:nodejs /app/node_modules/prisma ./node_modules/prisma
+COPY --from=build --chown=nextjs:nodejs /app/node_modules/.bin/prisma ./node_modules/.bin/prisma
 COPY --from=build --chown=nextjs:nodejs /app/prisma ./prisma
 COPY --from=build --chown=nextjs:nodejs /app/package.json ./package.json
-
-# Belt-and-suspenders: the standalone tracer can omit the Prisma engine .so (it's a data file,
-# not an import). Overwrite the traced copies from the prod-deps tree to guarantee both the app
-# and the poller find the query engine.
-COPY --from=proddeps --chown=nextjs:nodejs /app/node_modules/.prisma ./node_modules/.prisma
-COPY --from=proddeps --chown=nextjs:nodejs /app/node_modules/@prisma/client ./node_modules/@prisma/client
 
 USER nextjs
 EXPOSE 3000
