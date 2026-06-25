@@ -1,0 +1,6 @@
+# Replace your-domain.com with the real domain (A record must point at the VPS,
+# and ports 80+443 open, before first `up` — Caddy needs the ACME HTTP challenge).
+# Caddy auto-provisions and renews the Let's Encrypt cert.
+your-domain.com {
+	reverse_proxy app:3000
+}

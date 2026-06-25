@@ -1,0 +1,37 @@
+# Rebuilt in-image — and excluding them keeps host (Windows/WSL) native binaries out.
+node_modules
+.next
+dist
+build
+
+# VCS / tooling
+.git
+.gitignore
+.github
+
+# Secrets — never enter the build context
+.env
+.env.*
+
+# Docs / non-app assets
+docs
+app design
+README.md
+
+# Local-only / editor
+.fablize
+CLAUDE.md*
+.vscode
+.idea
+.DS_Store
+*.tsbuildinfo
+next-env.d.ts
+npm-debug.log*
+
+# Deploy artifacts (not needed inside the image)
+Dockerfile
+.dockerignore
+docker-compose.yml
+deploy.sh
+hedgefun_ci
+hedgefun_ci.pub

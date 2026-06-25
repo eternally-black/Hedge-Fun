@@ -1,0 +1,22 @@
+name: deploy
+on:
+  push:
+    branches: [main]
+
+# Never let two deploys overlap; don't cancel an in-flight one mid-build.
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH and run deploy script
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          script: cd /opt/hedgefun && bash deploy.sh
