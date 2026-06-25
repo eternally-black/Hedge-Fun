@@ -15,3 +15,20 @@ export function diffDays(a: string, b: string): number {
   const ms = dayToDate(a).getTime() - dayToDate(b).getTime();
   return Math.round(ms / 86_400_000);
 }
+
+// Day-of-week with Monday = 0 .. Sunday = 6 (the GM grid renders Mon→Sun).
+// JS getUTCDay() is Sunday = 0, so we rotate.
+export function weekdayMon0(key: string): number {
+  return (dayToDate(key).getUTCDay() + 6) % 7;
+}
+
+// Start day-key of the user's CURRENT 7-day streak window. The window begins at streak
+// level 1; position within it is (level-1) mod 7, so the start is that many days before
+// the last qualified day. Level 0 (never/freshly started) → today. Used to draw the
+// per-user week boundary on the GM grid.
+export function streakWindowStartDay(level: number, lastQualifiedDay: string | null, today: string): string {
+  if (level <= 0 || !lastQualifiedDay) return today;
+  const posInWindow = (level - 1) % 7; // 0 = start day itself
+  const start = new Date(dayToDate(lastQualifiedDay).getTime() - posInWindow * 86_400_000);
+  return start.toISOString().slice(0, 10);
+}

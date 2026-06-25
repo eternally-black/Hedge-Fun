@@ -22,7 +22,13 @@ export type Me = {
   skips: { usedToday: number; nextIsFree: boolean; shardCost: number };
   shards: number;
   artifacts: number;
-  streak: { level: number; state: string; recoverableUntil: string | null };
+  streak: {
+    level: number;
+    state: string;
+    recoverableUntil: string | null;
+    todayWeekday: number; // 0=Mon..6=Sun — which column is today
+    windowStartWeekday: number; // 0=Mon..6=Sun — where this user's 7-day window starts
+  };
   loginMarkedToday: boolean;
   dev?: boolean; // dev test account: unlimited skips + deck reset
 };

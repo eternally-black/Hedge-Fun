@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 import { effectivePoints } from "@/lib/points";
 import { evaluateStreak } from "@/lib/streak";
-import { utcDay } from "@/lib/time";
+import { utcDay, weekdayMon0, streakWindowStartDay } from "@/lib/time";
 import { SWIPE_CAP, FREE_SKIPS_PER_DAY, SKIP_SHARD_COST } from "@/lib/config";
 import { isDevUser } from "@/lib/dev";
 
@@ -44,6 +44,13 @@ export async function GET(req: Request) {
       level: streak?.currentLevel ?? 0,
       state: streak?.state ?? "ACTIVE",
       recoverableUntil: streak?.recoverableUntil ?? null,
+      // GM grid renders a fixed Mon→Sun week; these locate the user on it:
+      //  - todayWeekday: which column is "today"
+      //  - windowStartWeekday: where this user's personal 7-day window begins (the cutoff)
+      todayWeekday: weekdayMon0(day),
+      windowStartWeekday: weekdayMon0(
+        streakWindowStartDay(streak?.currentLevel ?? 0, streak?.lastQualifiedDay ?? null, day),
+      ),
     },
     loginMarkedToday: !!loginMark,
   });
