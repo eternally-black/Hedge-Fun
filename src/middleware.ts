@@ -15,7 +15,7 @@ const COOKIE_MAX_AGE = 60 * 60 * 24 * 7; // 7 days
 // if CODE_LEN ever bumps, but reject anything that isn't a plausible code (don't redirect junk).
 const CODE_RE = /^[A-HJ-NP-Z2-9]{3,8}$/i;
 
-export function middleware(req: NextRequest) {
+export async function middleware(req: NextRequest) {
   const code = req.nextUrl.pathname.slice("/r/".length);
 
   // Clean redirect to root. Strip any query too — the address bar ends up bare.
@@ -36,20 +36,27 @@ export function middleware(req: NextRequest) {
     path: "/",
   });
 
-  // Fire-and-forget click log (hashing + DB in the Node route). Never await — the redirect ships
-  // immediately. A failed log just means no cross-browser fallback for this click.
-  void fetch(new URL("/api/ref-click", req.url), {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      // Forward the real client signals so the route hashes the visitor, not the edge node.
-      "x-forwarded-for": req.headers.get("x-forwarded-for") ?? "",
-      "x-real-ip": req.headers.get("x-real-ip") ?? "",
-      "user-agent": req.headers.get("user-agent") ?? "",
-      "accept-language": req.headers.get("accept-language") ?? "",
-    },
-    body: JSON.stringify({ code }),
-  }).catch(() => { /* best-effort */ });
+  // Log the click (hashing + DB happen in the Node /api/ref-click route). We AWAIT it — a
+  // fire-and-forget fetch from self-hosted Next middleware is dropped when the response ships
+  // (no waitUntil), so the click never lands and the cross-browser fallback is dead. Awaiting
+  // guarantees it, gated by a 1.5s timeout so a slow/hung route never blocks the redirect.
+  try {
+    await fetch(new URL("/api/ref-click", req.url), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        // Forward the real client signals so the route hashes the visitor, not the edge node.
+        "x-forwarded-for": req.headers.get("x-forwarded-for") ?? "",
+        "x-real-ip": req.headers.get("x-real-ip") ?? "",
+        "user-agent": req.headers.get("user-agent") ?? "",
+        "accept-language": req.headers.get("accept-language") ?? "",
+      },
+      body: JSON.stringify({ code }),
+      signal: AbortSignal.timeout(1500),
+    });
+  } catch {
+    /* best-effort — a missed log just means no cross-browser fallback for this one click */
+  }
 
   return res;
 }
