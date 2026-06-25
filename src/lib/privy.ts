@@ -1,5 +1,5 @@
 import { PrivyClient, type User as PrivyUser } from "@privy-io/server-auth";
-import type { User } from "@prisma/client";
+import { Prisma, type User } from "@prisma/client";
 import { prisma } from "./prisma";
 import { START_BALANCE_CENTS } from "./config";
 
@@ -58,19 +58,30 @@ export async function ensureUser(privyId: string): Promise<User> {
   const pu = await privy.getUser(privyId);
   const id = extractIdentity(pu);
 
-  return prisma.user.create({
-    data: {
-      privyId,
-      authProvider: id.authProvider,
-      email: id.email,
-      twitterHandle: id.twitterHandle,
-      embeddedWalletAddress: id.wallet,
-      lastSeenAt: new Date(),
-      virtualBalance: { create: { balanceCents: START_BALANCE_CENTS } },
-      collectibleBalance: { create: {} },
-      streak: { create: {} },
-    },
-  });
+  try {
+    return await prisma.user.create({
+      data: {
+        privyId,
+        authProvider: id.authProvider,
+        email: id.email,
+        twitterHandle: id.twitterHandle,
+        embeddedWalletAddress: id.wallet,
+        lastSeenAt: new Date(),
+        virtualBalance: { create: { balanceCents: START_BALANCE_CENTS } },
+        collectibleBalance: { create: {} },
+        streak: { create: {} },
+      },
+    });
+  } catch (e) {
+    // First-login race: /api/me and /api/deck both call ensureUser in parallel, both
+    // findUnique→null, both create → the loser hits the privyId unique constraint (P2002).
+    // That's fine — the winner already provisioned the user; just read it back.
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
+      const created = await prisma.user.findUnique({ where: { privyId } });
+      if (created) return created;
+    }
+    throw e;
+  }
 }
 
 // Convenience for API routes: verify the request and return the app user, or null.
@@ -80,7 +91,13 @@ export async function authUser(req: Request): Promise<User | null> {
   try {
     const privyId = await verifyPrivyToken(token);
     return await ensureUser(privyId);
-  } catch {
+  } catch (e) {
+    // Token verify failures are the normal unauthorized path (expired/invalid) — quiet.
+    // But a thrown ensureUser (DB/Privy error) was silently becoming a 401 and hiding bugs;
+    // log those so they're visible.
+    if (!(e instanceof Error && /token|jwt|auth/i.test(e.message))) {
+      console.error("[authUser] ensureUser failed:", e);
+    }
     return null;
   }
 }
