@@ -221,8 +221,15 @@ export async function fetchBlitzDeck(hours = 48, want = 100): Promise<MarketCach
 }
 
 // Resolution lookup for one market by conditionId.
+//
+// closed=true is LOAD-BEARING: Gamma's /markets defaults to returning only NON-closed markets,
+// but a resolved market is closed=true — so the bare query returns 0 rows and we'd never settle
+// it (bet stuck "Awaiting resolution" forever). Verified live 2026-06-25: a resolved XRP Up/Down
+// market returned rows=0 without the param, rows=1 (uma=resolved, prices ["1","0"]) with it.
+// We only call this to DETECT resolution, so excluding still-open markets here is correct: an
+// open market resolves to null -> {kind:"open"} -> no-op, exactly as before.
 export async function fetchResolution(conditionId: string): Promise<MarketCache | null> {
-  const raw = await gammaGet(`/markets?condition_ids=${encodeURIComponent(conditionId)}`);
+  const raw = await gammaGet(`/markets?closed=true&condition_ids=${encodeURIComponent(conditionId)}`);
   // Only trust a row whose conditionId actually matches — never settle against the wrong
   // market if Gamma returns something unexpected (L1).
   const match = raw.find((m) => m.conditionId === conditionId);

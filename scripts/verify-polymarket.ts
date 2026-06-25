@@ -3,6 +3,14 @@
 import assert from "node:assert";
 import { fetchBlitzDeck, fetchResolution, mapMarket } from "../src/lib/polymarket";
 
+// Minimal Gamma GET for the verify-only positive check (gammaGet isn't exported from the lib).
+const VERIFY_BASE = process.env.POLYMARKET_API_BASE ?? "https://gamma-api.polymarket.com";
+async function gammaGetForVerify(path: string): Promise<Array<{ conditionId?: string; umaResolutionStatus?: string; outcomePrices?: string }>> {
+  const res = await fetch(`${VERIFY_BASE}${path}`, { cache: "no-store", headers: { accept: "application/json" } });
+  if (!res.ok) throw new Error(`Gamma ${res.status} for ${path}`);
+  return res.json();
+}
+
 async function main() {
   console.log("1. fetchBlitzDeck(24)...");
   const deck = await fetchBlitzDeck(24, 50);
@@ -41,12 +49,33 @@ async function main() {
     }
     console.log("   ✓ every card is contested (15%..85% band, no 100%/0% cards)");
 
-    console.log("2. fetchResolution(sample id)...");
-    const r = await fetchResolution(c.polymarketId);
-    assert.ok(r, "resolution lookup returns the market");
-    assert.strictEqual(r!.polymarketId, c.polymarketId, "same id round-trips");
-    console.log(`   status=${r!.status} outcome=${r!.resolvedOutcome ?? "—"}`);
-    console.log("   ✓ resolution lookup works");
+    // fetchResolution is a RESOLUTION lookup — it queries closed=true, so an OPEN deck market
+    // correctly returns null (it isn't resolved). This is the fix for the 2026-06-25 "stuck in
+    // Awaiting resolution" bug: the query MUST include closed=true or resolved markets (which are
+    // closed) come back empty and never settle. We assert both halves below.
+    console.log("2. fetchResolution(open deck id) -> should be null (not resolved yet)...");
+    const rOpen = await fetchResolution(c.polymarketId);
+    assert.strictEqual(rOpen, null, "an OPEN market must NOT be returned by the resolution lookup");
+    console.log("   ✓ open market correctly returns null");
+
+    // Positive half: a genuinely resolved market MUST be found and map to RESOLVED. Pull one that
+    // ended in the last 24h (closed=true) and round-trip it through fetchResolution. This is the
+    // canary that would have caught the stuck-settlement bug.
+    console.log("2b. fetchResolution(recently-resolved id) -> should be RESOLVED...");
+    const closedRaw = await gammaGetForVerify(
+      `/markets?closed=true&order=endDate&ascending=false&limit=20`,
+    );
+    const aResolved = closedRaw.find(
+      (m) => m.conditionId && m.umaResolutionStatus === "resolved" && m.outcomePrices,
+    );
+    if (aResolved?.conditionId) {
+      const rr = await fetchResolution(aResolved.conditionId);
+      assert.ok(rr, "resolution lookup MUST return a closed/resolved market (closed=true param)");
+      assert.strictEqual(rr!.polymarketId, aResolved.conditionId, "same id round-trips");
+      console.log(`   status=${rr!.status} outcome=${rr!.resolvedOutcome ?? "—"} — ✓ resolved market found`);
+    } else {
+      console.warn("   ⚠ no clean resolved market in the last-20 closed sample right now; skipped positive check");
+    }
   } else {
     console.warn(
       "   ⚠ deck empty right now — either thin <=24h pool this moment, or API shape drift. " +
