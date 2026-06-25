@@ -68,9 +68,27 @@ function App() {
     setMe(await api("/api/me"));
   }, [api]);
 
+  // Stash ?ref=<code> the moment the page loads — BEFORE Privy's OAuth redirect (X login) can
+  // navigate away and wipe the query string. sessionStorage survives that round-trip; the value
+  // is consumed once on the first authenticated login-mark (server captures once, then no-ops).
+  // advanced-init-once: runs a single time per app load, independent of auth state.
   useEffect(() => {
-    if (authenticated) refresh().catch(console.error);
-  }, [authenticated, refresh]);
+    const code = new URLSearchParams(window.location.search).get("ref");
+    if (code && !sessionStorage.getItem("hf_ref")) sessionStorage.setItem("hf_ref", code);
+  }, []);
+
+  useEffect(() => {
+    if (!authenticated) return;
+    refresh().catch(console.error);
+    // Fire-and-forget referral capture: if we arrived with a ?ref, forward it once so a user who
+    // swipes before ever tapping GM still attributes. Idempotent server-side (unique inviteeId).
+    const ref = sessionStorage.getItem("hf_ref");
+    if (ref) {
+      api(`/api/login-mark?ref=${encodeURIComponent(ref)}`, { method: "POST" })
+        .then(() => sessionStorage.removeItem("hf_ref"))
+        .catch(() => { /* GM tap will retry; capture stays idempotent */ });
+    }
+  }, [authenticated, refresh, api]);
 
   // Preload-ahead: refill well before the deck runs dry (threshold 8, not 1), so a fresh card is
   // always buffered behind the current one. `topping` dedupes so only one fetch is in flight.
@@ -155,7 +173,9 @@ function App() {
   const gm = useCallback(async () => {
     setBusy(true);
     try {
-      await api("/api/login-mark", { method: "POST" });
+      const ref = sessionStorage.getItem("hf_ref");
+      await api(ref ? `/api/login-mark?ref=${encodeURIComponent(ref)}` : "/api/login-mark", { method: "POST" });
+      if (ref) sessionStorage.removeItem("hf_ref");
       await refresh();
     } finally {
       setBusy(false);

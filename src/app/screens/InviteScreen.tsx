@@ -2,23 +2,30 @@
 
 import { useState } from "react";
 import { type Me } from "../ui";
+import { INVITE_X, INVITE_TG, SHARE_BASE_URL, composeXShare, composeTgShare, openShare } from "@/lib/share";
 
 // Referral screen (ported from app design). The invite link uses the user's REAL referralCode
 // (P-11: inviter earns 20% of the invitee's swipe+login points forever, once the invitee makes
 // 10 swipes). Stats + recent invites are placeholders until a /api/referrals endpoint exists.
 export function InviteScreen({ me }: { me: Me | null }) {
   const [copied, setCopied] = useState(false);
-  const link = me ? `hedge.fun/r/${me.user.referralCode.slice(0, 8)}` : "hedge.fun/r/…";
+  const code = me?.user.referralCode ?? null;
+  // Display strips the scheme; the real link carries the FULL code as ?ref= (login-mark captures it).
+  const link = code ? `${SHARE_BASE_URL.replace(/^https?:\/\//, "")}/?ref=${code}` : "…";
 
   const copy = async () => {
+    if (!code) return;
     try {
-      await navigator.clipboard.writeText(`https://${link}`);
+      await navigator.clipboard.writeText(`${SHARE_BASE_URL}/?ref=${code}`);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1600);
     } catch {
       /* clipboard blocked (insecure context) — no-op */
     }
   };
+
+  // Roll a fresh random line each tap (compose*Share picks internally) and open the composer.
+  // openShare is the platform-specific opener (web here; native lands in the Expo app later).
 
   return (
     <div className="hf-scroll" style={{ position: "absolute", inset: 0, overflowY: "auto", padding: "8px 18px 20px", textAlign: "center" }}>
@@ -33,11 +40,12 @@ export function InviteScreen({ me }: { me: Me | null }) {
         <div onClick={copy} style={{ background: "var(--energy)", color: "#fff", fontWeight: 700, padding: "11px 18px", borderRadius: 12, cursor: "pointer", fontSize: 13 }}>{copied ? "Copied!" : "Copy"}</div>
       </div>
 
-      {/* ponytail: share buttons + invite history are placeholders — no /api/referrals yet (TODO). */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 9, marginTop: 12, opacity: 0.5 }}>
-        {["𝕏 Share", "✈ Telegram", "⧉ More"].map((t) => (
-          <div key={t} style={{ background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 14, padding: "13px 6px", fontSize: 12, fontWeight: 700 }}>{t}</div>
-        ))}
+      {/* Share to X / Telegram. Each tap rolls a random copy line and opens the native composer
+          (unauthenticated web intent — no OAuth). "More" copies the raw link as a fallback. */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 9, marginTop: 12 }}>
+        <ShareBtn label="𝕏 Share" disabled={!code} onClick={() => code && openShare(composeXShare(INVITE_X, code))} />
+        <ShareBtn label="✈ Telegram" disabled={!code} onClick={() => code && openShare(composeTgShare(INVITE_TG, code))} />
+        <ShareBtn label="⧉ More" disabled={!code} onClick={copy} />
       </div>
 
       <div style={{ marginTop: 22, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
@@ -51,5 +59,21 @@ export function InviteScreen({ me }: { me: Me | null }) {
         </div>
       </div>
     </div>
+  );
+}
+
+function ShareBtn({ label, onClick, disabled }: { label: string; onClick: () => void; disabled?: boolean }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 14,
+        padding: "13px 6px", fontSize: 12, fontWeight: 700, color: "var(--text)",
+        cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.5 : 1, font: "inherit",
+      }}
+    >
+      {label}
+    </button>
   );
 }
