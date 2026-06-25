@@ -40,12 +40,12 @@ export function InviteScreen({ me }: { me: Me | null }) {
         <div onClick={copy} style={{ background: "var(--energy)", color: "#fff", fontWeight: 700, padding: "11px 18px", borderRadius: 12, cursor: "pointer", fontSize: 13 }}>{copied ? "Copied!" : "Copy"}</div>
       </div>
 
-      {/* Share to X / Telegram. Each tap rolls a random copy line and opens the native composer
-          (unauthenticated web intent — no OAuth). "More" copies the raw link as a fallback. */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 9, marginTop: 12 }}>
+      {/* Share to X / Telegram. Each tap rolls a random copy line and opens the composer
+          (X: post intent; Telegram: share-to-chat) — unauthenticated web intent, no OAuth.
+          Copy-link lives on the link row above, so no third button here. */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 9, marginTop: 12 }}>
         <ShareBtn label="𝕏 Share" disabled={!code} onClick={() => code && openShare(composeXShare(INVITE_X, code))} />
         <ShareBtn label="✈ Telegram" disabled={!code} onClick={() => code && openShare(composeTgShare(INVITE_TG, code))} />
-        <ShareBtn label="⧉ More" disabled={!code} onClick={copy} />
       </div>
 
       <div style={{ marginTop: 22, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
