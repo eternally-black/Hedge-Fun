@@ -73,7 +73,7 @@ services:
 
   poller:
     image: hedgefun:latest
-    command: ["npx", "tsx", "scripts/poller.ts"]
+    command: ["node", "dist/poller.cjs"]
     restart: unless-stopped
     env_file: .env
     environment:

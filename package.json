@@ -12,6 +12,7 @@
     "db:studio": "prisma studio",
     "postinstall": "prisma generate",
     "poll": "tsx scripts/poller.ts",
+    "build:poller": "esbuild scripts/poller.ts --bundle --platform=node --target=node22 --format=cjs --external:@prisma/client --external:.prisma --outfile=dist/poller.cjs",
     "refresh-deck": "tsx scripts/refresh-deck.ts",
     "verify:polymarket": "tsx scripts/verify-polymarket.ts",
     "test": "tsx scripts/test-points.ts && tsx scripts/test-engine.ts && tsx scripts/test-settle.ts && tsx scripts/test-referral.ts && tsx scripts/test-deck-mix.ts && tsx scripts/test-skip.ts && tsx scripts/test-gm-week.ts && tsx scripts/test-share.ts && tsx scripts/test-refcode.ts",
@@ -28,6 +29,7 @@
     "@solana-program/token": "0.9.0",
     "@solana/kit": "5.5.1",
     "next": "^16.2.9",
+    "prisma": "^6.19.3",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },
@@ -38,7 +40,7 @@
     "@types/node": "^26.0.0",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
-    "prisma": "^6.19.3",
+    "esbuild": "^0.25.0",
     "tsx": "^4.22.4",
     "typescript": "^5.9.3"
   }
