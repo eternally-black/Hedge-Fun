@@ -5,6 +5,7 @@
 import assert from "node:assert";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../src/lib/prisma";
+import { randomCode } from "../src/lib/refcode";
 
 async function main() {
   const privyId = `did:privy:racetest-${process.pid}-${Date.now() & 0xffffff}`;
@@ -12,7 +13,7 @@ async function main() {
   // Fire two creates concurrently for the same unique privyId — the real race.
   // Minimal row (no nested relations): we're asserting the privyId unique-violation
   // shape the fix catches, not the full provisioning graph.
-  const mk = () => prisma.user.create({ data: { privyId, authProvider: "EMAIL" } });
+  const mk = () => prisma.user.create({ data: { privyId, authProvider: "EMAIL", referralCode: randomCode() } });
 
   const results = await Promise.allSettled([mk(), mk()]);
   const ok = results.filter((r) => r.status === "fulfilled");

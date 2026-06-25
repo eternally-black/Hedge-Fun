@@ -7,6 +7,7 @@
 import assert from "node:assert";
 import { PrismaClient } from "@prisma/client";
 import { START_BALANCE_CENTS, SWIPE_CAP, LOGIN_BONUS } from "../src/lib/config";
+import { randomCode } from "../src/lib/refcode";
 import { recordLogin } from "../src/lib/login";
 import { qualifyDay } from "../src/lib/streak";
 import { recordSwipe } from "../src/lib/swipe";
@@ -46,6 +47,7 @@ async function main() {
       privyId,
       authProvider: "EMAIL",
       email: `${privyId}@test.local`,
+      referralCode: randomCode(),
       virtualBalance: { create: { balanceCents: START_BALANCE_CENTS } },
       collectibleBalance: { create: {} },
       streak: { create: {} },

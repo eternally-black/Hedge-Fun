@@ -2,6 +2,7 @@ import { PrivyClient, type User as PrivyUser } from "@privy-io/server-auth";
 import { Prisma, type User } from "@prisma/client";
 import { prisma } from "./prisma";
 import { START_BALANCE_CENTS } from "./config";
+import { newReferralCode } from "./refcode";
 
 const APP_ID = process.env.NEXT_PUBLIC_PRIVY_APP_ID ?? "";
 const APP_SECRET = process.env.PRIVY_APP_SECRET ?? "";
@@ -66,6 +67,7 @@ export async function ensureUser(privyId: string): Promise<User> {
         email: id.email,
         twitterHandle: id.twitterHandle,
         embeddedWalletAddress: id.wallet,
+        referralCode: await newReferralCode(), // short code (was @default(cuid()))
         lastSeenAt: new Date(),
         virtualBalance: { create: { balanceCents: START_BALANCE_CENTS } },
         collectibleBalance: { create: {} },
@@ -79,6 +81,22 @@ export async function ensureUser(privyId: string): Promise<User> {
     if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
       const created = await prisma.user.findUnique({ where: { privyId } });
       if (created) return created;
+      // P2002 but NOT this privyId -> a referralCode collision (two new users drew the same
+      // 4-char code concurrently — astronomically rare). Retry once with a fresh code.
+      return await prisma.user.create({
+        data: {
+          privyId,
+          authProvider: id.authProvider,
+          email: id.email,
+          twitterHandle: id.twitterHandle,
+          embeddedWalletAddress: id.wallet,
+          referralCode: await newReferralCode(),
+          lastSeenAt: new Date(),
+          virtualBalance: { create: { balanceCents: START_BALANCE_CENTS } },
+          collectibleBalance: { create: {} },
+          streak: { create: {} },
+        },
+      });
     }
     throw e;
   }

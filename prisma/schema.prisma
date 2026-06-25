@@ -89,7 +89,7 @@ model User {
   email                 String?      @unique
   twitterHandle         String?      @unique
   embeddedWalletAddress String?      @unique
-  referralCode          String       @unique @default(cuid())
+  referralCode          String       @unique // short code (src/lib/refcode.ts), set at create time
   createdAt             DateTime     @default(now())
   updatedAt             DateTime     @updatedAt
   lastSeenAt            DateTime?

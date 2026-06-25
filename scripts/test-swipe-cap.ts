@@ -5,11 +5,12 @@ import assert from "node:assert";
 import { prisma } from "../src/lib/prisma";
 import { recordSwipe, SwipeCapReachedError } from "../src/lib/swipe";
 import { SWIPE_CAP } from "../src/lib/config";
+import { randomCode } from "../src/lib/refcode";
 
 async function main() {
   const tag = `captest-${process.pid}-${Date.now() & 0xffffff}`;
   const user = await prisma.user.create({
-    data: { privyId: `did:privy:${tag}`, authProvider: "EMAIL", virtualBalance: { create: { balanceCents: 100000 } }, collectibleBalance: { create: {} }, streak: { create: {} } },
+    data: { privyId: `did:privy:${tag}`, authProvider: "EMAIL", referralCode: randomCode(), virtualBalance: { create: { balanceCents: 100000 } }, collectibleBalance: { create: {} }, streak: { create: {} } },
   });
 
   // Seed SWIPE_CAP + 1 distinct markets.
