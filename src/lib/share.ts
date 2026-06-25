@@ -23,12 +23,17 @@
 
 export const X_HANDLE = "@hedgeyourfun"; // tag this in X copy. NOT in Telegram copy (no handles there).
 
-// Public landing the link points at. The ?ref=<referralCode> is read on first load and forwarded
-// to /api/login-mark, which captures the referral (login-mark/route.ts). Must be the FULL code.
-export const SHARE_BASE_URL = "https://app.hedgeyour.fun";
+// Public landing the link points at. Invite links use the STEALTH path /r/<code>: the middleware
+// marks the visitor (hf_ref cookie + click log) and redirects to a clean "/" — so ?ref= never
+// shows in the address bar and the invitee just sees app.hedgeyour.fun while already attributed.
+// Env-overridable so the Android build can point invite links at a Play Store URL (+ &referrer)
+// instead of the web app, without touching the copy sets — see docs/share-and-android.md §4.
+// Falls back to prod so web (where the var is unset) is unchanged.
+export const SHARE_BASE_URL =
+  process.env.NEXT_PUBLIC_SHARE_BASE_URL ?? "https://app.hedgeyour.fun";
 
 export function refLink(referralCode: string): string {
-  return `${SHARE_BASE_URL}/?ref=${encodeURIComponent(referralCode)}`;
+  return `${SHARE_BASE_URL}/r/${encodeURIComponent(referralCode)}`;
 }
 
 // ---------------------------------------------------------------------------

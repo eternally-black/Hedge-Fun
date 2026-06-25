@@ -17,6 +17,20 @@ import { type Card, type Me, type Screen } from "./ui";
 
 const PRIVY_ON = !!process.env.NEXT_PUBLIC_PRIVY_APP_ID;
 
+// Stealth referral code readers. The middleware sets a non-httpOnly `hf_ref` cookie on a
+// /r/<code> click and redirects to a clean "/" (no ?ref= in the URL). We read it from the cookie,
+// falling back to the localStorage mirror (survives Safari ITP / Brave cookie purges). Module
+// scope: pure, no React state — safe to call from effects/handlers without re-creating per render.
+function readRefCookie(): string | null {
+  const m = document.cookie.match(/(?:^|;\s*)hf_ref=([^;]+)/);
+  return m ? decodeURIComponent(m[1]!) : null;
+}
+function readRef(): string | null {
+  const c = readRefCookie();
+  if (c) return c;
+  try { return localStorage.getItem("hf_ref"); } catch { return null; }
+}
+
 export default function Home() {
   if (!PRIVY_ON) return <ConfigNotice />;
   return <App />;
@@ -68,26 +82,25 @@ function App() {
     setMe(await api("/api/me"));
   }, [api]);
 
-  // Stash ?ref=<code> the moment the page loads — BEFORE Privy's OAuth redirect (X login) can
-  // navigate away and wipe the query string. sessionStorage survives that round-trip; the value
-  // is consumed once on the first authenticated login-mark (server captures once, then no-ops).
-  // advanced-init-once: runs a single time per app load, independent of auth state.
+  // Mirror the hf_ref cookie (set by middleware on a /r/<code> click) into localStorage once, so
+  // attribution survives a cookie purge (Safari ITP / Brave). advanced-init-once: one run per load.
   useEffect(() => {
-    const code = new URLSearchParams(window.location.search).get("ref");
-    if (code && !sessionStorage.getItem("hf_ref")) sessionStorage.setItem("hf_ref", code);
+    const fromCookie = readRefCookie();
+    if (fromCookie) {
+      try { localStorage.setItem("hf_ref", fromCookie); } catch { /* storage blocked */ }
+    }
   }, []);
 
   useEffect(() => {
     if (!authenticated) return;
     refresh().catch(console.error);
-    // Fire-and-forget referral capture: if we arrived with a ?ref, forward it once so a user who
-    // swipes before ever tapping GM still attributes. Idempotent server-side (unique inviteeId).
-    const ref = sessionStorage.getItem("hf_ref");
-    if (ref) {
-      api(`/api/login-mark?ref=${encodeURIComponent(ref)}`, { method: "POST" })
-        .then(() => sessionStorage.removeItem("hf_ref"))
-        .catch(() => { /* GM tap will retry; capture stays idempotent */ });
-    }
+    // Forward the stealth referral code (cookie → localStorage fallback) on first auth, so a user
+    // who swipes before ever tapping GM still attributes. The URL stays clean (no ?ref=); the code
+    // travels in the cookie the middleware set. Server captures once (unique inviteeId) AND, if no
+    // code is present, runs the IP/UA device fallback — so we send login-mark either way.
+    const ref = readRef();
+    const path = ref ? `/api/login-mark?ref=${encodeURIComponent(ref)}` : "/api/login-mark";
+    api(path, { method: "POST" }).catch(() => { /* GM tap retries; capture is idempotent */ });
   }, [authenticated, refresh, api]);
 
   // Preload-ahead: refill well before the deck runs dry (threshold 8, not 1), so a fresh card is
@@ -173,9 +186,8 @@ function App() {
   const gm = useCallback(async () => {
     setBusy(true);
     try {
-      const ref = sessionStorage.getItem("hf_ref");
+      const ref = readRef();
       await api(ref ? `/api/login-mark?ref=${encodeURIComponent(ref)}` : "/api/login-mark", { method: "POST" });
-      if (ref) sessionStorage.removeItem("hf_ref");
       await refresh();
     } finally {
       setBusy(false);

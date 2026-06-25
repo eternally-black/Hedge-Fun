@@ -2,7 +2,7 @@
 
 import { useState, type ReactNode } from "react";
 import { type Me } from "../ui";
-import { INVITE_X, INVITE_TG, SHARE_BASE_URL, composeXShare, composeTgShare, openShare } from "@/lib/share";
+import { INVITE_X, INVITE_TG, refLink, composeXShare, composeTgShare, openShare } from "@/lib/share";
 
 // Referral screen (ported from app design). The invite link uses the user's REAL referralCode
 // (P-11: inviter earns 20% of the invitee's swipe+login points forever, once the invitee makes
@@ -10,13 +10,14 @@ import { INVITE_X, INVITE_TG, SHARE_BASE_URL, composeXShare, composeTgShare, ope
 export function InviteScreen({ me }: { me: Me | null }) {
   const [copied, setCopied] = useState(false);
   const code = me?.user.referralCode ?? null;
-  // Display strips the scheme; the real link carries the FULL code as ?ref= (login-mark captures it).
-  const link = code ? `${SHARE_BASE_URL.replace(/^https?:\/\//, "")}/?ref=${code}` : "…";
+  // One source of truth for the invite URL (refLink → stealth /r/<code>). Display drops the scheme.
+  const fullLink = code ? refLink(code) : null;
+  const link = fullLink ? fullLink.replace(/^https?:\/\//, "") : "…";
 
   const copy = async () => {
-    if (!code) return;
+    if (!fullLink) return;
     try {
-      await navigator.clipboard.writeText(`${SHARE_BASE_URL}/?ref=${code}`);
+      await navigator.clipboard.writeText(fullLink);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1600);
     } catch {

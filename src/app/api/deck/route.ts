@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 
 import { categoryOf, shuffleNoRun } from "@/lib/deck-mix";
+import type { DeckResponse } from "@/lib/api-types";
 
 // The blitz deck: cached OPEN binary markets resolving within 48h.
 // 48h (not 24h) so the pool includes sports/esports (teams, players), which resolve further
@@ -56,5 +57,15 @@ export async function GET(req: Request) {
   // Randomly mix categories with the rule: never >2 cards of the same category in a row.
   // Seed from the clock so each fetch yields a fresh order.
   const cards = shuffleNoRun(candidates, (c) => categoryOf(c), DECK_SIZE, Date.now() & 0x7fffffff);
-  return NextResponse.json({ cards });
+  const body: DeckResponse = {
+    cards: cards.map((c) => ({
+      ...c,
+      // The query filters yes/noPriceBp to 1500..8500, so they're non-null here (the DB column
+      // is nullable in general). resolutionDeadline is a Date → ISO string for the JSON contract.
+      yesPriceBp: c.yesPriceBp!,
+      noPriceBp: c.noPriceBp!,
+      resolutionDeadline: c.resolutionDeadline.toISOString(),
+    })),
+  };
+  return NextResponse.json(body);
 }

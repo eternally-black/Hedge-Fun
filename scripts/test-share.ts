@@ -8,8 +8,8 @@ import {
 
 const CODE = "AbC-123_xyz"; // exercises url-safe chars that still encode (- and _ pass through)
 
-// ---- ref link carries the FULL code as ?ref= on the prod domain (the capture contract) ----
-assert.strictEqual(refLink(CODE), `${SHARE_BASE_URL}/?ref=${CODE}`, "ref link = base/?ref=fullcode");
+// ---- ref link is the stealth /r/<code> path on the prod domain (middleware marks + redirects) ----
+assert.strictEqual(refLink(CODE), `${SHARE_BASE_URL}/r/${CODE}`, "ref link = base/r/<code>");
 assert.ok(SHARE_BASE_URL.startsWith("https://app.hedgeyour.fun"), "prod domain");
 
 // ---- X share: full text blob, handle tagged, link inline, no leftover placeholders ----

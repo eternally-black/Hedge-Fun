@@ -2,36 +2,12 @@
 "use client";
 
 import { categoryOf, type Category } from "@/lib/deck-mix";
+import type { DeckCard, MeResponse } from "@/lib/api-types";
 
-export type Card = {
-  id: string;
-  question: string;
-  category: string | null;
-  outcomeYesLabel: string;
-  outcomeNoLabel: string;
-  yesPriceBp: number;
-  noPriceBp: number;
-  resolutionDeadline: string;
-};
-
-export type Me = {
-  user: { id: string; email: string | null; twitter: string | null; referralCode: string };
-  balanceCents: number;
-  points: { total: number; bonusFromX2: number };
-  swipes: { used: number; cap: number };
-  skips: { usedToday: number; nextIsFree: boolean; shardCost: number };
-  shards: number;
-  artifacts: number;
-  streak: {
-    level: number;
-    state: string;
-    recoverableUntil: string | null;
-    todayWeekday: number; // 0=Mon..6=Sun — which column is today
-    windowStartWeekday: number; // 0=Mon..6=Sun — where this user's 7-day window starts
-  };
-  loginMarkedToday: boolean;
-  dev?: boolean; // dev test account: unlimited skips + deck reset
-};
+// The screens consume the API contract directly (src/lib/api-types.ts) — single source of truth,
+// shared verbatim with the Android client. These aliases keep the existing screen imports working.
+export type Card = DeckCard;
+export type Me = MeResponse;
 
 export type Screen = "deck" | "gm" | "vault" | "invite" | "you" | "leaderboard";
 

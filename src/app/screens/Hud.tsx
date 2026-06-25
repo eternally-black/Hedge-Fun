@@ -8,7 +8,8 @@ import { type Me, num, usd } from "../ui";
 // callbacks from the parent, so it only re-renders when me/pop actually change.
 export const Hud = memo(function Hud({ me, pop, onShards, onGM, onBalance }: { me: Me | null; pop: { amt: number; color: string } | null; onShards: () => void; onGM: () => void; onBalance: () => void }) {
   const shards = me?.shards ?? 0;
-  const shardPct = Math.round((shards / 20) * 100);
+  const per = me?.shardsPerArtifact ?? 20;
+  const shardPct = Math.round((shards / per) * 100);
 
   return (
     <div style={{ position: "relative", zIndex: 30, padding: "16px 16px 10px", background: "linear-gradient(180deg, color-mix(in srgb, var(--bg) 92%, transparent), transparent)" }}>
@@ -37,7 +38,7 @@ export const Hud = memo(function Hud({ me, pop, onShards, onGM, onBalance }: { m
       </div>
 
       <div onClick={onShards} style={{ marginTop: 9, display: "flex", alignItems: "center", gap: 9, cursor: "pointer" }}>
-        <div style={{ fontSize: 9, letterSpacing: ".12em", textTransform: "uppercase", color: "var(--gold)", fontWeight: 700, whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: 4 }}>◆ {shards}/20</div>
+        <div style={{ fontSize: 9, letterSpacing: ".12em", textTransform: "uppercase", color: "var(--gold)", fontWeight: 700, whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: 4 }}>◆ {shards}/{per}</div>
         <div style={{ flex: 1, height: 7, borderRadius: 6, background: "var(--panel2)", overflow: "hidden", border: "1px solid var(--line)" }}>
           <div style={{ height: "100%", width: `${shardPct}%`, background: "linear-gradient(90deg,#c98a1e,var(--gold))", borderRadius: 6 }} />
         </div>

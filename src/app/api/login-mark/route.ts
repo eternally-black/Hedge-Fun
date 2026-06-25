@@ -4,15 +4,22 @@ import { authUser } from "@/lib/privy";
 import { recordLogin } from "@/lib/login";
 import { qualifyDay } from "@/lib/streak";
 import { captureReferral, accrueReferralForInvitee } from "@/lib/referral";
+import { lookupReferralByDevice } from "@/lib/refclick";
+import type { LoginMarkResponse } from "@/lib/api-types";
 
 // The daily "GM" tap: login bonus + streak day qualification (one action in the MVP).
-// On first ever call, captures a referral if a ?ref=<referralCode> is present.
+// On first ever call, captures a referral: code comes from the hf_ref cookie (stealth — never in
+// the URL), or, if absent, from the IP/UA device match logged when the /r/<code> link was clicked.
 export async function POST(req: Request) {
   const user = await authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
-  // Referral capture (once). ref = inviter's referralCode.
-  const refCode = new URL(req.url).searchParams.get("ref");
+  // Referral capture (once). ref = inviter's referralCode from the cookie; if the client sent
+  // none (cookie purged / clicked in a different browser than they signed up in), fall back to
+  // the IP/UA device match. captureReferral is idempotent (unique inviteeId), so this is safe to
+  // run on every GM tap — only the first one binds.
+  let refCode = new URL(req.url).searchParams.get("ref");
+  if (!refCode) refCode = await lookupReferralByDevice(req.headers);
   if (refCode) {
     const inviter = await prisma.user.findUnique({ where: { referralCode: refCode } });
     if (inviter) await captureReferral(inviter.id, user.id);
@@ -25,8 +32,9 @@ export async function POST(req: Request) {
   // (idempotent, scans only un-accrued rows). Daily GM is the natural trigger.
   await accrueReferralForInvitee(user.id);
 
-  return NextResponse.json({
+  const body: LoginMarkResponse = {
     login: { awarded: login.awarded, amount: login.amount },
     streak: { qualifiedToday: streak.qualifiedToday, level: streak.currentLevel, state: streak.state },
-  });
+  };
+  return NextResponse.json(body);
 }

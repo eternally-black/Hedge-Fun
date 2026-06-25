@@ -42,7 +42,7 @@ export function ProfileScreen({ me, api, onLeaderboard, onRefresh, onHistory }: 
         <Tile label="Points" value={me ? num(me.points.total) : "—"} color="var(--energy)" />
         <Tile label="Virtual $" value={me ? usd(me.balanceCents) : "—"} color="var(--yes)" />
         <Tile label="Streak" value={me ? `🔥 ${me.streak.level}d` : "—"} color="var(--text)" />
-        <Tile label="◆ Shards" value={me ? `${me.shards}/20` : "—"} color="var(--gold)" />
+        <Tile label="◆ Shards" value={me ? `${me.shards}/${me.shardsPerArtifact}` : "—"} color="var(--gold)" />
       </div>
 
       <div style={{ marginTop: 20, fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700 }}>Prediction history</div>

@@ -11,10 +11,11 @@ type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 export function VaultScreen({ me, api, onRefresh }: { me: Me | null; api: Api; onRefresh: () => Promise<void> }) {
   const [busy, setBusy] = useState(false);
   const shards = me?.shards ?? 0;
+  const per = me?.shardsPerArtifact ?? 20;
   const artifacts = me?.artifacts ?? 0;
   const burned = me?.streak.state === "BURNED_RECOVERABLE";
   const circumference = 326.7;
-  const dash = `${((shards / 20) * circumference).toFixed(0)} ${circumference}`;
+  const dash = `${((shards / per) * circumference).toFixed(0)} ${circumference}`;
 
   const revive = async () => {
     setBusy(true);
@@ -31,7 +32,7 @@ export function VaultScreen({ me, api, onRefresh }: { me: Me | null; api: Api; o
   return (
     <div className="hf-scroll" style={{ position: "absolute", inset: 0, overflowY: "auto", padding: "8px 18px 20px", textAlign: "center" }}>
       <div style={{ fontFamily: "var(--df)", fontSize: 30, marginTop: 6 }}>The Vault</div>
-      <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>Correct calls drop shards. 20 shards forge 1 artifact.</div>
+      <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>Correct calls drop shards. {per} shards forge 1 artifact.</div>
 
       <div style={{ margin: "20px auto 0", width: 150, height: 150, position: "relative", display: "flex", alignItems: "center", justifyContent: "center" }}>
         <svg viewBox="0 0 120 120" style={{ position: "absolute", inset: 0, transform: "rotate(-90deg)" }}>
@@ -40,10 +41,10 @@ export function VaultScreen({ me, api, onRefresh }: { me: Me | null; api: Api; o
         </svg>
         <div style={{ position: "relative" }}>
           <div style={{ fontSize: 40, filter: "drop-shadow(0 0 12px var(--gold))" }}>◆</div>
-          <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 20, color: "var(--gold)", marginTop: 2 }}>{shards}/20</div>
+          <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 20, color: "var(--gold)", marginTop: 2 }}>{shards}/{per}</div>
         </div>
       </div>
-      <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 6 }}>{20 - shards} more shards to forge your next artifact</div>
+      <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 6 }}>{per - shards} more shards to forge your next artifact</div>
 
       <div style={{ marginTop: 22, textAlign: "left", fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700 }}>Artifacts · revive a burned streak</div>
       <div style={{ display: "flex", gap: 10, marginTop: 10 }}>

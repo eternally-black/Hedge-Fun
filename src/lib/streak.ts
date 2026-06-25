@@ -163,7 +163,7 @@ export async function evaluateStreak(userId: string, at: Date = new Date()) {
 export async function recoverStreak(
   userId: string,
   at: Date = new Date(),
-): Promise<{ recovered: boolean; reason?: string; currentLevel: number }> {
+): Promise<{ recovered: boolean; reason?: "no_streak" | "not_recoverable" | "window_expired" | "no_artifact"; currentLevel: number }> {
   return prisma.$transaction(async (tx) => {
     const streak = await tx.streak.findUnique({ where: { userId } });
     if (!streak) return { recovered: false, reason: "no_streak", currentLevel: 0 };

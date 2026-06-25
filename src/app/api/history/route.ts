@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
+import type { HistoryResponse } from "@/lib/api-types";
 
 // Prediction history: the user's bets joined with market info. PENDING (awaiting resolution)
 // first, then most-recently-settled. Returns the REAL side label the user picked (team/Over/Up/
@@ -31,7 +32,7 @@ export async function GET(req: Request) {
     },
   });
 
-  const rows = bets.map((b) => ({
+  const rows: HistoryResponse["rows"] = bets.map((b) => ({
     id: b.id,
     question: b.market.question,
     // The label of the side the user actually bet (YES = side A label, NO = side B label).
@@ -41,8 +42,8 @@ export async function GET(req: Request) {
     lockedPriceBp: b.lockedPriceBp,
     status: b.settlementStatus === "PENDING" ? "PENDING" : b.result, // PENDING | WIN | LOSS | PUSH
     pnlCents: b.pnlCents,
-    resolutionDeadline: b.market.resolutionDeadline,
-    createdAt: b.createdAt,
+    resolutionDeadline: b.market.resolutionDeadline.toISOString(),
+    createdAt: b.createdAt.toISOString(),
   }));
 
   // Pending first (most urgent / what the user wants to glance at), then settled by recency.

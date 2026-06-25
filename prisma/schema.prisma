@@ -341,6 +341,23 @@ model ReferralEvent {
   @@map("referral_events")
 }
 
+// A click on a referral link (/r/<code> or /?ref=<code>), logged BEFORE signup so attribution
+// survives the device losing the cookie (in-app browser -> system browser is the common mobile
+// case). ip/ua are HMAC-SHA256 hashes, never plaintext — defense in depth against a DB dump,
+// not a privacy claim (see lib/refclick.ts). Looked up by (ipHash, uaHash) within 7 days when a
+// fresh signup has no hf_ref cookie. No FK to User — the clicker isn't a user yet.
+model ReferralClick {
+  id        String   @id @default(cuid())
+  code      String // the inviter's referralCode that was clicked
+  ipHash    Bytes // HMAC-SHA256(ip)
+  uaHash    Bytes // HMAC-SHA256(user-agent\naccept-language)
+  createdAt DateTime @default(now())
+
+  // The cross-browser attribution lookup: WHERE ipHash=? AND uaHash=? AND createdAt > now()-7d.
+  @@index([ipHash, uaHash, createdAt])
+  @@map("referral_clicks")
+}
+
 // ============================================================ LEADERBOARD (deferred UI)
 
 model LeaderboardSnapshot {

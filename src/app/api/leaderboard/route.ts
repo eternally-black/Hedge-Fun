@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 import { scorePoints } from "@/lib/points";
+import type { LeaderboardResponse } from "@/lib/api-types";
 
 const TOP_N = 100;
 
@@ -55,5 +56,6 @@ export async function GET(req: Request) {
       ? { rank: null, points: 0 }
       : { rank: meIdx + 1, points: scored[meIdx].points };
 
-  return NextResponse.json({ top, me });
+  const body: LeaderboardResponse = { top, me };
+  return NextResponse.json(body);
 }
