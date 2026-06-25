@@ -134,9 +134,12 @@ function App() {
         .then(() => refreshMe()) // stats only (points/shards/balance/skip counter); never the deck
         .catch((e) => {
           const status = (e as { status?: number }).status;
+          // 403 = daily swipe cap hit (raced past the client gate). The bet wasn't stored;
+          // refreshMe pulls used>=cap, which flips capReached and shows the limit screen.
+          if (status === 403) { flashToast("Daily limit reached — back at 00:00 UTC"); void refreshMe(); }
           // 409 (already bet) is fine — the card's gone anyway. 402 (skip blocked) shouldn't
           // happen since we gate above, but if it races, just surface it. Card already advanced.
-          if (status === 402) flashToast("No shards — earn one (or wait for tomorrow's free skip)");
+          else if (status === 402) flashToast("No shards — earn one (or wait for tomorrow's free skip)");
           else if (status !== 409) console.error(e);
         });
     },
@@ -174,6 +177,9 @@ function App() {
   topRef.current = top; // keep the stable handleAction pointed at the live top card
   // Skip is blocked when the free daily skip is used AND the user can't afford the shard cost.
   const skipBlocked = !!me && !me.skips.nextIsFree && me.shards < me.skips.shardCost;
+  // Hard daily cap: once a non-dev user hits the swipe cap, stop the deck and show the
+  // "come back tomorrow" screen. Dev accounts swipe unlimited (and have a deck reset).
+  const capReached = !!me && !me.dev && me.swipes.used >= me.swipes.cap;
 
   return (
     <Frame>
@@ -189,30 +195,45 @@ function App() {
         {screen === "deck" && (
           <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column" }}>
             <div style={{ position: "relative", flex: 1, margin: "6px 14px 0" }}>
-              {/* next card — FULLY rendered behind the top one (not a gray stub) */}
-              {next && <CardPreview key={next.id} card={next} />}
-              {top ? (
-                <DeckCard key={top.id} card={top} busy={busy} onAction={handleAction} onTap={noop} />
-              ) : (
-                <div style={{ position: "absolute", inset: 0, borderRadius: 26, background: "var(--panel)", border: "1px solid var(--line)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, textAlign: "center" }}>
-                  <p style={{ color: "var(--muted)" }}>No more cards right now. Check back after the next batch resolves.</p>
+              {capReached ? (
+                <div style={{ position: "absolute", inset: 0, borderRadius: 26, background: "var(--panel)", border: "1px solid var(--line)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 28, textAlign: "center", gap: 10 }}>
+                  <div style={{ fontFamily: "var(--df)", fontSize: 34 }}>That&apos;s a wrap.</div>
+                  <p style={{ color: "var(--muted)", fontSize: 14 }}>
+                    You hit today&apos;s {me?.swipes.cap} swipes. Come back after 00:00 UTC for a fresh deck.
+                  </p>
                 </div>
+              ) : (
+                <>
+                  {/* next card — FULLY rendered behind the top one (not a gray stub) */}
+                  {next && <CardPreview key={next.id} card={next} />}
+                  {top ? (
+                    <DeckCard key={top.id} card={top} busy={busy} onAction={handleAction} onTap={noop} />
+                  ) : (
+                    <div style={{ position: "absolute", inset: 0, borderRadius: 26, background: "var(--panel)", border: "1px solid var(--line)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, textAlign: "center" }}>
+                      <p style={{ color: "var(--muted)" }}>No more cards right now. Check back after the next batch resolves.</p>
+                    </div>
+                  )}
+                </>
               )}
             </div>
 
-            {/* fallback buttons */}
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 18, padding: "14px 0 2px" }}>
-              <CircleBtn glyph="✕" color="var(--no)" size={56} disabled={busy || !top} onClick={() => top && act(top, "NO")} />
-              <CircleBtn glyph="↑" color="var(--skip)" size={46} disabled={busy || !top || skipBlocked} onClick={() => top && act(top, "SKIP")} />
-              <CircleBtn glyph="✓" color="var(--yes)" size={56} disabled={busy || !top} onClick={() => top && act(top, "YES")} />
-            </div>
-            <div style={{ textAlign: "center", fontSize: 10, color: "var(--muted)", paddingBottom: 8 }}>
-              {me?.skips.nextIsFree
-                ? "Skip free today"
-                : skipBlocked
-                  ? "Skip needs 1 ◆ — none left"
-                  : `Skip costs 1 ◆`}
-            </div>
+            {/* fallback buttons — hidden once the daily cap is reached */}
+            {!capReached && (
+              <>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 18, padding: "14px 0 2px" }}>
+                  <CircleBtn glyph="✕" color="var(--no)" size={56} disabled={busy || !top} onClick={() => top && act(top, "NO")} />
+                  <CircleBtn glyph="↑" color="var(--skip)" size={46} disabled={busy || !top || skipBlocked} onClick={() => top && act(top, "SKIP")} />
+                  <CircleBtn glyph="✓" color="var(--yes)" size={56} disabled={busy || !top} onClick={() => top && act(top, "YES")} />
+                </div>
+                <div style={{ textAlign: "center", fontSize: 10, color: "var(--muted)", paddingBottom: 8 }}>
+                  {me?.skips.nextIsFree
+                    ? "Skip free today"
+                    : skipBlocked
+                      ? "Skip needs 1 ◆ — none left"
+                      : `Skip costs 1 ◆`}
+                </div>
+              </>
+            )}
           </div>
         )}
 

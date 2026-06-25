@@ -84,16 +84,28 @@ async function main() {
   }
   console.log("3. seeded", markets.length, "synthetic markets");
 
-  // 4. Swipe: SWIPE_CAP earning + 1 over-cap, each on a distinct market. Lock the BOUGHT
-  //    side's price (C2).
-  for (let i = 0; i < SWIPE_CAP + 1; i++) {
+  // 4. Swipe: SWIPE_CAP earning swipes, each on a distinct market, locking the BOUGHT
+  //    side's price (C2). The (cap+1)th is a HARD STOP — it must throw, store nothing.
+  for (let i = 0; i < SWIPE_CAP; i++) {
     const m = markets[i];
     const side = i % 2 ? "NO" : "YES";
     const lockedPriceBp = side === "YES" ? m.yesPriceBp! : m.noPriceBp!;
     const r = await recordSwipe({ userId: user.id, marketId: m.id, side, lockedPriceBp });
-    if (i < SWIPE_CAP) assert.strictEqual(r.pointsAwarded, 1, `swipe ${i} earns a point`);
-    else assert.strictEqual(r.pointsAwarded, 0, "over-cap swipe earns 0");
+    assert.strictEqual(r.pointsAwarded, 1, `swipe ${i} earns a point`);
   }
+  // Over-cap (non-dev): hard stop — recordSwipe throws and no bet is created.
+  const overCapMkt = markets[SWIPE_CAP];
+  let capStopped = false;
+  try {
+    await recordSwipe({ userId: user.id, marketId: overCapMkt.id, side: "YES", lockedPriceBp: overCapMkt.yesPriceBp! });
+  } catch (e) {
+    capStopped = (e as Error).name === "SwipeCapReachedError";
+  }
+  assert.ok(capStopped, "over-cap swipe is hard-stopped (throws SwipeCapReachedError)");
+  const overCapBet = await prisma.bet.findUnique({ where: { userId_marketId: { userId: user.id, marketId: overCapMkt.id } } });
+  assert.strictEqual(overCapBet, null, "no bet stored for the hard-stopped over-cap swipe");
+  // (Dev capBypass exemption is asserted in test-swipe-cap.ts in isolation, so it doesn't
+  //  perturb this user's counters/P&L below.)
 
   // C1: a second swipe on a market already bet is rejected by the unique constraint.
   let dedupRejected = false;

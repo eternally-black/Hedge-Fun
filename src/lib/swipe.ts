@@ -4,9 +4,19 @@ import { utcDay } from "./time";
 import { writePoints } from "./points";
 import { STAKE_CENTS, SWIPE_CAP } from "./config";
 
+// Thrown when a non-dev user tries to swipe past the daily cap. The route turns it
+// into a 403 so the client can show the "daily limit reached" screen.
+export class SwipeCapReachedError extends Error {
+  constructor() {
+    super("daily swipe cap reached");
+    this.name = "SwipeCapReachedError";
+  }
+}
+
 // Record a swipe = a paper bet on a market outcome at a locked price.
-// Cap (P-3): first SWIPE_CAP/day earn 1 raw point each; over-cap swipes are still
-// stored as bets but earn nothing (decided: allow over-cap, no points).
+// Cap (P-3): SWIPE_CAP swipes/day, each earns 1 raw point. HARD STOP — the
+// (SWIPE_CAP+1)th swipe is rejected (throws SwipeCapReachedError), nothing is stored.
+// Dev accounts (capBypass) are exempt: they swipe unlimited and earn every time.
 // Atomicity: the daily swipeCount increment is the cap gate — it's the source of truth.
 export async function recordSwipe(input: {
   userId: string;
@@ -33,6 +43,10 @@ export async function recordSwipe(input: {
     });
 
     const overCap = counter.swipeCount > SWIPE_CAP;
+    // HARD STOP at the cap for normal users: reject the over-cap swipe so no bet is
+    // stored. Throwing here rolls back the counter increment too (same transaction).
+    // Dev accounts bypass the stop entirely.
+    if (overCap && !input.capBypass) throw new SwipeCapReachedError();
     // Dev bypass: earn a point on every swipe regardless of the cap (for testing accrual).
     const earnedPoint = input.capBypass ? true : !overCap;
 
