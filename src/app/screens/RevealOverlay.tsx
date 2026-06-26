@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { ResultRow } from "@/lib/api-types";
 import { catOfResult, resultMeta } from "../ui";
 import { useCardSwipe } from "../useCardSwipe";
+import { PREVIEW_SCALE, PREVIEW_Y } from "../DeckCard";
 
 // ─── Results Reveal — the dopamine peak ──────────────────────────────────────────────────────────
 // Plays on app open, before the deck, replaying what resolved while the user was away. Three phases:
@@ -101,11 +102,14 @@ export function RevealOverlay({
           <div style={{ display: "flex", gap: 5, justifyContent: "center", padding: "52px 46px 0" }}>
             {featured.map((_, k) => <div key={k} style={{ flex: 1, height: 3, borderRadius: 3, background: k <= state.i ? "var(--text)" : "var(--line)", transition: "background .3s" }} />)}
           </div>
-          <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: "14px 22px", minHeight: 0 }}>
+          {/* The SAME visual stack as the blitz deck: the next card sits fully-rendered behind the
+              top one (scaled back + dimmed), so the swipe mechanic reads instantly as "a deck". */}
+          <div style={{ position: "relative", flex: 1, margin: "10px 22px 0", minHeight: 0 }}>
+            {featured[state.i + 1] && <RevealCardPreview key={`p${state.i}`} row={featured[state.i + 1]!} />}
             {/* keyed by index so each card remounts (fresh flip + a fresh swipe hook state) */}
             <RevealCard key={state.i} row={featured[state.i]!} onAdvance={next} />
           </div>
-          <div style={{ textAlign: "center", paddingBottom: 30, color: "var(--muted)", fontSize: 12 }}>Swipe or tap to continue · {state.i + 1} / {featured.length}</div>
+          <div style={{ textAlign: "center", padding: "14px 0 30px", color: "var(--muted)", fontSize: 12 }}>Swipe or tap to continue · {state.i + 1} / {featured.length}</div>
         </div>
       )}
 
@@ -151,25 +155,13 @@ function AggTile({ value, label, color }: { value: string; label: string; color:
 
 const FLIP_MS = 500; // hfFlipIn duration — the card owns transform via the keyframe until this ends
 
-function RevealCard({ row, onAdvance }: { row: ResultRow; onAdvance: () => void }) {
+// ── RevealCardFace — the card VISUALS, pure + memoized (mirrors DeckCard's CardFace). Used by both
+//    the interactive top card and the preview behind it, so the next card is fully rendered (not a
+//    stub) — exactly how the blitz deck does its stack. `showCoins=false` on the preview (the burst
+//    only plays on the live card). No gesture, no positioning here.
+const RevealCardFace = memo(function RevealCardFace({ row, showCoins }: { row: ResultRow; showCoins: boolean }) {
   const cat = catOfResult(row);
   const m = resultMeta(row.status);
-
-  // Same swipe physics as the deck (useCardSwipe): a swipe in any direction OR a tap advances. The
-  // flip plays on mount and owns `transform`; once it ends, the swipe style takes over (mirrors the
-  // deck's entering→drag handoff). Grabbing mid-flip cancels it so the drag is immediate.
-  const [flipping, setFlipping] = useState(true);
-  const flipTimer = useRef<number | undefined>(undefined);
-  useEffect(() => {
-    flipTimer.current = window.setTimeout(() => setFlipping(false), FLIP_MS);
-    return () => window.clearTimeout(flipTimer.current);
-  }, []);
-  const swipe = useCardSwipe({ onCommit: onAdvance, onTap: onAdvance });
-  const onPointerDown = (e: React.PointerEvent) => {
-    if (flipping) { window.clearTimeout(flipTimer.current); setFlipping(false); }
-    swipe.handlers.onPointerDown(e);
-  };
-  const flipAnim = flipping && !swipe.active && !swipe.flying;
   const isWin = row.status === "WIN";
   const isVoid = row.status === "PUSH";
   const badge = isWin ? "WON" : isVoid ? "REFUNDED" : "MISSED";
@@ -187,49 +179,37 @@ function RevealCard({ row, onAdvance }: { row: ResultRow; onAdvance: () => void 
 
   // Coin burst on a win — 14 coins, positions fixed once per card (useMemo keyed by row.id).
   const coins = useMemo(
-    () => (isWin ? Array.from({ length: 14 }, (_, k) => ({
+    () => (isWin && showCoins ? Array.from({ length: 14 }, (_, k) => ({
       key: k,
       left: `${8 + Math.random() * 84}%`,
       size: `${15 + Math.random() * 13}px`,
       cx: `${(Math.random() * 120 - 60).toFixed(0)}px`,
       anim: `hfCoin ${(1 + Math.random() * 0.7).toFixed(2)}s ${(Math.random() * 0.35).toFixed(2)}s ease-out forwards`,
     })) : []),
-    [isWin, row.id], // eslint-disable-line react-hooks/exhaustive-deps -- positions fixed per card; isWin/id are the identity
+    [isWin, showCoins, row.id], // eslint-disable-line react-hooks/exhaustive-deps -- positions fixed per card
   );
 
   return (
-    <div
-      onPointerDown={onPointerDown}
-      onPointerMove={swipe.handlers.onPointerMove}
-      onPointerUp={swipe.handlers.onPointerUp}
-      style={{
-        position: "relative", width: 300, maxWidth: "100%", borderRadius: 26, padding: 20,
-        background: `radial-gradient(120% 80% at 80% 0%, color-mix(in srgb,${m.accent} 16%,transparent), transparent 58%), linear-gradient(170deg, var(--panel2), var(--panel))`,
-        border: `1px solid color-mix(in srgb,${m.accent} 45%, var(--line))`,
-        boxShadow: isWin ? "0 0 52px -6px color-mix(in srgb,var(--yes) 65%,transparent)" : "0 22px 44px -20px rgba(0,0,0,.7)",
-        touchAction: "none", cursor: "grab", willChange: "transform",
-        ...(flipAnim
-          ? { animation: `hfFlipIn ${FLIP_MS}ms cubic-bezier(.3,1.1,.5,1) both` }
-          : swipe.style),
-      }}
-    >
+    <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", padding: 20 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 7, background: "rgba(0,0,0,.35)", padding: "5px 10px", borderRadius: 18, fontSize: 10, letterSpacing: ".12em", textTransform: "uppercase", fontWeight: 700, color: "#fff" }}>
           <span style={{ width: 7, height: 7, borderRadius: "50%", background: cat.color }} />{cat.label}
         </div>
         <div style={{ marginLeft: "auto", fontFamily: "var(--df)", fontSize: 18, color: m.accent, letterSpacing: ".04em" }}>{badge}</div>
       </div>
-      <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 16, lineHeight: 1.3 }}>{row.question}</div>
-      <div style={{ fontFamily: "var(--df)", fontSize: 31, lineHeight: 1.03, color: "#fff", marginTop: 6 }}>{row.outcome}</div>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 16 }}>
-        <span style={{ fontSize: 11, color: "var(--muted)" }}>Your call</span>
-        <span style={{ fontFamily: "var(--df)", fontSize: 15, color: sideColor, border: `2px solid ${sideColor}`, borderRadius: 8, padding: "1px 9px" }}>{row.side}</span>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center" }}>
+        <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 16, lineHeight: 1.3 }}>{row.question}</div>
+        <div style={{ fontFamily: "var(--df)", fontSize: 31, lineHeight: 1.03, color: "#fff", marginTop: 6 }}>{row.outcome}</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 16 }}>
+          <span style={{ fontSize: 11, color: "var(--muted)" }}>Your call</span>
+          <span style={{ fontFamily: "var(--df)", fontSize: 15, color: sideColor, border: `2px solid ${sideColor}`, borderRadius: 8, padding: "1px 9px" }}>{row.side}</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "flex-end", gap: 10, marginTop: 12 }}>
+          <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 34, color: m.accent, lineHeight: 1 }}>{deltaStr}</div>
+          <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>{isVoid ? "returned" : isWin ? "virtual payout" : "virtual loss"}</div>
+        </div>
       </div>
-      <div style={{ display: "flex", alignItems: "flex-end", gap: 10, marginTop: 12 }}>
-        <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 34, color: m.accent, lineHeight: 1 }}>{deltaStr}</div>
-        <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>{isVoid ? "returned" : isWin ? "virtual payout" : "virtual loss"}</div>
-      </div>
-      <div style={{ marginTop: 15, paddingTop: 14, borderTop: "1px solid var(--line)", fontSize: 12, color: gotShards ? "var(--gold)" : "var(--muted)", fontWeight: gotShards ? 700 : 500 }}>{foot}</div>
+      <div style={{ paddingTop: 14, borderTop: "1px solid var(--line)", fontSize: 12, color: gotShards ? "var(--gold)" : "var(--muted)", fontWeight: gotShards ? 700 : 500 }}>{foot}</div>
 
       {coins.length > 0 && (
         <div style={{ position: "absolute", inset: 0, overflow: "hidden", pointerEvents: "none", borderRadius: 26 }}>
@@ -238,6 +218,65 @@ function RevealCard({ row, onAdvance }: { row: ResultRow; onAdvance: () => void 
           ))}
         </div>
       )}
+    </div>
+  );
+});
+
+// Shared card-shell styling so the top card and the preview match exactly (only the accent glow
+// differs per result). Mirrors the deck's rounded panel + shadow.
+function cardShell(row: ResultRow): React.CSSProperties {
+  const m = resultMeta(row.status);
+  const isWin = row.status === "WIN";
+  return {
+    position: "absolute", inset: 0, borderRadius: 26, overflow: "hidden",
+    background: `radial-gradient(120% 80% at 80% 0%, color-mix(in srgb,${m.accent} 16%,transparent), transparent 58%), linear-gradient(170deg, var(--panel2), var(--panel))`,
+    border: `1px solid color-mix(in srgb,${m.accent} 45%, var(--line))`,
+    boxShadow: isWin ? "0 0 52px -6px color-mix(in srgb,var(--yes) 65%,transparent)" : "0 22px 44px -20px rgba(0,0,0,.7)",
+  };
+}
+
+// ── RevealCardPreview — the next reveal card sitting behind the top one. Fully rendered, scaled
+//    back + dimmed + non-interactive. Uses the deck's exact PREVIEW_SCALE/_Y so the "deck" read is
+//    identical to the blitz deck's stack.
+function RevealCardPreview({ row }: { row: ResultRow }) {
+  return (
+    <div style={{ ...cardShell(row), filter: "brightness(.82)", pointerEvents: "none", transform: `scale(${PREVIEW_SCALE}) translateY(${PREVIEW_Y}px)`, transformOrigin: "center bottom" }}>
+      <RevealCardFace row={row} showCoins={false} />
+    </div>
+  );
+}
+
+// ── RevealCard — the interactive top card. Same swipe physics as the deck (useCardSwipe): a swipe
+//    in any direction OR a tap flings it off and advances. The flip plays on mount and owns
+//    `transform`; once it ends the swipe style takes over (mirrors the deck's entering→drag handoff).
+function RevealCard({ row, onAdvance }: { row: ResultRow; onAdvance: () => void }) {
+  const [flipping, setFlipping] = useState(true);
+  const flipTimer = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    flipTimer.current = window.setTimeout(() => setFlipping(false), FLIP_MS);
+    return () => window.clearTimeout(flipTimer.current);
+  }, []);
+  const swipe = useCardSwipe({ onCommit: onAdvance, onTap: onAdvance });
+  const onPointerDown = (e: React.PointerEvent) => {
+    if (flipping) { window.clearTimeout(flipTimer.current); setFlipping(false); } // grab cancels the flip
+    swipe.handlers.onPointerDown(e);
+  };
+  const flipAnim = flipping && !swipe.active && !swipe.flying;
+
+  return (
+    <div
+      onPointerDown={onPointerDown}
+      onPointerMove={swipe.handlers.onPointerMove}
+      onPointerUp={swipe.handlers.onPointerUp}
+      style={{
+        ...cardShell(row),
+        touchAction: "none", cursor: "grab", willChange: "transform",
+        ...(flipAnim
+          ? { animation: `hfFlipIn ${FLIP_MS}ms cubic-bezier(.3,1.1,.5,1) both` }
+          : swipe.style),
+      }}
+    >
+      <RevealCardFace row={row} showCoins />
     </div>
   );
 }
