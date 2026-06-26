@@ -131,12 +131,18 @@ function App() {
     // reveal while the deck arrives; a user without results waits on the spinner the deck-fetch fills).
     api("/api/deck").then((d) => setDeck((d as { cards: Card[] }).cards)).catch(console.error);
 
-    // Gate: me + results in parallel. Decide the reveal, set state, THEN unspin.
+    // Gate: me + results in parallel. Decide the daily-open ritual (auth → reveal? → GM → deck),
+    // set state, THEN unspin — so the first frame is the right screen, no flash.
+    //   • unseen results  → play the reveal (it chains forward to GM on finish/skip).
+    //   • else not GM'd today → open GM (daily check-in is the open ritual even with nothing to reveal).
+    //   • else (already checked in) → deck.
     Promise.all([api("/api/me"), api("/api/results")])
       .then(([m, r]) => {
-        setMe(m as Me);
+        const me = m as Me;
+        setMe(me);
         const unseen = (r as ResultsResponse).rows.filter((row) => !row.seen);
         if (unseen.length) setReveal(unseen);
+        else if (!me.loginMarkedToday) setScreen("gm");
       })
       .catch(console.error)
       .finally(() => setBooted(true));
@@ -242,6 +248,12 @@ function App() {
   const goDeck = useCallback(() => setScreen("deck"), []);
   const goNotifs = useCallback(() => setScreen("notifications"), []);
 
+  // Method-scoped login: a single loginMethods entry makes Privy skip the picker and go straight to
+  // that method (email → email entry, twitter → OAuth redirect). Stable so Onboarding gets the same
+  // refs each render.
+  const loginTwitter = useCallback(() => login({ loginMethods: ["twitter"] }), [login]);
+  const loginEmail = useCallback(() => login({ loginMethods: ["email"] }), [login]);
+
   // Sign out: clear local account state so a re-login boots fresh (no previous user's me/deck/reveal
   // flashing under the spinner), reset the boot gate, then end the Privy session. `authenticated`
   // flips false → the app falls back to Onboarding.
@@ -284,7 +296,7 @@ function App() {
   }, [api]);
 
   if (!ready) return <Frame><Spinner /></Frame>;
-  if (!authenticated) return <Frame><Onboarding onLogin={login} /></Frame>;
+  if (!authenticated) return <Frame><Onboarding onTwitter={loginTwitter} onEmail={loginEmail} /></Frame>;
   // Authed but not booted: hold the spinner until me + results are loaded and the reveal decision is
   // made. The first content frame below is then the correct screen (reveal or deck), never a flash.
   if (!booted) return <Frame><Spinner /></Frame>;
