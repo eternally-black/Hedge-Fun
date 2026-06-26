@@ -68,6 +68,10 @@ function App() {
   // the deck (it's a re-watch, not the open sequence).
   const [reveal, setReveal] = useState<ResultRow[] | null>(null);
   const revealMode = useRef<"ritual" | "replay">("ritual");
+  // Latest `me` mirrored into a ref so event handlers (e.g. exitReveal) can read the CURRENT value
+  // without depending on `me` — that keeps those callbacks stable across the frequent me refreshes.
+  const meRef = useRef<Me | null>(null);
+  meRef.current = me;
   // First-paint gate: stay on the spinner until me + results have loaded and we've DECIDED whether
   // the reveal plays. This prevents the deck flashing for a frame before the reveal floats up — the
   // very first content frame is already the right screen (reveal or deck), never an intermediate.
@@ -282,10 +286,12 @@ function App() {
 
   // Where a closed reveal leads. A daily-ritual reveal chains forward to GM, but ONLY if the user
   // hasn't checked in today — GM is once a day; otherwise the deck. A replay just returns to the deck.
+  // Reads the live `me` via meRef so this stays a stable callback (no [me] dep, no churn per swipe).
   const exitReveal = useCallback(() => {
-    if (revealMode.current === "ritual" && me && !me.loginMarkedToday) setScreen("gm");
+    const m = meRef.current;
+    if (revealMode.current === "ritual" && m && !m.loginMarkedToday) setScreen("gm");
     else setScreen("deck");
-  }, [me]);
+  }, []);
 
   // Reveal exits. Watching through to summary "clears unread" (design §4): mark seen on the SERVER so
   // the badge stays gone after the next /api/me. Skip is the safety net — it does NOT mark seen
