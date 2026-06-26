@@ -13,6 +13,7 @@ import { qualifyDay } from "../src/lib/streak";
 import { recordSwipe } from "../src/lib/swipe";
 import { effectivePoints } from "../src/lib/points";
 import { settleMarket, computePnl } from "./settle";
+import { resultBetSelect, toResultRow } from "../src/lib/results";
 
 const prisma = new PrismaClient();
 const TAG = "smoke-user"; // privyId prefix so we can clean up
@@ -158,6 +159,47 @@ async function main() {
   assert.strictEqual(bal2, bal1, "re-settle does not move balance");
   assert.strictEqual(coll2.shards, coll.shards, "re-settle does not double the shard");
   console.log("6. idempotency: re-settle no-op (balance & shards unchanged) ✓");
+
+  // 7. RESULTS / REVEAL / INBOX pipeline. Settle a SECOND market as VOID (canceled -> push), then
+  //    read the settled bets through the SAME mapper the /api/results route uses (resultBetSelect +
+  //    toResultRow). The HTTP contract is pinned in test-api-contract.ts; here we exercise the
+  //    domain side of the daily loop: WIN + VOID rows, unread starts true, /seen flips it.
+  const secondBet = await prisma.bet.findFirst({
+    where: { userId: user.id, settlementStatus: "PENDING" },
+    orderBy: { createdAt: "asc" },
+  });
+  assert.ok(secondBet, "have a second, still-pending bet to void");
+  await settleMarket(prisma, secondBet!.marketId, { kind: "void" });
+
+  const settledBets = await prisma.bet.findMany({
+    where: { userId: user.id, settlementStatus: { in: ["SETTLED", "VOID"] } },
+    orderBy: { settledAt: "desc" },
+    select: resultBetSelect,
+  });
+  const rows = settledBets.map(toResultRow);
+  assert.strictEqual(rows.length, 2, "two settled results (one WIN, one VOID)");
+  assert.ok(rows.every((r) => !r.seen), "settle leaves seenAt null -> all unread");
+
+  const win = rows.find((r) => r.status === "WIN");
+  const voidRow = rows.find((r) => r.status === "PUSH");
+  assert.ok(win, "WIN row present");
+  assert.strictEqual(win!.shards, 1, "WIN row reports the collected shard");
+  assert.ok(win!.deltaCents > 0, "WIN deltaCents positive");
+  assert.ok(voidRow, "VOID -> PUSH row present");
+  assert.strictEqual(voidRow!.outcome, "Voided", "VOID outcome label");
+  assert.strictEqual(voidRow!.deltaCents, 0, "VOID is a refund — zero delta");
+  assert.strictEqual(voidRow!.shards, 0, "VOID grants no shard");
+
+  // unread count == every settled bet (mirrors /api/me's count); /seen marks all, idempotent.
+  const unread0 = await prisma.bet.count({ where: { userId: user.id, settlementStatus: { in: ["SETTLED", "VOID"] }, seenAt: null } });
+  assert.strictEqual(unread0, 2, "two unread before seen");
+  const marked = await prisma.bet.updateMany({ where: { userId: user.id, settlementStatus: { in: ["SETTLED", "VOID"] }, seenAt: null }, data: { seenAt: new Date() } });
+  assert.strictEqual(marked.count, 2, "/seen marks both");
+  const unread1 = await prisma.bet.count({ where: { userId: user.id, settlementStatus: { in: ["SETTLED", "VOID"] }, seenAt: null } });
+  assert.strictEqual(unread1, 0, "unread cleared after seen");
+  const marked2 = await prisma.bet.updateMany({ where: { userId: user.id, settlementStatus: { in: ["SETTLED", "VOID"] }, seenAt: null }, data: { seenAt: new Date() } });
+  assert.strictEqual(marked2.count, 0, "seen is idempotent -> second mark touches 0");
+  console.log("7. results: WIN+VOID rows mapped, unread 2 -> 0 via seen (idempotent) ✓");
 
   console.log("\nSMOKE: end-to-end daily loop OK");
   await cleanup();

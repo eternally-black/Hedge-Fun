@@ -13,7 +13,10 @@ import { InviteScreen } from "./screens/InviteScreen";
 import { ProfileScreen } from "./screens/ProfileScreen";
 import { LeaderboardScreen } from "./screens/LeaderboardScreen";
 import { HistorySheet } from "./screens/HistorySheet";
+import { NotificationsScreen } from "./screens/NotificationsScreen";
+import { RevealOverlay } from "./screens/RevealOverlay";
 import { type Card, type Me, type Screen } from "./ui";
+import type { ResultRow, ResultsResponse } from "@/lib/api-types";
 
 const PRIVY_ON = !!process.env.NEXT_PUBLIC_PRIVY_APP_ID;
 
@@ -59,6 +62,10 @@ function App() {
   const [pop, setPop] = useState<{ amt: number; color: string } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  // Results reveal: the rows to play, or null when closed. Opened by the daily-open ritual (unseen
+  // results on auth) and by "Replay" from the inbox.
+  const [reveal, setReveal] = useState<ResultRow[] | null>(null);
+  const ritualDone = useRef(false); // run the auth→reveal→gm sequence once per load, not on every refresh
   const topping = useRef(false);
   const popTimer = useRef<number | undefined>(undefined);
   const toastTimer = useRef<number | undefined>(undefined);
@@ -114,6 +121,20 @@ function App() {
     const path = ref ? `/api/login-mark?ref=${encodeURIComponent(ref)}` : "/api/login-mark";
     api(path, { method: "POST" }).catch(() => { /* GM tap retries; capture is idempotent */ });
   }, [authenticated, refresh, api]);
+
+  // Daily-open ritual: on the first auth of a load, if results settled while away (unseen rows),
+  // play the reveal before the deck. Runs once (ritualDone ref) — refreshes after a swipe/GM must
+  // NOT re-trigger it. The reveal itself chains forward to GM/deck; skip/finish handles the badge.
+  useEffect(() => {
+    if (!authenticated || ritualDone.current) return;
+    ritualDone.current = true;
+    api("/api/results")
+      .then((r) => {
+        const unseen = (r as ResultsResponse).rows.filter((row) => !row.seen);
+        if (unseen.length) setReveal(unseen);
+      })
+      .catch(console.error);
+  }, [authenticated, api]);
 
   // Preload-ahead: refill well before the deck runs dry (threshold 8, not 1), so a fresh card is
   // always buffered behind the current one. `topping` dedupes so only one fetch is in flight.
@@ -212,6 +233,36 @@ function App() {
   const goLeaderboard = useCallback(() => setScreen("leaderboard"), []);
   const openHistory = useCallback(() => setHistoryOpen(true), []);
   const closeHistory = useCallback(() => setHistoryOpen(false), []);
+  const goDeck = useCallback(() => setScreen("deck"), []);
+  const goNotifs = useCallback(() => setScreen("notifications"), []);
+
+  // Opening the inbox clears the unread badge optimistically; the NotificationsScreen POSTs
+  // /api/results/seen, and the next /api/me confirms unreadResults=0.
+  const markResultsSeen = useCallback(() => {
+    setMe((m) => (m && m.unreadResults ? { ...m, unreadResults: 0 } : m));
+  }, []);
+
+  // Reveal exits. Watching through to summary "clears unread" (design §4): mark seen on the SERVER
+  // so the badge stays gone after the next /api/me. Skip is the safety net — it does NOT mark seen
+  // (unwatched results stay badged in the bell), only closes the overlay. Both chain forward and
+  // refresh /api/me so balance/shards/unread reflect the server. Replay (from inbox) re-opens all rows.
+  const finishReveal = useCallback(() => {
+    setReveal(null);
+    markResultsSeen();
+    api("/api/results/seen", { method: "POST" }).catch(() => { /* badge re-syncs from /api/me */ });
+    setScreen("gm");
+    void refreshMe();
+  }, [api, markResultsSeen, refreshMe]);
+  const skipReveal = useCallback(() => {
+    setReveal(null);
+    setScreen("gm");
+    void refreshMe(); // badge persists — unwatched results stay unread (the safety net)
+  }, [refreshMe]);
+  const replayReveal = useCallback(() => {
+    api("/api/results")
+      .then((r) => { setReveal((r as ResultsResponse).rows); setScreen("deck"); })
+      .catch(console.error);
+  }, [api]);
 
   if (!ready) return <Frame><div style={{ marginTop: 200, textAlign: "center", color: "var(--muted)" }}>Loading…</div></Frame>;
   if (!authenticated) return <Frame><Onboarding onLogin={login} /></Frame>;
@@ -233,7 +284,7 @@ function App() {
         </div>
       )}
       {historyOpen && <HistorySheet api={api} onClose={closeHistory} />}
-      <Hud me={me} pop={pop} onShards={goVault} onGM={goGmScreen} onBalance={openHistory} />
+      <Hud me={me} pop={pop} onShards={goVault} onGM={goGmScreen} onBalance={openHistory} onBell={goNotifs} />
 
       <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
         {screen === "deck" && (
@@ -281,14 +332,26 @@ function App() {
           </div>
         )}
 
-        {screen === "gm" && <GmScreen me={me} busy={busy} onGM={gm} />}
+        {screen === "gm" && <GmScreen me={me} busy={busy} onGM={gm} onEnterDeck={goDeck} />}
         {screen === "vault" && <VaultScreen me={me} api={api} onRefresh={refresh} />}
         {screen === "invite" && <InviteScreen me={me} />}
         {screen === "you" && <ProfileScreen me={me} api={api} onLeaderboard={goLeaderboard} onRefresh={refresh} onHistory={openHistory} />}
         {screen === "leaderboard" && <LeaderboardScreen api={api} />}
+        {screen === "notifications" && <NotificationsScreen api={api} onSeen={markResultsSeen} onReplay={replayReveal} />}
       </div>
 
       <BottomNav screen={screen} onNav={setScreen} />
+
+      {/* Results reveal sits above the whole shell (HUD + nav). */}
+      {reveal && (
+        <RevealOverlay
+          rows={reveal}
+          shards={me?.shards ?? 0}
+          shardsPerArtifact={me?.shardsPerArtifact ?? 20}
+          onDone={finishReveal}
+          onSkip={skipReveal}
+        />
+      )}
     </Frame>
   );
 }

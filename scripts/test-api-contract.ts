@@ -44,6 +44,8 @@ async function main() {
   const history = await import("../src/app/api/history/route");
   const leaderboard = await import("../src/app/api/leaderboard/route");
   const loginMark = await import("../src/app/api/login-mark/route");
+  const results = await import("../src/app/api/results/route");
+  const resultsSeen = await import("../src/app/api/results/seen/route");
 
   // Provision the test user via /me (which calls authUser -> ensureUser).
   const meRes = await me.GET(authed("http://x/api/me"));
@@ -68,11 +70,13 @@ async function main() {
   await expect401(skip.POST, "http://x/api/skip", { method: "POST" });
   await expect401(recover.POST, "http://x/api/recover", { method: "POST" });
   await expect401(loginMark.POST, "http://x/api/login-mark", { method: "POST" });
+  await expect401(results.GET, "http://x/api/results");
+  await expect401(resultsSeen.POST, "http://x/api/results/seen", { method: "POST" });
 
   // ---- (b) authed 200 + EXACT top-level key contract (Android binds to these) ----
   const meBody = await (await me.GET(authed("http://x/api/me"))).json();
   assert.deepStrictEqual(keysOf(meBody),
-    ["artifacts","balanceCents","dev","loginMarkedToday","points","shards","shardsPerArtifact","skips","streak","swipes","user"],
+    ["artifacts","balanceCents","dev","loginMarkedToday","points","shards","shardsPerArtifact","skips","streak","swipes","unreadResults","user"],
     "/me top-level keys");
   assert.deepStrictEqual(Object.keys(meBody.points).sort(), ["bonusFromX2","breakdown","total"], "/me points keys");
   assert.deepStrictEqual(Object.keys(meBody.swipes).sort(), ["cap","used"], "/me swipes keys");
@@ -119,6 +123,41 @@ async function main() {
   assert.strictEqual(recRes.status, 409, "/recover with no burned streak -> 409");
   const recBody = await recRes.json();
   assert.strictEqual(recBody.recovered, false, "/recover body recovered=false");
+
+  // results: empty top-level contract first (no settled bets yet).
+  const resEmpty = await (await results.GET(authed("http://x/api/results"))).json();
+  assert.deepStrictEqual(keysOf(resEmpty), ["rows","unreadCount"], "/results top-level keys");
+  assert.strictEqual(resEmpty.rows.length, 0, "/results no settled bets yet -> empty");
+
+  // Settle the swiped bet (resolve market YES) so /results returns a real ResultRow.
+  const { settleMarket } = await import("./settle");
+  await settleMarket(prisma, market.id, { kind: "resolved", resolvedYes: true });
+
+  const resBody = await (await results.GET(authed("http://x/api/results"))).json();
+  assert.strictEqual(resBody.rows.length, 1, "/results one settled bet -> one row");
+  assert.strictEqual(resBody.unreadCount, 1, "/results unread before seen = 1");
+  assert.deepStrictEqual(Object.keys(resBody.rows[0]).sort(),
+    ["category","deltaCents","id","outcome","pnlCents","question","seen","settledAt","shards","side","sideLabel","status"],
+    "/results row keys");
+  assert.strictEqual(resBody.rows[0].status, "WIN", "/results YES bet on YES resolution = WIN");
+  assert.strictEqual(resBody.rows[0].seen, false, "/results row unseen before /seen");
+
+  // /me reflects the unread before it's marked seen.
+  const meUnread = await (await me.GET(authed("http://x/api/me"))).json();
+  assert.strictEqual(meUnread.unreadResults, 1, "/me unreadResults = 1 before seen");
+
+  // results/seen: marks all unseen, idempotent.
+  const seen1 = await (await resultsSeen.POST(authed("http://x/api/results/seen", { method: "POST" }))).json();
+  assert.deepStrictEqual(keysOf(seen1), ["markedSeen"], "/results/seen top-level keys");
+  assert.strictEqual(seen1.markedSeen, 1, "/results/seen marks the 1 unseen row");
+  const seen2 = await (await resultsSeen.POST(authed("http://x/api/results/seen", { method: "POST" }))).json();
+  assert.strictEqual(seen2.markedSeen, 0, "/results/seen idempotent -> 0 on second call");
+
+  const resAfter = await (await results.GET(authed("http://x/api/results"))).json();
+  assert.strictEqual(resAfter.unreadCount, 0, "/results unread after seen = 0");
+  assert.strictEqual(resAfter.rows[0].seen, true, "/results row seen=true after /seen");
+  const meSeen = await (await me.GET(authed("http://x/api/me"))).json();
+  assert.strictEqual(meSeen.unreadResults, 0, "/me unreadResults = 0 after seen");
 
   // cleanup (children before parents)
   await prisma.shardGrant.deleteMany({ where: { userId: user.id } });

@@ -169,6 +169,7 @@ model Bet {
 
   createdAt DateTime  @default(now())
   settledAt DateTime?
+  seenAt    DateTime? // null = result not yet revealed to the user (inbox/reveal). Drives unread count.
 
   shardGrant ShardGrant?
 
@@ -178,6 +179,7 @@ model Bet {
   @@index([settlementStatus])
   @@index([marketId, settlementStatus])
   @@index([userId, utcDay])
+  @@index([userId, settlementStatus, seenAt]) // unread-results scan (/api/me unreadResults, /api/results/seen)
   @@map("bets")
 }
 

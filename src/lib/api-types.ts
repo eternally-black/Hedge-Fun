@@ -102,6 +102,35 @@ export interface HistoryResponse {
   pendingCount: number;
 }
 
+// ─── GET /api/results ──────────────────────────────────────────────────────────────────────────
+// Auth: Bearer. The user's SETTLED/VOID bets, newest first. Feeds BOTH the inbox list and the
+// results reveal (reveal = the subset with seen=false). One settled bet = one row.
+export interface ResultRow {
+  id: string;
+  question: string;
+  category: string | null;
+  side: BetSide;
+  sideLabel: string; // label of the side the user bet (team / Over / Up / Yes)
+  status: "WIN" | "LOSS" | "PUSH";
+  outcome: string; // human-readable resolved outcome, e.g. "Resolved YES" — built from data, no LLM
+  pnlCents: number; // settled P&L (negative on a loss, 0 on push)
+  deltaCents: number; // alias of pnlCents — the balance delta this result applied
+  shards: number; // shards granted for this bet (0 or 1)
+  settledAt: string; // ISO-8601
+  seen: boolean; // seenAt != null
+}
+export interface ResultsResponse {
+  rows: ResultRow[];
+  unreadCount: number;
+}
+
+// ─── POST /api/results/seen ──────────────────────────────────────────────────────────────────────
+// Auth: Bearer. No body. Marks ALL of the user's unseen settled results as seen (idempotent —
+// only seenAt IS NULL rows are touched). Called when the reveal is dismissed or the inbox is opened.
+export interface SeenResponse {
+  markedSeen: number;
+}
+
 // ─── GET /api/leaderboard ──────────────────────────────────────────────────────────────────────
 // Auth: Bearer. Top-100 by effective (multiplier-applied) points + the caller's own rank.
 export interface LeaderboardEntry {
@@ -137,4 +166,5 @@ export interface MeResponse {
     windowStartWeekday: number; // 0=Mon..6=Sun — where this user's 7-day window starts
   };
   loginMarkedToday: boolean;
+  unreadResults: number; // settled bets the user hasn't seen yet (seenAt IS NULL) — drives the HUD bell
 }

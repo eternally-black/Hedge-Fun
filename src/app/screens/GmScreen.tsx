@@ -36,7 +36,7 @@ export function buildGmWeek(
   });
 }
 
-export function GmScreen({ me, busy, onGM }: { me: Me | null; busy: boolean; onGM: () => void }) {
+export function GmScreen({ me, busy, onGM, onEnterDeck }: { me: Me | null; busy: boolean; onGM: () => void; onEnterDeck: () => void }) {
   const done = me?.loginMarkedToday ?? false;
   const streak = me?.streak.level ?? 0;
   const todayWeekday = me?.streak.todayWeekday ?? 0;
@@ -77,12 +77,17 @@ export function GmScreen({ me, busy, onGM }: { me: Me | null; busy: boolean; onG
         <div><div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 22, color: "var(--gold)" }}>🔥 {streak}</div><div style={{ fontSize: 9, letterSpacing: ".1em", textTransform: "uppercase", color: "var(--muted)" }}>Streak</div></div>
       </div>
 
+      {/* Before claim: claim CTA. After claim: the button flips to "Enter the deck →" (the natural
+          next step in the daily-open ritual), and a quiet "Skip to the deck" link sits below it. */}
       <div
-        onClick={done || busy ? undefined : onGM}
-        style={{ marginTop: 26, width: "100%", maxWidth: 300, background: done ? "var(--panel)" : "linear-gradient(135deg,var(--energy),color-mix(in srgb,var(--energy) 55%,#000))", color: done ? "var(--muted)" : "#fff", fontFamily: "var(--df)", fontSize: 22, padding: 16, borderRadius: 18, cursor: done || busy ? "default" : "pointer", boxShadow: done ? "none" : "0 14px 30px -8px color-mix(in srgb,var(--energy) 60%,transparent)", border: done ? "1px solid var(--line)" : "none" }}
+        onClick={busy ? undefined : done ? onEnterDeck : onGM}
+        style={{ marginTop: 26, width: "100%", maxWidth: 300, background: "linear-gradient(135deg,var(--energy),color-mix(in srgb,var(--energy) 55%,#000))", color: "#fff", fontFamily: "var(--df)", fontSize: 22, padding: 16, borderRadius: 18, cursor: busy ? "default" : "pointer", boxShadow: "0 14px 30px -8px color-mix(in srgb,var(--energy) 60%,transparent)" }}
       >
-        {done ? "✓ Checked in — see you tomorrow" : "☀ Claim & keep streak"}
+        {done ? "Enter the deck →" : "☀ Claim & keep streak"}
       </div>
+      {done && (
+        <div onClick={onEnterDeck} style={{ marginTop: 12, fontSize: 12, color: "var(--muted)", textDecoration: "underline", cursor: "pointer" }}>Skip to the deck →</div>
+      )}
     </div>
   );
 }

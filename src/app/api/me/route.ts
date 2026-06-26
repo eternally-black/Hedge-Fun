@@ -18,13 +18,16 @@ export async function GET(req: Request) {
   const day = utcDay();
   // Defensive streak sweep on read (idempotent), then fan out the reads in parallel.
   await evaluateStreak(user.id);
-  const [points, balance, collectibles, streak, counter, loginMark] = await Promise.all([
+  const [points, balance, collectibles, streak, counter, loginMark, unreadResults] = await Promise.all([
     effectivePoints(prisma, user.id),
     prisma.virtualBalance.findUnique({ where: { userId: user.id } }),
     prisma.collectibleBalance.findUnique({ where: { userId: user.id } }),
     prisma.streak.findUnique({ where: { userId: user.id } }),
     prisma.dailyCounter.findUnique({ where: { userId_utcDay: { userId: user.id, utcDay: day } } }),
     prisma.loginMark.findUnique({ where: { userId_utcDay: { userId: user.id, utcDay: day } } }),
+    prisma.bet.count({
+      where: { userId: user.id, settlementStatus: { in: ["SETTLED", "VOID"] }, seenAt: null },
+    }),
   ]);
 
   const body: MeResponse = {
@@ -55,6 +58,7 @@ export async function GET(req: Request) {
       ),
     },
     loginMarkedToday: !!loginMark,
+    unreadResults,
   };
   return NextResponse.json(body);
 }

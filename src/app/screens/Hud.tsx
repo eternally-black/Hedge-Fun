@@ -6,10 +6,11 @@ import { type Me, num, usd } from "../ui";
 // Top HUD: points / streak / virtual-$ chips + the shard→artifact progress strip.
 // Ported from app design. Points pop animates on a +N event (pop prop). memo'd + stable
 // callbacks from the parent, so it only re-renders when me/pop actually change.
-export const Hud = memo(function Hud({ me, pop, onShards, onGM, onBalance }: { me: Me | null; pop: { amt: number; color: string } | null; onShards: () => void; onGM: () => void; onBalance: () => void }) {
+export const Hud = memo(function Hud({ me, pop, onShards, onGM, onBalance, onBell }: { me: Me | null; pop: { amt: number; color: string } | null; onShards: () => void; onGM: () => void; onBalance: () => void; onBell: () => void }) {
   const shards = me?.shards ?? 0;
   const per = me?.shardsPerArtifact ?? 20;
   const shardPct = Math.round((shards / per) * 100);
+  const unread = me?.unreadResults ?? 0;
 
   return (
     <div style={{ position: "relative", zIndex: 30, padding: "16px 16px 10px", background: "linear-gradient(180deg, color-mix(in srgb, var(--bg) 92%, transparent), transparent)" }}>
@@ -29,10 +30,21 @@ export const Hud = memo(function Hud({ me, pop, onShards, onGM, onBalance }: { m
           <Stat value={me ? String(me.streak.level) : "—"} label="Streak" />
         </div>
 
-        <div onClick={onBalance} style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 7, background: "var(--panel)", border: "1px solid var(--line)", padding: "6px 11px", borderRadius: 30, cursor: "pointer" }}>
-          <div style={{ lineHeight: 1, textAlign: "right" }}>
-            <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 14, color: "var(--yes)" }}>{me ? usd(me.balanceCents) : "—"}</div>
-            <div style={{ fontSize: 8, letterSpacing: ".14em", color: "var(--muted)", textTransform: "uppercase", marginTop: 1 }}>Virtual $ ›</div>
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
+          <div onClick={onBalance} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--panel)", border: "1px solid var(--line)", padding: "6px 11px", borderRadius: 30, cursor: "pointer" }}>
+            <div style={{ lineHeight: 1, textAlign: "right" }}>
+              <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 14, color: "var(--yes)" }}>{me ? usd(me.balanceCents) : "—"}</div>
+              <div style={{ fontSize: 8, letterSpacing: ".14em", color: "var(--muted)", textTransform: "uppercase", marginTop: 1 }}>Virtual $ ›</div>
+            </div>
+          </div>
+
+          <div onClick={onBell} style={{ position: "relative", width: 38, height: 38, borderRadius: "50%", background: "var(--panel)", border: "1px solid var(--line)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", fontSize: 17 }}>
+            <span style={{ display: "inline-block", animation: unread > 0 ? "hfBellSwing 2.6s ease-in-out infinite" : undefined }}>🔔</span>
+            {unread > 0 && (
+              <div style={{ position: "absolute", top: -4, right: -4, minWidth: 18, height: 18, padding: "0 4px", borderRadius: 9, background: "var(--no)", color: "#fff", fontFamily: "var(--nf)", fontWeight: 700, fontSize: 10, display: "flex", alignItems: "center", justifyContent: "center", animation: "hfBadgePop .4s ease", boxShadow: "0 0 0 2px var(--bg)" }}>
+                {unread}
+              </div>
+            )}
           </div>
         </div>
       </div>
