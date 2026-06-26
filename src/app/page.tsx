@@ -63,8 +63,11 @@ function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   // Results reveal: the rows to play, or null when closed. Opened by the daily-open ritual (unseen
-  // results on auth) and by "Replay" from the inbox.
+  // results on auth) and by "Replay" from the inbox. `revealMode` controls where closing it leads:
+  // a daily-ritual reveal chains forward (GM if not checked in, else deck); a replay just returns to
+  // the deck (it's a re-watch, not the open sequence).
   const [reveal, setReveal] = useState<ResultRow[] | null>(null);
+  const revealMode = useRef<"ritual" | "replay">("ritual");
   // First-paint gate: stay on the spinner until me + results have loaded and we've DECIDED whether
   // the reveal plays. This prevents the deck flashing for a frame before the reveal floats up — the
   // very first content frame is already the right screen (reveal or deck), never an intermediate.
@@ -122,26 +125,30 @@ function App() {
     if (!authenticated || ritualDone.current) return;
     ritualDone.current = true;
 
-    // Fire the login-mark + referral capture immediately (independent of the boot gate).
+    // Referral capture only — NOT the GM mark. App-open must never count as a check-in; the day is
+    // marked only when the user taps Claim on the GM screen. capture-ref is idempotent, so it's safe
+    // to fire every open; it preserves attribution even for a user who never taps GM.
     const ref = readRef();
-    const markPath = ref ? `/api/login-mark?ref=${encodeURIComponent(ref)}` : "/api/login-mark";
-    api(markPath, { method: "POST" }).catch(() => { /* GM tap retries; capture is idempotent */ });
+    const capturePath = ref ? `/api/capture-ref?ref=${encodeURIComponent(ref)}` : "/api/capture-ref";
+    api(capturePath, { method: "POST" }).catch(() => { /* idempotent; the GM tap also captures */ });
 
     // Deck loads in the background — NOT awaited by the gate (a user with unseen results watches the
     // reveal while the deck arrives; a user without results waits on the spinner the deck-fetch fills).
     api("/api/deck").then((d) => setDeck((d as { cards: Card[] }).cards)).catch(console.error);
 
-    // Gate: me + results in parallel. Decide the daily-open ritual (auth → reveal? → GM → deck),
-    // set state, THEN unspin — so the first frame is the right screen, no flash.
-    //   • unseen results  → play the reveal (it chains forward to GM on finish/skip).
-    //   • else not GM'd today → open GM (daily check-in is the open ritual even with nothing to reveal).
-    //   • else (already checked in) → deck.
+    // Gate: me + results in parallel. Decide the daily-open ritual, set state, THEN unspin — so the
+    // first frame is the right screen, no flash. Ritual (matches Android once it ships the same flags):
+    //   • brand-new user      → straight to the deck, ZERO popups (feel the core loop first).
+    //   • unseen results      → play the reveal (it chains forward to GM on finish/skip).
+    //   • else not GM'd today → open GM (the once-a-day check-in is the open ritual).
+    //   • else (checked in)   → deck.
     Promise.all([api("/api/me"), api("/api/results")])
       .then(([m, r]) => {
         const me = m as Me;
         setMe(me);
+        if (me.isNewUser) return; // new user: deck (default screen), no reveal, no GM
         const unseen = (r as ResultsResponse).rows.filter((row) => !row.seen);
-        if (unseen.length) setReveal(unseen);
+        if (unseen.length) { revealMode.current = "ritual"; setReveal(unseen); }
         else if (!me.loginMarkedToday) setScreen("gm");
       })
       .catch(console.error)
@@ -273,25 +280,32 @@ function App() {
     setMe((m) => (m && m.unreadResults ? { ...m, unreadResults: 0 } : m));
   }, []);
 
-  // Reveal exits. Watching through to summary "clears unread" (design §4): mark seen on the SERVER
-  // so the badge stays gone after the next /api/me. Skip is the safety net — it does NOT mark seen
-  // (unwatched results stay badged in the bell), only closes the overlay. Both chain forward and
-  // refresh /api/me so balance/shards/unread reflect the server. Replay (from inbox) re-opens all rows.
+  // Where a closed reveal leads. A daily-ritual reveal chains forward to GM, but ONLY if the user
+  // hasn't checked in today — GM is once a day; otherwise the deck. A replay just returns to the deck.
+  const exitReveal = useCallback(() => {
+    if (revealMode.current === "ritual" && me && !me.loginMarkedToday) setScreen("gm");
+    else setScreen("deck");
+  }, [me]);
+
+  // Reveal exits. Watching through to summary "clears unread" (design §4): mark seen on the SERVER so
+  // the badge stays gone after the next /api/me. Skip is the safety net — it does NOT mark seen
+  // (unwatched results stay badged in the bell), only closes the overlay. Both refresh /api/me so
+  // balance/shards/unread reflect the server. Replay (from inbox) re-opens all rows as a re-watch.
   const finishReveal = useCallback(() => {
     setReveal(null);
     markResultsSeen();
     api("/api/results/seen", { method: "POST" }).catch(() => { /* badge re-syncs from /api/me */ });
-    setScreen("gm");
+    exitReveal();
     void refreshMe();
-  }, [api, markResultsSeen, refreshMe]);
+  }, [api, markResultsSeen, refreshMe, exitReveal]);
   const skipReveal = useCallback(() => {
     setReveal(null);
-    setScreen("gm");
+    exitReveal();
     void refreshMe(); // badge persists — unwatched results stay unread (the safety net)
-  }, [refreshMe]);
+  }, [refreshMe, exitReveal]);
   const replayReveal = useCallback(() => {
     api("/api/results")
-      .then((r) => { setReveal((r as ResultsResponse).rows); setScreen("deck"); })
+      .then((r) => { revealMode.current = "replay"; setReveal((r as ResultsResponse).rows); })
       .catch(console.error);
   }, [api]);
 

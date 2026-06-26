@@ -167,4 +167,16 @@ export interface MeResponse {
   };
   loginMarkedToday: boolean;
   unreadResults: number; // settled bets the user hasn't seen yet (seenAt IS NULL) — drives the HUD bell
+  // True for a brand-new account that has never started a streak and hasn't checked in today. The
+  // client skips the GM/reveal open ritual for new users — straight to the deck so they feel the
+  // core loop first. Derived (streak.level===0 && !loginMarkedToday), no extra query.
+  isNewUser: boolean;
+}
+
+// ─── POST /api/capture-ref ───────────────────────────────────────────────────────────────────────
+// Auth: Bearer. Optional query ?ref=<referralCode>. Captures the referral (cookie code or IP/UA
+// device match) and accrues the inviter's share — WITHOUT marking the GM day. Sent on app open so
+// attribution survives even when the user doesn't tap GM. Idempotent (capture binds once).
+export interface CaptureRefResponse {
+  captured: boolean; // true if a referral was bound on this call (false if already bound / no code)
 }

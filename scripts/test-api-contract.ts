@@ -46,6 +46,7 @@ async function main() {
   const loginMark = await import("../src/app/api/login-mark/route");
   const results = await import("../src/app/api/results/route");
   const resultsSeen = await import("../src/app/api/results/seen/route");
+  const captureRef = await import("../src/app/api/capture-ref/route");
 
   // Provision the test user via /me (which calls authUser -> ensureUser).
   const meRes = await me.GET(authed("http://x/api/me"));
@@ -72,11 +73,12 @@ async function main() {
   await expect401(loginMark.POST, "http://x/api/login-mark", { method: "POST" });
   await expect401(results.GET, "http://x/api/results");
   await expect401(resultsSeen.POST, "http://x/api/results/seen", { method: "POST" });
+  await expect401(captureRef.POST, "http://x/api/capture-ref", { method: "POST" });
 
   // ---- (b) authed 200 + EXACT top-level key contract (Android binds to these) ----
   const meBody = await (await me.GET(authed("http://x/api/me"))).json();
   assert.deepStrictEqual(keysOf(meBody),
-    ["artifacts","balanceCents","dev","loginMarkedToday","points","shards","shardsPerArtifact","skips","streak","swipes","unreadResults","user"],
+    ["artifacts","balanceCents","dev","isNewUser","loginMarkedToday","points","shards","shardsPerArtifact","skips","streak","swipes","unreadResults","user"],
     "/me top-level keys");
   assert.deepStrictEqual(Object.keys(meBody.points).sort(), ["bonusFromX2","breakdown","total"], "/me points keys");
   assert.deepStrictEqual(Object.keys(meBody.swipes).sort(), ["cap","used"], "/me swipes keys");
@@ -103,6 +105,11 @@ async function main() {
   assert.deepStrictEqual(keysOf(gmBody), ["login","streak"], "/login-mark top-level keys");
   assert.deepStrictEqual(Object.keys(gmBody.login).sort(), ["amount","awarded"], "/login-mark login keys");
   assert.deepStrictEqual(Object.keys(gmBody.streak).sort(), ["level","qualifiedToday","state"], "/login-mark streak keys");
+
+  // capture-ref: referral-only (no GM mark). Shape is { captured }. No ?ref= -> captured:false.
+  const crBody = await (await captureRef.POST(authed("http://x/api/capture-ref", { method: "POST" }))).json();
+  assert.deepStrictEqual(keysOf(crBody), ["captured"], "/capture-ref top-level keys");
+  assert.strictEqual(crBody.captured, false, "/capture-ref no code -> not captured");
 
   // swipe: a real authed swipe returns the recordSwipe contract.
   const swBody = await (await swipe.POST(authed("http://x/api/swipe",

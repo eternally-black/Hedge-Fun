@@ -59,6 +59,8 @@ export async function GET(req: Request) {
     },
     loginMarkedToday: !!loginMark,
     unreadResults,
+    // Brand-new account: streak never started AND no GM today → skip the open ritual (deck first).
+    isNewUser: (streak?.currentLevel ?? 0) === 0 && !loginMark,
   };
   return NextResponse.json(body);
 }
