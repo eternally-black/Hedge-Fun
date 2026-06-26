@@ -34,17 +34,21 @@ export function categoryOf(m: {
   // The full text signal: question + both side labels (named-binary carries the signal in labels).
   const text = `${m.question} ${m.outcomeYesLabel} ${m.outcomeNoLabel}`;
 
-  // 1) Up/Down + Over/Under are unambiguous label shapes — check first.
+  // 1) Up/Down is an unambiguous crypto shape — keep it first.
   if (y === "up" && n === "down") return "crypto"; // Up/Down markets are ~always crypto minutes
-  if (y === "over" || y === "under" || n === "over" || n === "under") return "overunder";
 
-  // 2) Content signals (question + labels). Order: esports/crypto/politics/weather before the
-  //    broad sports net (which includes generic "vs"/"at" that could otherwise grab esports).
+  // 2) THEME beats bet-TYPE. An Over/Under market is still about a CS2 map or an NBA game — the
+  //    subject matters more to the user than the wager shape. So check content signals first; a
+  //    market only lands in "overunder" if it's a bare total with no recognizable subject.
+  //    (e.g. "Map 1 Total Rounds: O/U 21.5" -> esports; "Norway vs France: Norway O/U 0.5" -> sports.)
   if (ESPORTS.test(text)) return "esports";
   if (CRYPTO.test(text)) return "crypto";
   if (POLITICS.test(text)) return "politics";
   if (WEATHER.test(text)) return "weather";
   if (SPORTS.test(text)) return "sports";
+
+  // 3) Bare Over/Under total with no subject signal.
+  if (y === "over" || y === "under" || n === "over" || n === "under") return "overunder";
   return "other";
 }
 

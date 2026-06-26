@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useEffect, useRef, useState } from "react";
-import { type Card, catOf, bgGrad, cents, winPayout, countdown } from "./ui";
+import { type Card, catOf, bgGrad, cents, winPayout, countdown, sideLabels, marketHint } from "./ui";
 import { useCardSwipe } from "./useCardSwipe";
 
 export type SwipeAction = "YES" | "NO" | "SKIP";
@@ -27,6 +27,9 @@ const CardFace = memo(function CardFace({ card, countdownText, urgent, yesP, noP
   const cat = catOf(card);
   const stamp = (p: number) => ({ o: Math.max(0, Math.min(1, (p - 0.15) / 0.5)), s: 0.6 + 0.4 * Math.min(1, p) });
   const ys = stamp(yesP), ns = stamp(noP), ks = stamp(skipP);
+  // Human-readable side labels (Over/Under markets get the line folded in) + a plain-language hint.
+  const labels = sideLabels(card);
+  const hint = marketHint(card);
 
   return (
     <>
@@ -37,9 +40,9 @@ const CardFace = memo(function CardFace({ card, countdownText, urgent, yesP, noP
       <div style={{ position: "absolute", inset: 0, pointerEvents: "none", opacity: noP, background: "linear-gradient(90deg, color-mix(in srgb,var(--no) 70%, transparent), transparent 65%)" }} />
       <div style={{ position: "absolute", inset: 0, pointerEvents: "none", opacity: skipP, background: "radial-gradient(120% 70% at 50% 34%, color-mix(in srgb,var(--skip) 60%, transparent), transparent 62%)" }} />
 
-      {/* stamps — show the real side label */}
-      <Stamp label={card.outcomeNoLabel} color="var(--no)" o={ns.o} s={ns.s} pos={{ top: 42, left: 26 }} rot={-15} />
-      <Stamp label={card.outcomeYesLabel} color="var(--yes)" o={ys.o} s={ys.s} pos={{ top: 42, right: 26 }} rot={15} />
+      {/* stamps — show the human-readable side label */}
+      <Stamp label={labels.no} color="var(--no)" o={ns.o} s={ns.s} pos={{ top: 42, left: 26 }} rot={-15} />
+      <Stamp label={labels.yes} color="var(--yes)" o={ys.o} s={ys.s} pos={{ top: 42, right: 26 }} rot={15} />
       <Stamp label="SKIP" color="var(--skip)" o={ks.o} s={ks.s} pos={{ top: 30, left: "50%", marginLeft: -62 }} rot={0} />
 
       {/* content */}
@@ -55,15 +58,16 @@ const CardFace = memo(function CardFace({ card, countdownText, urgent, yesP, noP
           </div>
         </div>
 
-        <div style={{ flex: 1, display: "flex", alignItems: "center", padding: "14px 0" }}>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center", padding: "14px 0" }}>
           <div style={{ fontFamily: "var(--df)", fontSize: 32, lineHeight: 1.04, letterSpacing: ".2px", color: "#fff", textShadow: "0 2px 20px rgba(0,0,0,.5)", textWrap: "balance" }}>{card.question}</div>
+          {hint && <div style={{ marginTop: 10, fontSize: 13, color: "rgba(255,255,255,.62)", lineHeight: 1.3, textWrap: "pretty" }}>{hint}</div>}
         </div>
 
         {/* odds split — sides + CENTS (Polymarket-style), not % */}
         <div style={{ marginBottom: 14 }}>
           <div style={{ display: "flex", justifyContent: "space-between", fontFamily: "var(--nf)", fontWeight: 700, fontSize: 13, marginBottom: 6 }}>
-            <span style={{ color: "var(--no)" }}>{card.outcomeNoLabel} {cents(card.noPriceBp)}</span>
-            <span style={{ color: "var(--yes)" }}>{cents(card.yesPriceBp)} {card.outcomeYesLabel}</span>
+            <span style={{ color: "var(--no)" }}>{labels.no} {cents(card.noPriceBp)}</span>
+            <span style={{ color: "var(--yes)" }}>{cents(card.yesPriceBp)} {labels.yes}</span>
           </div>
           <div style={{ display: "flex", height: 12, borderRadius: 8, overflow: "hidden", background: "rgba(0,0,0,.4)" }}>
             <div style={{ width: `${card.noPriceBp / 100}%`, background: "linear-gradient(90deg,color-mix(in srgb,var(--no) 60%,#000),var(--no))" }} />
@@ -78,8 +82,8 @@ const CardFace = memo(function CardFace({ card, countdownText, urgent, yesP, noP
             <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 15, color: "#fff" }}>$100</div>
           </div>
           <div style={{ flex: 1, display: "flex", gap: 6 }}>
-            <PayBox label={`Win ${card.outcomeNoLabel}`} val={winPayout(card.noPriceBp)} color="var(--no)" />
-            <PayBox label={`Win ${card.outcomeYesLabel}`} val={winPayout(card.yesPriceBp)} color="var(--yes)" />
+            <PayBox label={`Win ${labels.no}`} val={winPayout(card.noPriceBp)} color="var(--no)" />
+            <PayBox label={`Win ${labels.yes}`} val={winPayout(card.yesPriceBp)} color="var(--yes)" />
           </div>
         </div>
         <div style={{ textAlign: "center", marginTop: 12, fontSize: 11, color: "rgba(255,255,255,.55)", letterSpacing: ".02em" }}>Tap for details · swipe to call</div>

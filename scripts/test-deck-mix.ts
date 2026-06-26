@@ -5,9 +5,13 @@ import { shuffleNoRun, categoryOf, MAX_RUN } from "../src/lib/deck-mix";
 
 // ---- categoryOf: real shapes (verified live) bucket correctly ----
 assert.strictEqual(categoryOf({ question: "Bitcoin Up or Down - 9:05AM", outcomeYesLabel: "Up", outcomeNoLabel: "Down" }), "crypto");
-assert.strictEqual(categoryOf({ question: "Games Total: O/U 2.5", outcomeYesLabel: "Over", outcomeNoLabel: "Under" }), "overunder");
+assert.strictEqual(categoryOf({ question: "Games Total: O/U 2.5", outcomeYesLabel: "Over", outcomeNoLabel: "Under" }), "overunder", "bare total, no subject -> overunder");
 assert.strictEqual(categoryOf({ question: "Dota 2: L1ga Team vs 4ikibamboni", outcomeYesLabel: "L1ga Team", outcomeNoLabel: "4ikibamboni" }), "esports");
 assert.strictEqual(categoryOf({ question: "Bosnia vs. Qatar match", outcomeYesLabel: "Bosnia", outcomeNoLabel: "Qatar" }), "sports");
+// THEME beats bet-TYPE: an Over/Under market with a recognizable subject goes to its theme, not "overunder".
+assert.strictEqual(categoryOf({ question: "Map 1 Total Rounds: Over/Under 21.5", outcomeYesLabel: "Over", outcomeNoLabel: "Under" }), "esports", "CS2 map total -> esports, not overunder");
+assert.strictEqual(categoryOf({ question: "Norway vs. France: Norway O/U 0.5", outcomeYesLabel: "Over", outcomeNoLabel: "Under" }), "sports", "match total -> sports, not overunder");
+assert.strictEqual(categoryOf({ question: "Will BTC close over 100k?", outcomeYesLabel: "Over", outcomeNoLabel: "Under" }), "crypto", "crypto total -> crypto, not overunder");
 
 // helper: longest run of equal categories in a sequence
 function longestRun(cats: string[]): number {

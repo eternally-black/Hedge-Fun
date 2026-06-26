@@ -45,6 +45,44 @@ export function catOf(card: Pick<Card, "question" | "outcomeYesLabel" | "outcome
   return CAT_COLORS[categoryOf({ question: card.question, outcomeYesLabel: card.outcomeYesLabel, outcomeNoLabel: card.outcomeNoLabel })];
 }
 
+// Polymarket hands us raw "Over"/"Under" side labels with the threshold buried in the question
+// ("Map 1 Total Rounds: Over/Under 21.5", "Norway vs France: Norway O/U 0.5"). On their own,
+// "Over"/"Under" are jargon — a user can't tell over WHAT. We pull the line out of the question and
+// fold it into the label ("Over 21.5" / "Under 21.5"), and surface a plain-language hint line.
+const ouLabels = (s: string) => s.toLowerCase() === "over" || s.toLowerCase() === "under";
+
+// The threshold number in an Over/Under question, or null. Matches "O/U 21.5" and "Over/Under 21.5".
+function ouLine(question: string): string | null {
+  const m = question.match(/(?:o\/u|over\/under|over or under)\s*([\d.]+)/i);
+  return m ? m[1]! : null;
+}
+
+// Display labels for a card's two sides. For Over/Under markets, append the line ("Over 21.5"); for
+// everything else, the raw label is already a real name (team/player/Yes), so pass it through.
+export function sideLabels(card: Pick<Card, "question" | "outcomeYesLabel" | "outcomeNoLabel">): { yes: string; no: string } {
+  if (ouLabels(card.outcomeYesLabel) && ouLabels(card.outcomeNoLabel)) {
+    const line = ouLine(card.question);
+    if (line) {
+      const over = `Over ${line}`, under = `Under ${line}`;
+      // outcomes[0] (YES) is whichever of Over/Under Polymarket listed first — keep that mapping.
+      return card.outcomeYesLabel.toLowerCase() === "over"
+        ? { yes: over, no: under }
+        : { yes: under, no: over };
+    }
+  }
+  return { yes: card.outcomeYesLabel, no: card.outcomeNoLabel };
+}
+
+// One-line plain-language explainer shown under the question. Only Over/Under markets need it (the
+// rest are self-explanatory: a team name, Yes/No). Returns null when no hint helps.
+export function marketHint(card: Pick<Card, "question" | "outcomeYesLabel" | "outcomeNoLabel">): string | null {
+  if (ouLabels(card.outcomeYesLabel) && ouLabels(card.outcomeNoLabel)) {
+    const line = ouLine(card.question);
+    return line ? `Will the total be over or under ${line}?` : "Will the total go over or under the line?";
+  }
+  return null;
+}
+
 // Visual for a result/inbox row. The reveal & inbox don't carry side labels, so classify by the
 // question alone (deck-mix's categoryOf reads labels too, but question-only still hits the common
 // signals). Falls back to the raw `category` string from the API only for the display label.
