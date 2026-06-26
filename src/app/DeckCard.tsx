@@ -6,7 +6,7 @@ import { useCardSwipe } from "./useCardSwipe";
 
 export type SwipeAction = "YES" | "NO" | "SKIP";
 
-const RISE_MS = 320; // how long the next card rises into the top slot
+export const RISE_MS = 320; // how long the next card rises into the top slot (shared with the reveal stack)
 
 // ============================================================================
 // CardFace — the full card VISUALS, pure + memoized. Used both for the live top card and the

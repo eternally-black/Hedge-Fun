@@ -85,10 +85,7 @@ body {
 @keyframes hfSpin { to { transform: rotate(360deg); } }
 
 /* ---- results reveal + bell (ported from app design diff) ---- */
-@keyframes hfFlipIn {
-  0% { transform: perspective(900px) rotateY(82deg); opacity: 0; }
-  100% { transform: perspective(900px) rotateY(0); opacity: 1; }
-}
+/* (hfFlipIn removed — the reveal now uses hfCardRise, the deck's rise-out-of-stack, for one mechanic.) */
 @keyframes hfCoin {
   0% { transform: translate(0, 0) scale(0.5) rotate(0); opacity: 0; }
   20% { opacity: 1; }

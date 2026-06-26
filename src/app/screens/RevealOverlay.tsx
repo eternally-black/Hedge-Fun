@@ -4,19 +4,20 @@ import { memo, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { ResultRow } from "@/lib/api-types";
 import { catOfResult, resultMeta } from "../ui";
 import { useCardSwipe } from "../useCardSwipe";
-import { PREVIEW_SCALE, PREVIEW_Y } from "../DeckCard";
+import { PREVIEW_SCALE, PREVIEW_Y, RISE_MS } from "../DeckCard";
 
 // ─── Results Reveal — the dopamine peak ──────────────────────────────────────────────────────────
 // Plays on app open, before the deck, replaying what resolved while the user was away. Three phases:
 //   aggregate → featured cards (≤5, peak-end ordered) → summary.
-// USER-PACED: no auto-advance. The card swipes with the SAME physics as the blitz deck (useCardSwipe)
-// — follow-the-finger, fling off on commit in any direction, tap to advance — so the user is never
-// rushed off a result they want to read. The ✕ in the corner exits to the deck at any point. Finishing
-// vs skipping is the parent's job (onDone/onSkip); only finishing clears the unread badge.
+// USER-PACED: no auto-advance. Cards are a COMPACT centered deck-stack with the SAME mechanic as the
+// blitz deck — the next card sits scaled-back behind the top one; the top card rises out of the stack
+// on entry (hfCardRise) and swipes off in any direction (or a tap) to advance. The user is never
+// rushed. The ✕ in the corner exits to the deck at any point. Finishing vs skipping is the parent's
+// job (onDone/onSkip); only finishing clears the unread badge.
 //
 // React notes:
 //   • phase machine is a useReducer (atomic transitions), not a pile of useState.
-//   • gesture is the shared useCardSwipe hook (one source of the deck's physics/timings, no reinvention).
+//   • gesture is the shared useCardSwipe hook + the deck's entering→rise pattern (one source, no reinvention).
 //   • peak-end order, aggregate totals, and coin-burst positions are useMemo'd so they're stable
 //     across re-renders (coins must NOT re-randomize every frame, or they jump).
 
@@ -102,12 +103,15 @@ export function RevealOverlay({
           <div style={{ display: "flex", gap: 5, justifyContent: "center", padding: "52px 46px 0" }}>
             {featured.map((_, k) => <div key={k} style={{ flex: 1, height: 3, borderRadius: 3, background: k <= state.i ? "var(--text)" : "var(--line)", transition: "background .3s" }} />)}
           </div>
-          {/* The SAME visual stack as the blitz deck: the next card sits fully-rendered behind the
-              top one (scaled back + dimmed), so the swipe mechanic reads instantly as "a deck". */}
-          <div style={{ position: "relative", flex: 1, margin: "10px 22px 0", minHeight: 0 }}>
-            {featured[state.i + 1] && <RevealCardPreview key={`p${state.i}`} row={featured[state.i + 1]!} />}
-            {/* keyed by index so each card remounts (fresh flip + a fresh swipe hook state) */}
-            <RevealCard key={state.i} row={featured[state.i]!} onAdvance={next} />
+          {/* A COMPACT centered deck-stack — same mechanic as the blitz deck (next card sits
+              scaled-back behind the top one; swiping the top off rises the next out of the stack),
+              just sized to a fixed card instead of filling the screen. */}
+          <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", minHeight: 0, padding: "10px 0" }}>
+            <div style={{ position: "relative", width: 300, maxWidth: "calc(100% - 44px)", height: 420, maxHeight: "100%" }}>
+              {featured[state.i + 1] && <RevealCardPreview key={`p${state.i}`} row={featured[state.i + 1]!} />}
+              {/* keyed by index so each card remounts (fresh rise + a fresh swipe hook state) */}
+              <RevealCard key={state.i} row={featured[state.i]!} onAdvance={next} />
+            </div>
           </div>
           <div style={{ textAlign: "center", padding: "14px 0 30px", color: "var(--muted)", fontSize: 12 }}>Swipe or tap to continue · {state.i + 1} / {featured.length}</div>
         </div>
@@ -152,8 +156,6 @@ function AggTile({ value, label, color }: { value: string; label: string; color:
     </div>
   );
 }
-
-const FLIP_MS = 500; // hfFlipIn duration — the card owns transform via the keyframe until this ends
 
 // ── RevealCardFace — the card VISUALS, pure + memoized (mirrors DeckCard's CardFace). Used by both
 //    the interactive top card and the preview behind it, so the next card is fully rendered (not a
@@ -246,22 +248,23 @@ function RevealCardPreview({ row }: { row: ResultRow }) {
   );
 }
 
-// ── RevealCard — the interactive top card. Same swipe physics as the deck (useCardSwipe): a swipe
-//    in any direction OR a tap flings it off and advances. The flip plays on mount and owns
-//    `transform`; once it ends the swipe style takes over (mirrors the deck's entering→drag handoff).
+// ── RevealCard — the interactive top card. SAME mechanic as the blitz deck (DeckCard): on mount it
+//    rises out of the stack (hfCardRise, from the preview's pose), then the shared swipe physics take
+//    over — a swipe in any direction OR a tap flings it off and advances. The entering→drag handoff
+//    is copied 1:1 from DeckCard so the reveal and the deck feel identical.
 function RevealCard({ row, onAdvance }: { row: ResultRow; onAdvance: () => void }) {
-  const [flipping, setFlipping] = useState(true);
-  const flipTimer = useRef<number | undefined>(undefined);
+  const [entering, setEntering] = useState(true);
+  const enterTimer = useRef<number | undefined>(undefined);
   useEffect(() => {
-    flipTimer.current = window.setTimeout(() => setFlipping(false), FLIP_MS);
-    return () => window.clearTimeout(flipTimer.current);
+    enterTimer.current = window.setTimeout(() => setEntering(false), RISE_MS); // matches the keyframe
+    return () => window.clearTimeout(enterTimer.current);
   }, []);
   const swipe = useCardSwipe({ onCommit: onAdvance, onTap: onAdvance });
   const onPointerDown = (e: React.PointerEvent) => {
-    if (flipping) { window.clearTimeout(flipTimer.current); setFlipping(false); } // grab cancels the flip
+    if (entering) { window.clearTimeout(enterTimer.current); setEntering(false); } // grab cancels the rise
     swipe.handlers.onPointerDown(e);
   };
-  const flipAnim = flipping && !swipe.active && !swipe.flying;
+  const riseAnim = entering && !swipe.active && !swipe.flying;
 
   return (
     <div
@@ -271,8 +274,8 @@ function RevealCard({ row, onAdvance }: { row: ResultRow; onAdvance: () => void 
       style={{
         ...cardShell(row),
         touchAction: "none", cursor: "grab", willChange: "transform",
-        ...(flipAnim
-          ? { animation: `hfFlipIn ${FLIP_MS}ms cubic-bezier(.3,1.1,.5,1) both` }
+        ...(riseAnim
+          ? { animation: `hfCardRise ${RISE_MS}ms cubic-bezier(.34,1.2,.5,1) both`, transformOrigin: "center bottom" }
           : swipe.style),
       }}
     >
