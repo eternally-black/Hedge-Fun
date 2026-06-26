@@ -7,6 +7,8 @@
 //  - Resolution signal = umaResolutionStatus === "resolved" + outcomePrices collapse to 1/0.
 //  - conditionId is the stable id -> our polymarketId.
 
+import { isContextPoor } from "./deck-mix";
+
 const BASE = process.env.POLYMARKET_API_BASE ?? "https://gamma-api.polymarket.com";
 
 export interface MarketCache {
@@ -193,7 +195,8 @@ export async function fetchBlitzDeck(hours = 48, want = 100): Promise<MarketCach
         m.yesPriceBp !== null &&
         m.noPriceBp !== null &&
         new Date(m.resolutionDeadline).getTime() <= maxMs && // re-assert window client-side
-        priceIsContested(m.yesPriceBp, m.noPriceBp) // drop decided/live matches (100%/0%)
+        priceIsContested(m.yesPriceBp, m.noPriceBp) && // drop decided/live matches (100%/0%)
+        !isContextPoor(m) // drop bare Over/Under totals with no match named ("Games Total: O/U 4.5")
       ) {
         buckets[shapeOf(m)].push(m);
       }

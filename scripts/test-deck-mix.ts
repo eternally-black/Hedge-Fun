@@ -1,7 +1,7 @@
 // Self-check for deck mixing: never >2 same-category in a row, and the mix is random.
 // Run: npx tsx scripts/test-deck-mix.ts
 import assert from "node:assert";
-import { shuffleNoRun, categoryOf, MAX_RUN } from "../src/lib/deck-mix";
+import { shuffleNoRun, categoryOf, isContextPoor, MAX_RUN } from "../src/lib/deck-mix";
 
 // ---- categoryOf: real shapes (verified live) bucket correctly ----
 assert.strictEqual(categoryOf({ question: "Bitcoin Up or Down - 9:05AM", outcomeYesLabel: "Up", outcomeNoLabel: "Down" }), "crypto");
@@ -12,6 +12,16 @@ assert.strictEqual(categoryOf({ question: "Bosnia vs. Qatar match", outcomeYesLa
 assert.strictEqual(categoryOf({ question: "Map 1 Total Rounds: Over/Under 21.5", outcomeYesLabel: "Over", outcomeNoLabel: "Under" }), "esports", "CS2 map total -> esports, not overunder");
 assert.strictEqual(categoryOf({ question: "Norway vs. France: Norway O/U 0.5", outcomeYesLabel: "Over", outcomeNoLabel: "Under" }), "sports", "match total -> sports, not overunder");
 assert.strictEqual(categoryOf({ question: "Will BTC close over 100k?", outcomeYesLabel: "Over", outcomeNoLabel: "Under" }), "crypto", "crypto total -> crypto, not overunder");
+
+// ---- isContextPoor: bare Over/Under totals with no match named are dropped from the deck ----
+const ou = (q: string) => ({ question: q, outcomeYesLabel: "Over", outcomeNoLabel: "Under" });
+assert.strictEqual(isContextPoor(ou("Games Total: O/U 4.5")), true, "bare total, no match -> poor");
+assert.strictEqual(isContextPoor(ou("Map 1 Total Rounds: Over/Under 21.5")), true, "esports signal but no match named -> poor");
+assert.strictEqual(isContextPoor(ou("Norway vs. France: Norway O/U 0.5")), false, "names the match -> usable");
+assert.strictEqual(isContextPoor(ou("Lakers @ Celtics: Total Points O/U 210.5")), false, "@ match form -> usable");
+// non-Over/Under markets are never poor — a team name or Yes/No explains itself.
+assert.strictEqual(isContextPoor({ question: "Games Total 4.5", outcomeYesLabel: "Bosnia", outcomeNoLabel: "Qatar" }), false, "named teams -> never poor");
+assert.strictEqual(isContextPoor({ question: "Will BTC hit 100k?", outcomeYesLabel: "Yes", outcomeNoLabel: "No" }), false, "Yes/No -> never poor");
 
 // helper: longest run of equal categories in a sequence
 function longestRun(cats: string[]): number {

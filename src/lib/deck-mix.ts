@@ -52,6 +52,28 @@ export function categoryOf(m: {
   return "other";
 }
 
+// A "match" signal in the question: two participants (Team vs Team, A @ B) or a named subject. An
+// Over/Under question carries this when it names who's playing; "Games Total: O/U 4.5" and
+// "Map 1 Total Rounds: O/U 21.5" do NOT — they're bare totals the user can't make sense of.
+const MATCH = /\bvs\.?\b|\bv\.\b|\s@\s|\s+at\s+|\bversus\b/i;
+
+// Context-poor: an Over/Under total with no recognizable match/subject in the question. These cards
+// are jargon ("over/under WHAT?") — we keep them out of the deck. NON-Over/Under markets are never
+// poor (a team name or Yes/No is self-explanatory). The check reads the question + labels only, so
+// it's the same signal the deck card shows.
+export function isContextPoor(m: {
+  question: string;
+  outcomeYesLabel: string;
+  outcomeNoLabel: string;
+}): boolean {
+  const y = m.outcomeYesLabel.toLowerCase();
+  const n = m.outcomeNoLabel.toLowerCase();
+  const isOverUnder = y === "over" || y === "under" || n === "over" || n === "under";
+  if (!isOverUnder) return false; // teams / Yes/No / Up-Down are self-explanatory
+  // O/U is fine IF the question names the match (participants). No match signal -> poor.
+  return !MATCH.test(m.question);
+}
+
 // Mutable xorshift PRNG seeded from a number — deterministic given a seed (testable), random
 // in practice because callers seed from the clock. No Math.random (banned in some contexts).
 function rng(seed: number) {

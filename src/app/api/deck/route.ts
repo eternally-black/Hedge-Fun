@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 
-import { categoryOf, shuffleNoRun } from "@/lib/deck-mix";
+import { categoryOf, shuffleNoRun, isContextPoor } from "@/lib/deck-mix";
 import type { DeckResponse } from "@/lib/api-types";
 
 // The blitz deck: cached OPEN binary markets resolving within 48h.
@@ -54,9 +54,14 @@ export async function GET(req: Request) {
     },
   });
 
+  // Drop context-poor markets (bare Over/Under totals with no match named, e.g. "Games Total:
+  // O/U 4.5") at serve time — this also clears any such rows already cached in the DB, not just
+  // new ingests. Applied before the mix so the deck only carries cards a user can make sense of.
+  const usable = candidates.filter((c) => !isContextPoor(c));
+
   // Randomly mix categories with the rule: never >2 cards of the same category in a row.
   // Seed from the clock so each fetch yields a fresh order.
-  const cards = shuffleNoRun(candidates, (c) => categoryOf(c), DECK_SIZE, Date.now() & 0x7fffffff);
+  const cards = shuffleNoRun(usable, (c) => categoryOf(c), DECK_SIZE, Date.now() & 0x7fffffff);
   const body: DeckResponse = {
     cards: cards.map((c) => ({
       ...c,
