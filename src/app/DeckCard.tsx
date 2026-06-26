@@ -2,15 +2,11 @@
 
 import { memo, useEffect, useRef, useState } from "react";
 import { type Card, catOf, bgGrad, cents, winPayout, countdown } from "./ui";
+import { useCardSwipe } from "./useCardSwipe";
 
 export type SwipeAction = "YES" | "NO" | "SKIP";
 
-const COMMIT = 130; // px drag past which a release commits (matches design)
-const FLY_MS = 380; // how long the swiped card animates off-screen
 const RISE_MS = 320; // how long the next card rises into the top slot
-// Overlap: the next card starts rising at FLY_MS * RISE_OVERLAP — i.e. 50% into the fly-out, so
-// the two motions run together. Lower = more overlap (rise starts sooner).
-const RISE_OVERLAP = 0.5;
 
 // ============================================================================
 // CardFace — the full card VISUALS, pure + memoized. Used both for the live top card and the
@@ -128,84 +124,36 @@ export function DeckCard({
   onAction: (a: SwipeAction) => void;
   onTap: () => void;
 }) {
-  const [drag, setDrag] = useState({ active: false, dx: 0, dy: 0, dir: null as SwipeAction | null, progress: 0 });
-  const [fly, setFly] = useState<SwipeAction | null>(null);
   // `entering` plays the rise-out-of-stack animation once on mount (this card just became top).
   // While entering we let the CSS keyframe own `transform`; after it ends we switch to the
   // inline transform that drives the drag. A new card key remounts -> entering resets to true.
   const [entering, setEntering] = useState(true);
-  const start = useRef<{ x: number; y: number; t: number; moved: boolean } | null>(null);
-  const flyTimer = useRef<number | undefined>(undefined);
   const enterTimer = useRef<number | undefined>(undefined);
   useEffect(() => {
     enterTimer.current = window.setTimeout(() => setEntering(false), RISE_MS); // matches keyframe
-    return () => { window.clearTimeout(flyTimer.current); window.clearTimeout(enterTimer.current); };
+    return () => window.clearTimeout(enterTimer.current);
   }, []);
 
   const cd = useCountdown(card.resolutionDeadline);
 
-  function down(e: React.PointerEvent) {
-    if (busy || fly) return;
-    if (entering) { window.clearTimeout(enterTimer.current); setEntering(false); } // grab cancels the rise
-    try { (e.currentTarget as Element).setPointerCapture(e.pointerId); } catch {}
-    start.current = { x: e.clientX, y: e.clientY, t: Date.now(), moved: false };
-  }
-  function move(e: React.PointerEvent) {
-    const s = start.current;
-    if (!s) return;
-    const dx = e.clientX - s.x;
-    const dy = e.clientY - s.y;
-    if (Math.abs(dx) > 5 || Math.abs(dy) > 5) s.moved = true;
-    const ax = Math.abs(dx), ay = Math.abs(dy);
-    let dir: SwipeAction, progress: number;
-    if (ay > ax * 1.15 && dy < 0) { dir = "SKIP"; progress = Math.min(1, ay / COMMIT); }
-    else { dir = dx > 0 ? "YES" : "NO"; progress = Math.min(1, ax / COMMIT); }
-    setDrag({ active: true, dx, dy, dir, progress });
-  }
-  function up() {
-    const s = start.current;
-    start.current = null;
-    if (!s) return;
-    const quick = !s.moved && Date.now() - s.t < 300;
-    if (quick) { setDrag({ active: false, dx: 0, dy: 0, dir: null, progress: 0 }); onTap(); return; }
-    if (drag.progress >= 1 && drag.dir) {
-      const dir = drag.dir;
-      setFly(dir);
-      setDrag({ active: false, dx: 0, dy: 0, dir: null, progress: 0 });
-      // Fly-out animates for FLY_MS, but we hand control to the parent at FLY_MS * RISE_OVERLAP
-      // so the NEXT card starts rising while this one is still flying out (50% overlap). The
-      // outgoing card keeps animating off-screen during the overlap window before it unmounts.
-      flyTimer.current = window.setTimeout(() => onAction(dir), Math.round(FLY_MS * RISE_OVERLAP));
-    } else {
-      setDrag({ active: false, dx: 0, dy: 0, dir: null, progress: 0 });
-    }
-  }
+  // Shared deck/reveal physics. Commit fires the bet (onAction); tap opens detail.
+  const swipe = useCardSwipe({ onCommit: onAction, onTap, enabled: !busy });
 
-  let transform = "translate(0,0) rotate(0deg)";
-  let transition = "transform .45s cubic-bezier(.34,1.4,.5,1)";
-  let opacity = 1;
-  if (fly) {
-    transform = fly === "YES" ? "translate(150%,-12%) rotate(26deg)"
-      : fly === "NO" ? "translate(-150%,-12%) rotate(-26deg)"
-      : "translate(0,-170%) rotate(-3deg)";
-    transition = `transform ${FLY_MS}ms cubic-bezier(.45,0,.25,1), opacity ${FLY_MS}ms`;
-    opacity = 0;
-  } else if (drag.active) {
-    transform = `translate(${drag.dx}px,${drag.dy}px) rotate(${drag.dx * 0.05}deg)`;
-    transition = "none";
-  }
+  // Grabbing the card cancels the entering rise so the drag takes over cleanly.
+  const onPointerDown = (e: React.PointerEvent) => {
+    if (entering) { window.clearTimeout(enterTimer.current); setEntering(false); }
+    swipe.handlers.onPointerDown(e);
+  };
 
   // While the rise animation plays, hand `transform`/`filter` to the keyframe (don't set them
-  // inline, or inline would fight the animation). Once it's done, the inline logic above takes over.
-  const riseAnim = entering && !drag.active && !fly;
-
-  const dp = (d: SwipeAction) => (drag.active && drag.dir === d ? drag.progress : 0);
+  // inline, or inline would fight the animation). Once it's done, the swipe style takes over.
+  const riseAnim = entering && !swipe.active && !swipe.flying;
 
   return (
     <div
-      onPointerDown={down}
-      onPointerMove={move}
-      onPointerUp={up}
+      onPointerDown={onPointerDown}
+      onPointerMove={swipe.handlers.onPointerMove}
+      onPointerUp={swipe.handlers.onPointerUp}
       style={{
         position: "absolute", inset: 0, borderRadius: 26, overflow: "hidden",
         background: "var(--panel2)", border: "1px solid var(--line)",
@@ -213,10 +161,10 @@ export function DeckCard({
         cursor: busy ? "default" : "grab", willChange: "transform",
         ...(riseAnim
           ? { animation: `hfCardRise ${RISE_MS}ms cubic-bezier(.34,1.2,.5,1) both`, transformOrigin: "center bottom" }
-          : { transform, transition, opacity }),
+          : swipe.style),
       }}
     >
-      <CardFace card={card} countdownText={cd.text} urgent={cd.urgent} yesP={dp("YES")} noP={dp("NO")} skipP={dp("SKIP")} />
+      <CardFace card={card} countdownText={cd.text} urgent={cd.urgent} yesP={swipe.progressOf("YES")} noP={swipe.progressOf("NO")} skipP={swipe.progressOf("SKIP")} />
     </div>
   );
 }

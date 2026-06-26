@@ -65,6 +65,10 @@ function App() {
   // Results reveal: the rows to play, or null when closed. Opened by the daily-open ritual (unseen
   // results on auth) and by "Replay" from the inbox.
   const [reveal, setReveal] = useState<ResultRow[] | null>(null);
+  // First-paint gate: stay on the spinner until me + results have loaded and we've DECIDED whether
+  // the reveal plays. This prevents the deck flashing for a frame before the reveal floats up — the
+  // very first content frame is already the right screen (reveal or deck), never an intermediate.
+  const [booted, setBooted] = useState(false);
   const ritualDone = useRef(false); // run the auth→reveal→gm sequence once per load, not on every refresh
   const topping = useRef(false);
   const popTimer = useRef<number | undefined>(undefined);
@@ -110,30 +114,32 @@ function App() {
     } catch { /* storage blocked — skip the once-guard, still attempt below is fine */ }
   }, []);
 
-  useEffect(() => {
-    if (!authenticated) return;
-    refresh().catch(console.error);
-    // Forward the stealth referral code (cookie → localStorage fallback) on first auth, so a user
-    // who swipes before ever tapping GM still attributes. The URL stays clean (no ?ref=); the code
-    // travels in the cookie the middleware set. Server captures once (unique inviteeId) AND, if no
-    // code is present, runs the IP/UA device fallback — so we send login-mark either way.
-    const ref = readRef();
-    const path = ref ? `/api/login-mark?ref=${encodeURIComponent(ref)}` : "/api/login-mark";
-    api(path, { method: "POST" }).catch(() => { /* GM tap retries; capture is idempotent */ });
-  }, [authenticated, refresh, api]);
-
-  // Daily-open ritual: on the first auth of a load, if results settled while away (unseen rows),
-  // play the reveal before the deck. Runs once (ritualDone ref) — refreshes after a swipe/GM must
-  // NOT re-trigger it. The reveal itself chains forward to GM/deck; skip/finish handles the badge.
+  // Boot: one coherent first-load sequence per auth. We gate the first content frame on me + results
+  // (the two things that decide WHAT to show), load the deck in parallel (it's ready by the time the
+  // reveal finishes, or by deck-paint if there's no reveal), then lift the spinner. No intermediate
+  // frames: the reveal decision is made before `booted` flips, so the deck never flashes first.
   useEffect(() => {
     if (!authenticated || ritualDone.current) return;
     ritualDone.current = true;
-    api("/api/results")
-      .then((r) => {
+
+    // Fire the login-mark + referral capture immediately (independent of the boot gate).
+    const ref = readRef();
+    const markPath = ref ? `/api/login-mark?ref=${encodeURIComponent(ref)}` : "/api/login-mark";
+    api(markPath, { method: "POST" }).catch(() => { /* GM tap retries; capture is idempotent */ });
+
+    // Deck loads in the background — NOT awaited by the gate (a user with unseen results watches the
+    // reveal while the deck arrives; a user without results waits on the spinner the deck-fetch fills).
+    api("/api/deck").then((d) => setDeck((d as { cards: Card[] }).cards)).catch(console.error);
+
+    // Gate: me + results in parallel. Decide the reveal, set state, THEN unspin.
+    Promise.all([api("/api/me"), api("/api/results")])
+      .then(([m, r]) => {
+        setMe(m as Me);
         const unseen = (r as ResultsResponse).rows.filter((row) => !row.seen);
         if (unseen.length) setReveal(unseen);
       })
-      .catch(console.error);
+      .catch(console.error)
+      .finally(() => setBooted(true));
   }, [authenticated, api]);
 
   // Preload-ahead: refill well before the deck runs dry (threshold 8, not 1), so a fresh card is
@@ -264,8 +270,11 @@ function App() {
       .catch(console.error);
   }, [api]);
 
-  if (!ready) return <Frame><div style={{ marginTop: 200, textAlign: "center", color: "var(--muted)" }}>Loading…</div></Frame>;
+  if (!ready) return <Frame><Spinner /></Frame>;
   if (!authenticated) return <Frame><Onboarding onLogin={login} /></Frame>;
+  // Authed but not booted: hold the spinner until me + results are loaded and the reveal decision is
+  // made. The first content frame below is then the correct screen (reveal or deck), never a flash.
+  if (!booted) return <Frame><Spinner /></Frame>;
 
   const top = deck[0];
   const next = deck[1];
@@ -353,6 +362,15 @@ function App() {
         />
       )}
     </Frame>
+  );
+}
+
+// Single boot spinner — the only thing shown before the first real frame. One ring, energy accent.
+function Spinner() {
+  return (
+    <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ width: 38, height: 38, borderRadius: "50%", border: "3px solid var(--line)", borderTopColor: "var(--energy)", animation: "hfSpin .8s linear infinite" }} />
+    </div>
   );
 }
 

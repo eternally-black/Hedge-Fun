@@ -1,22 +1,24 @@
 "use client";
 
-import { useEffect, useMemo, useReducer } from "react";
+import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { ResultRow } from "@/lib/api-types";
 import { catOfResult, resultMeta } from "../ui";
+import { useCardSwipe } from "../useCardSwipe";
 
 // ─── Results Reveal — the dopamine peak ──────────────────────────────────────────────────────────
 // Plays on app open, before the deck, replaying what resolved while the user was away. Three phases:
 //   aggregate → featured cards (≤5, peak-end ordered) → summary.
-// Persistent Skip ✕ exits to the deck at any point. Finishing (or skipping) is the parent's job via
-// onDone/onSkip; only finishing should clear the unread badge (skip preserves it as a safety net).
+// USER-PACED: no auto-advance. The card swipes with the SAME physics as the blitz deck (useCardSwipe)
+// — follow-the-finger, fling off on commit in any direction, tap to advance — so the user is never
+// rushed off a result they want to read. The ✕ in the corner exits to the deck at any point. Finishing
+// vs skipping is the parent's job (onDone/onSkip); only finishing clears the unread badge.
 //
 // React notes:
 //   • phase machine is a useReducer (atomic transitions), not a pile of useState.
-//   • the 1.5s auto-advance lives in one effect keyed on phase+index, with a clean clearTimeout.
+//   • gesture is the shared useCardSwipe hook (one source of the deck's physics/timings, no reinvention).
 //   • peak-end order, aggregate totals, and coin-burst positions are useMemo'd so they're stable
 //     across re-renders (coins must NOT re-randomize every frame, or they jump).
 
-const AUTO_ADVANCE_MS = 1500;
 const MAX_FEATURED = 5;
 
 type Phase = "aggregate" | "cards" | "summary";
@@ -63,17 +65,8 @@ export function RevealOverlay({
 
   const last = featured.length - 1;
 
-  // Auto-advance through the featured cards. One timer per (phase, index); cleared on change/unmount.
-  useEffect(() => {
-    if (state.phase !== "cards") return;
-    const id = window.setTimeout(() => dispatch({ t: "next", last }), AUTO_ADVANCE_MS);
-    return () => window.clearTimeout(id);
-  }, [state.phase, state.i, last]);
-
-  const tap = () => {
-    if (state.phase === "aggregate") dispatch({ t: "toCards" });
-    else if (state.phase === "cards") dispatch({ t: "next", last });
-  };
+  // Advance to the next card / phase. Driven by a tap OR a swipe in any direction — never a timer.
+  const next = () => dispatch({ t: "next", last });
 
   const netPositive = agg.net >= 0;
   const netStr = (netPositive ? "+$" : "−$") + Math.abs(Math.round(agg.net / 100)).toLocaleString("en-US");
@@ -83,13 +76,14 @@ export function RevealOverlay({
 
   return (
     <div style={{ position: "absolute", inset: 0, zIndex: 88, overflow: "hidden", background: "var(--bg)" }}>
-      {/* persistent skip — exits to the deck, badge preserved */}
-      <div onClick={onSkip} style={{ position: "absolute", top: 14, right: 16, zIndex: 8, display: "flex", alignItems: "center", gap: 7, background: "rgba(0,0,0,.4)", backdropFilter: "blur(6px)", border: "1px solid var(--line)", padding: "7px 13px 7px 14px", borderRadius: 24, cursor: "pointer", color: "var(--muted)", fontSize: 12, fontWeight: 700 }}>
-        Skip <span style={{ fontSize: 15, lineHeight: 1 }}>✕</span>
+      {/* persistent close — exits to the deck, badge preserved. A bold ✕ in a circle (no "Skip"
+          label, no bare X that reads as the Twitter glyph on a dark field). */}
+      <div onClick={onSkip} aria-label="Close" style={{ position: "absolute", top: 14, right: 16, zIndex: 8, width: 36, height: 36, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,.45)", backdropFilter: "blur(6px)", border: "1px solid var(--line)", cursor: "pointer", color: "var(--text)", fontSize: 20, fontWeight: 800, lineHeight: 1 }}>
+        ✕
       </div>
 
       {state.phase === "aggregate" && (
-        <div onClick={tap} style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 30, textAlign: "center", cursor: "pointer", background: `radial-gradient(130% 55% at 50% 24%, color-mix(in srgb,${netColor} 22%,transparent), transparent 62%)` }}>
+        <div onClick={() => dispatch({ t: "toCards" })} style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 30, textAlign: "center", cursor: "pointer", background: `radial-gradient(130% 55% at 50% 24%, color-mix(in srgb,${netColor} 22%,transparent), transparent 62%)` }}>
           <div style={{ fontSize: 11, letterSpacing: ".24em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700, animation: "hfBigIn .4s ease both" }}>While you were away</div>
           <div style={{ fontFamily: "var(--df)", fontSize: 84, lineHeight: 0.82, marginTop: 16, color: netColor, textShadow: `0 0 46px color-mix(in srgb,${netColor} 45%,transparent)`, animation: "hfBigIn .4s .05s ease both" }}>{netStr}</div>
           <div style={{ fontSize: 12, letterSpacing: ".04em", color: "var(--muted)", marginTop: 6, animation: "hfBigIn .4s .1s ease both" }}>net virtual P&amp;L · {rows.length} call{rows.length === 1 ? "" : "s"} settled</div>
@@ -103,14 +97,15 @@ export function RevealOverlay({
       )}
 
       {state.phase === "cards" && featured[state.i] && (
-        <div onClick={tap} style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", cursor: "pointer" }}>
+        <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column" }}>
           <div style={{ display: "flex", gap: 5, justifyContent: "center", padding: "52px 46px 0" }}>
             {featured.map((_, k) => <div key={k} style={{ flex: 1, height: 3, borderRadius: 3, background: k <= state.i ? "var(--text)" : "var(--line)", transition: "background .3s" }} />)}
           </div>
           <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: "14px 22px", minHeight: 0 }}>
-            <RevealCard key={state.i} row={featured[state.i]!} />
+            {/* keyed by index so each card remounts (fresh flip + a fresh swipe hook state) */}
+            <RevealCard key={state.i} row={featured[state.i]!} onAdvance={next} />
           </div>
-          <div style={{ textAlign: "center", paddingBottom: 30, color: "var(--muted)", fontSize: 12 }}>Tap anywhere to continue · {state.i + 1} / {featured.length}</div>
+          <div style={{ textAlign: "center", paddingBottom: 30, color: "var(--muted)", fontSize: 12 }}>Swipe or tap to continue · {state.i + 1} / {featured.length}</div>
         </div>
       )}
 
@@ -154,9 +149,27 @@ function AggTile({ value, label, color }: { value: string; label: string; color:
   );
 }
 
-function RevealCard({ row }: { row: ResultRow }) {
+const FLIP_MS = 500; // hfFlipIn duration — the card owns transform via the keyframe until this ends
+
+function RevealCard({ row, onAdvance }: { row: ResultRow; onAdvance: () => void }) {
   const cat = catOfResult(row);
   const m = resultMeta(row.status);
+
+  // Same swipe physics as the deck (useCardSwipe): a swipe in any direction OR a tap advances. The
+  // flip plays on mount and owns `transform`; once it ends, the swipe style takes over (mirrors the
+  // deck's entering→drag handoff). Grabbing mid-flip cancels it so the drag is immediate.
+  const [flipping, setFlipping] = useState(true);
+  const flipTimer = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    flipTimer.current = window.setTimeout(() => setFlipping(false), FLIP_MS);
+    return () => window.clearTimeout(flipTimer.current);
+  }, []);
+  const swipe = useCardSwipe({ onCommit: onAdvance, onTap: onAdvance });
+  const onPointerDown = (e: React.PointerEvent) => {
+    if (flipping) { window.clearTimeout(flipTimer.current); setFlipping(false); }
+    swipe.handlers.onPointerDown(e);
+  };
+  const flipAnim = flipping && !swipe.active && !swipe.flying;
   const isWin = row.status === "WIN";
   const isVoid = row.status === "PUSH";
   const badge = isWin ? "WON" : isVoid ? "REFUNDED" : "MISSED";
@@ -185,7 +198,21 @@ function RevealCard({ row }: { row: ResultRow }) {
   );
 
   return (
-    <div style={{ position: "relative", width: 300, maxWidth: "100%", borderRadius: 26, padding: 20, background: `radial-gradient(120% 80% at 80% 0%, color-mix(in srgb,${m.accent} 16%,transparent), transparent 58%), linear-gradient(170deg, var(--panel2), var(--panel))`, border: `1px solid color-mix(in srgb,${m.accent} 45%, var(--line))`, boxShadow: isWin ? "0 0 52px -6px color-mix(in srgb,var(--yes) 65%,transparent)" : "0 22px 44px -20px rgba(0,0,0,.7)", animation: "hfFlipIn .5s cubic-bezier(.3,1.1,.5,1) both" }}>
+    <div
+      onPointerDown={onPointerDown}
+      onPointerMove={swipe.handlers.onPointerMove}
+      onPointerUp={swipe.handlers.onPointerUp}
+      style={{
+        position: "relative", width: 300, maxWidth: "100%", borderRadius: 26, padding: 20,
+        background: `radial-gradient(120% 80% at 80% 0%, color-mix(in srgb,${m.accent} 16%,transparent), transparent 58%), linear-gradient(170deg, var(--panel2), var(--panel))`,
+        border: `1px solid color-mix(in srgb,${m.accent} 45%, var(--line))`,
+        boxShadow: isWin ? "0 0 52px -6px color-mix(in srgb,var(--yes) 65%,transparent)" : "0 22px 44px -20px rgba(0,0,0,.7)",
+        touchAction: "none", cursor: "grab", willChange: "transform",
+        ...(flipAnim
+          ? { animation: `hfFlipIn ${FLIP_MS}ms cubic-bezier(.3,1.1,.5,1) both` }
+          : swipe.style),
+      }}
+    >
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 7, background: "rgba(0,0,0,.35)", padding: "5px 10px", borderRadius: 18, fontSize: 10, letterSpacing: ".12em", textTransform: "uppercase", fontWeight: 700, color: "#fff" }}>
           <span style={{ width: 7, height: 7, borderRadius: "50%", background: cat.color }} />{cat.label}
