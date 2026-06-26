@@ -53,7 +53,7 @@ function ConfigNotice() {
 }
 
 function App() {
-  const { ready, authenticated, login } = usePrivy();
+  const { ready, authenticated, login, logout } = usePrivy();
   const api = useApi();
   const [me, setMe] = useState<Me | null>(null);
   const [deck, setDeck] = useState<Card[]>([]);
@@ -242,6 +242,19 @@ function App() {
   const goDeck = useCallback(() => setScreen("deck"), []);
   const goNotifs = useCallback(() => setScreen("notifications"), []);
 
+  // Sign out: clear local account state so a re-login boots fresh (no previous user's me/deck/reveal
+  // flashing under the spinner), reset the boot gate, then end the Privy session. `authenticated`
+  // flips false → the app falls back to Onboarding.
+  const doLogout = useCallback(async () => {
+    setMe(null);
+    setDeck([]);
+    setReveal(null);
+    setScreen("deck");
+    setBooted(false);
+    ritualDone.current = false;
+    await logout().catch(console.error);
+  }, [logout]);
+
   // Opening the inbox clears the unread badge optimistically; the NotificationsScreen POSTs
   // /api/results/seen, and the next /api/me confirms unreadResults=0.
   const markResultsSeen = useCallback(() => {
@@ -344,7 +357,7 @@ function App() {
         {screen === "gm" && <GmScreen me={me} busy={busy} onGM={gm} onEnterDeck={goDeck} />}
         {screen === "vault" && <VaultScreen me={me} api={api} onRefresh={refresh} />}
         {screen === "invite" && <InviteScreen me={me} />}
-        {screen === "you" && <ProfileScreen me={me} api={api} onLeaderboard={goLeaderboard} onRefresh={refresh} onHistory={openHistory} />}
+        {screen === "you" && <ProfileScreen me={me} api={api} onLeaderboard={goLeaderboard} onRefresh={refresh} onHistory={openHistory} onLogout={doLogout} />}
         {screen === "leaderboard" && <LeaderboardScreen api={api} />}
         {screen === "notifications" && <NotificationsScreen api={api} onSeen={markResultsSeen} onReplay={replayReveal} />}
       </div>

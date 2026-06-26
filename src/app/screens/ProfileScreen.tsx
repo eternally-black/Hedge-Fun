@@ -7,7 +7,7 @@ type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
 // Profile / "You" (ported from app design). Real stats from /api/me. The leaderboard link opens
 // the PRIVATE (auth-gated) leaderboard. Prediction history is a placeholder until /api/history.
-export function ProfileScreen({ me, api, onLeaderboard, onRefresh, onHistory }: { me: Me | null; api: Api; onLeaderboard: () => void; onRefresh: () => Promise<void>; onHistory: () => void }) {
+export function ProfileScreen({ me, api, onLeaderboard, onRefresh, onHistory, onLogout }: { me: Me | null; api: Api; onLeaderboard: () => void; onRefresh: () => Promise<void>; onHistory: () => void; onLogout: () => void }) {
   const handle = me?.user.twitter ?? (me?.user.email ? me.user.email.split("@")[0] : "degen");
   const initials = handle.slice(0, 2).toUpperCase();
   const [resetting, setResetting] = useState(false);
@@ -59,6 +59,20 @@ export function ProfileScreen({ me, api, onLeaderboard, onRefresh, onHistory }: 
           </div>
         </div>
       )}
+
+      {/* Account / sign out. Shows who's signed in (email or @handle) + a logout action. */}
+      <div style={{ marginTop: 22, fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700 }}>Account</div>
+      <div style={{ marginTop: 10, background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 14, padding: "12px 14px", display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ fontSize: 9, letterSpacing: ".1em", textTransform: "uppercase", color: "var(--muted)" }}>Signed in as</div>
+          <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {me?.user.twitter ? `@${me.user.twitter}` : me?.user.email ?? "—"}
+          </div>
+        </div>
+        <div onClick={onLogout} style={{ flexShrink: 0, background: "color-mix(in srgb,var(--no) 12%,var(--panel))", border: "1px solid color-mix(in srgb,var(--no) 40%,var(--line))", color: "var(--no)", fontWeight: 700, fontSize: 13, padding: "9px 16px", borderRadius: 12, cursor: "pointer" }}>
+          Log out
+        </div>
+      </div>
     </div>
   );
 }
