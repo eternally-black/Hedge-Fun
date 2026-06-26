@@ -1,6 +1,6 @@
-# HedgeFun production stack. Build once (app), reuse the image for migrate + poller.
-# Postgres stays on the internal network only; Caddy is the sole public ingress.
-# Env comes from a sibling .env (mode 600, not in git).
+# HedgeFun production stack. The image is built + pushed to GHCR by CI; prod pulls it.
+# One image serves app + migrate + poller. Postgres stays on the internal network only;
+# Caddy is the sole public ingress. Env comes from a sibling .env (mode 600, not in git).
 
 services:
   db:
@@ -27,7 +27,7 @@ services:
 
   # One-shot: apply schema (prisma db push). Exits 0; app/poller wait on it.
   migrate:
-    image: hedgefun:latest
+    image: ghcr.io/eternally-black/hedge-fun:latest
     command: ["npx", "prisma", "db", "push", "--skip-generate"]
     env_file: .env
     depends_on:
@@ -38,7 +38,8 @@ services:
     restart: "no"
 
   app:
-    image: hedgefun:latest
+    image: ghcr.io/eternally-black/hedge-fun:latest
+    # build: kept for local-dev / manual fallback only — prod pulls from GHCR (CI builds it).
     build:
       context: .
       dockerfile: Dockerfile
@@ -72,7 +73,7 @@ services:
           memory: 768m
 
   poller:
-    image: hedgefun:latest
+    image: ghcr.io/eternally-black/hedge-fun:latest
     command: ["node", "dist/poller.cjs"]
     restart: unless-stopped
     env_file: .env
