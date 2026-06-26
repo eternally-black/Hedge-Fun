@@ -159,9 +159,9 @@ function AggTile({ value, label, color }: { value: string; label: string; color:
 
 // ── RevealCardFace — the card VISUALS, pure + memoized (mirrors DeckCard's CardFace). Used by both
 //    the interactive top card and the preview behind it, so the next card is fully rendered (not a
-//    stub) — exactly how the blitz deck does its stack. `showCoins=false` on the preview (the burst
-//    only plays on the live card). No gesture, no positioning here.
-const RevealCardFace = memo(function RevealCardFace({ row, showCoins }: { row: ResultRow; showCoins: boolean }) {
+//    stub) — exactly how the blitz deck does its stack. No gesture, no positioning, no coin burst
+//    (that's a sibling layer in RevealCard so it can overflow above the card).
+const RevealCardFace = memo(function RevealCardFace({ row }: { row: ResultRow }) {
   const cat = catOfResult(row);
   const m = resultMeta(row.status);
   const isWin = row.status === "WIN";
@@ -178,18 +178,6 @@ const RevealCardFace = memo(function RevealCardFace({ row, showCoins }: { row: R
     : isWin ? "Nice call — virtual payout banked"
     : isVoid ? "Market voided · your $100 stake was returned"
     : "So close — no payout this time";
-
-  // Coin burst on a win — 14 coins, positions fixed once per card (useMemo keyed by row.id).
-  const coins = useMemo(
-    () => (isWin && showCoins ? Array.from({ length: 14 }, (_, k) => ({
-      key: k,
-      left: `${8 + Math.random() * 84}%`,
-      size: `${15 + Math.random() * 13}px`,
-      cx: `${(Math.random() * 120 - 60).toFixed(0)}px`,
-      anim: `hfCoin ${(1 + Math.random() * 0.7).toFixed(2)}s ${(Math.random() * 0.35).toFixed(2)}s ease-out forwards`,
-    })) : []),
-    [isWin, showCoins, row.id], // eslint-disable-line react-hooks/exhaustive-deps -- positions fixed per card
-  );
 
   return (
     <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", padding: 20 }}>
@@ -212,14 +200,6 @@ const RevealCardFace = memo(function RevealCardFace({ row, showCoins }: { row: R
         </div>
       </div>
       <div style={{ paddingTop: 14, borderTop: "1px solid var(--line)", fontSize: 12, color: gotShards ? "var(--gold)" : "var(--muted)", fontWeight: gotShards ? 700 : 500 }}>{foot}</div>
-
-      {coins.length > 0 && (
-        <div style={{ position: "absolute", inset: 0, overflow: "hidden", pointerEvents: "none", borderRadius: 26 }}>
-          {coins.map((c) => (
-            <div key={c.key} style={{ position: "absolute", left: c.left, bottom: "40%", fontSize: c.size, ["--cx" as string]: c.cx, animation: c.anim }}>🪙</div>
-          ))}
-        </div>
-      )}
     </div>
   );
 });
@@ -243,7 +223,31 @@ function cardShell(row: ResultRow): React.CSSProperties {
 function RevealCardPreview({ row }: { row: ResultRow }) {
   return (
     <div style={{ ...cardShell(row), filter: "brightness(.82)", pointerEvents: "none", transform: `scale(${PREVIEW_SCALE}) translateY(${PREVIEW_Y}px)`, transformOrigin: "center bottom" }}>
-      <RevealCardFace row={row} showCoins={false} />
+      <RevealCardFace row={row} />
+    </div>
+  );
+}
+
+// Coin fountain for a win — bursts UP from the card's TOP edge and flies out above it. Rendered as a
+// sibling of the card shell (not inside it) so the card's overflow:hidden doesn't clip the coins.
+// Positions are fixed once per card (useMemo keyed by row.id) so they don't re-randomize each frame.
+function CoinBurst({ row }: { row: ResultRow }) {
+  const coins = useMemo(
+    () => Array.from({ length: 14 }, (_, k) => ({
+      key: k,
+      left: `${8 + Math.random() * 84}%`,
+      size: `${15 + Math.random() * 13}px`,
+      cx: `${(Math.random() * 120 - 60).toFixed(0)}px`,
+      anim: `hfCoin ${(1 + Math.random() * 0.7).toFixed(2)}s ${(Math.random() * 0.35).toFixed(2)}s ease-out forwards`,
+    })),
+    [row.id], // eslint-disable-line react-hooks/exhaustive-deps -- positions fixed per card
+  );
+  return (
+    <div style={{ position: "absolute", inset: 0, overflow: "visible", pointerEvents: "none" }}>
+      {coins.map((c) => (
+        // top:0 = the card's top edge; hfCoin lifts them up (-180px) so they fountain out above it.
+        <div key={c.key} style={{ position: "absolute", left: c.left, top: 0, fontSize: c.size, ["--cx" as string]: c.cx, animation: c.anim }}>🪙</div>
+      ))}
     </div>
   );
 }
@@ -265,21 +269,28 @@ function RevealCard({ row, onAdvance }: { row: ResultRow; onAdvance: () => void 
     swipe.handlers.onPointerDown(e);
   };
   const riseAnim = entering && !swipe.active && !swipe.flying;
+  const isWin = row.status === "WIN";
 
+  // Wrapper holds the swipeable card shell (overflow:hidden) AND the coin burst as a SIBLING above it
+  // (overflow:visible) — so the win fountain bursts from the card's top edge and flies out over it,
+  // never clipped. The shell keeps the gesture/transform; the burst sits at the same box, unclipped.
   return (
-    <div
-      onPointerDown={onPointerDown}
-      onPointerMove={swipe.handlers.onPointerMove}
-      onPointerUp={swipe.handlers.onPointerUp}
-      style={{
-        ...cardShell(row),
-        touchAction: "none", cursor: "grab", willChange: "transform",
-        ...(riseAnim
-          ? { animation: `hfCardRise ${RISE_MS}ms cubic-bezier(.34,1.2,.5,1) both`, transformOrigin: "center bottom" }
-          : swipe.style),
-      }}
-    >
-      <RevealCardFace row={row} showCoins />
+    <div style={{ position: "absolute", inset: 0 }}>
+      <div
+        onPointerDown={onPointerDown}
+        onPointerMove={swipe.handlers.onPointerMove}
+        onPointerUp={swipe.handlers.onPointerUp}
+        style={{
+          ...cardShell(row),
+          touchAction: "none", cursor: "grab", willChange: "transform",
+          ...(riseAnim
+            ? { animation: `hfCardRise ${RISE_MS}ms cubic-bezier(.34,1.2,.5,1) both`, transformOrigin: "center bottom" }
+            : swipe.style),
+        }}
+      >
+        <RevealCardFace row={row} />
+      </div>
+      {isWin && <CoinBurst row={row} />}
     </div>
   );
 }
