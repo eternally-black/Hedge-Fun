@@ -41,6 +41,7 @@ async function main() {
   const swipe = await import("../src/app/api/swipe/route");
   const skip = await import("../src/app/api/skip/route");
   const recover = await import("../src/app/api/recover/route");
+  const topup = await import("../src/app/api/topup/route");
   const history = await import("../src/app/api/history/route");
   const leaderboard = await import("../src/app/api/leaderboard/route");
   const loginMark = await import("../src/app/api/login-mark/route");
@@ -70,6 +71,7 @@ async function main() {
   await expect401(swipe.POST, "http://x/api/swipe", { method: "POST", body: "{}" });
   await expect401(skip.POST, "http://x/api/skip", { method: "POST" });
   await expect401(recover.POST, "http://x/api/recover", { method: "POST" });
+  await expect401(topup.POST, "http://x/api/topup", { method: "POST", body: "{}" });
   await expect401(loginMark.POST, "http://x/api/login-mark", { method: "POST" });
   await expect401(results.GET, "http://x/api/results");
   await expect401(resultsSeen.POST, "http://x/api/results/seen", { method: "POST" });
@@ -78,10 +80,12 @@ async function main() {
   // ---- (b) authed 200 + EXACT top-level key contract (Android binds to these) ----
   const meBody = await (await me.GET(authed("http://x/api/me"))).json();
   assert.deepStrictEqual(keysOf(meBody),
-    ["artifacts","balanceCents","dev","isNewUser","loginMarkedToday","points","shards","shardsPerArtifact","skips","streak","swipes","unreadResults","user"],
+    ["artifacts","balanceCents","cashCents","dev","isNewUser","lockedCents","loginMarkedToday","points","shards","shardsPerArtifact","skips","stakeCents","streak","swipes","topup","unreadResults","user"],
     "/me top-level keys");
   assert.deepStrictEqual(Object.keys(meBody.points).sort(), ["bonusFromX2","breakdown","total"], "/me points keys");
   assert.deepStrictEqual(Object.keys(meBody.swipes).sort(), ["cap","used"], "/me swipes keys");
+  assert.deepStrictEqual(Object.keys(meBody.topup).sort(),
+    ["artifactCost","artifactTopupAvailable","freeTopupAvailable","freeTopupUsed","grantCents"], "/me topup keys");
   assert.deepStrictEqual(Object.keys(meBody.streak).sort(),
     ["level","recoverableUntil","state","todayWeekday","windowStartWeekday"], "/me streak keys");
 
@@ -130,6 +134,14 @@ async function main() {
   assert.strictEqual(recRes.status, 409, "/recover with no burned streak -> 409");
   const recBody = await recRes.json();
   assert.strictEqual(recBody.recovered, false, "/recover body recovered=false");
+
+  // topup: bad/missing kind -> 400; dormant points path -> 404 (route hides it); artifact w/ none -> 402.
+  const badTopup = await topup.POST(authed("http://x/api/topup", { method: "POST", body: "{}" }));
+  assert.strictEqual(badTopup.status, 400, "/topup missing kind -> 400");
+  const ptsTopup = await topup.POST(authed("http://x/api/topup", { method: "POST", body: JSON.stringify({ kind: "points" }) }));
+  assert.strictEqual(ptsTopup.status, 404, "/topup dormant points path -> 404");
+  const artTopup = await topup.POST(authed("http://x/api/topup", { method: "POST", body: JSON.stringify({ kind: "artifact" }) }));
+  assert.strictEqual(artTopup.status, 402, "/topup artifact with no artifact -> 402");
 
   // results: empty top-level contract first (no settled bets yet).
   const resEmpty = await (await results.GET(authed("http://x/api/results"))).json();

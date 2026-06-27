@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useLinkAccount, usePrivy } from "@privy-io/react-auth";
 import { type Me, num, usd } from "../ui";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
@@ -11,6 +12,50 @@ export function ProfileScreen({ me, api, onLeaderboard, onRefresh, onHistory, on
   const handle = me?.user.twitter ?? (me?.user.email ? me.user.email.split("@")[0] : "degen");
   const initials = handle.slice(0, 2).toUpperCase();
   const [resetting, setResetting] = useState(false);
+
+  // X (Twitter) link/unlink. linkTwitter opens Privy's OAuth flow; on success we push the new handle
+  // into our DB (/api/link/sync — extractIdentity only runs at first login) then refresh /api/me so
+  // it renders. Unlink detaches in Privy client-side first, then /api/link/unlink nulls our column.
+  const [busyX, setBusyX] = useState<null | "link" | "unlink">(null);
+  const [xError, setXError] = useState<string | null>(null);
+  const { linkTwitter } = useLinkAccount({
+    onSuccess: async () => {
+      setXError(null);
+      try {
+        await api("/api/link/sync", { method: "POST" });
+        await onRefresh();
+      } catch (e) {
+        setXError(
+          (e as { status?: number }).status === 409
+            ? "That X account is already linked to another HedgeFun account — contact support."
+            : "Couldn't link X. Try again.",
+        );
+      } finally {
+        setBusyX(null);
+      }
+    },
+    onError: () => setBusyX(null),
+  });
+  const { user: privyUser, unlinkTwitter } = usePrivy();
+  const startLink = () => { setXError(null); setBusyX("link"); linkTwitter(); };
+  const startUnlink = async () => {
+    setXError(null);
+    setBusyX("unlink");
+    try {
+      // Unlink in Privy first (its subject id), then clear our DB. Privy requires ≥1 other account —
+      // the email-signup user keeps their email, so this is allowed. No subject = nothing to unlink in
+      // Privy; bail rather than clear our column (that would desync: gone here, still linked there).
+      const subject = privyUser?.twitter?.subject;
+      if (!subject) throw new Error("no twitter subject");
+      await unlinkTwitter(subject);
+      await api("/api/link/unlink", { method: "POST" });
+      await onRefresh();
+    } catch {
+      setXError("Couldn't unlink X. Try again.");
+    } finally {
+      setBusyX(null);
+    }
+  };
 
   const resetDeck = async () => {
     setResetting(true);
@@ -73,6 +118,30 @@ export function ProfileScreen({ me, api, onLeaderboard, onRefresh, onHistory, on
           Log out
         </div>
       </div>
+
+      {/* X (Twitter) connection. Linked → show the @handle (+ Unlink for email-signup users; a
+          twitter-signup user can't unlink — it's their login). Not linked → a Link button (email
+          users only). */}
+      <div style={{ marginTop: 10, background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 14, padding: "12px 14px", display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ fontSize: 9, letterSpacing: ".1em", textTransform: "uppercase", color: "var(--muted)" }}>𝕏 Account</div>
+          <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {me?.user.twitter ? `@${me.user.twitter}` : "Not connected"}
+          </div>
+        </div>
+        {me?.user.twitter
+          ? (me.user.authProvider === "EMAIL"
+              ? <div onClick={busyX ? undefined : startUnlink} style={{ flexShrink: 0, background: "color-mix(in srgb,var(--no) 12%,var(--panel))", border: "1px solid color-mix(in srgb,var(--no) 40%,var(--line))", color: "var(--no)", fontWeight: 700, fontSize: 13, padding: "9px 16px", borderRadius: 12, cursor: busyX ? "default" : "pointer", opacity: busyX ? 0.6 : 1 }}>
+                  {busyX === "unlink" ? "Unlinking…" : "Unlink"}
+                </div>
+              : null)
+          : (me?.user.authProvider === "EMAIL"
+              ? <div onClick={busyX ? undefined : startLink} style={{ flexShrink: 0, background: "color-mix(in srgb,var(--energy) 16%,var(--panel))", border: "1px solid color-mix(in srgb,var(--energy) 45%,var(--line))", color: "var(--energy)", fontWeight: 700, fontSize: 13, padding: "9px 16px", borderRadius: 12, cursor: busyX ? "default" : "pointer", opacity: busyX ? 0.6 : 1 }}>
+                  {busyX === "link" ? "Linking…" : "Link 𝕏"}
+                </div>
+              : null)}
+      </div>
+      {xError ? <div style={{ marginTop: 8, fontSize: 12, color: "var(--no)" }}>{xError}</div> : null}
     </div>
   );
 }

@@ -145,8 +145,9 @@ async function main() {
   const bal1 = (await prisma.virtualBalance.findUnique({ where: { userId: user.id } }))!.balanceCents;
   const settledBet = (await prisma.bet.findUnique({ where: { id: firstYesBet!.id } }))!;
   assert.strictEqual(settledBet.result, "WIN", "YES bet on YES = win");
-  assert.strictEqual(settledBet.pnlCents, expected.pnlCents, "balance pnl matches formula");
-  assert.strictEqual(bal1 - bal0, s1.settled === 1 ? expected.pnlCents : bal1 - bal0, "balance moved");
+  assert.strictEqual(settledBet.pnlCents, expected.pnlCents, "bet pnl matches formula");
+  // Cash/Locked model: settle credits the FULL PAYOUT (stake was locked at swipe, not debited).
+  assert.strictEqual(bal1 - bal0, s1.settled === 1 ? expected.payoutCents : bal1 - bal0, "balance += payout on settle");
   const coll = (await prisma.collectibleBalance.findUnique({ where: { userId: user.id } }))!;
   assert.ok(coll.shards >= 1 || coll.artifacts >= 1, "win awarded a shard");
   console.log("   balance", bal0, "->", bal1, "(pnl", settledBet.pnlCents + ")", "shards", coll.shards);

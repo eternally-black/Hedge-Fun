@@ -3,6 +3,14 @@ import { awardShard } from "../src/lib/shards";
 import { START_BALANCE_CENTS } from "../src/lib/config";
 
 // ---------------------------------------------------------------------------
+// Balance model (Cash/Locked): the stake is HELD at swipe time (lockedCents += stake on
+// virtual_balances), never decremented from balanceCents. Settlement releases the hold and credits
+// the full payout (Cash = balanceCents − lockedCents):
+//   - win  -> balanceCents += payoutCents, lockedCents −= stake (Cash net change = payout − stake = pnl)
+//   - loss -> payoutCents = 0, lockedCents −= stake (stake consumed; only the hold is released)
+//   - void -> lockedCents −= stake, NO balance change — releasing the hold IS the refund
+// balanceCents thus only ever increments, by payouts (here) and top-ups (src/lib/topup.ts).
+//
 // Paper P&L (share math). User "buys" $stake of the YES or NO share at the locked
 // price p (fraction). A winning share pays $1, a losing share pays $0.
 //
@@ -74,6 +82,8 @@ export async function settleMarket(
 
       for (const bet of bets) {
         if (resolution.kind === "void") {
+          // Release the hold (lockedCents −= stake) with NO balance change — that release IS the
+          // refund (Cash returns by stake). The stake was held, never debited from balanceCents.
           await tx.bet.update({
             where: { id: bet.id },
             data: {
@@ -83,6 +93,10 @@ export async function settleMarket(
               pnlCents: 0,
               settledAt: new Date(),
             },
+          });
+          await tx.virtualBalance.update({
+            where: { userId: bet.userId },
+            data: { lockedCents: { decrement: bet.stakeCents } },
           });
           voided++;
           continue;
@@ -107,13 +121,14 @@ export async function settleMarket(
           },
         });
 
-        // Apply net P&L delta to the virtual balance (race-safe increment).
-        // The create branch is a safety net — balance is provisioned at signup, so it
-        // should never fire; if it does, start from the configured balance, not a literal.
+        // Release the hold (lockedCents −= stake) and credit the FULL payout (balanceCents +=
+        // payout). Cash net change = payout − stake = pnl. A loss has payoutCents = 0 → only the
+        // hold is released. The create branch is a safety net — balance is provisioned at signup,
+        // so it should never fire; if it does, start from the config base with no hold.
         await tx.virtualBalance.upsert({
           where: { userId: bet.userId },
-          create: { userId: bet.userId, balanceCents: START_BALANCE_CENTS + pnlCents },
-          update: { balanceCents: { increment: pnlCents } },
+          create: { userId: bet.userId, balanceCents: START_BALANCE_CENTS + payoutCents, lockedCents: 0 },
+          update: { balanceCents: { increment: payoutCents }, lockedCents: { decrement: bet.stakeCents } },
         });
 
         if (won) {

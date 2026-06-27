@@ -13,6 +13,7 @@ import { InviteScreen } from "./screens/InviteScreen";
 import { ProfileScreen } from "./screens/ProfileScreen";
 import { LeaderboardScreen } from "./screens/LeaderboardScreen";
 import { HistorySheet } from "./screens/HistorySheet";
+import { BalanceSheet } from "./screens/BalanceSheet";
 import { NotificationsScreen } from "./screens/NotificationsScreen";
 import { RevealOverlay } from "./screens/RevealOverlay";
 import { type Card, type Me, type Screen } from "./ui";
@@ -62,6 +63,7 @@ function App() {
   const [pop, setPop] = useState<{ amt: number; color: string } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [balanceOpen, setBalanceOpen] = useState(false);
   // Results reveal: the rows to play, or null when closed. Opened by the daily-open ritual (unseen
   // results on auth) and by "Replay" from the inbox. `revealMode` controls where closing it leads:
   // a daily-ritual reveal chains forward (GM if not checked in, else deck); a replay just returns to
@@ -208,6 +210,12 @@ function App() {
         flashToast("No shards — earn one (or wait for tomorrow's free skip)");
         return;
       }
+      // Cash gate: a YES/NO bet needs >= one stake of free Cash. Block BEFORE the optimistic advance
+      // so the card isn't lost — it stays so the user can top up and retry.
+      if (action !== "SKIP" && me && me.cashCents < me.stakeCents) {
+        flashToast("No free cash left");
+        return;
+      }
       // OPTIMISTIC: advance the deck immediately so the next card rises in sync with the fly-out
       // animation (the gesture already committed). The network call runs in the background — we
       // do NOT block the UI on it, which is what made advancing feel laggy/network-coupled.
@@ -224,9 +232,13 @@ function App() {
           // 403 = daily swipe cap hit (raced past the client gate). The bet wasn't stored;
           // refreshMe pulls used>=cap, which flips capReached and shows the limit screen.
           if (status === 403) { flashToast("Daily limit reached — back at 00:00 UTC"); void refreshMe(); }
-          // 409 (already bet) is fine — the card's gone anyway. 402 (skip blocked) shouldn't
-          // happen since we gate above, but if it races, just surface it. Card already advanced.
-          else if (status === 402) flashToast("No shards — earn one (or wait for tomorrow's free skip)");
+          // 402 = no free cash (swipe) or no shards (skip), depending on the action. We pre-gate both,
+          // so a 402 here means a race; surface it + refresh. The swipe tx rolled back (no bet row), so
+          // the market re-enters a future deck — the card isn't permanently lost.
+          else if (status === 402) {
+            flashToast(action === "SKIP" ? "No shards — earn one (or wait for tomorrow's free skip)" : "No free cash left");
+            void refreshMe();
+          }
           else if (status !== 409) console.error(e);
         });
     },
@@ -256,6 +268,8 @@ function App() {
   const goLeaderboard = useCallback(() => setScreen("leaderboard"), []);
   const openHistory = useCallback(() => setHistoryOpen(true), []);
   const closeHistory = useCallback(() => setHistoryOpen(false), []);
+  const openBalance = useCallback(() => setBalanceOpen(true), []);
+  const closeBalance = useCallback(() => setBalanceOpen(false), []);
   const goDeck = useCallback(() => setScreen("deck"), []);
   const goNotifs = useCallback(() => setScreen("notifications"), []);
 
@@ -338,7 +352,8 @@ function App() {
         </div>
       )}
       {historyOpen && <HistorySheet api={api} onClose={closeHistory} />}
-      <Hud me={me} pop={pop} onShards={goVault} onGM={goGmScreen} onBalance={openHistory} onBell={goNotifs} />
+      {balanceOpen && <BalanceSheet me={me} api={api} onClose={closeBalance} onTopupDone={refreshMe} onToast={flashToast} />}
+      <Hud me={me} pop={pop} onShards={goVault} onGM={goGmScreen} onBalance={openBalance} onBell={goNotifs} />
 
       <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
         {screen === "deck" && (

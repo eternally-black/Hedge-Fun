@@ -4,18 +4,21 @@ Swipe-prediction paper-trading app on real Polymarket markets. Web now (Next.js)
 
 Stack: Next.js (App Router) · Prisma · Postgres · Privy auth. Money in integer cents, points in a raw ledger, x2 multiplier applied at read time (one swappable strategy).
 
-## Local dev (Windows + Postgres in WSL)
+## Local dev (Windows + Postgres in Docker)
 
-Postgres 16 runs in WSL Ubuntu; Windows reaches it at `127.0.0.1:5432`. The WSL VM tears down when no `wsl.exe` process is alive, so start the DB before anything that touches it:
+Postgres 16 runs in a Docker container (`docker-compose.dev.yml`), published on a stable
+`127.0.0.1:5432`. Prereq: **Docker Desktop** (WSL2 backend) installed and running.
 
 ```bash
 npm install
-npm run db:up        # starts Postgres in WSL
+npm run db:up        # starts Postgres in Docker (waits until healthy)
 npm run db:push      # create tables (first time)
 npm run refresh-deck # load real <=24h Polymarket markets into the cache
 npm run dev          # web at http://localhost:3000  (or: npm run dev:db = db:up + dev)
 npm run poll         # settlement poller (separate terminal)
 ```
+
+`npm run db:down` stops the container (data persists in the `pgdata` volume).
 
 Fill `.env.local` with your Privy keys (`NEXT_PUBLIC_PRIVY_APP_ID`, `PRIVY_APP_SECRET`) to enable login. `DATABASE_URL` + `POLYMARKET_API_BASE` live in `.env`.
 

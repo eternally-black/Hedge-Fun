@@ -13,6 +13,15 @@ export class SwipeCapReachedError extends Error {
   }
 }
 
+// Thrown when the user's Cash can't cover the stake. Cash = balance − Σ(pending stakes).
+// The route turns it into a 402 so the client can show "no free cash left".
+export class InsufficientFundsError extends Error {
+  constructor() {
+    super("insufficient cash for stake");
+    this.name = "InsufficientFundsError";
+  }
+}
+
 // Record a swipe = a paper bet on a market outcome at a locked price.
 // Cap (P-3): SWIPE_CAP swipes/day, each earns 1 raw point. HARD STOP — the
 // (SWIPE_CAP+1)th swipe is rejected (throws SwipeCapReachedError), nothing is stored.
@@ -72,6 +81,21 @@ export async function recordSwipe(input: {
         betId: bet.id, // unique -> 1 point per bet, ever
       });
     }
+
+    // Cash gate as an atomic conditional HOLD (bank-style): place STAKE_CENTS onto "lockedCents"
+    // only if free Cash ("balanceCents" − "lockedCents") still covers it. The WHERE makes the check
+    // + the increment one indivisible DB write, so two concurrent swipes can't both pass — the
+    // second's WHERE sees the first's incremented "lockedCents" and updates 0 rows. "balanceCents"
+    // is never decremented; the hold is released by settle. Raw SQL because the guard compares two
+    // columns (balance − locked), which Prisma's typed `where` can't express. Column names are
+    // camelCase (no @map on the fields, only @@map on the table) so they must be double-quoted.
+    // Returns the affected row count; 0 ⇒ not enough Cash ⇒ throw (rolls back bet + counter + points).
+    const held = await tx.$executeRaw`
+      UPDATE virtual_balances
+         SET "lockedCents" = "lockedCents" + ${STAKE_CENTS}
+       WHERE "userId" = ${input.userId}
+         AND "balanceCents" - "lockedCents" >= ${STAKE_CENTS}`;
+    if (held === 0) throw new InsufficientFundsError();
 
     return {
       betId: bet.id,

@@ -49,4 +49,23 @@ assert.strictEqual(dog.pnlCents, 90000, "YES@0.10 win pnl = +90000c");
 r = computePnl({ side: "YES", stakeCents: S, lockedPriceBp: 0, resolvedYes: true });
 assert.ok(Number.isFinite(r.payoutCents) && r.payoutCents > 0, "bp=0 clamped, finite payout");
 
-console.log("settle P&L: OK");
+// ── Cash/Locked invariant. Balance now moves by FULL PAYOUT at settle (stake was locked, not
+// debited), so Δbalance == payoutCents. The net Cash change still equals the old pnl, because Cash
+// = balance − locked and the bet leaving PENDING drops locked by stake:
+//   ΔCash = Δbalance − Δlocked = payoutCents − (−stake) ... no: locked DROPS by stake → Δlocked = −stake
+//   ΔCash = payoutCents − stake = pnlCents.  Assert payout == pnl + stake for win, loss, near-certain.
+for (const c of [
+  { side: "YES" as const, bp: 4000, yes: true },  // win
+  { side: "YES" as const, bp: 4000, yes: false }, // loss
+  { side: "NO" as const, bp: 6000, yes: false },  // win
+  { side: "YES" as const, bp: 9999, yes: true },  // near-certain win
+]) {
+  const x = computePnl({ side: c.side, stakeCents: S, lockedPriceBp: c.bp, resolvedYes: c.yes });
+  assert.strictEqual(x.payoutCents, x.pnlCents + S, `payout == pnl + stake (${c.side}@${c.bp}/${c.yes})`);
+  assert.ok(x.payoutCents >= 0, "payout never negative (loss credits 0, not −stake)");
+}
+// A loss credits 0 to balance (not −stake): the stake was already consumed by locking it.
+const loss = computePnl({ side: "YES", stakeCents: S, lockedPriceBp: 4000, resolvedYes: false });
+assert.strictEqual(loss.payoutCents, 0, "loss settle credits 0 to balance");
+
+console.log("settle P&L + Cash/Locked invariant: OK");

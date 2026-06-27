@@ -23,7 +23,7 @@ export function bearer(req: Request): string | null {
 }
 
 // Read identity fields from the Privy user's linked accounts.
-function extractIdentity(pu: PrivyUser): {
+export function extractIdentity(pu: PrivyUser): {
   authProvider: "EMAIL" | "TWITTER";
   email: string | null;
   twitterHandle: string | null;
@@ -100,6 +100,14 @@ export async function ensureUser(privyId: string): Promise<User> {
     }
     throw e;
   }
+}
+
+// Read the live Privy user (linked accounts incl. twitter). Used by /api/link/sync to back-fill
+// twitterHandle after the client links via useLinkAccount — extractIdentity only runs at ensureUser
+// (first login), so a later link wouldn't reach our DB otherwise. (Unlinking is done client-side via
+// usePrivy().unlinkTwitter — this server SDK version has no unlink method.)
+export async function getPrivyUser(privyId: string): Promise<PrivyUser> {
+  return privy.getUser(privyId);
 }
 
 // Convenience for API routes: verify the request and return the app user, or null.

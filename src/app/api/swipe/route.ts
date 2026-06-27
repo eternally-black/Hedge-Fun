@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
-import { recordSwipe, SwipeCapReachedError } from "@/lib/swipe";
+import { recordSwipe, SwipeCapReachedError, InsufficientFundsError } from "@/lib/swipe";
 import { maybeQualifyReferralOnSwipe } from "@/lib/referral";
 import { isDevUser } from "@/lib/dev";
 import type { SwipeRequest, SwipeResponse } from "@/lib/api-types";
@@ -51,6 +51,10 @@ export async function POST(req: Request) {
     // Hard daily cap: the (cap+1)th swipe is rejected, nothing stored.
     if (e instanceof SwipeCapReachedError) {
       return NextResponse.json({ error: "daily swipe limit reached" }, { status: 403 });
+    }
+    // No free Cash to cover the stake — nothing stored (tx rolled back).
+    if (e instanceof InsufficientFundsError) {
+      return NextResponse.json({ error: "insufficient_funds" }, { status: 402 });
     }
     // P2002 on [userId, marketId] = already bet this market (one bet per card).
     if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {

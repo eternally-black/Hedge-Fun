@@ -2,8 +2,20 @@
 // OPEN values are flagged — when the product answer lands, change it here only.
 
 // ---- Currency / stake (DECIDED) ----
-export const START_BALANCE_CENTS = 100_000; // $1000.00
-export const STAKE_CENTS = 10_000; // $100.00 fixed per swipe
+export const START_BALANCE_CENTS = 20_000; // $200.00
+export const STAKE_CENTS = 1_000; // $10.00 fixed per swipe
+
+// ---- Top-up (DECIDED) ----
+// Cash/Locked model: a swipe locks STAKE_CENTS (Locked = Σ pending stakes); balance is never
+// decremented on swipe. Top-up CREDITS balance. 1st top-up free (low-cash gate), then 1 artifact each.
+export const TOPUP_GRANT_CENTS = 20_000; // +$200.00 Cash per top-up
+export const FREE_TOPUP_CASH_GATE_CENTS = 3_000; // free top-up only enabled when Cash < $30
+export const TOPUP_ARTIFACT_COST = 1; // artifacts spent per paid top-up (1 artifact = SHARDS_PER_ARTIFACT shards)
+
+// ---- Points top-up (DORMANT — backend only, no UI, flag OFF) ----
+// Spend points for Cash. Built but not shipped; flip the flag + set a real cost when the partner agrees.
+export const TOPUP_POINTS_ENABLED = false;
+export const TOPUP_POINTS_COST = 0; // TODO(pricing): real N points for +$200. Placeholder — never ship enabled with 0.
 
 // ---- Daily caps (DECIDED) ----
 export const SWIPE_CAP = 10; // point-earning swipes/day (over-cap allowed, 0 pts)

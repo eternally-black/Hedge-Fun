@@ -1,7 +1,8 @@
 "use client";
 
 import { memo, useEffect, useRef, useState } from "react";
-import { type Card, catOf, bgGrad, cents, winPayout, countdown, sideLabels, marketHint } from "./ui";
+import { type Card, catOf, bgGrad, cents, usd, winPayout, countdown, sideLabels, marketHint } from "./ui";
+import { STAKE_CENTS } from "@/lib/config";
 import { useCardSwipe } from "./useCardSwipe";
 
 export type SwipeAction = "YES" | "NO" | "SKIP";
@@ -79,7 +80,7 @@ const CardFace = memo(function CardFace({ card, countdownText, urgent, yesP, noP
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <div style={{ background: "rgba(0,0,0,.4)", backdropFilter: "blur(6px)", border: "1px solid var(--line)", padding: "8px 12px", borderRadius: 14 }}>
             <div style={{ fontSize: 8, letterSpacing: ".12em", color: "var(--muted)", textTransform: "uppercase" }}>Stake</div>
-            <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 15, color: "#fff" }}>$100</div>
+            <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 15, color: "#fff" }}>{usd(STAKE_CENTS)}</div>
           </div>
           <div style={{ flex: 1, display: "flex", gap: 6 }}>
             <PayBox label={`Win ${labels.no}`} val={winPayout(card.noPriceBp)} color="var(--no)" />

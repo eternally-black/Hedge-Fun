@@ -4,7 +4,16 @@ import { authUser } from "@/lib/privy";
 import { effectivePoints } from "@/lib/points";
 import { evaluateStreak } from "@/lib/streak";
 import { utcDay, weekdayMon0, streakWindowStartDay } from "@/lib/time";
-import { SWIPE_CAP, FREE_SKIPS_PER_DAY, SKIP_SHARD_COST, SHARDS_PER_ARTIFACT } from "@/lib/config";
+import {
+  SWIPE_CAP,
+  FREE_SKIPS_PER_DAY,
+  SKIP_SHARD_COST,
+  SHARDS_PER_ARTIFACT,
+  STAKE_CENTS,
+  TOPUP_GRANT_CENTS,
+  FREE_TOPUP_CASH_GATE_CENTS,
+  TOPUP_ARTIFACT_COST,
+} from "@/lib/config";
 import { isDevUser } from "@/lib/dev";
 import type { MeResponse } from "@/lib/api-types";
 
@@ -30,9 +39,31 @@ export async function GET(req: Request) {
     }),
   ]);
 
+  // Cash/Locked split. balanceCents is the stored total; lockedCents is the held sum (maintained
+  // atomically by recordSwipe/settle); Cash is what's spendable right now.
+  const balanceCents = balance?.balanceCents ?? 0;
+  const lockedCents = balance?.lockedCents ?? 0;
+  const cashCents = balanceCents - lockedCents;
+  // Free top-up: never used AND Cash < $30 AND Cash can't charge the rest of today's deck.
+  const remainingSwipes = Math.max(0, SWIPE_CAP - (counter?.swipeCount ?? 0));
+  const freeTopupUsed = balance?.freeTopupUsed ?? false;
+  const freeTopupAvailable =
+    !freeTopupUsed && cashCents < FREE_TOPUP_CASH_GATE_CENTS && cashCents < remainingSwipes * STAKE_CENTS;
+
   const body: MeResponse = {
-    user: { id: user.id, email: user.email, twitter: user.twitterHandle, referralCode: user.referralCode },
-    balanceCents: balance?.balanceCents ?? 0,
+    user: { id: user.id, email: user.email, twitter: user.twitterHandle, authProvider: user.authProvider, referralCode: user.referralCode },
+    balanceCents, // total = Cash + Locked
+    cashCents, // spendable now
+    lockedCents, // Σ pending stakes
+    stakeCents: STAKE_CENTS, // client gates "cash >= stake" without hardcoding
+    topup: {
+      freeTopupUsed,
+      freeTopupAvailable,
+      // Artifact top-up: any time the user holds >=1 artifact (no cash gate).
+      artifactTopupAvailable: (collectibles?.artifacts ?? 0) >= TOPUP_ARTIFACT_COST,
+      grantCents: TOPUP_GRANT_CENTS,
+      artifactCost: TOPUP_ARTIFACT_COST,
+    },
     points: { total: points.total, breakdown: points.breakdown, bonusFromX2: points.bonusFromX2 },
     swipes: { used: counter?.swipeCount ?? 0, cap: SWIPE_CAP },
     skips: {

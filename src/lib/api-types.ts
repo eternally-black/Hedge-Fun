@@ -21,6 +21,7 @@ export type BetSide = "YES" | "NO";
 export type StreakState = "ACTIVE" | "BURNED_RECOVERABLE" | "LOST";
 export type PointsType = "SWIPE" | "LOGIN" | "REFERRAL" | "STREAK_X2";
 export type BetStatus = "PENDING" | "WIN" | "LOSS" | "PUSH";
+export type AuthProvider = "EMAIL" | "TWITTER"; // how the user signed up
 
 // Every route returns this on a missing/invalid Bearer token (HTTP 401). Other 4xx use the same
 // `{ error }` shape (see per-route notes below).
@@ -47,7 +48,8 @@ export interface DeckResponse {
 
 // ─── POST /api/swipe ───────────────────────────────────────────────────────────────────────────
 // Auth: Bearer. Body: SwipeRequest. Paper bet Yes/No on a deck market; locks the bought side's price.
-// Errors: 400 (bad body), 409 (market not open / already swiped this market), 403 (daily cap reached).
+// Errors: 400 (bad body), 409 (market not open / already swiped this market), 403 (daily cap reached),
+//         402 (insufficient Cash for stake — body { error: "insufficient_funds" }; distinct from /api/skip's 402).
 export interface SwipeRequest {
   marketId: string;
   side: BetSide;
@@ -74,6 +76,23 @@ export interface RecoverResponse {
   reason?: "no_streak" | "not_recoverable" | "window_expired" | "no_artifact";
   currentLevel: number;
 }
+
+// ─── POST /api/topup ───────────────────────────────────────────────────────────────────────────
+// Auth: Bearer. Body: { kind: "free" | "artifact" | "points" }. Credits +$200 Cash.
+//   free     — once ever, low-cash gate.  409 (free_used / free_not_eligible).
+//   artifact — spend 1 artifact, no gate. 402 (no_artifact).
+//   points   — DORMANT (flag off).        404 (route hides it) / 402 (not_enough_points if enabled).
+export type TopupResponse =
+  | { ok: true; kind: "free" | "artifact" | "points"; grantedCents: number; balanceCents: number }
+  | {
+      ok: false;
+      reason:
+        | "free_used"
+        | "free_not_eligible"
+        | "no_artifact"
+        | "points_disabled"
+        | "not_enough_points";
+    };
 
 // ─── POST /api/login-mark ──────────────────────────────────────────────────────────────────────
 // Auth: Bearer. Optional query ?ref=<referralCode> (captured once, on first ever call). The daily
@@ -149,8 +168,21 @@ export interface LeaderboardResponse {
 // computed (points multiplier applied, caps/costs included) so the client renders, never derives,
 // the economy. weekday fields are 0=Mon..6=Sun.
 export interface MeResponse {
-  user: { id: string; email: string | null; twitter: string | null; referralCode: string };
-  balanceCents: number;
+  // authProvider = how the user signed up. The client gates "Unlink X" on it (a TWITTER-signup user
+  // can't unlink X — it's their login). twitter = the linked @handle: set at signup (TWITTER) or
+  // later via /api/link/sync (an EMAIL user who linked X).
+  user: { id: string; email: string | null; twitter: string | null; authProvider: AuthProvider; referralCode: string };
+  balanceCents: number; // total = cashCents + lockedCents
+  cashCents: number; // spendable now (balance − Σ pending stakes)
+  lockedCents: number; // Σ stakes of still-PENDING bets ("in play")
+  stakeCents: number; // cost of one swipe (so the client gates cash >= stake without hardcoding)
+  topup: {
+    freeTopupUsed: boolean; // lifetime free top-up consumed
+    freeTopupAvailable: boolean; // free path enabled (low-cash gate met)
+    artifactTopupAvailable: boolean; // user holds >=1 artifact (no cash gate)
+    grantCents: number; // +Cash per top-up
+    artifactCost: number; // artifacts per paid top-up
+  };
   points: { total: number; breakdown: Record<PointsType, number>; bonusFromX2: number };
   swipes: { used: number; cap: number };
   skips: { usedToday: number; nextIsFree: boolean; shardCost: number };
@@ -179,4 +211,26 @@ export interface MeResponse {
 // attribution survives even when the user doesn't tap GM. Idempotent (capture binds once).
 export interface CaptureRefResponse {
   captured: boolean; // true if a referral was bound on this call (false if already bound / no code)
+}
+
+// ─── GET /api/admin/leaderboard ──────────────────────────────────────────────────────────────────
+// Auth: Bearer + ADMIN_EMAILS allowlist. 401 (no/invalid token), 403 (authed but not admin).
+// PRIVATE admin growth tool — returns PII (twitter handle, activity). Never cached/indexed; email
+// is intentionally NOT in the payload. One payload carries all 3 windows so the client does
+// windowing/sort/filter with zero refetch.
+export interface AdminLeaderboardRow {
+  userId: string;
+  handle: string; // twitterHandle ?? `user_<id6>`
+  twitterHandle: string | null;
+  hasTwitter: boolean;
+  pointsAll: number;
+  pointsWeek: number; // last 7 days incl. today (windowed multiplier is approximate — see route)
+  pointsToday: number;
+  streakLevel: number;
+  lastActive: string | null; // ISO-8601, derived (max of lastSeenAt / latest ledger / createdAt)
+  rank: number; // canonical rank by all-time points
+}
+export interface AdminLeaderboardResponse {
+  rows: AdminLeaderboardRow[];
+  generatedAt: string; // ISO-8601
 }

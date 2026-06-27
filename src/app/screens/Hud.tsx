@@ -33,8 +33,10 @@ export const Hud = memo(function Hud({ me, pop, onShards, onGM, onBalance, onBel
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
           <div onClick={onBalance} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--panel)", border: "1px solid var(--line)", padding: "6px 11px", borderRadius: 30, cursor: "pointer" }}>
             <div style={{ lineHeight: 1, textAlign: "right" }}>
-              <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 14, color: "var(--yes)" }}>{me ? usd(me.balanceCents) : "—"}</div>
-              <div style={{ fontSize: 8, letterSpacing: ".14em", color: "var(--muted)", textTransform: "uppercase", marginTop: 1 }}>Virtual $ ›</div>
+              <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 14, color: "var(--yes)" }}>{me ? usd(me.cashCents) : "—"}</div>
+              <div style={{ fontSize: 8, letterSpacing: ".14em", color: "var(--muted)", textTransform: "uppercase", marginTop: 1 }}>
+                {me && me.lockedCents > 0 ? `+ ${usd(me.lockedCents)} locked ›` : "Cash ›"}
+              </div>
             </div>
           </div>
 

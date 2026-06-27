@@ -48,7 +48,7 @@ export function scorePoints(
   streak: { currentLevel: number; state: MultiplierContext["streakState"] },
   userId: string,
 ): ScoreResult {
-  const breakdown = { SWIPE: 0, LOGIN: 0, REFERRAL: 0, STREAK_X2: 0 } as Record<
+  const breakdown = { SWIPE: 0, LOGIN: 0, REFERRAL: 0, STREAK_X2: 0, TOPUP_SPEND: 0 } as Record<
     PointsType,
     number
   >;
@@ -98,7 +98,9 @@ export function scorePoints(
       streakSwipeDays,
     });
 
-  const nonSwipe = breakdown.LOGIN + breakdown.REFERRAL + breakdown.STREAK_X2;
+  // TOPUP_SPEND rows carry NEGATIVE amounts (points spent on a cash top-up, dormant), so they
+  // subtract here — never multiplied. Flows through this one core, so /me and /leaderboard agree.
+  const nonSwipe = breakdown.LOGIN + breakdown.REFERRAL + breakdown.STREAK_X2 + breakdown.TOPUP_SPEND;
   return {
     total: nonSwipe + multipliedSwipe,
     breakdown,

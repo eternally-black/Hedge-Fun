@@ -58,6 +58,7 @@ enum PointsType {
   LOGIN // daily GM bonus (config constant), never multiplied
   REFERRAL // referral rewards, never multiplied
   STREAK_X2 // reserved: materialized x2 delta (Mode B). UNUSED at launch.
+  TOPUP_SPEND // NEGATIVE-amount rows: points spent on a cash top-up (dormant). Never multiplied.
 }
 
 enum StreakState {
@@ -212,10 +213,13 @@ model PointsLedger {
 // ============================================================ VIRTUAL BALANCE
 
 model VirtualBalance {
-  userId       String   @id
-  user         User     @relation(fields: [userId], references: [id])
-  balanceCents Int      @default(100000) // start $1000.00
-  updatedAt    DateTime @updatedAt
+  userId        String   @id
+  user          User     @relation(fields: [userId], references: [id])
+  balanceCents  Int      @default(20000) // start $200.00 (= START_BALANCE_CENTS). Total = Cash + Locked.
+  lockedCents   Int      @default(0) // Σ stakes on still-PENDING bets ("hold"). Cash = balance − locked.
+  freeTopupUsed Boolean  @default(false) // lifetime free top-up consumed
+  topupCount    Int      @default(0) // count of paid (artifact/points) top-ups — audit only
+  updatedAt     DateTime @updatedAt
 
   @@map("virtual_balances")
 }

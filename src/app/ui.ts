@@ -2,6 +2,7 @@
 "use client";
 
 import { categoryOf, type Category } from "@/lib/deck-mix";
+import { STAKE_CENTS } from "@/lib/config";
 import type { DeckCard, MeResponse } from "@/lib/api-types";
 
 // The screens consume the API contract directly (src/lib/api-types.ts) — single source of truth,
@@ -21,11 +22,12 @@ export const cents = (bp: number) => {
 export const num = (n: number) => n.toLocaleString("en-US");
 export const usd = (cents: number) => `$${Math.round(cents / 100).toLocaleString("en-US")}`;
 
-// Virtual-$ payout if this side wins: stake $100 at price p (cents/100) returns 100/p shares
-// worth $1 each. Mirrors settle.ts share math. bp is the bought side's price.
-export const winPayout = (bp: number) => {
+// Virtual-$ payout (whole dollars) if this side wins: stake of `stakeCents` at price p (bp/10000)
+// buys stake/p of $1 shares. Mirrors settle.ts share math (payout = stake*10000/priceBp). bp is the
+// bought side's price; stakeCents defaults to the live STAKE_CENTS so callers pass just the price.
+export const winPayout = (bp: number, stakeCents: number = STAKE_CENTS) => {
   const p = Math.max(0.02, bp / 10000);
-  return Math.round(100 / p);
+  return Math.round(stakeCents / 100 / p);
 };
 
 // Category accent + display label. Single source of truth = deck-mix categoryOf, so the badge a
