@@ -52,6 +52,51 @@ export function categoryOf(m: {
   return "other";
 }
 
+// Specific league/discipline label for a sports/esports market, derived from the same text signal
+// (question + side labels). Returns the display name (e.g. "NBA", "UFC", "Dota 2", "CS2") or null
+// when nothing specific is recognized — callers then fall back to the generic "Sports"/"Esports".
+// Ordered: first regex that hits wins. Covers the main live leagues/games (per product decision).
+const SPORT_GAMES: [RegExp, string][] = [
+  [/\b(nba|basketball)\b/i, "NBA"],
+  [/\b(nfl|american football)\b/i, "NFL"],
+  [/\b(mlb|baseball|innings?)\b/i, "MLB"],
+  [/\b(nhl|hockey)\b/i, "NHL"],
+  [/\b(ufc|mma|octagon)\b/i, "UFC"],
+  [/\bboxing\b/i, "Boxing"],
+  [/\b(f1|formula\s*1|grand prix|nascar)\b/i, "F1"],
+  [/\b(tennis|atp|wta|grand slam|wimbledon|us open|roland garros|australian open)\b/i, "Tennis"],
+  [/\bcricket\b/i, "Cricket"],
+  [/\b(golf|pga|masters)\b/i, "Golf"],
+  // Soccer last among sports — its league names are many; the generic word catches the rest.
+  [/\b(soccer|football|premier league|la liga|serie a|bundesliga|ligue 1|champions league|world cup|epl|ucl)\b/i, "Soccer"],
+];
+const ESPORT_GAMES: [RegExp, string][] = [
+  [/\b(dota\s*2?|dota)\b/i, "Dota 2"],
+  [/\b(counter-?strike|cs2|cs:go|csgo)\b/i, "CS2"],
+  [/\bvalorant\b/i, "Valorant"],
+  [/\b(league of legends|\blol\b)\b/i, "LoL"],
+  [/\boverwatch\b/i, "Overwatch"],
+  [/\brocket league\b/i, "Rocket League"],
+  [/\b(rainbow six|r6)\b/i, "Rainbow Six"],
+  [/\bpubg\b/i, "PUBG"],
+  [/\bmobile legends\b/i, "Mobile Legends"],
+  [/\b(honor of kings|king of glory)\b/i, "Honor of Kings"],
+  [/\bstarcraft\b/i, "StarCraft"],
+];
+
+// `cat` lets callers that already classified the market pass it in to skip a redundant
+// categoryOf() pass (catOf/catOfResult do exactly that). Omit it and we classify here.
+export function gameOf(
+  m: { question: string; category?: string | null; outcomeYesLabel: string; outcomeNoLabel: string },
+  cat: Category = categoryOf(m),
+): string | null {
+  if (cat !== "sports" && cat !== "esports") return null;
+  const text = `${m.question} ${m.outcomeYesLabel} ${m.outcomeNoLabel}`;
+  const table = cat === "esports" ? ESPORT_GAMES : SPORT_GAMES;
+  for (const [re, name] of table) if (re.test(text)) return name;
+  return null;
+}
+
 // A "match" signal in the question: two participants (Team vs Team, A @ B) or a named subject. An
 // Over/Under question carries this when it names who's playing; "Games Total: O/U 4.5" and
 // "Map 1 Total Rounds: O/U 21.5" do NOT — they're bare totals the user can't make sense of.

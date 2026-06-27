@@ -1,9 +1,7 @@
-import type { Prisma, StreakState } from "@prisma/client";
+import type { StreakState } from "@prisma/client";
 import { prisma } from "./prisma";
 import { utcDay, diffDays } from "./time";
 import { RECOVERY_WINDOW_DAYS } from "./config";
-
-type Db = Prisma.TransactionClient;
 
 // ---------------------------------------------------------------------------
 // Pure transition core (DB-free, unit-testable). Given current streak state and

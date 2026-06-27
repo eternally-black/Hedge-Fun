@@ -1,7 +1,7 @@
 // Shared UI helpers + types for the Hedge Fun screens (ported from app design).
 "use client";
 
-import { categoryOf, type Category } from "@/lib/deck-mix";
+import { categoryOf, gameOf, type Category } from "@/lib/deck-mix";
 import { STAKE_CENTS } from "@/lib/config";
 import type { DeckCard, MeResponse } from "@/lib/api-types";
 
@@ -42,9 +42,14 @@ const CAT_COLORS: Record<Category, { color: string; label: string; icon: string 
   other: { color: "#94a3b8", label: "Market", icon: "◎" },
 };
 
-// Display accent + label for a card, derived via the SAME classifier the deck mixer uses.
+// Display accent + label for a card, derived via the SAME classifier the deck mixer uses. For
+// sports/esports we name the specific league/game (NBA, UFC, Dota 2, CS2…) when recognized,
+// keeping the category's color + icon; otherwise the generic category label.
 export function catOf(card: Pick<Card, "question" | "outcomeYesLabel" | "outcomeNoLabel">): { color: string; label: string; icon: string } {
-  return CAT_COLORS[categoryOf({ question: card.question, outcomeYesLabel: card.outcomeYesLabel, outcomeNoLabel: card.outcomeNoLabel })];
+  const m = { question: card.question, outcomeYesLabel: card.outcomeYesLabel, outcomeNoLabel: card.outcomeNoLabel };
+  const cat = categoryOf(m);
+  const game = gameOf(m, cat); // reuse the category — no second classify pass
+  return game ? { ...CAT_COLORS[cat], label: game } : CAT_COLORS[cat];
 }
 
 // Polymarket hands us raw "Over"/"Under" side labels with the threshold buried in the question
@@ -89,7 +94,10 @@ export function marketHint(card: Pick<Card, "question" | "outcomeYesLabel" | "ou
 // question alone (deck-mix's categoryOf reads labels too, but question-only still hits the common
 // signals). Falls back to the raw `category` string from the API only for the display label.
 export function catOfResult(r: { question: string; category: string | null }): { color: string; label: string; icon: string } {
-  return CAT_COLORS[categoryOf({ question: r.question, outcomeYesLabel: "", outcomeNoLabel: "" })];
+  const m = { question: r.question, outcomeYesLabel: "", outcomeNoLabel: "" };
+  const cat = categoryOf(m);
+  const game = gameOf(m, cat); // reuse the category — no second classify pass
+  return game ? { ...CAT_COLORS[cat], label: game } : CAT_COLORS[cat];
 }
 
 // Settled-result presentation: accent color, badge glyph, tag word. WIN=lime, LOSS=red, PUSH=blue.

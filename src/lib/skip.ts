@@ -1,25 +1,21 @@
 import { prisma } from "./prisma";
 import { utcDay } from "./time";
-import { FREE_SKIPS_PER_DAY, SKIP_SHARD_COST } from "./config";
 
-// Skip a card: the first FREE_SKIPS_PER_DAY/day are free; each subsequent skip costs
-// SKIP_SHARD_COST shards. Blocked (no-op) if a paid skip is needed and the user lacks shards.
-// Skip is NOT tied to a market (it makes no bet), so it's a daily counter increment plus a
-// conditional shard decrement, all atomic so the counter and the spend can't diverge.
+// Skip a card: ALWAYS free and unlimited — a skip just advances the deck so the user spends their
+// 10 daily swipes only on cards they care about. It makes no bet (never touches the swipe cap) and
+// no longer costs a shard. We still increment the daily skipCount (kept for analytics). The shard
+// economy is left in config for reference but no longer consumed by skips.
 export type SkipResult =
   | { ok: true; free: boolean; shardsSpent: number; skipsToday: number; shards: number }
   | { ok: false; reason: "no_shards"; shards: number };
 
-// Pure decision (DB-free, testable): given skips used today and shard balance, decide whether
-// the next skip is free, paid, or blocked. Free until FREE_SKIPS_PER_DAY used; then it costs
-// SKIP_SHARD_COST shards; blocked if the balance can't cover the cost.
+// Pure decision (DB-free, testable): a skip is always free, always allowed, costs nothing.
+// (Signature kept so existing callers/tests compile; inputs no longer affect the outcome.)
 export function decideSkip(
-  skipsUsedToday: number,
-  shards: number,
+  _skipsUsedToday: number,
+  _shards: number,
 ): { free: boolean; allowed: boolean; cost: number } {
-  if (skipsUsedToday < FREE_SKIPS_PER_DAY) return { free: true, allowed: true, cost: 0 };
-  const allowed = shards >= SKIP_SHARD_COST;
-  return { free: false, allowed, cost: allowed ? SKIP_SHARD_COST : 0 };
+  return { free: true, allowed: true, cost: 0 };
 }
 
 // freeOverride: dev test account — always free, unlimited, never spends a shard or blocks.

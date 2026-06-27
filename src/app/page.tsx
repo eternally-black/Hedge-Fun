@@ -205,11 +205,7 @@ function App() {
           void topUpIfLow(next.length);
           return next;
         });
-      // Gate a blocked skip client-side so we don't fire a request we know will 402.
-      if (action === "SKIP" && me && !me.skips.nextIsFree && me.shards < me.skips.shardCost) {
-        flashToast("No shards — earn one (or wait for tomorrow's free skip)");
-        return;
-      }
+      // Skips are always free + unlimited now — no client gate (the server never 402s a skip).
       // Cash gate: a YES/NO bet needs >= one stake of free Cash. Block BEFORE the optimistic advance
       // so the card isn't lost — it stays so the user can top up and retry.
       if (action !== "SKIP" && me && me.cashCents < me.stakeCents) {
@@ -232,13 +228,10 @@ function App() {
           // 403 = daily swipe cap hit (raced past the client gate). The bet wasn't stored;
           // refreshMe pulls used>=cap, which flips capReached and shows the limit screen.
           if (status === 403) { flashToast("Daily limit reached — back at 00:00 UTC"); void refreshMe(); }
-          // 402 = no free cash (swipe) or no shards (skip), depending on the action. We pre-gate both,
-          // so a 402 here means a race; surface it + refresh. The swipe tx rolled back (no bet row), so
-          // the market re-enters a future deck — the card isn't permanently lost.
-          else if (status === 402) {
-            flashToast(action === "SKIP" ? "No shards — earn one (or wait for tomorrow's free skip)" : "No free cash left");
-            void refreshMe();
-          }
+          // 402 = no free cash for a swipe (we pre-gate, so this means a race). The swipe tx rolled
+          // back (no bet row), so the market re-enters a future deck — the card isn't lost. Skips
+          // never 402 anymore (always free).
+          else if (status === 402) { flashToast("No free cash left"); void refreshMe(); }
           else if (status !== 409) console.error(e);
         });
     },
@@ -338,8 +331,6 @@ function App() {
   const top = deck[0];
   const next = deck[1];
   topRef.current = top; // keep the stable handleAction pointed at the live top card
-  // Skip is blocked when the free daily skip is used AND the user can't afford the shard cost.
-  const skipBlocked = !!me && !me.skips.nextIsFree && me.shards < me.skips.shardCost;
   // Hard daily cap: once a non-dev user hits the swipe cap, stop the deck and show the
   // "come back tomorrow" screen. Dev accounts swipe unlimited (and have a deck reset).
   const capReached = !!me && !me.dev && me.swipes.used >= me.swipes.cap;
@@ -386,15 +377,11 @@ function App() {
               <>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 18, padding: "14px 0 2px" }}>
                   <CircleBtn glyph="✕" color="var(--no)" size={56} disabled={busy || !top} onClick={() => top && act(top, "NO")} />
-                  <CircleBtn glyph="↑" color="var(--skip)" size={46} disabled={busy || !top || skipBlocked} onClick={() => top && act(top, "SKIP")} />
+                  <CircleBtn glyph="↑" color="var(--skip)" size={46} disabled={busy || !top} onClick={() => top && act(top, "SKIP")} />
                   <CircleBtn glyph="✓" color="var(--yes)" size={56} disabled={busy || !top} onClick={() => top && act(top, "YES")} />
                 </div>
                 <div style={{ textAlign: "center", fontSize: 10, color: "var(--muted)", paddingBottom: 8 }}>
-                  {me?.skips.nextIsFree
-                    ? "Skip free today"
-                    : skipBlocked
-                      ? "Skip needs 1 ◆ — none left"
-                      : `Skip costs 1 ◆`}
+                  Skip free — save your swipes for the calls you want
                 </div>
               </>
             )}

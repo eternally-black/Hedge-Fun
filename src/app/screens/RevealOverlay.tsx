@@ -244,7 +244,7 @@ function CoinBurst({ row }: { row: ResultRow }) {
     [row.id], // eslint-disable-line react-hooks/exhaustive-deps -- positions fixed per card
   );
   return (
-    <div style={{ position: "absolute", inset: 0, overflow: "visible", pointerEvents: "none" }}>
+    <div style={{ position: "absolute", inset: 0, zIndex: 0, overflow: "visible", pointerEvents: "none" }}>
       {coins.map((c) => (
         // top:0 = the card's top edge; hfCoin lifts them up (-180px) so they fountain out above it.
         <div key={c.key} style={{ position: "absolute", left: c.left, top: 0, fontSize: c.size, ["--cx" as string]: c.cx, animation: c.anim }}>🪙</div>
@@ -272,17 +272,20 @@ function RevealCard({ row, onAdvance }: { row: ResultRow; onAdvance: () => void 
   const riseAnim = entering && !swipe.active && !swipe.flying;
   const isWin = row.status === "WIN";
 
-  // Wrapper holds the swipeable card shell (overflow:hidden) AND the coin burst as a SIBLING above it
-  // (overflow:visible) — so the win fountain bursts from the card's top edge and flies out over it,
-  // never clipped. The shell keeps the gesture/transform; the burst sits at the same box, unclipped.
+  // Wrapper holds the swipeable card shell (overflow:hidden) AND the coin burst as a SIBLING (overflow:
+  // visible) — so the win fountain bursts from the card's top edge, unclipped. The burst sits BEHIND
+  // the card (zIndex 0 vs the shell's 1): coins fountain up from behind the top edge and rise out above
+  // it, reading as a backdrop effect rather than covering the card face.
   return (
     <div style={{ position: "absolute", inset: 0 }}>
+      {isWin && <CoinBurst row={row} />}
       <div
         onPointerDown={onPointerDown}
         onPointerMove={swipe.handlers.onPointerMove}
         onPointerUp={swipe.handlers.onPointerUp}
         style={{
           ...cardShell(row),
+          position: "relative", zIndex: 1, // above the burst sibling
           touchAction: "none", cursor: "grab", willChange: "transform",
           ...(riseAnim
             ? { animation: `hfCardRise ${RISE_MS}ms cubic-bezier(.34,1.2,.5,1) both`, transformOrigin: "center bottom" }
@@ -291,7 +294,6 @@ function RevealCard({ row, onAdvance }: { row: ResultRow; onAdvance: () => void 
       >
         <RevealCardFace row={row} />
       </div>
-      {isWin && <CoinBurst row={row} />}
     </div>
   );
 }

@@ -6,6 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "lint": "eslint .",
     "db:up": "docker compose -f docker-compose.dev.yml up -d --wait",
     "db:down": "docker compose -f docker-compose.dev.yml down",
     "dev:db": "npm run db:up && next dev",
@@ -36,13 +37,18 @@
     "react-dom": "^19.2.7"
   },
   "overrides": {
-    "@solana-program/memo": { "@solana/kit": "5.5.1" }
+    "@solana-program/memo": {
+      "@solana/kit": "5.5.1"
+    }
   },
   "devDependencies": {
+    "@eslint/eslintrc": "^3.3.5",
     "@types/node": "^26.0.0",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "esbuild": "^0.25.0",
+    "eslint": "^9.39.4",
+    "eslint-config-next": "^16.2.9",
     "tsx": "^4.22.4",
     "typescript": "^5.9.3"
   }

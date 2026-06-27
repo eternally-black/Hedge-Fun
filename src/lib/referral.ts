@@ -4,8 +4,6 @@ import { utcDay } from "./time";
 import { writePoints } from "./points";
 import { REFERRAL_INVITEE_BONUS, REFERRAL_INVITER_RATE } from "./config";
 
-type Db = Prisma.TransactionClient;
-
 // Capture the inviter<->invitee relationship at signup. The invitee can only ever
 // have one referral (unique inviteeId). Logs a SIGNUP event so reward can be computed
 // retroactively once params (§8 Q4-7) are decided. Self-referral is rejected.

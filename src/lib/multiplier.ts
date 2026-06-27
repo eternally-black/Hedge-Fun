@@ -33,7 +33,9 @@ export interface MultiplierStrategy {
   multipliedSwipePoints(ctx: MultiplierContext): number;
 }
 
-// --- Default: no multiplier. Sums raw, never doubles. ---
+// --- Default: no multiplier. Sums raw, never doubles. Kept as the fallback strategy you can
+// switch ACTIVE_MULTIPLIER to (e.g. to disable x2 globally); intentionally retained though unused.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 const Identity: MultiplierStrategy = {
   id: "identity",
   multipliedSwipePoints: (c) =>

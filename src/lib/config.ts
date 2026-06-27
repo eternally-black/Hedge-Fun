@@ -20,8 +20,10 @@ export const TOPUP_POINTS_COST = 0; // TODO(pricing): real N points for +$200. P
 // ---- Daily caps (DECIDED) ----
 export const SWIPE_CAP = 10; // point-earning swipes/day (over-cap allowed, 0 pts)
 export const SHARD_DAILY_CAP = 10; // 1 win = 1 shard, max 10/day
-export const FREE_SKIPS_PER_DAY = 1; // first skip/day free; each subsequent costs SKIP_SHARD_COST
-export const SKIP_SHARD_COST = 1; // shards spent per paid skip (blocked if balance < cost)
+// RETIRED 2026-06-27: skips are now always free + unlimited (decideSkip ignores these). Kept for
+// reference / possible re-introduction; no code reads them anymore.
+export const FREE_SKIPS_PER_DAY = 1; // (retired) was: free skips/day before shard cost
+export const SKIP_SHARD_COST = 1; // (retired) was: shards per paid skip
 
 // ---- Collectibles (DECIDED) ----
 export const SHARDS_PER_ARTIFACT = 20; // 20 shards -> 1 artifact

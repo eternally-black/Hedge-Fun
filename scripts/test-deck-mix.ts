@@ -1,7 +1,7 @@
 // Self-check for deck mixing: never >2 same-category in a row, and the mix is random.
 // Run: npx tsx scripts/test-deck-mix.ts
 import assert from "node:assert";
-import { shuffleNoRun, categoryOf, isContextPoor, MAX_RUN } from "../src/lib/deck-mix";
+import { shuffleNoRun, categoryOf, gameOf, isContextPoor, MAX_RUN } from "../src/lib/deck-mix";
 
 // ---- categoryOf: real shapes (verified live) bucket correctly ----
 assert.strictEqual(categoryOf({ question: "Bitcoin Up or Down - 9:05AM", outcomeYesLabel: "Up", outcomeNoLabel: "Down" }), "crypto");
@@ -22,6 +22,25 @@ assert.strictEqual(isContextPoor(ou("Lakers @ Celtics: Total Points O/U 210.5"))
 // non-Over/Under markets are never poor — a team name or Yes/No explains itself.
 assert.strictEqual(isContextPoor({ question: "Games Total 4.5", outcomeYesLabel: "Bosnia", outcomeNoLabel: "Qatar" }), false, "named teams -> never poor");
 assert.strictEqual(isContextPoor({ question: "Will BTC hit 100k?", outcomeYesLabel: "Yes", outcomeNoLabel: "No" }), false, "Yes/No -> never poor");
+
+// ---- gameOf: name the specific league/game for sports/esports; null otherwise ----
+const mk = (q: string, y = "", n = "") => ({ question: q, outcomeYesLabel: y, outcomeNoLabel: n });
+// esports games (named-binary carries the signal in labels too)
+assert.strictEqual(gameOf(mk("Dota 2: L1ga Team vs 4ikibamboni", "L1ga Team", "4ikibamboni")), "Dota 2");
+assert.strictEqual(gameOf(mk("CS2: NAVI vs FaZe", "NAVI", "FaZe")), "CS2");
+assert.strictEqual(gameOf(mk("Map 1 Total Rounds: Over/Under 21.5 (Valorant)", "Over", "Under")), "Valorant");
+assert.strictEqual(gameOf(mk("LoL Worlds: T1 vs GenG", "T1", "GenG")), "LoL");
+// sports leagues
+assert.strictEqual(gameOf(mk("NBA: Lakers @ Celtics", "Lakers", "Celtics")), "NBA");
+assert.strictEqual(gameOf(mk("UFC 300: Jones vs Aspinall", "Jones", "Aspinall")), "UFC");
+assert.strictEqual(gameOf(mk("Soccer: Bosnia vs. Qatar", "Bosnia", "Qatar")), "Soccer", "soccer word -> Soccer");
+assert.strictEqual(gameOf(mk("Premier League: Arsenal vs Spurs", "Arsenal", "Spurs")), "Soccer", "league name -> Soccer");
+// recognized sport but no specific league word -> null (caller shows generic "Sports")
+assert.strictEqual(gameOf(mk("Spread: Team A (-1.5)", "Team A", "Team B")), null, "bare spread, no league -> null");
+assert.strictEqual(gameOf(mk("Bosnia vs. Qatar match", "Bosnia", "Qatar")), null, "bare match, no league word -> null (falls back to Sports)");
+// non sports/esports categories never name a game
+assert.strictEqual(gameOf(mk("Bitcoin Up or Down", "Up", "Down")), null, "crypto -> null");
+assert.strictEqual(gameOf(mk("Will the Fed cut rates?", "Yes", "No")), null, "politics -> null");
 
 // helper: longest run of equal categories in a sequence
 function longestRun(cats: string[]): number {

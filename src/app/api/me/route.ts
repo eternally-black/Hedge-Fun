@@ -6,8 +6,6 @@ import { evaluateStreak } from "@/lib/streak";
 import { utcDay, weekdayMon0, streakWindowStartDay } from "@/lib/time";
 import {
   SWIPE_CAP,
-  FREE_SKIPS_PER_DAY,
-  SKIP_SHARD_COST,
   SHARDS_PER_ARTIFACT,
   STAKE_CENTS,
   TOPUP_GRANT_CENTS,
@@ -68,9 +66,9 @@ export async function GET(req: Request) {
     swipes: { used: counter?.swipeCount ?? 0, cap: SWIPE_CAP },
     skips: {
       usedToday: counter?.skipCount ?? 0,
-      // Dev account skips free forever, so the client never pre-blocks it.
-      nextIsFree: dev || (counter?.skipCount ?? 0) < FREE_SKIPS_PER_DAY,
-      shardCost: SKIP_SHARD_COST, // cost of the next skip once free ones are used
+      // Skips are now always free + unlimited (no shard cost) — the client never blocks them.
+      nextIsFree: true,
+      shardCost: 0,
     },
     dev,
     shards: collectibles?.shards ?? 0,
