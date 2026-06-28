@@ -11,7 +11,6 @@ import { GmScreen } from "./screens/GmScreen";
 import { VaultScreen } from "./screens/VaultScreen";
 import { InviteScreen } from "./screens/InviteScreen";
 import { ProfileScreen } from "./screens/ProfileScreen";
-import { LeaderboardScreen } from "./screens/LeaderboardScreen";
 import { HistorySheet } from "./screens/HistorySheet";
 import { BalanceSheet } from "./screens/BalanceSheet";
 import { NotificationsScreen } from "./screens/NotificationsScreen";
@@ -258,7 +257,6 @@ function App() {
   // Stable nav callbacks so memo'd Hud/BottomNav don't re-render on unrelated state changes.
   const goVault = useCallback(() => setScreen("vault"), []);
   const goGmScreen = useCallback(() => setScreen("gm"), []);
-  const goLeaderboard = useCallback(() => setScreen("leaderboard"), []);
   const openHistory = useCallback(() => setHistoryOpen(true), []);
   const closeHistory = useCallback(() => setHistoryOpen(false), []);
   const openBalance = useCallback(() => setBalanceOpen(true), []);
@@ -391,8 +389,7 @@ function App() {
         {screen === "gm" && <GmScreen me={me} busy={busy} onGM={gm} onEnterDeck={goDeck} />}
         {screen === "vault" && <VaultScreen me={me} api={api} onRefresh={refresh} />}
         {screen === "invite" && <InviteScreen me={me} />}
-        {screen === "you" && <ProfileScreen me={me} api={api} onLeaderboard={goLeaderboard} onRefresh={refresh} onHistory={openHistory} onLogout={doLogout} />}
-        {screen === "leaderboard" && <LeaderboardScreen api={api} />}
+        {screen === "you" && <ProfileScreen me={me} api={api} onRefresh={refresh} onHistory={openHistory} onLogout={doLogout} />}
         {screen === "notifications" && <NotificationsScreen api={api} onSeen={markResultsSeen} onReplay={replayReveal} />}
       </div>
 

@@ -16,7 +16,7 @@ type LedgerRow = { type: PointsType; amount: number; utcDay: string; createdAt: 
 export async function GET(req: Request) {
   const user = await authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  if (!isAdmin(user.email)) return NextResponse.json({ error: "forbidden" }, { status: 403 });
+  if (!isAdmin(user)) return NextResponse.json({ error: "forbidden" }, { status: 403 });
 
   // Same live-query shape as the public leaderboard (no snapshot at MVP scale), enriched with the
   // columns the admin tool needs. One ledger fetch feeds all three time windows.

@@ -8,12 +8,18 @@ import type { AdminLeaderboardRow } from "../src/lib/api-types";
 // --- isAdmin allowlist (env read at module load -> set BEFORE importing) --------------------
 async function main() {
   process.env.ADMIN_EMAILS = "  Boss@Team.com , growth@team.com ";
+  process.env.ADMIN_TWITTER = "  @BossHandle , growthX ";
   const { isAdmin } = await import("../src/lib/admin");
-  assert.strictEqual(isAdmin("boss@team.com"), true, "exact match (lowercased)");
-  assert.strictEqual(isAdmin("  BOSS@TEAM.COM "), true, "case + whitespace insensitive");
-  assert.strictEqual(isAdmin("growth@team.com"), true, "second entry matches");
-  assert.strictEqual(isAdmin("rando@team.com"), false, "non-listed -> false");
-  assert.strictEqual(isAdmin(null), false, "null email -> false");
+  assert.strictEqual(isAdmin({ email: "boss@team.com" }), true, "exact email match (lowercased)");
+  assert.strictEqual(isAdmin({ email: "  BOSS@TEAM.COM " }), true, "case + whitespace insensitive");
+  assert.strictEqual(isAdmin({ email: "growth@team.com" }), true, "second email entry matches");
+  assert.strictEqual(isAdmin({ email: "rando@team.com" }), false, "non-listed email -> false");
+  assert.strictEqual(isAdmin({ email: null, twitterHandle: null }), false, "no email, no handle -> false");
+  // X handle path (admins with no email): match on handle, @ optional, case-insensitive.
+  assert.strictEqual(isAdmin({ twitterHandle: "BossHandle" }), true, "exact handle (env had @, case-insensitive)");
+  assert.strictEqual(isAdmin({ twitterHandle: "@growthX" }), true, "handle with leading @ matches");
+  assert.strictEqual(isAdmin({ twitterHandle: "rando" }), false, "non-listed handle -> false");
+  assert.strictEqual(isAdmin({ email: "rando@team.com", twitterHandle: "bosshandle" }), true, "either key grants");
 }
 
 // --- windowed scoring: filtering by utcDay then scorePoints is the route's contract -----------

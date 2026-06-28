@@ -43,7 +43,6 @@ async function main() {
   const recover = await import("../src/app/api/recover/route");
   const topup = await import("../src/app/api/topup/route");
   const history = await import("../src/app/api/history/route");
-  const leaderboard = await import("../src/app/api/leaderboard/route");
   const loginMark = await import("../src/app/api/login-mark/route");
   const results = await import("../src/app/api/results/route");
   const resultsSeen = await import("../src/app/api/results/seen/route");
@@ -67,7 +66,6 @@ async function main() {
   await expect401(me.GET, "http://x/api/me");
   await expect401(deck.GET, "http://x/api/deck");
   await expect401(history.GET, "http://x/api/history");
-  await expect401(leaderboard.GET, "http://x/api/leaderboard");
   await expect401(swipe.POST, "http://x/api/swipe", { method: "POST", body: "{}" });
   await expect401(skip.POST, "http://x/api/skip", { method: "POST" });
   await expect401(recover.POST, "http://x/api/recover", { method: "POST" });
@@ -97,9 +95,6 @@ async function main() {
       ["category","id","noPriceBp","outcomeNoLabel","outcomeYesLabel","question","resolutionDeadline","yesPriceBp"],
       "/deck card keys");
   }
-
-  const lbBody = await (await leaderboard.GET(authed("http://x/api/leaderboard"))).json();
-  assert.deepStrictEqual(keysOf(lbBody), ["me","top"], "/leaderboard top-level keys");
 
   const histBody = await (await history.GET(authed("http://x/api/history"))).json();
   assert.deepStrictEqual(keysOf(histBody), ["pendingCount","rows"], "/history top-level keys");

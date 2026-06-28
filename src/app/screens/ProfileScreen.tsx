@@ -1,14 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useLinkAccount, usePrivy } from "@privy-io/react-auth";
 import { type Me, num, usd } from "../ui";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
-// Profile / "You" (ported from app design). Real stats from /api/me. The leaderboard link opens
-// the PRIVATE (auth-gated) leaderboard. Prediction history is a placeholder until /api/history.
-export function ProfileScreen({ me, api, onLeaderboard, onRefresh, onHistory, onLogout }: { me: Me | null; api: Api; onLeaderboard: () => void; onRefresh: () => Promise<void>; onHistory: () => void; onLogout: () => void }) {
+// Profile / "You" (ported from app design). Real stats from /api/me. Prediction history is a
+// placeholder until /api/history. (No user-facing leaderboard — ranking is admin-only.)
+export function ProfileScreen({ me, api, onRefresh, onHistory, onLogout }: { me: Me | null; api: Api; onRefresh: () => Promise<void>; onHistory: () => void; onLogout: () => void }) {
   const handle = me?.user.twitter ?? (me?.user.email ? me.user.email.split("@")[0] : "degen");
   const initials = handle.slice(0, 2).toUpperCase();
   const [resetting, setResetting] = useState(false);
@@ -18,26 +18,49 @@ export function ProfileScreen({ me, api, onLeaderboard, onRefresh, onHistory, on
   // it renders. Unlink detaches in Privy client-side first, then /api/link/unlink nulls our column.
   const [busyX, setBusyX] = useState<null | "link" | "unlink">(null);
   const [xError, setXError] = useState<string | null>(null);
+  const { user: privyUser, unlinkTwitter } = usePrivy();
+
+  // Back-fill our DB from Privy's reconciled state. Single source of truth for "link succeeded" —
+  // works for the OAuth *redirect* flow where useLinkAccount.onSuccess never fires (page remounts on
+  // return), not just the popup flow. Idempotent: /api/link/sync no-ops once the handle is stored.
+  const syncTwitter = async () => {
+    try {
+      await api("/api/link/sync", { method: "POST" });
+      await onRefresh();
+    } catch (e) {
+      setXError(
+        (e as { status?: number }).status === 409
+          ? "That X account is already linked to another HedgeFun account — contact support."
+          : "Couldn't link X. Try again.",
+      );
+    } finally {
+      setBusyX(null);
+    }
+  };
+
   const { linkTwitter } = useLinkAccount({
-    onSuccess: async () => {
-      setXError(null);
-      try {
-        await api("/api/link/sync", { method: "POST" });
-        await onRefresh();
-      } catch (e) {
-        setXError(
-          (e as { status?: number }).status === 409
-            ? "That X account is already linked to another HedgeFun account — contact support."
-            : "Couldn't link X. Try again.",
-        );
-      } finally {
-        setBusyX(null);
-      }
-    },
+    onSuccess: () => { setXError(null); void syncTwitter(); }, // popup flow; redirect flow → effect below
     onError: () => setBusyX(null),
   });
-  const { user: privyUser, unlinkTwitter } = usePrivy();
-  const startLink = () => { setXError(null); setBusyX("link"); linkTwitter(); };
+
+  // Redirect flow returns with Privy already linked but our DB null → back-fill once. Deps are
+  // primitives; once the handle lands the condition flips false, so this can't loop.
+  const privyTwitter = privyUser?.twitter?.username ?? null;
+  useEffect(() => {
+    // set-state-in-effect false positive: syncTwitter's setState calls are all post-await (async).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (privyTwitter && me && !me.user.twitter) void syncTwitter();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [privyTwitter, me?.user.twitter]);
+
+  const startLink = () => {
+    setXError(null);
+    setBusyX("link");
+    // Already linked in Privy but not synced (desync) → don't re-open OAuth (Privy throws "already
+    // linked"); just back-fill our DB.
+    if (privyUser?.twitter) { void syncTwitter(); return; }
+    linkTwitter();
+  };
   const startUnlink = async () => {
     setXError(null);
     setBusyX("unlink");
@@ -76,10 +99,6 @@ export function ProfileScreen({ me, api, onLeaderboard, onRefresh, onHistory, on
         <div style={{ minWidth: 0 }}>
           <div style={{ fontFamily: "var(--df)", fontSize: 24, lineHeight: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{handle}</div>
           <div style={{ fontSize: 12, color: "var(--muted)" }}>Test app · stack points</div>
-        </div>
-        <div onClick={onLeaderboard} style={{ marginLeft: "auto", background: "var(--panel)", border: "1px solid var(--line)", padding: "9px 13px", borderRadius: 14, textAlign: "center", cursor: "pointer" }}>
-          <div style={{ fontSize: 9, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".1em" }}>Board</div>
-          <div style={{ fontFamily: "var(--nf)", fontWeight: 700, color: "var(--gold)" }}>↗</div>
         </div>
       </div>
 

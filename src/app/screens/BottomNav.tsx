@@ -15,8 +15,7 @@ export const BottomNav = memo(function BottomNav({ screen, onNav }: { screen: Sc
   return (
     <div style={{ position: "relative", zIndex: 40, display: "flex", alignItems: "center", justifyContent: "space-around", padding: "10px 8px 22px", background: "linear-gradient(0deg,var(--bg) 60%,transparent)", borderTop: "1px solid var(--line)" }}>
       {ITEMS.map((it) => {
-        // "leaderboard" lives under the You tab, so it counts as active there.
-        const active = screen === it.key || (it.key === "you" && screen === "leaderboard");
+        const active = screen === it.key;
         return (
           <div key={it.key} onClick={() => onNav(it.key)} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3, cursor: "pointer", color: active ? "var(--energy)" : "var(--muted)" }}>
             <span style={{ fontSize: 20 }}>{it.glyph}</span>

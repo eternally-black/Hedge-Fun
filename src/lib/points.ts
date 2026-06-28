@@ -99,7 +99,7 @@ export function scorePoints(
     });
 
   // TOPUP_SPEND rows carry NEGATIVE amounts (points spent on a cash top-up, dormant), so they
-  // subtract here — never multiplied. Flows through this one core, so /me and /leaderboard agree.
+  // subtract here — never multiplied. Flows through this one core, so /me and admin ranking agree.
   const nonSwipe = breakdown.LOGIN + breakdown.REFERRAL + breakdown.STREAK_X2 + breakdown.TOPUP_SPEND;
   return {
     total: nonSwipe + multipliedSwipe,

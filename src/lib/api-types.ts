@@ -150,19 +150,6 @@ export interface SeenResponse {
   markedSeen: number;
 }
 
-// ─── GET /api/leaderboard ──────────────────────────────────────────────────────────────────────
-// Auth: Bearer. Top-100 by effective (multiplier-applied) points + the caller's own rank.
-export interface LeaderboardEntry {
-  rank: number;
-  userId: string;
-  handle: string; // twitter handle, else `user_<id6>`
-  points: number;
-}
-export interface LeaderboardResponse {
-  top: LeaderboardEntry[];
-  me: { rank: number | null; points: number }; // rank null if the caller has no points yet
-}
-
 // ─── GET /api/me ───────────────────────────────────────────────────────────────────────────────
 // Auth: Bearer. The account snapshot — the client's primary state source. Numbers are server-
 // computed (points multiplier applied, caps/costs included) so the client renders, never derives,
