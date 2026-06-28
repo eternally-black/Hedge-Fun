@@ -131,10 +131,12 @@ async function loop() {
   }
 }
 
-// Only start the daemon when run directly (npm run poll / tsx scripts/poller.ts). Importing this
-// module (e.g. scripts/test-poller-resolution.ts unit-testing toResolution) must NOT spin up the
-// loop or install process-killing handlers.
-const runAsDaemon = process.argv[1]?.endsWith("poller.ts") ?? false;
+// Only start the daemon when this file is the entry point — dev `tsx scripts/poller.ts` (poller.ts)
+// AND prod `node dist/poller.cjs` (the esbuild bundle). Importing this module (e.g.
+// scripts/test-poller-resolution.ts unit-testing toResolution) must NOT spin up the loop or install
+// process-killing handlers — its entry is test-*.ts, which doesn't match. Matching ONLY "poller.ts"
+// silently disabled the prod poller (entry is poller.cjs) — keep both extensions.
+const runAsDaemon = /(?:^|[\\/])poller\.(?:ts|cjs)$/.test(process.argv[1] ?? "");
 if (runAsDaemon) {
   // Crash on a fault instead of limping on: an unhandled rejection / uncaught exception can
   // leave the loop wedged while Docker still reports the container "up". Exit(1) so
