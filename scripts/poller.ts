@@ -51,7 +51,9 @@ async function settleOne(market: { id: string; polymarketId: string }) {
 }
 
 // Process an array with a bounded concurrency, isolating per-item errors.
-async function mapLimit<T>(items: T[], limit: number, fn: (t: T) => Promise<void>) {
+// Exported so scripts/test-poller-maplimit.ts can unit-test the error-isolation + bounded
+// concurrency in isolation (importing this module does NOT start loop() — see runAsDaemon guard).
+export async function mapLimit<T>(items: T[], limit: number, fn: (t: T) => Promise<void>) {
   const queue = [...items];
   const workers = Array.from({ length: Math.min(limit, queue.length) }, async () => {
     while (queue.length) {

@@ -14,11 +14,12 @@ export const metadata: Metadata = {
 };
 
 // viewport-fit=cover so env(safe-area-inset-*) works on notched phones (the app goes fullscreen
-// on mobile — see Frame in page.tsx). maximumScale=1 stops iOS zoom-on-input jank.
+// on mobile — see Frame in page.tsx). No maximumScale: pinch-zoom stays enabled (WCAG 1.4.4). The
+// user-facing app has no <16px text inputs (auth is Privy's own UI), so dropping the old
+// maximumScale=1 doesn't reintroduce iOS focus-zoom on the swipe flow.
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
-  maximumScale: 1,
   viewportFit: "cover",
 };
 

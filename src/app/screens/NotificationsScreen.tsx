@@ -34,7 +34,7 @@ export function NotificationsScreen({ api, onSeen, onReplay }: { api: Api; onSee
         <div style={{ fontFamily: "var(--df)", fontSize: 26 }}>Results</div>
         <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 6 }}>Every call you&apos;ve made, settled.</div>
         {rows.length > 0 && (
-          <div onClick={onReplay} style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6, background: "color-mix(in srgb,var(--energy) 16%,var(--panel))", border: "1px solid color-mix(in srgb,var(--energy) 40%,var(--line))", padding: "8px 12px", borderRadius: 12, cursor: "pointer", fontSize: 12, fontWeight: 700, color: "var(--text)" }}>▸ Replay</div>
+          <button type="button" onClick={onReplay} aria-label="Replay results reveal" style={{ margin: 0, font: "inherit", marginLeft: "auto", display: "flex", alignItems: "center", gap: 6, background: "color-mix(in srgb,var(--energy) 16%,var(--panel))", border: "1px solid color-mix(in srgb,var(--energy) 40%,var(--line))", padding: "8px 12px", borderRadius: 12, cursor: "pointer", fontSize: 12, fontWeight: 700, color: "var(--text)" }}>▸ Replay</button>
         )}
       </div>
 
@@ -66,7 +66,7 @@ function InboxRow({ row }: { row: ResultRow }) {
       </div>
       <div style={{ textAlign: "right", flexShrink: 0 }}>
         <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 14, color: m.accent }}>{deltaStr(row.status, row.deltaCents)}</div>
-        <div style={{ fontSize: 9, letterSpacing: ".06em", textTransform: "uppercase", color: m.accent, fontWeight: 700, marginTop: 2 }}>{m.tag}</div>
+        <div style={{ fontSize: 10, letterSpacing: ".06em", textTransform: "uppercase", color: m.accent, fontWeight: 700, marginTop: 2 }}>{m.tag}</div>
         {row.shards > 0 && <div style={{ fontSize: 10, color: "var(--gold)", marginTop: 2 }}>+{row.shards} ◆</div>}
       </div>
     </div>

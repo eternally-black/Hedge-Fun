@@ -69,9 +69,9 @@ export function VaultScreen({ me, api, onRefresh }: { me: Me | null; api: Api; o
             </div>
           </div>
           {burned && (
-            <div onClick={busy || artifacts < 1 ? undefined : revive} style={{ marginTop: 14, background: artifacts < 1 ? "var(--panel2)" : "linear-gradient(135deg,var(--gold),#c98a1e)", color: artifacts < 1 ? "var(--muted)" : "#1a1205", fontFamily: "var(--df)", fontSize: 18, textAlign: "center", padding: 13, borderRadius: 14, cursor: busy || artifacts < 1 ? "default" : "pointer" }}>
+            <button type="button" onClick={busy || artifacts < 1 ? undefined : revive} disabled={busy || artifacts < 1} style={{ margin: 0, font: "inherit", border: "none", width: "100%", marginTop: 14, background: artifacts < 1 ? "var(--panel2)" : "linear-gradient(135deg,var(--gold),#c98a1e)", color: artifacts < 1 ? "var(--muted)" : "#1a1205", fontFamily: "var(--df)", fontSize: 18, textAlign: "center", padding: 13, borderRadius: 14, cursor: busy || artifacts < 1 ? "default" : "pointer" }}>
               {artifacts < 1 ? "No artifact to spend" : "🛡 Spend 1 Artifact → Revive streak"}
-            </div>
+            </button>
           )}
         </div>
       </div>

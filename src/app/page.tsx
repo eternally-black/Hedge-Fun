@@ -206,8 +206,11 @@ function App() {
         });
       // Skips are always free + unlimited now — no client gate (the server never 402s a skip).
       // Cash gate: a YES/NO bet needs >= one stake of free Cash. Block BEFORE the optimistic advance
-      // so the card isn't lost — it stays so the user can top up and retry.
-      if (action !== "SKIP" && me && me.cashCents < me.stakeCents) {
+      // so the card isn't lost — it stays so the user can top up and retry. Read the gate from
+      // meRef.current (not `me`) so this callback stays stable across the frequent /api/me refreshes
+      // — otherwise act + handleAction would get a new identity every refresh and re-key the DeckCard.
+      const m = meRef.current;
+      if (action !== "SKIP" && m && m.cashCents < m.stakeCents) {
         flashToast("No free cash left");
         return;
       }
@@ -234,7 +237,7 @@ function App() {
           else if (status !== 409) console.error(e);
         });
     },
-    [api, me, refreshMe, topUpIfLow, flashPop, flashToast],
+    [api, refreshMe, topUpIfLow, flashPop, flashToast],
   );
 
   // Stable handlers for the keyed DeckCard so it isn't handed new function props each render.
@@ -248,11 +251,14 @@ function App() {
     try {
       const ref = readRef();
       await api(ref ? `/api/login-mark?ref=${encodeURIComponent(ref)}` : "/api/login-mark", { method: "POST" });
-      await refresh();
+      // Stats only — GM check-in updates streak/points/login state but must NOT re-fetch /api/deck:
+      // it's re-shuffled with a fresh seed each call, so swapping the deck here would change which
+      // card sits on top (same rationale as the post-swipe path). refreshMe leaves the deck intact.
+      await refreshMe();
     } finally {
       setBusy(false);
     }
-  }, [api, refresh]);
+  }, [api, refreshMe]);
 
   // Stable nav callbacks so memo'd Hud/BottomNav don't re-render on unrelated state changes.
   const goVault = useCallback(() => setScreen("vault"), []);

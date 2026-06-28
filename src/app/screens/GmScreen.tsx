@@ -62,7 +62,7 @@ export function GmScreen({ me, busy, onGM, onEnterDeck }: { me: Me | null; busy:
               <div style={{ width: 30, height: 30, borderRadius: 10, background: d.isDone ? "color-mix(in srgb,var(--gold) 22%,transparent)" : "var(--panel)", border: `1.5px solid ${d.isToday ? "var(--energy)" : d.isDone ? "var(--gold)" : "var(--line)"}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, color: d.isDone ? "var(--gold)" : "var(--muted)" }}>
                 {d.isDone ? "🔥" : d.isToday && !done ? "☀" : ""}
               </div>
-              <div style={{ fontSize: 8, color: d.isWindowStart ? "var(--energy)" : "var(--muted)", fontWeight: d.isWindowStart ? 700 : 400 }}>{d.label}</div>
+              <div style={{ fontSize: 10, color: d.isWindowStart ? "var(--energy)" : "var(--muted)", fontWeight: d.isWindowStart ? 700 : 400 }}>{d.label}</div>
             </div>
           </div>
         ))}
@@ -79,14 +79,16 @@ export function GmScreen({ me, busy, onGM, onEnterDeck }: { me: Me | null; busy:
 
       {/* Before claim: claim CTA. After claim: the button flips to "Enter the deck →" (the natural
           next step in the daily-open ritual), and a quiet "Skip to the deck" link sits below it. */}
-      <div
+      <button
+        type="button"
         onClick={busy ? undefined : done ? onEnterDeck : onGM}
-        style={{ marginTop: 26, width: "100%", maxWidth: 300, background: "linear-gradient(135deg,var(--energy),color-mix(in srgb,var(--energy) 55%,#000))", color: "#fff", fontFamily: "var(--df)", fontSize: 22, padding: 16, borderRadius: 18, cursor: busy ? "default" : "pointer", boxShadow: "0 14px 30px -8px color-mix(in srgb,var(--energy) 60%,transparent)" }}
+        disabled={busy}
+        style={{ margin: 0, font: "inherit", border: "none", marginTop: 26, width: "100%", maxWidth: 300, background: "linear-gradient(135deg,var(--energy),color-mix(in srgb,var(--energy) 55%,#000))", color: "#fff", fontFamily: "var(--df)", fontSize: 22, padding: 16, borderRadius: 18, cursor: busy ? "default" : "pointer", boxShadow: "0 14px 30px -8px color-mix(in srgb,var(--energy) 60%,transparent)" }}
       >
         {done ? "Enter the deck →" : "☀ Claim & keep streak"}
-      </div>
+      </button>
       {done && (
-        <div onClick={onEnterDeck} style={{ marginTop: 12, fontSize: 12, color: "var(--muted)", textDecoration: "underline", cursor: "pointer" }}>Skip to the deck →</div>
+        <button type="button" onClick={onEnterDeck} style={{ background: "none", border: "none", padding: 0, font: "inherit", marginTop: 12, fontSize: 12, color: "var(--muted)", textDecoration: "underline", cursor: "pointer" }}>Skip to the deck →</button>
       )}
     </div>
   );

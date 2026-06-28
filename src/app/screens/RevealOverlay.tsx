@@ -81,12 +81,12 @@ export function RevealOverlay({
     <div style={{ position: "absolute", inset: 0, zIndex: 88, overflow: "hidden", background: "var(--bg)" }}>
       {/* persistent close — exits to the deck, badge preserved. A bold ✕ in a circle (no "Skip"
           label, no bare X that reads as the Twitter glyph on a dark field). */}
-      <div onClick={onSkip} aria-label="Close" style={{ position: "absolute", top: 14, right: 16, zIndex: 8, width: 36, height: 36, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,.45)", backdropFilter: "blur(6px)", border: "1px solid var(--line)", cursor: "pointer", color: "var(--text)", fontSize: 20, fontWeight: 800, lineHeight: 1 }}>
-        ✕
-      </div>
+      <button type="button" onClick={onSkip} aria-label="Close" style={{ margin: 0, font: "inherit", position: "absolute", top: 14, right: 16, zIndex: 8, width: 36, height: 36, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,.45)", backdropFilter: "blur(6px)", border: "1px solid var(--line)", cursor: "pointer", color: "var(--text)", fontSize: 20, fontWeight: 800, lineHeight: 1, padding: 0 }}>
+        <span aria-hidden="true">✕</span>
+      </button>
 
       {state.phase === "aggregate" && (
-        <div onClick={() => dispatch({ t: "toCards" })} style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 30, textAlign: "center", cursor: "pointer", background: `radial-gradient(130% 55% at 50% 24%, color-mix(in srgb,${netColor} 22%,transparent), transparent 62%)` }}>
+        <button type="button" onClick={() => dispatch({ t: "toCards" })} aria-label="Relive your calls" style={{ margin: 0, font: "inherit", color: "inherit", textAlign: "center", position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 30, cursor: "pointer", border: "none", background: `radial-gradient(130% 55% at 50% 24%, color-mix(in srgb,${netColor} 22%,transparent), transparent 62%)` }}>
           <div style={{ fontSize: 11, letterSpacing: ".24em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700, animation: "hfBigIn .4s ease both" }}>While you were away</div>
           <div style={{ fontFamily: "var(--df)", fontSize: 84, lineHeight: 0.82, marginTop: 16, color: netColor, textShadow: `0 0 46px color-mix(in srgb,${netColor} 45%,transparent)`, animation: "hfBigIn .4s .05s ease both" }}>{netStr}</div>
           <div style={{ fontSize: 12, letterSpacing: ".04em", color: "var(--muted)", marginTop: 6, animation: "hfBigIn .4s .1s ease both" }}>net virtual P&amp;L · {rows.length} call{rows.length === 1 ? "" : "s"} settled</div>
@@ -96,7 +96,7 @@ export function RevealOverlay({
             <AggTile value={`+${agg.shards} ◆`} label="Shards" color="var(--gold)" />
           </div>
           <div style={{ marginTop: 36, fontSize: 13, color: "var(--text)", fontWeight: 700, background: "var(--panel)", border: "1px solid var(--line)", padding: "12px 20px", borderRadius: 24, animation: "hfPulse 2s ease-in-out infinite" }}>Tap to relive your calls →</div>
-        </div>
+        </button>
       )}
 
       {state.phase === "cards" && featured[state.i] && (
@@ -142,7 +142,7 @@ export function RevealOverlay({
           )}
 
           <div style={{ flex: 1, minHeight: 18 }} />
-          <div onClick={onDone} style={{ marginTop: 18, background: "linear-gradient(135deg,var(--energy),color-mix(in srgb,var(--energy) 55%,#000))", color: "#fff", fontFamily: "var(--df)", fontSize: 26, textAlign: "center", padding: 16, borderRadius: 18, cursor: "pointer", boxShadow: "0 14px 30px -8px color-mix(in srgb,var(--energy) 60%,transparent)" }}>Continue →</div>
+          <button type="button" onClick={onDone} style={{ margin: 0, border: "none", width: "100%", marginTop: 18, background: "linear-gradient(135deg,var(--energy),color-mix(in srgb,var(--energy) 55%,#000))", color: "#fff", fontFamily: "var(--df)", fontSize: 26, textAlign: "center", padding: 16, borderRadius: 18, cursor: "pointer", boxShadow: "0 14px 30px -8px color-mix(in srgb,var(--energy) 60%,transparent)" }}>Continue →</button>
         </div>
       )}
     </div>

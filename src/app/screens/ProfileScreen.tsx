@@ -110,17 +110,17 @@ export function ProfileScreen({ me, api, onRefresh, onHistory, onLogout }: { me:
       </div>
 
       <div style={{ marginTop: 20, fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700 }}>Prediction history</div>
-      <div onClick={onHistory} style={{ marginTop: 10, background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 14, padding: 16, textAlign: "center", color: "var(--text)", fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+      <button type="button" onClick={onHistory} style={{ margin: 0, font: "inherit", width: "100%", marginTop: 10, background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 14, padding: 16, textAlign: "center", color: "var(--text)", fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
         <span>📜 View your open & settled predictions</span><span style={{ color: "var(--muted)" }}>›</span>
-      </div>
+      </button>
 
       {me?.dev && (
         <div style={{ marginTop: 22, border: "1px dashed color-mix(in srgb,var(--skip) 50%,var(--line))", borderRadius: 14, padding: 14, background: "color-mix(in srgb,var(--skip) 8%,transparent)" }}>
           <div style={{ fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: "var(--skip)", fontWeight: 700 }}>Dev tools</div>
           <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>Unlimited skips are on. Reset re-deals every market.</div>
-          <div onClick={resetting ? undefined : resetDeck} style={{ marginTop: 10, background: "var(--skip)", color: "#04121f", fontWeight: 700, fontSize: 13, textAlign: "center", padding: 12, borderRadius: 12, cursor: resetting ? "default" : "pointer", opacity: resetting ? 0.6 : 1 }}>
+          <button type="button" onClick={resetting ? undefined : resetDeck} disabled={resetting} style={{ margin: 0, font: "inherit", border: "none", width: "100%", marginTop: 10, background: "var(--skip)", color: "#04121f", fontWeight: 700, fontSize: 13, textAlign: "center", padding: 12, borderRadius: 12, cursor: resetting ? "default" : "pointer", opacity: resetting ? 0.6 : 1 }}>
             {resetting ? "Resetting…" : "↻ Reset & reload deck"}
-          </div>
+          </button>
         </div>
       )}
 
@@ -128,14 +128,14 @@ export function ProfileScreen({ me, api, onRefresh, onHistory, onLogout }: { me:
       <div style={{ marginTop: 22, fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700 }}>Account</div>
       <div style={{ marginTop: 10, background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 14, padding: "12px 14px", display: "flex", alignItems: "center", gap: 10 }}>
         <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ fontSize: 9, letterSpacing: ".1em", textTransform: "uppercase", color: "var(--muted)" }}>Signed in as</div>
+          <div style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: "var(--muted)" }}>Signed in as</div>
           <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {me?.user.twitter ? `@${me.user.twitter}` : me?.user.email ?? "—"}
           </div>
         </div>
-        <div onClick={onLogout} style={{ flexShrink: 0, background: "color-mix(in srgb,var(--no) 12%,var(--panel))", border: "1px solid color-mix(in srgb,var(--no) 40%,var(--line))", color: "var(--no)", fontWeight: 700, fontSize: 13, padding: "9px 16px", borderRadius: 12, cursor: "pointer" }}>
+        <button type="button" onClick={onLogout} style={{ margin: 0, font: "inherit", flexShrink: 0, background: "color-mix(in srgb,var(--no) 12%,var(--panel))", border: "1px solid color-mix(in srgb,var(--no) 40%,var(--line))", color: "var(--no)", fontWeight: 700, fontSize: 13, padding: "9px 16px", borderRadius: 12, cursor: "pointer" }}>
           Log out
-        </div>
+        </button>
       </div>
 
       {/* X (Twitter) connection. Linked → show the @handle (+ Unlink for email-signup users; a
@@ -143,21 +143,21 @@ export function ProfileScreen({ me, api, onRefresh, onHistory, onLogout }: { me:
           users only). */}
       <div style={{ marginTop: 10, background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 14, padding: "12px 14px", display: "flex", alignItems: "center", gap: 10 }}>
         <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ fontSize: 9, letterSpacing: ".1em", textTransform: "uppercase", color: "var(--muted)" }}>𝕏 Account</div>
+          <div style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: "var(--muted)" }}>𝕏 Account</div>
           <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {me?.user.twitter ? `@${me.user.twitter}` : "Not connected"}
           </div>
         </div>
         {me?.user.twitter
           ? (me.user.authProvider === "EMAIL"
-              ? <div onClick={busyX ? undefined : startUnlink} style={{ flexShrink: 0, background: "color-mix(in srgb,var(--no) 12%,var(--panel))", border: "1px solid color-mix(in srgb,var(--no) 40%,var(--line))", color: "var(--no)", fontWeight: 700, fontSize: 13, padding: "9px 16px", borderRadius: 12, cursor: busyX ? "default" : "pointer", opacity: busyX ? 0.6 : 1 }}>
+              ? <button type="button" onClick={busyX ? undefined : startUnlink} disabled={!!busyX} style={{ margin: 0, font: "inherit", flexShrink: 0, background: "color-mix(in srgb,var(--no) 12%,var(--panel))", border: "1px solid color-mix(in srgb,var(--no) 40%,var(--line))", color: "var(--no)", fontWeight: 700, fontSize: 13, padding: "9px 16px", borderRadius: 12, cursor: busyX ? "default" : "pointer", opacity: busyX ? 0.6 : 1 }}>
                   {busyX === "unlink" ? "Unlinking…" : "Unlink"}
-                </div>
+                </button>
               : null)
           : (me?.user.authProvider === "EMAIL"
-              ? <div onClick={busyX ? undefined : startLink} style={{ flexShrink: 0, background: "color-mix(in srgb,var(--energy) 16%,var(--panel))", border: "1px solid color-mix(in srgb,var(--energy) 45%,var(--line))", color: "var(--energy)", fontWeight: 700, fontSize: 13, padding: "9px 16px", borderRadius: 12, cursor: busyX ? "default" : "pointer", opacity: busyX ? 0.6 : 1 }}>
+              ? <button type="button" onClick={busyX ? undefined : startLink} disabled={!!busyX} style={{ margin: 0, font: "inherit", flexShrink: 0, background: "color-mix(in srgb,var(--energy) 16%,var(--panel))", border: "1px solid color-mix(in srgb,var(--energy) 45%,var(--line))", color: "var(--energy)", fontWeight: 700, fontSize: 13, padding: "9px 16px", borderRadius: 12, cursor: busyX ? "default" : "pointer", opacity: busyX ? 0.6 : 1 }}>
                   {busyX === "link" ? "Linking…" : "Link 𝕏"}
-                </div>
+                </button>
               : null)}
       </div>
       {xError ? <div style={{ marginTop: 8, fontSize: 12, color: "var(--no)" }}>{xError}</div> : null}

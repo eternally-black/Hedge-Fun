@@ -38,7 +38,7 @@ export function InviteScreen({ me }: { me: Me | null }) {
 
       <div style={{ marginTop: 22, background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 16, padding: "6px 6px 6px 16px", display: "flex", alignItems: "center", gap: 10 }}>
         <div style={{ flex: 1, textAlign: "left", fontFamily: "var(--nf)", fontSize: 13, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{link}</div>
-        <div onClick={copy} style={{ background: "var(--energy)", color: "#fff", fontWeight: 700, padding: "11px 18px", borderRadius: 12, cursor: "pointer", fontSize: 13 }}>{copied ? "Copied!" : "Copy"}</div>
+        <button type="button" onClick={copy} aria-label="Copy invite link" disabled={!fullLink} style={{ margin: 0, font: "inherit", border: "none", background: "var(--energy)", color: "#fff", fontWeight: 700, padding: "11px 18px", borderRadius: 12, cursor: fullLink ? "pointer" : "default", fontSize: 13 }}>{copied ? "Copied!" : "Copy"}</button>
       </div>
 
       {/* Share to X / Telegram. Each tap rolls a random copy line and opens the composer
@@ -66,6 +66,7 @@ export function InviteScreen({ me }: { me: Me | null }) {
 function ShareBtn({ label, onClick, disabled }: { label: ReactNode; onClick: () => void; disabled?: boolean }) {
   return (
     <button
+      type="button"
       onClick={onClick}
       disabled={disabled}
       style={{
