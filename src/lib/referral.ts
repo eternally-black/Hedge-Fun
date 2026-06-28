@@ -4,19 +4,7 @@ import { utcDay } from "./time";
 import { writePoints } from "./points";
 import { REFERRAL_INVITEE_BONUS, REFERRAL_INVITER_RATE } from "./config";
 import { resolveUserDevice, sameDevice, type DeviceFingerprint } from "./refclick";
-
-// Run a transaction at Serializable isolation, retrying on a write-conflict/deadlock (P2034). The
-// bodies that use it are idempotent (delta-only high-water marks), so a retry is always safe.
-async function runSerializable<T>(fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      return await prisma.$transaction(fn, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
-    } catch (e) {
-      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2034" && attempt < 4) continue;
-      throw e;
-    }
-  }
-}
+import { runSerializable } from "./tx";
 
 // Capture the inviter<->invitee relationship at signup. The invitee can only ever
 // have one referral (unique inviteeId). Logs a SIGNUP event so reward can be computed

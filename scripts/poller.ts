@@ -28,7 +28,7 @@ const HEARTBEAT_FILE = process.env.POLLER_HEARTBEAT_FILE ?? join(tmpdir(), "poll
 
 let running = true;
 
-function toResolution(m: Awaited<ReturnType<typeof fetchResolution>>): Resolution {
+export function toResolution(m: Awaited<ReturnType<typeof fetchResolution>>): Resolution {
   if (!m) return { kind: "open" };
   if (m.status === "RESOLVED" && m.resolvedOutcome === "YES") return { kind: "resolved", resolvedYes: true };
   if (m.status === "RESOLVED" && m.resolvedOutcome === "NO") return { kind: "resolved", resolvedYes: false };
@@ -129,24 +129,30 @@ async function loop() {
   }
 }
 
-// Crash on a fault instead of limping on: an unhandled rejection / uncaught exception can
-// leave the loop wedged while Docker still reports the container "up". Exit(1) so
-// `restart: unless-stopped` actually fires.
-process.on("unhandledRejection", (reason) => {
-  console.error("[poll] unhandledRejection:", reason);
-  process.exit(1);
-});
-process.on("uncaughtException", (err) => {
-  console.error("[poll] uncaughtException:", err);
-  process.exit(1);
-});
-
-for (const sig of ["SIGINT", "SIGTERM"] as const) {
-  process.on(sig, () => {
-    console.log(`\n${sig} -> stopping…`);
-    running = false;
-    prisma.$disconnect().then(() => process.exit(0));
+// Only start the daemon when run directly (npm run poll / tsx scripts/poller.ts). Importing this
+// module (e.g. scripts/test-poller-resolution.ts unit-testing toResolution) must NOT spin up the
+// loop or install process-killing handlers.
+const runAsDaemon = process.argv[1]?.endsWith("poller.ts") ?? false;
+if (runAsDaemon) {
+  // Crash on a fault instead of limping on: an unhandled rejection / uncaught exception can
+  // leave the loop wedged while Docker still reports the container "up". Exit(1) so
+  // `restart: unless-stopped` actually fires.
+  process.on("unhandledRejection", (reason) => {
+    console.error("[poll] unhandledRejection:", reason);
+    process.exit(1);
   });
-}
+  process.on("uncaughtException", (err) => {
+    console.error("[poll] uncaughtException:", err);
+    process.exit(1);
+  });
 
-loop();
+  for (const sig of ["SIGINT", "SIGTERM"] as const) {
+    process.on(sig, () => {
+      console.log(`\n${sig} -> stopping…`);
+      running = false;
+      prisma.$disconnect().then(() => process.exit(0));
+    });
+  }
+
+  loop();
+}

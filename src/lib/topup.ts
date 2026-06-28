@@ -1,5 +1,4 @@
-import { Prisma } from "@prisma/client";
-import { prisma } from "./prisma";
+import { runSerializable } from "./tx";
 import { utcDay } from "./time";
 import {
   SWIPE_CAP,
@@ -25,7 +24,10 @@ export type TopupResult =
 //   artifact — costs 1 artifact, NO cash gate (artifacts are the currency; user decides).
 // Mirrors the artifact-spend pattern in streak.ts recoverStreak().
 export async function topUp(userId: string, kind: TopupKind, at = new Date()): Promise<TopupResult> {
-  return prisma.$transaction(
+  // Serializable + P2034 retry (src/lib/tx): serializes concurrent top-ups per user so the free
+  // flag / artifact decrement can't double-fire, and a write conflict retries instead of 500ing.
+  // The body re-reads vb/cb state, so a retry is idempotent (no double-grant).
+  return runSerializable<TopupResult>(
     async (tx): Promise<TopupResult> => {
       const vb = await tx.virtualBalance.upsert({ where: { userId }, create: { userId }, update: {} });
 
@@ -61,6 +63,5 @@ export async function topUp(userId: string, kind: TopupKind, at = new Date()): P
       });
       return { ok: true, kind, grantedCents: TOPUP_GRANT_CENTS, balanceCents: updated.balanceCents };
     },
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
   );
 }
