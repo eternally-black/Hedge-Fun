@@ -38,6 +38,25 @@ in depth. This doc is the broader readiness checklist.
   - `TopupResponse` dropped the `"points"` kind and its reasons; `/api/topup` now returns **400** for an
     unknown kind (no longer **404**). Remaining kinds: `"free"` (409 free_used / free_not_eligible) and
     `"artifact"` (402 no_artifact).
+  - `MeResponse.referrals: { joined, pointsEarned }` (2026-06-29) — invite stats now come from
+    `/api/me`; RN renders them with **no new endpoint**. `User.signupIpHash` / `signupUaHash` were
+    added (`Bytes?`, nullable) but are **internal** — not in any response shape, zero client impact.
+
+## ✅ Done in this pass (2026-06-29 — audit hardening)
+
+These shipped to prod; the table is what matters for the Android client (the rest is server-internal).
+
+| Change | Android impact |
+|---|---|
+| **Referral device anti-fraud** ([`referral.ts`](../src/lib/referral.ts), [`refclick.ts`](../src/lib/refclick.ts), [`privy.ts`](../src/lib/privy.ts)) | `authUser` captures the **signup device** (HMAC of IP / UA+lang) from request headers at account creation; `captureReferral` rejects a binding when inviter & invitee share a signup device or embedded wallet. **RN works identically** — captured from the RN client's UA + Caddy `x-forwarded-for` IP. Match needs BOTH ipHash AND uaHash, so it never wrongly blocks a real cross-device invite. **Needs `REFERRAL_HASH_SECRET`** (else guard + cross-browser attribution are off — [`instrumentation.ts`](../src/instrumentation.ts) warns at boot). RN's referral flow is unchanged: same idempotent authed POST, now with server-side fraud checks for free. |
+| **Prisma Migrate adopted** (compose `migrate deploy`, [`prisma/migrations/`](../prisma/migrations/)) | Schema-evolution path is locked **before** Android depends on it. Any Android-needed column/table = `npm run db:migrate` (committed migration) → deploy runs `migrate deploy`. `db push` is dev-only now. This is the substrate the bounty-API schema should use. |
+| **a11y / perf web sweep** (`page.tsx`, `screens/*`) | **Web client ONLY — does not touch the shared boundary.** RN still shares exactly three files (`api-types.ts`, `share.ts`, `time.ts`); web screens are not ported. No Android effect. |
+| **Rate-limit + over-cap pre-write** ([`ratelimit.ts`](../src/lib/ratelimit.ts), swipe route) | Server-side, origin-agnostic — RN inherits the 403-on-over-cap and `/api/ref-click` validation for free. In-process limiter (single instance); revisit only at multi-instance. |
+
+**Bounty-API integration (separate agent's task):** to keep Android-compat, put its request/response
+shapes in [`api-types.ts`](../src/lib/api-types.ts), any new schema as a Prisma migration
+(`npm run db:migrate`), and the integration **server-side** (API route / poller) — then the Android
+client inherits it with no extra work. Add CORS only if a browser-context caller appears (see §1).
 
 ---
 
