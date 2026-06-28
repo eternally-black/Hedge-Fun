@@ -36,6 +36,10 @@ export async function captureReferral(
     prisma.user.findUnique({ where: { id: inviterId }, select: { embeddedWalletAddress: true } }),
     prisma.user.findUnique({ where: { id: inviteeId }, select: { embeddedWalletAddress: true } }),
   ]);
+  // ponytail: belt-and-suspenders — User.embeddedWalletAddress is @unique, so two rows can't
+  // actually share one address today (Privy provisions one wallet per DID). Kept because it's
+  // free, self-documents intent, and activates if that uniqueness is ever relaxed (e.g. shared
+  // external payout wallets). The signup-device guard below is the live same-human enforcement.
   if (
     inviter?.embeddedWalletAddress &&
     invitee?.embeddedWalletAddress &&

@@ -1,0 +1,21 @@
+name: canary
+# Settlement canary: exercises the live Polymarket Gamma integration (fetchBlitzDeck per-category
+# horizon, fetchResolution closed=true lookup, mapMarket shapes). Runs on a schedule — NOT per
+# deploy — because it hits the real API. A red run = Polymarket API shape/behavior drifted and
+# settlement/deck could silently break (the 2026-06-25 "stuck in Awaiting resolution" class).
+on:
+  schedule:
+    - cron: "0 9 * * *" # daily 09:00 UTC
+  workflow_dispatch:
+
+jobs:
+  verify-polymarket:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run verify:polymarket
