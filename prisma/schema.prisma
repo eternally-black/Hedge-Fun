@@ -94,6 +94,12 @@ model User {
   createdAt             DateTime     @default(now())
   updatedAt             DateTime     @updatedAt
   lastSeenAt            DateTime?
+  // Device fingerprint captured at signup (HMAC-SHA256 of IP / UA+lang, see refclick.ts). Powers the
+  // referral self/multi-account device guard: two accounts created on the same device get equal
+  // hashes -> a referral between them is rejected. Nullable — pre-guard users and signups without
+  // REFERRAL_HASH_SECRET stay null, and the guard skips a user whose signup device is unknown.
+  signupIpHash          Bytes?
+  signupUaHash          Bytes?
 
   bets               Bet[]
   pointsLedger       PointsLedger[]

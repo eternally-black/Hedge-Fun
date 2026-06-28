@@ -75,7 +75,8 @@ export function evaluateBurn(
 
 // Qualify today for the streak. The day = the GM tap (login + opening the app are one
 // action in the MVP — see H1: the separate deck-open leg was dead, so it's collapsed).
-// Idempotent: same day re-qualifies to a no-op via applyQualify.
+// Idempotent: same day re-qualifies to a no-op via applyQualify. Runs the burn sweep first (in-tx)
+// so a missed day always transitions to BURNED_RECOVERABLE before this tap can qualify (F7/P-10).
 export async function qualifyDay(
   userId: string,
   at?: Date,
@@ -83,11 +84,48 @@ export async function qualifyDay(
   const day = utcDay(at);
 
   return prisma.$transaction(async (tx) => {
-    const streak = await tx.streak.upsert({
+    let streak = await tx.streak.upsert({
       where: { userId },
       create: { userId },
       update: {},
     });
+
+    // CRITICAL (F7/P-10): a missed day must ALWAYS burn before any new qualify. Otherwise an
+    // ACTIVE streak with a gap>=2 taps GM here (before /me or the poller ran evaluateStreak) and
+    // applyQualify's ACTIVE+gap branch silently restarts it at level 1 — skipping
+    // BURNED_RECOVERABLE entirely and permanently destroying the artifact recovery. Run the burn
+    // sweep first, in-transaction, so the burn is recorded before this tap can qualify.
+    const v = evaluateBurn(streak, at ?? new Date());
+    if (v.state !== streak.state) {
+      const levelBefore = streak.currentLevel;
+      streak = await tx.streak.update({
+        where: { userId },
+        data: {
+          state: v.state,
+          burnedAt: v.burnedAt ?? streak.burnedAt,
+          recoverableUntil: v.recoverableUntil,
+          currentLevel: v.currentLevelReset ? 0 : streak.currentLevel,
+        },
+      });
+      await tx.streakEvent.upsert({
+        where: { userId_utcDay_type: { userId, utcDay: day, type: v.state === "LOST" ? "LOST" : "BURNED" } },
+        create: {
+          userId,
+          utcDay: day,
+          type: v.state === "LOST" ? "LOST" : "BURNED",
+          levelBefore,
+          levelAfter: streak.currentLevel,
+        },
+        update: {},
+      });
+    }
+
+    // A burned-but-recoverable streak is NOT auto-qualified by this tap: doing so would reset to a
+    // fresh level-1 ACTIVE streak and wipe the open recovery window. Leave it BURNED_RECOVERABLE so
+    // the user can spend an artifact (recoverStreak) within the window. The tap awards no streak day.
+    if (streak.state === "BURNED_RECOVERABLE") {
+      return { qualifiedToday: false, state: streak.state, currentLevel: streak.currentLevel };
+    }
 
     const next = applyQualify(
       { currentLevel: streak.currentLevel, state: streak.state, lastQualifiedDay: streak.lastQualifiedDay },

@@ -14,10 +14,46 @@ concurrency:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # Test gate: lint + DB-free unit suite + DB-backed money/economy suite.
+  # Must be green before the image is built/pushed (build `needs: test`), so a
+  # logic regression in points/settle/referral/streak/cash-gate can't ship.
+  # verify:polymarket hits the live API → run it on a schedule, not per-deploy.
+  # ---------------------------------------------------------------------------
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: hedgefun
+          POSTGRES_PASSWORD: hedgefun
+          POSTGRES_DB: hedgefun
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U hedgefun"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://hedgefun:hedgefun@localhost:5432/hedgefun
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci                 # strict install from lockfile (postinstall = prisma generate)
+      - run: npm run lint
+      - run: npm test               # DB-free units (no DATABASE_URL needed)
+      - run: npm run test:db:run    # DB-backed: cash gate, settle, referral, streak recovery
+
+  # ---------------------------------------------------------------------------
   # Build the image on the runner and push to GHCR. The heavy lifting that used
   # to run on the VPS now runs here, with a persistent GHA layer cache.
   # ---------------------------------------------------------------------------
   build:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read

@@ -1,9 +1,9 @@
-// Top-up paths: free (once, low-cash gate), artifact (spend 1, no gate, race-safe), points (dormant).
+// Top-up paths: free (once, low-cash gate), artifact (spend 1, no gate, race-safe).
 // DB-backed. Run: npx tsx scripts/test-topup.ts  (needs DATABASE_URL)
 import assert from "node:assert";
 import { prisma } from "../src/lib/prisma";
 import { topUp } from "../src/lib/topup";
-import { TOPUP_GRANT_CENTS, FREE_TOPUP_CASH_GATE_CENTS, TOPUP_POINTS_ENABLED } from "../src/lib/config";
+import { TOPUP_GRANT_CENTS, FREE_TOPUP_CASH_GATE_CENTS } from "../src/lib/config";
 import { randomCode } from "../src/lib/refcode";
 
 async function mkUser(tag: string, balanceCents: number, artifacts = 0) {
@@ -68,15 +68,7 @@ async function main() {
   assert.ok(!r5.ok && r5.reason === "no_artifact", "no artifact → rejected");
   await cleanup(u5.id);
 
-  // (6) POINTS dormant: flag is off → points_disabled, no balance change.
-  assert.strictEqual(TOPUP_POINTS_ENABLED, false, "points top-up ships disabled");
-  const u6 = await mkUser(`${base}-pts`, 100000, 0);
-  const r6 = await topUp(u6.id, "points");
-  assert.ok(!r6.ok && r6.reason === "points_disabled", "points path disabled by flag");
-  assert.strictEqual((await prisma.virtualBalance.findUniqueOrThrow({ where: { userId: u6.id } })).balanceCents, 100000, "dormant points path moved no money");
-  await cleanup(u6.id);
-
-  console.log("OK: free once+gated, artifact spend race-safe, points dormant");
+  console.log("OK: free once+gated, artifact spend race-safe");
 }
 
 main().catch((e) => { console.error("FAIL:", e); process.exit(1); }).finally(() => prisma.$disconnect());

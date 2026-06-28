@@ -17,10 +17,10 @@ export const BottomNav = memo(function BottomNav({ screen, onNav }: { screen: Sc
       {ITEMS.map((it) => {
         const active = screen === it.key;
         return (
-          <div key={it.key} onClick={() => onNav(it.key)} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3, cursor: "pointer", color: active ? "var(--energy)" : "var(--muted)" }}>
-            <span style={{ fontSize: 20 }}>{it.glyph}</span>
+          <button key={it.key} type="button" onClick={() => onNav(it.key)} aria-label={it.label} aria-current={active ? "page" : undefined} style={{ background: "none", border: "none", padding: 0, margin: 0, font: "inherit", display: "flex", flexDirection: "column", alignItems: "center", gap: 3, cursor: "pointer", color: active ? "var(--energy)" : "var(--muted)" }}>
+            <span aria-hidden="true" style={{ fontSize: 20 }}>{it.glyph}</span>
             <span style={{ fontSize: 9, letterSpacing: ".06em", textTransform: "uppercase", fontWeight: 700 }}>{it.label}</span>
-          </div>
+          </button>
         );
       })}
     </div>

@@ -2,6 +2,7 @@
 // Hits the real API and asserts the blueprint's VERIFY-AT-RUNTIME flags hold.
 import assert from "node:assert";
 import { fetchBlitzDeck, fetchResolution, mapMarket } from "../src/lib/polymarket";
+import { categoryOf, withinCategoryHorizon, DECK_FETCH_HORIZON_HOURS } from "../src/lib/deck-mix";
 
 // Minimal Gamma GET for the verify-only positive check (gammaGet isn't exported from the lib).
 const VERIFY_BASE = process.env.POLYMARKET_API_BASE ?? "https://gamma-api.polymarket.com";
@@ -12,9 +13,9 @@ async function gammaGetForVerify(path: string): Promise<Array<{ conditionId?: st
 }
 
 async function main() {
-  console.log("1. fetchBlitzDeck(24)...");
-  const deck = await fetchBlitzDeck(24, 50);
-  console.log(`   got ${deck.length} blitz markets (<=24h, OPEN, both prices present)`);
+  console.log(`1. fetchBlitzDeck() [prod config: outer ${DECK_FETCH_HORIZON_HOURS}h, per-category horizon]...`);
+  const deck = await fetchBlitzDeck(DECK_FETCH_HORIZON_HOURS, 50);
+  console.log(`   got ${deck.length} blitz markets (per-category horizon, OPEN, both prices present)`);
 
   if (deck.length > 0) {
     const c = deck[0];
@@ -31,8 +32,11 @@ async function main() {
       c.yesPriceBp! >= 0 && c.yesPriceBp! <= 10000,
       "yes price in bp range",
     );
-    const maxMs = Date.now() + 24 * 3_600_000;
-    assert.ok(new Date(c.resolutionDeadline).getTime() <= maxMs, "<=24h window holds");
+    const nowMs = Date.now();
+    assert.ok(
+      withinCategoryHorizon(c, new Date(c.resolutionDeadline).getTime(), nowMs),
+      "sample card is within its category's horizon",
+    );
     // Yes/No price pair should roughly sum to ~1 (10000bp) on a binary market.
     const sum = (c.yesPriceBp ?? 0) + (c.noPriceBp ?? 0);
     assert.ok(Math.abs(sum - 10000) < 1500, `yes+no ~ 10000bp (got ${sum})`);
@@ -48,6 +52,18 @@ async function main() {
       );
     }
     console.log("   ✓ every card is contested (15%..85% band, no 100%/0% cards)");
+
+    // Per-category horizon: every card resolves within ITS category window (crypto/OU <=24h,
+    // sports/esports <=72h). Exercises the PRODUCTION fetchBlitzDeck default — closes the old blind
+    // spot where this canary asserted a flat 24h while prod served a wider, per-category window.
+    for (const card of deck) {
+      const dl = new Date(card.resolutionDeadline).getTime();
+      assert.ok(withinCategoryHorizon(card, dl, nowMs), `horizon: ${card.question.slice(0, 40)} beyond its category window`);
+      if (categoryOf(card) === "crypto") {
+        assert.ok(dl <= nowMs + 24 * 3_600_000, `crypto must stay blitz <=24h: ${card.question.slice(0, 40)}`);
+      }
+    }
+    console.log("   ✓ every card within its category horizon (crypto<=24h, sports/esports<=72h)");
 
     // fetchResolution is a RESOLUTION lookup — it queries closed=true, so an OPEN deck market
     // correctly returns null (it isn't resolved). This is the fix for the 2026-06-25 "stuck in

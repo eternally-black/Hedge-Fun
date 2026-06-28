@@ -1,12 +1,8 @@
 // Self-check for the points scoring core. Run: npx tsx scripts/test-points.ts
-// Asserts the ACTIVE one-time 7-day-window x2 (via scorePoints) AND the strategy unit
-// behavior directly, so the meaning is pinned regardless of small refactors.
+// Asserts the ACTIVE one-time 7-day-window x2 via scorePoints, so the meaning is
+// pinned regardless of small refactors.
 import assert from "node:assert";
 import { scorePoints } from "../src/lib/points";
-import {
-  SevenDayWindowOneTime,
-  type MultiplierContext,
-} from "../src/lib/multiplier";
 
 // --- helpers ----------------------------------------------------------------
 // n consecutive swipe-days ending at `end` (inclusive), each worth `perDay` raw swipe.
@@ -79,26 +75,6 @@ function swipeWindow(end: string, n: number, perDay: number) {
   assert.strictEqual(r.breakdown.SWIPE, 26, "raw swipe = 5 + 21 = 26");
   assert.strictEqual(r.bonusFromX2, 21, "only the in-window 21 doubles; the ancient 5 stays raw");
   assert.strictEqual(r.total, 47, "level7+ancient total = (5) + (42) = 47");
-}
-
-// 6. Strategy unit check (pure, independent of scorePoints wiring):
-//    earliest floor(L/7)*7 days double, login/referral are not even in scope here.
-{
-  const days = (n: number) =>
-    Array.from({ length: n }, (_, i) => ({
-      utcDay: `day${String(i).padStart(2, "0")}`,
-      raw: 3,
-    }));
-  const mk = (level: number, n: number): MultiplierContext => ({
-    userId: "u1",
-    streakLevel: level,
-    streakState: "ACTIVE",
-    streakSwipeDays: days(n),
-  });
-  assert.strictEqual(SevenDayWindowOneTime.multipliedSwipePoints(mk(6, 6)), 18, "L6: 6*3 raw");
-  assert.strictEqual(SevenDayWindowOneTime.multipliedSwipePoints(mk(7, 7)), 42, "L7: 7*3 doubled");
-  assert.strictEqual(SevenDayWindowOneTime.multipliedSwipePoints(mk(8, 8)), 45, "L8: 7 doubled + 1 raw");
-  assert.strictEqual(SevenDayWindowOneTime.multipliedSwipePoints(mk(0, 0)), 0, "L0: nothing");
 }
 
 console.log("points scoring: OK");

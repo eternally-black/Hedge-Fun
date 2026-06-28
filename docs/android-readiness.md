@@ -17,7 +17,7 @@ in depth. This doc is the broader readiness checklist.
 | **All routes return pure JSON** | [`src/app/api/`](../src/app/api/) | No redirects, server components, or relative URLs. Contract transfers 1:1. |
 | **`share.ts` env-free + `ShareIntent`** | [`share.ts`](../src/lib/share.ts) | RN imports verbatim, adds only a native opener. |
 | **Server is the source of truth** | swipe-cap, points, streak computed server-side | Device renders numbers from `/api/me`, never re-derives the economy. |
-| **Pure cores extracted from DB code** | `scorePoints`, `evaluateBurn`, `rollUp`, `decideSkip`, `inviterAccrualDelta` | If Android ever wants client-side previews, it reuses these — no drift. |
+| **Pure cores extracted from DB code** | `scorePoints`, `evaluateBurn`, `rollUp`, `inviterAccrualDelta` | If Android ever wants client-side previews, it reuses these — no drift. |
 
 ## ✅ Done in this pass
 
@@ -31,6 +31,13 @@ in depth. This doc is the broader readiness checklist.
   `tsc` error, not a prod surprise); web screens consume it via [`ui.ts`](../src/app/ui.ts) aliases.
   Android imports this file verbatim as its client contract. **It caught two latent web bugs**:
   `me.recoverableUntil` was emitted as a raw `Date`, and deck prices were typed nullable.
+- **Contract changes to record (2026-06-28):**
+  - `SkipResponse` is now `{ ok: true; skipsToday: number }` only — **no failure variant**; `/api/skip`
+    always returns **200** (skips became free + unlimited, the shard-sink was dropped). Was: a success
+    + failure union with a shard-cost path.
+  - `TopupResponse` dropped the `"points"` kind and its reasons; `/api/topup` now returns **400** for an
+    unknown kind (no longer **404**). Remaining kinds: `"free"` (409 free_used / free_not_eligible) and
+    `"artifact"` (402 no_artifact).
 
 ---
 

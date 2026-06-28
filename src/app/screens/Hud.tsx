@@ -25,39 +25,40 @@ export const Hud = memo(function Hud({ me, pop, onShards, onGM, onBalance, onBel
           <Stat value={me ? num(me.points.total) : "—"} label="Points" />
         </div>
 
-        <div onClick={onGM} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--panel)", border: "1px solid var(--line)", padding: "6px 12px", borderRadius: 30, cursor: "pointer" }}>
-          <div style={{ fontSize: 15, animation: "hfFlame 1.6s ease-in-out infinite" }}>🔥</div>
+        <button type="button" onClick={onGM} aria-label="Streak — open GM check-in" style={{ background: "var(--panel)", border: "1px solid var(--line)", margin: 0, font: "inherit", color: "inherit", display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 30, cursor: "pointer" }}>
+          <div aria-hidden="true" style={{ fontSize: 15, animation: "hfFlame 1.6s ease-in-out infinite" }}>🔥</div>
           <Stat value={me ? String(me.streak.level) : "—"} label="Streak" />
-        </div>
+        </button>
 
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
-          <div onClick={onBalance} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--panel)", border: "1px solid var(--line)", padding: "6px 11px", borderRadius: 30, cursor: "pointer" }}>
+          <button type="button" onClick={onBalance} aria-label="Cash balance — open wallet" style={{ background: "var(--panel)", border: "1px solid var(--line)", margin: 0, font: "inherit", color: "inherit", display: "flex", alignItems: "center", gap: 7, padding: "6px 11px", borderRadius: 30, cursor: "pointer" }}>
             <div style={{ lineHeight: 1, textAlign: "right" }}>
               <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 14, color: "var(--yes)" }}>{me ? usd(me.cashCents) : "—"}</div>
               <div style={{ fontSize: 8, letterSpacing: ".14em", color: "var(--muted)", textTransform: "uppercase", marginTop: 1 }}>
                 {me && me.lockedCents > 0 ? `+ ${usd(me.lockedCents)} locked ›` : "Cash ›"}
               </div>
             </div>
-          </div>
+          </button>
 
-          <div onClick={onBell} style={{ position: "relative", width: 38, height: 38, borderRadius: "50%", background: "var(--panel)", border: "1px solid var(--line)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", fontSize: 17 }}>
-            <span style={{ display: "inline-block", animation: unread > 0 ? "hfBellSwing 2.6s ease-in-out infinite" : undefined }}>🔔</span>
+          <button type="button" onClick={onBell} aria-label={unread > 0 ? `Notifications, ${unread} unread` : "Notifications"} style={{ margin: 0, font: "inherit", color: "inherit", position: "relative", width: 38, height: 38, borderRadius: "50%", background: "var(--panel)", border: "1px solid var(--line)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", fontSize: 17, padding: 0 }}>
+            <span aria-hidden="true" style={{ display: "inline-block", animation: unread > 0 ? "hfBellSwing 2.6s ease-in-out infinite" : undefined }}>🔔</span>
             {unread > 0 && (
-              <div style={{ position: "absolute", top: -4, right: -4, minWidth: 18, height: 18, padding: "0 4px", borderRadius: 9, background: "var(--no)", color: "#fff", fontFamily: "var(--nf)", fontWeight: 700, fontSize: 10, display: "flex", alignItems: "center", justifyContent: "center", animation: "hfBadgePop .4s ease", boxShadow: "0 0 0 2px var(--bg)" }}>
+              // span (not div) so the badge is valid phrasing content inside the <button>
+              <span aria-hidden="true" style={{ position: "absolute", top: -4, right: -4, minWidth: 18, height: 18, padding: "0 4px", borderRadius: 9, background: "var(--no)", color: "#fff", fontFamily: "var(--nf)", fontWeight: 700, fontSize: 10, display: "flex", alignItems: "center", justifyContent: "center", animation: "hfBadgePop .4s ease", boxShadow: "0 0 0 2px var(--bg)" }}>
                 {unread}
-              </div>
+              </span>
             )}
-          </div>
+          </button>
         </div>
       </div>
 
-      <div onClick={onShards} style={{ marginTop: 9, display: "flex", alignItems: "center", gap: 9, cursor: "pointer" }}>
+      <button type="button" onClick={onShards} aria-label={`Shards ${shards} of ${per} — open Vault`} style={{ background: "none", border: "none", padding: 0, font: "inherit", color: "inherit", width: "100%", marginTop: 9, display: "flex", alignItems: "center", gap: 9, cursor: "pointer" }}>
         <div style={{ fontSize: 9, letterSpacing: ".12em", textTransform: "uppercase", color: "var(--gold)", fontWeight: 700, whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: 4 }}>◆ {shards}/{per}</div>
         <div style={{ flex: 1, height: 7, borderRadius: 6, background: "var(--panel2)", overflow: "hidden", border: "1px solid var(--line)" }}>
           <div style={{ height: "100%", width: `${shardPct}%`, background: "linear-gradient(90deg,#c98a1e,var(--gold))", borderRadius: 6 }} />
         </div>
         <div style={{ fontSize: 9, color: "var(--muted)", whiteSpace: "nowrap" }}>→ artifact</div>
-      </div>
+      </button>
     </div>
   );
 });

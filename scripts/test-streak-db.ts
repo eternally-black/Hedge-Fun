@@ -78,16 +78,48 @@ async function main() {
   assert.strictEqual(lostRec.recovered, false, "cannot recover a LOST streak");
   assert.strictEqual(lostRec.reason, "not_recoverable", "LOST is not recoverable");
 
+  // ---- REGRESSION (F7/P-10): GM tap after a missed day must BURN, not silently restart at 1 ----
+  // The bug: qualifyDay ran applyQualify with no preceding evaluateStreak, so an ACTIVE streak with
+  // a gap>=2 (user missed exactly one day and taps GM before the /me or poller burn-sweep) reset to
+  // a fresh level-1 ACTIVE streak — never entering BURNED_RECOVERABLE, permanently killing the
+  // artifact recovery. The fix runs the burn sweep inside qualifyDay's transaction first.
+  const tag3 = `${tag}-recover`;
+  const u3 = await prisma.user.create({
+    data: { privyId: `did:privy:${tag3}`, authProvider: "EMAIL", referralCode: randomCode(),
+      virtualBalance: { create: { balanceCents: 100000 } },
+      collectibleBalance: { create: { artifacts: 1 } }, // one artifact to spend on recovery
+      streak: { create: {} } },
+  });
+  // Build a level-3 streak, then qualify day N+2 (a missed day) with NO evaluateStreak between.
+  await qualifyDay(u3.id, D("2026-06-01"));
+  await qualifyDay(u3.id, D("2026-06-02"));
+  const q3 = await qualifyDay(u3.id, D("2026-06-03"));
+  assert.strictEqual(q3.currentLevel, 3, "level 3 after three consecutive days");
+  // Missed 06-04. Tap GM on 06-05 (gap 2) directly — this is the swept-by-no-one GM path.
+  const gap = await qualifyDay(u3.id, D("2026-06-05"));
+  assert.strictEqual(gap.state, "BURNED_RECOVERABLE", "missed-day GM tap burns (does NOT restart at 1)");
+  assert.strictEqual(gap.currentLevel, 3, "level preserved through the burn (NOT reset to 1)");
+  assert.strictEqual(gap.qualifiedToday, false, "burned tap does not award a streak day");
+  // The streak row itself reflects BURNED_RECOVERABLE with the window open and level intact.
+  const u3streak = await prisma.streak.findUniqueOrThrow({ where: { userId: u3.id } });
+  assert.strictEqual(u3streak.state, "BURNED_RECOVERABLE", "DB row burned, recovery window open");
+  assert.strictEqual(u3streak.currentLevel, 3, "DB level preserved for recovery");
+  assert.ok(u3streak.recoverableUntil, "recovery window opened by the in-tx burn");
+  // Artifact recovery is STILL available afterward (the whole point of the fix): resume at n+1 = 4.
+  const u3rec = await recoverStreak(u3.id, D("2026-06-06"));
+  assert.strictEqual(u3rec.recovered, true, "artifact recovery still available after missed-day GM tap");
+  assert.strictEqual(u3rec.currentLevel, 4, "recovery resumes at n+1 = 4 (level was preserved)");
+
   // cleanup
-  for (const id of [user.id, u2.id]) {
+  for (const id of [user.id, u2.id, u3.id]) {
     await prisma.streakEvent.deleteMany({ where: { userId: id } });
     await prisma.streak.deleteMany({ where: { userId: id } });
     await prisma.collectibleBalance.deleteMany({ where: { userId: id } });
     await prisma.virtualBalance.deleteMany({ where: { userId: id } });
   }
-  await prisma.user.deleteMany({ where: { id: { in: [user.id, u2.id] } } });
+  await prisma.user.deleteMany({ where: { id: { in: [user.id, u2.id, u3.id] } } });
 
-  console.log("OK: ACTIVE->BURN->LOST transitions + recovery (spend artifact, resume n+1, window-gated)");
+  console.log("OK: ACTIVE->BURN->LOST transitions + recovery (spend artifact, resume n+1, window-gated); missed-day GM tap burns + stays recoverable");
 }
 
 main().catch((e) => { console.error("FAIL:", e); process.exit(1); }).finally(() => prisma.$disconnect());

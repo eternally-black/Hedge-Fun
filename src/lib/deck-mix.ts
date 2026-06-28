@@ -52,6 +52,38 @@ export function categoryOf(m: {
   return "other";
 }
 
+// ---- Per-category resolution horizon -------------------------------------------------------
+// The fix for "a wall of crypto vs. enough variety": crypto Up/Down resolve by the minute and are
+// plentiful, so they stay strictly blitz (<=24h) — that keeps the deck FRESH without reordering.
+// Sports/esports resolve at match end (often 1-3 days out) and are SPARSE, so they get a longer
+// leash (<=72h) — that's what keeps the deck DIVERSE instead of crypto-only. Bare Over/Under totals
+// track crypto's tightness; weather/politics/other sit in between. Tune the policy here.
+export const DECK_HORIZON_HOURS: Record<Category, number> = {
+  crypto: 24,
+  overunder: 24,
+  weather: 48,
+  politics: 48,
+  other: 48,
+  sports: 72,
+  esports: 72,
+};
+
+// Outer scan/serve bound = the widest per-category horizon. fetchBlitzDeck pulls THIS window from
+// Gamma and the deck route reads it from cache; both then narrow each market to ITS category's
+// horizon via withinCategoryHorizon, so a 50h crypto market is dropped while a 50h match is kept.
+export const DECK_FETCH_HORIZON_HOURS = Math.max(...Object.values(DECK_HORIZON_HOURS));
+
+// True when a market resolves within ITS category's horizon (not a flat window). `nowMs` is passed
+// so a whole deck is filtered against one clock. Pass a precomputed `cat` to skip a categoryOf pass.
+export function withinCategoryHorizon(
+  m: { question: string; category?: string | null; outcomeYesLabel: string; outcomeNoLabel: string },
+  deadlineMs: number,
+  nowMs: number,
+  cat: Category = categoryOf(m),
+): boolean {
+  return deadlineMs <= nowMs + DECK_HORIZON_HOURS[cat] * 3_600_000;
+}
+
 // Specific league/discipline label for a sports/esports market, derived from the same text signal
 // (question + side labels). Returns the display name (e.g. "NBA", "UFC", "Dota 2", "CS2") or null
 // when nothing specific is recognized — callers then fall back to the generic "Sports"/"Esports".

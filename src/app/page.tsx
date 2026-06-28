@@ -193,9 +193,9 @@ function App() {
     toastTimer.current = window.setTimeout(() => setToast(null), 2200);
   }, []);
 
-  // Act on the top card: YES/NO post a bet, SKIP posts to /api/skip (first free then 1 shard,
-  // blocked at 402). The card advances; a swipe-409 (already bet) advances too. Backend contracts
-  // (cents, named-binary, points/shards/skip economy) unchanged.
+  // Act on the top card: YES/NO post a bet, SKIP posts to /api/skip (always free + unlimited —
+  // the shard-sink was dropped, so a skip never fails/402s). The card advances; a swipe-409
+  // (already bet) advances too. Backend contracts (cents, named-binary, points/shards) unchanged.
   const act = useCallback(
     (card: Card, action: SwipeAction) => {
       const advance = () =>
@@ -374,9 +374,9 @@ function App() {
             {!capReached && (
               <>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 18, padding: "14px 0 2px" }}>
-                  <CircleBtn glyph="✕" color="var(--no)" size={56} disabled={busy || !top} onClick={() => top && act(top, "NO")} />
-                  <CircleBtn glyph="↑" color="var(--skip)" size={46} disabled={busy || !top} onClick={() => top && act(top, "SKIP")} />
-                  <CircleBtn glyph="✓" color="var(--yes)" size={56} disabled={busy || !top} onClick={() => top && act(top, "YES")} />
+                  <CircleBtn glyph="✕" label="No" color="var(--no)" size={56} disabled={busy || !top} onClick={() => top && act(top, "NO")} />
+                  <CircleBtn glyph="↑" label="Skip" color="var(--skip)" size={46} disabled={busy || !top} onClick={() => top && act(top, "SKIP")} />
+                  <CircleBtn glyph="✓" label="Yes" color="var(--yes)" size={56} disabled={busy || !top} onClick={() => top && act(top, "YES")} />
                 </div>
                 <div style={{ textAlign: "center", fontSize: 10, color: "var(--muted)", paddingBottom: 8 }}>
                   Skip free — save your swipes for the calls you want
@@ -418,11 +418,16 @@ function Spinner() {
   );
 }
 
-function CircleBtn({ glyph, color, size, disabled, onClick }: { glyph: string; color: string; size: number; disabled?: boolean; onClick: () => void }) {
+function CircleBtn({ glyph, label, color, size, disabled, onClick }: { glyph: string; label: string; color: string; size: number; disabled?: boolean; onClick: () => void }) {
   return (
-    <div
+    <button
+      type="button"
+      aria-label={label}
       onClick={disabled ? undefined : onClick}
+      disabled={disabled}
       style={{
+        // button reset so it renders identical to the original div
+        padding: 0, margin: 0, font: "inherit",
         width: size, height: size, borderRadius: "50%", background: "var(--panel)",
         border: `1.5px solid color-mix(in srgb,${color} 55%,var(--line))`, display: "flex",
         alignItems: "center", justifyContent: "center", cursor: disabled ? "default" : "pointer",
@@ -430,7 +435,7 @@ function CircleBtn({ glyph, color, size, disabled, onClick }: { glyph: string; c
       }}
     >
       {glyph}
-    </div>
+    </button>
   );
 }
 

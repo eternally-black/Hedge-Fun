@@ -22,6 +22,18 @@ export class InsufficientFundsError extends Error {
   }
 }
 
+// Cheap, NON-atomic read of whether this user's NEXT swipe today would be over the daily cap.
+// True once they've already used SWIPE_CAP swipes (recordSwipe increments-then-compares, so the
+// next one would push swipeCount to SWIPE_CAP+1 = over cap). The route uses this to 403 BEFORE
+// opening the write transaction; recordSwipe still does the authoritative atomic gate for races.
+export async function isOverCap(userId: string, at?: Date): Promise<boolean> {
+  const counter = await prisma.dailyCounter.findUnique({
+    where: { userId_utcDay: { userId, utcDay: utcDay(at) } },
+    select: { swipeCount: true },
+  });
+  return (counter?.swipeCount ?? 0) >= SWIPE_CAP;
+}
+
 // Record a swipe = a paper bet on a market outcome at a locked price.
 // Cap (P-3): SWIPE_CAP swipes/day, each earns 1 raw point. HARD STOP — the
 // (SWIPE_CAP+1)th swipe is rejected (throws SwipeCapReachedError), nothing is stored.

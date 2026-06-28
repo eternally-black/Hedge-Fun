@@ -3,16 +3,56 @@ import { prisma } from "./prisma";
 import { utcDay } from "./time";
 import { writePoints } from "./points";
 import { REFERRAL_INVITEE_BONUS, REFERRAL_INVITER_RATE } from "./config";
+import { resolveUserDevice, sameDevice, type DeviceFingerprint } from "./refclick";
 
 // Capture the inviter<->invitee relationship at signup. The invitee can only ever
 // have one referral (unique inviteeId). Logs a SIGNUP event so reward can be computed
-// retroactively once params (§8 Q4-7) are decided. Self-referral is rejected.
+// retroactively once params (§8 Q4-7) are decided.
+//
+// Anti-fraud (self / multi-account): a referral is bound — and so pays out — only when inviter
+// and invitee are plausibly different humans/devices. Guards, in strength order:
+//   1. Same User row (inviterId === inviteeId).
+//   2. Same embedded wallet (User.embeddedWalletAddress): strong, per-user, request-free — the
+//      same human re-using their Privy wallet across two accounts. Always checked.
+//   3. Same device fingerprint (ipHash+uaHash), when the caller supplies the invitee's current
+//      device hashes AND we can resolve the inviter's device — the same phone spinning up a
+//      second account. Fail-safe: hashes unavailable (no REFERRAL_HASH_SECRET) -> skipped.
+// Any guard that trips returns referralId:null (no Referral row, no SIGNUP event) so neither the
+// inviter accrual nor the invitee bonus can ever fire for a self-referral.
 export async function captureReferral(
   inviterId: string,
   inviteeId: string,
   at?: Date,
+  opts?: { inviteeDevice?: DeviceFingerprint | null },
 ): Promise<{ referralId: string | null; reason?: string }> {
   if (inviterId === inviteeId) return { referralId: null, reason: "self" };
+
+  // Guard 2 — same embedded wallet = same human. Per-user, no request context needed, so this
+  // runs on BOTH the cookie and device-fallback paths. Only matches non-null addresses (the field
+  // is nullable when Privy hasn't propagated the wallet yet — see F1-wallet — so two null rows
+  // must NOT collide). Single query fetches both rows.
+  const [inviter, invitee] = await Promise.all([
+    prisma.user.findUnique({ where: { id: inviterId }, select: { embeddedWalletAddress: true } }),
+    prisma.user.findUnique({ where: { id: inviteeId }, select: { embeddedWalletAddress: true } }),
+  ]);
+  if (
+    inviter?.embeddedWalletAddress &&
+    invitee?.embeddedWalletAddress &&
+    inviter.embeddedWalletAddress === invitee.embeddedWalletAddress
+  ) {
+    return { referralId: null, reason: "self_wallet" };
+  }
+
+  // Guard 3 — same signup device. Compares the inviter's and invitee's device captured at signup
+  // (User.signupIpHash/signupUaHash), resolved symmetrically. Falls back to the invitee's CURRENT
+  // request device (opts.inviteeDevice) when their stored signup device is null (a pre-guard account,
+  // or REFERRAL_HASH_SECRET added after they signed up). Fail-safe: any missing piece -> skip (never
+  // crashes; the wallet guard above still applies). On by default when REFERRAL_HASH_SECRET is set.
+  const inviterDevice = await resolveUserDevice(inviterId);
+  const inviteeDevice = (await resolveUserDevice(inviteeId)) ?? opts?.inviteeDevice ?? null;
+  if (inviterDevice && inviteeDevice && sameDevice(inviterDevice, inviteeDevice)) {
+    return { referralId: null, reason: "self_device" };
+  }
 
   try {
     const ref = await prisma.referral.create({

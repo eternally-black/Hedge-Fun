@@ -4,7 +4,7 @@ import { authUser } from "@/lib/privy";
 import { recordLogin } from "@/lib/login";
 import { qualifyDay } from "@/lib/streak";
 import { captureReferral, accrueReferralForInvitee } from "@/lib/referral";
-import { lookupReferralByDevice } from "@/lib/refclick";
+import { lookupReferralByDevice, deviceHashes } from "@/lib/refclick";
 import type { LoginMarkResponse } from "@/lib/api-types";
 
 // The daily "GM" tap: login bonus + streak day qualification (one action in the MVP).
@@ -22,7 +22,9 @@ export async function POST(req: Request) {
   if (!refCode) refCode = await lookupReferralByDevice(req.headers);
   if (refCode) {
     const inviter = await prisma.user.findUnique({ where: { referralCode: refCode } });
-    if (inviter) await captureReferral(inviter.id, user.id);
+    // Pass the invitee's current device fingerprint so captureReferral's self/device guard can
+    // reject a same-device multi-account binding (null when no REFERRAL_HASH_SECRET — fail-safe).
+    if (inviter) await captureReferral(inviter.id, user.id, undefined, { inviteeDevice: deviceHashes(req.headers) });
   }
 
   const login = await recordLogin(user.id);

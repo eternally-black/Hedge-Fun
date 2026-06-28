@@ -12,18 +12,9 @@ export const TOPUP_GRANT_CENTS = 20_000; // +$200.00 Cash per top-up
 export const FREE_TOPUP_CASH_GATE_CENTS = 3_000; // free top-up only enabled when Cash < $30
 export const TOPUP_ARTIFACT_COST = 1; // artifacts spent per paid top-up (1 artifact = SHARDS_PER_ARTIFACT shards)
 
-// ---- Points top-up (DORMANT — backend only, no UI, flag OFF) ----
-// Spend points for Cash. Built but not shipped; flip the flag + set a real cost when the partner agrees.
-export const TOPUP_POINTS_ENABLED = false;
-export const TOPUP_POINTS_COST = 0; // TODO(pricing): real N points for +$200. Placeholder — never ship enabled with 0.
-
 // ---- Daily caps (DECIDED) ----
 export const SWIPE_CAP = 10; // point-earning swipes/day (over-cap allowed, 0 pts)
 export const SHARD_DAILY_CAP = 10; // 1 win = 1 shard, max 10/day
-// RETIRED 2026-06-27: skips are now always free + unlimited (decideSkip ignores these). Kept for
-// reference / possible re-introduction; no code reads them anymore.
-export const FREE_SKIPS_PER_DAY = 1; // (retired) was: free skips/day before shard cost
-export const SKIP_SHARD_COST = 1; // (retired) was: shards per paid skip
 
 // ---- Collectibles (DECIDED) ----
 export const SHARDS_PER_ARTIFACT = 20; // 20 shards -> 1 artifact
@@ -43,5 +34,5 @@ export const REFERRAL_INVITER_RATE = 0.2; // inviter gets 20% of referral's poin
 //       -> ReferralRewardParams in referral.ts, computed retroactively over logged events.
 
 // ---- x2 multiplier (DECIDED) ----
-// The strategy itself lives in src/lib/multiplier.ts (ACTIVE = SevenDayWindowOneTime).
+// The rule itself lives in src/lib/points.ts (scorePoints — applied at read time).
 // DECIDED: trigger = 7-day streak; cadence = one-time per completed 7-day window. Swipe-only.

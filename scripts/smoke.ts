@@ -140,14 +140,16 @@ async function main() {
 
   const s1 = await settleMarket(prisma, firstYesBet!.marketId, { kind: "resolved", resolvedYes: true });
   console.log("5. settled market:", s1);
-  assert.ok(s1.settled >= 1, "settled at least the YES bet");
+  // One bet per market (C1), so settling firstYesBet's market settles EXACTLY that one bet.
+  assert.strictEqual(s1.settled, 1, "settled exactly the single YES bet on this market");
 
   const bal1 = (await prisma.virtualBalance.findUnique({ where: { userId: user.id } }))!.balanceCents;
   const settledBet = (await prisma.bet.findUnique({ where: { id: firstYesBet!.id } }))!;
   assert.strictEqual(settledBet.result, "WIN", "YES bet on YES = win");
   assert.strictEqual(settledBet.pnlCents, expected.pnlCents, "bet pnl matches formula");
   // Cash/Locked model: settle credits the FULL PAYOUT (stake was locked at swipe, not debited).
-  assert.strictEqual(bal1 - bal0, s1.settled === 1 ? expected.payoutCents : bal1 - bal0, "balance += payout on settle");
+  // Exactly one bet settled here, so the balance delta IS that bet's payout — assert unconditionally.
+  assert.strictEqual(bal1 - bal0, expected.payoutCents, "balance += payout on settle");
   const coll = (await prisma.collectibleBalance.findUnique({ where: { userId: user.id } }))!;
   assert.ok(coll.shards >= 1 || coll.artifacts >= 1, "win awarded a shard");
   console.log("   balance", bal0, "->", bal1, "(pnl", settledBet.pnlCents + ")", "shards", coll.shards);

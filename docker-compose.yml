@@ -86,6 +86,18 @@ services:
         condition: service_completed_successfully
     networks:
       - internal
+    # Liveness: the poller touches a heartbeat file at the end of each successful tick.
+    # Fail (and let restart: unless-stopped fire) if it's missing or stale — older than 3x
+    # the 60s poll interval. Resolves the path the same way the poller does (env override or
+    # os.tmpdir() default) so they can't drift.
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "node -e 'const f=process.env.POLLER_HEARTBEAT_FILE||require(\"path\").join(require(\"os\").tmpdir(),\"poller-heartbeat\");process.exit(Date.now()-require(\"fs\").statSync(f).mtimeMs<180000?0:1)'"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
     deploy:
       resources:
         limits:

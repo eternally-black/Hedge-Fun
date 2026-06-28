@@ -5,7 +5,11 @@
 //   - sweeps streak burns each tick
 // Rule: thrown error = transient -> backoff/retry; a returned decision = commit it.
 import { PrismaClient } from "@prisma/client";
+import { writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fetchResolution } from "../src/lib/polymarket";
+import { DECK_FETCH_HORIZON_HOURS } from "../src/lib/deck-mix";
 import { settleMarket, type Resolution } from "./settle";
 import { evaluateStreak } from "../src/lib/streak";
 import { refreshDeck } from "./refresh-deck";
@@ -14,6 +18,13 @@ const prisma = new PrismaClient();
 
 const POLL_INTERVAL_MS = 60_000;
 const CONCURRENCY = 4;
+
+// Liveness signal: touched at the end of every successful tick. The compose healthcheck
+// fails the container when this file is stale (mtime older than ~3x the interval) so a
+// wedged-but-not-exited loop gets restarted instead of sitting "up" with settlement dead.
+// ponytail: a file beats a DB heartbeat row here — the healthcheck is just a stat() with no
+// DB creds. Default lives under the OS temp dir so the same path resolves in the container.
+const HEARTBEAT_FILE = process.env.POLLER_HEARTBEAT_FILE ?? join(tmpdir(), "poller-heartbeat");
 
 let running = true;
 
@@ -57,10 +68,11 @@ async function mapLimit<T>(items: T[], limit: number, fn: (t: T) => Promise<void
 
 async function tick() {
   // Keep the deck cache warm so swipes lock fresh prices and expired markets drop (M4).
-  // 48h to match the deck route's window — otherwise the 24-48h half of the deck never gets
-  // price refreshes and shows stale (often 50/50) odds.
+  // Pull the OUTER window (max per-category horizon) to match the deck route — otherwise the
+  // longer-horizon sports/esports half never gets price refreshes and shows stale (often 50/50)
+  // odds. fetchBlitzDeck still drops each market past its own category horizon.
   try {
-    const n = await refreshDeck(48, 100);
+    const n = await refreshDeck(DECK_FETCH_HORIZON_HOURS, 100);
     console.log(`[deck] refreshed ${n} markets`);
   } catch (e) {
     console.warn("[deck] refresh error:", (e as Error).message);
@@ -106,6 +118,9 @@ async function loop() {
     const start = Date.now();
     try {
       await tick();
+      // Heartbeat only on a clean tick — a failed tick should let the file go stale so the
+      // healthcheck eventually restarts us rather than masking a persistent failure.
+      writeFileSync(HEARTBEAT_FILE, new Date().toISOString());
     } catch (e) {
       console.error("[poll] tick failed:", (e as Error).message);
     }
@@ -113,6 +128,18 @@ async function loop() {
     await new Promise((r) => setTimeout(r, Math.max(0, POLL_INTERVAL_MS - elapsed)));
   }
 }
+
+// Crash on a fault instead of limping on: an unhandled rejection / uncaught exception can
+// leave the loop wedged while Docker still reports the container "up". Exit(1) so
+// `restart: unless-stopped` actually fires.
+process.on("unhandledRejection", (reason) => {
+  console.error("[poll] unhandledRejection:", reason);
+  process.exit(1);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[poll] uncaughtException:", err);
+  process.exit(1);
+});
 
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => {

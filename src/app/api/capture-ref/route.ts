@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 import { captureReferral, accrueReferralForInvitee } from "@/lib/referral";
-import { lookupReferralByDevice } from "@/lib/refclick";
+import { lookupReferralByDevice, deviceHashes } from "@/lib/refclick";
 import type { CaptureRefResponse } from "@/lib/api-types";
 
 // Referral capture WITHOUT marking the GM day. Sent on app open so attribution lands even if the
@@ -21,7 +21,9 @@ export async function POST(req: Request) {
   if (refCode) {
     const inviter = await prisma.user.findUnique({ where: { referralCode: refCode } });
     if (inviter) {
-      const r = await captureReferral(inviter.id, user.id);
+      // Pass the invitee's current device fingerprint so captureReferral's self/device guard can
+      // reject a same-device multi-account binding (null when no REFERRAL_HASH_SECRET — fail-safe).
+      const r = await captureReferral(inviter.id, user.id, undefined, { inviteeDevice: deviceHashes(req.headers) });
       captured = r.referralId != null;
     }
   }

@@ -7,7 +7,7 @@
 //  - Resolution signal = umaResolutionStatus === "resolved" + outcomePrices collapse to 1/0.
 //  - conditionId is the stable id -> our polymarketId.
 
-import { isContextPoor } from "./deck-mix";
+import { isContextPoor, withinCategoryHorizon, DECK_FETCH_HORIZON_HOURS } from "./deck-mix";
 
 const BASE = process.env.POLYMARKET_API_BASE ?? "https://gamma-api.polymarket.com";
 
@@ -156,18 +156,21 @@ function shapeOf(m: MarketCache): Shape {
   return "named"; // teams, players, candidates
 }
 
-// Blitz deck: active, not-closed binary markets resolving within `hours`, balanced by shape.
+// Blitz deck: active, not-closed binary markets, each kept only within ITS category's horizon
+// (crypto/OU <=24h, sports/esports <=72h — see DECK_HORIZON_HOURS), balanced by shape.
 //
-// What this has to handle (verified live 2026-06-24, 48h window: 707 Up/Down, 455 Yes/No,
+// What this has to handle (verified live 2026-06-24, wide window: 707 Up/Down, 455 Yes/No,
 // 338 NAMED team/player/OU markets):
 //  - Gamma ignores limit>100, so we PAGINATE by offset.
 //  - Sorted by endDate, the nearest markets are a WALL of short-horizon crypto Up/Down; the
 //    sports & esports (teams, players, Over/Under) resolve further out and get crowded out of
-//    a pure endDate-ordered top-N. So we scan the window, bucket by shape, then INTERLEAVE
-//    round-robin (named, over/under, crypto, ...) — the deck always carries teams/sports, not
-//    a monolith of crypto. Each bucket stays endDate-ascending (soonest first).
-export async function fetchBlitzDeck(hours = 48, want = 100): Promise<MarketCache[]> {
+//    a pure endDate-ordered top-N. So we scan the OUTER window, drop each market past its own
+//    category horizon (keeps crypto blitz-fresh while letting sparse sports/esports through),
+//    bucket by shape, then INTERLEAVE round-robin (named, over/under, crypto, ...) — the deck
+//    always carries teams/sports, not a monolith of crypto. Each bucket stays endDate-ascending.
+export async function fetchBlitzDeck(hours = DECK_FETCH_HORIZON_HOURS, want = 100): Promise<MarketCache[]> {
   const now = new Date();
+  const nowMs = now.getTime();
   const max = new Date(now.getTime() + hours * 3_600_000);
   const maxMs = max.getTime();
   const buckets: Record<Shape, MarketCache[]> = { named: [], overunder: [], crypto: [] };
@@ -194,7 +197,8 @@ export async function fetchBlitzDeck(hours = 48, want = 100): Promise<MarketCach
         m.status === "OPEN" &&
         m.yesPriceBp !== null &&
         m.noPriceBp !== null &&
-        new Date(m.resolutionDeadline).getTime() <= maxMs && // re-assert window client-side
+        new Date(m.resolutionDeadline).getTime() <= maxMs && // re-assert outer window client-side
+        withinCategoryHorizon(m, new Date(m.resolutionDeadline).getTime(), nowMs) && // per-category cap
         priceIsContested(m.yesPriceBp, m.noPriceBp) && // drop decided/live matches (100%/0%)
         !isContextPoor(m) // drop bare Over/Under totals with no match named ("Games Total: O/U 4.5")
       ) {

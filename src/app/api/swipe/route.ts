@@ -2,15 +2,12 @@ import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
-import { recordSwipe, SwipeCapReachedError, InsufficientFundsError } from "@/lib/swipe";
+import { recordSwipe, isOverCap, SwipeCapReachedError, InsufficientFundsError } from "@/lib/swipe";
 import { maybeQualifyReferralOnSwipe } from "@/lib/referral";
 import { isDevUser } from "@/lib/dev";
 import type { SwipeRequest, SwipeResponse } from "@/lib/api-types";
 
 // Swipe = paper bet Yes/No on a deck market. Locks the BOUGHT side's price for P&L.
-// ponytail: no request rate-limit (L2). The point cap (10/day) + one-bet-per-market (C1)
-// bound farming, but a client can still spam over-cap bets creating DB rows. Add a real
-// limiter (middleware / Redis) when the VPS is up — not worth in-process state for MVP.
 export async function POST(req: Request) {
   const user = await authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
@@ -18,6 +15,15 @@ export async function POST(req: Request) {
   const body = (await req.json().catch(() => null)) as Partial<SwipeRequest> | null;
   if (!body?.marketId || (body.side !== "YES" && body.side !== "NO")) {
     return NextResponse.json({ error: "marketId and side (YES|NO) required" }, { status: 400 });
+  }
+
+  const capBypass = isDevUser(user.email); // dev account earns a point on every swipe, unlimited
+  // Cheap pre-write cap gate: reject an over-cap swipe with 403 BEFORE opening the recordSwipe
+  // transaction, so a client hammering past the daily cap can't even create a Bet row to inflate
+  // the DB. recordSwipe still does the AUTHORITATIVE atomic check (counter increment in-tx) — this
+  // is just an early bail so the common over-cap case never touches the write path. Dev bypasses.
+  if (!capBypass && (await isOverCap(user.id))) {
+    return NextResponse.json({ error: "daily swipe limit reached" }, { status: 403 });
   }
 
   // Validate the market is still tradable; need both side prices to lock the right one.
@@ -36,7 +42,7 @@ export async function POST(req: Request) {
       marketId: market.id,
       side: body.side,
       lockedPriceBp,
-      capBypass: isDevUser(user.email), // dev account earns a point on every swipe
+      capBypass, // dev account earns a point on every swipe, ignoring the daily cap
     });
     // Q7: once this user hits 10 LIFETIME swipes, qualify their referral and back-pay the
     // inviter's 20%. Counts lifetime bets itself — result.swipeCountToday is per-DAY, not the

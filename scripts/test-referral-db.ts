@@ -10,17 +10,20 @@ import assert from "node:assert";
 import { prisma } from "../src/lib/prisma";
 import { randomCode } from "../src/lib/refcode";
 import { writePoints } from "../src/lib/points";
-import {
-  captureReferral,
-  qualifyReferral,
-  computeReferralRewards,
-  DEFAULT_REWARD_PARAMS,
-} from "../src/lib/referral";
 import { utcDay } from "../src/lib/time";
+import type { DeviceFingerprint } from "../src/lib/refclick"; // type-only: erased, no runtime load
 
-async function mkUser(tag: string) {
+// The self/device anti-fraud guard reads REFERRAL_HASH_SECRET + REFERRAL_DEVICE_GUARD at module
+// load (src/lib/refclick.ts). Set BOTH before the dynamic import of referral/refclick in main(),
+// the same env-before-import pattern as test-admin.ts. Nothing statically imported above pulls in
+// refclick, so the dynamic import below is the first time it loads — with the env already in place.
+process.env.REFERRAL_HASH_SECRET = process.env.REFERRAL_HASH_SECRET || "test-referral-secret";
+process.env.REFERRAL_DEVICE_GUARD = "1";
+
+async function mkUser(tag: string, signup?: DeviceFingerprint | null) {
   return prisma.user.create({
     data: { privyId: `did:privy:${tag}`, authProvider: "EMAIL", referralCode: randomCode(),
+      signupIpHash: signup?.ipHash ?? null, signupUaHash: signup?.uaHash ?? null,
       virtualBalance: { create: { balanceCents: 100000 } }, collectibleBalance: { create: {} }, streak: { create: {} } },
   });
 }
@@ -36,6 +39,11 @@ async function cleanup(ids: string[], refIds: string[]) {
 }
 
 async function main() {
+  // Dynamic import so refclick.ts reads the env set at the top of this file (see note there).
+  const { captureReferral, qualifyReferral, computeReferralRewards, DEFAULT_REWARD_PARAMS, accrueReferralForInvitee } =
+    await import("../src/lib/referral");
+  const { deviceHashes } = await import("../src/lib/refclick");
+
   const tag = `reftest-${process.pid}-${Date.now() & 0xffffff}`;
   const inviter = await mkUser(`${tag}-inviter`);
   const invitee = await mkUser(`${tag}-invitee`);
@@ -66,6 +74,39 @@ async function main() {
   assert.strictEqual(refCount, 1, "exactly one referral row for the invitee, ever");
   const signupCount = await prisma.referralEvent.count({ where: { referralId: first.referralId!, type: "SIGNUP" } });
   assert.strictEqual(signupCount, 1, "exactly one SIGNUP event (no duplicate from re-capture)");
+
+  // ---- ANTI-FRAUD: same signup-device self-referral is NOT bound (no row, no accrual, no bonus) ----
+  // The self-referrer creates account A AND account B on the same device D, so both rows store the
+  // same signupIpHash+signupUaHash (captured at signup by ensureUser). Without the guard,
+  // captureReferral(A, B) would bind A->B and pay A 20% of B's farming forever. The guard resolves
+  // each user's STORED signup device and rejects when they match — symmetric and non-circular.
+  const deviceD = new Headers({ "x-forwarded-for": "203.0.113.7", "user-agent": "Mozilla/5.0 (FraudPhone)", "accept-language": "en-US" });
+  const dD = deviceHashes(deviceD)!; // secret is set at top of file, so never null
+  const fraudInviter = await mkUser(`${tag}-fraud-inviter`, dD);
+  const fraudInvitee = await mkUser(`${tag}-fraud-invitee`, dD);
+  const fraud = await captureReferral(fraudInviter.id, fraudInvitee.id);
+  assert.strictEqual(fraud.referralId, null, "same signup-device self-referral is rejected (no binding)");
+  assert.strictEqual(fraud.reason, "self_device", "rejection reason = self_device");
+  assert.strictEqual(await prisma.referral.count({ where: { inviteeId: fraudInvitee.id } }), 0, "no Referral row for the same-device pair");
+  assert.strictEqual(await prisma.referralEvent.count({ where: { referral: { inviteeId: fraudInvitee.id } } }), 0, "no referral events (no SIGNUP)");
+  // Accrual is a no-op (no referral) and the invitee never gets the one-time bonus.
+  await accrueReferralForInvitee(fraudInvitee.id);
+  const fraudInviteeReferralPts = await prisma.pointsLedger.aggregate({
+    where: { userId: fraudInvitee.id, type: "REFERRAL" }, _sum: { amount: true },
+  });
+  assert.strictEqual(fraudInviteeReferralPts._sum.amount ?? 0, 0, "rejected invitee earns no referral bonus");
+  const fraudInviterReferralPts = await prisma.pointsLedger.aggregate({
+    where: { userId: fraudInviter.id, type: "REFERRAL" }, _sum: { amount: true },
+  });
+  assert.strictEqual(fraudInviterReferralPts._sum.amount ?? 0, 0, "fraud inviter accrues nothing");
+
+  // Sanity: a DIFFERENT signup device IS allowed (the guard rejects only on a device match). Distinct
+  // IP+UA -> distinct fingerprint -> binding succeeds (real invitee on their own phone).
+  const deviceE = new Headers({ "x-forwarded-for": "198.51.100.42", "user-agent": "Mozilla/5.0 (HonestPhone)", "accept-language": "fr-FR" });
+  const honestInvitee = await mkUser(`${tag}-honest-invitee`, deviceHashes(deviceE)!);
+  const honest = await captureReferral(fraudInviter.id, honestInvitee.id);
+  assert.ok(honest.referralId, "different signup-device invitee binds normally (guard does not over-match)");
+  refIds.push(honest.referralId!);
 
   // ---- (3) computeReferralRewards retroactivity ----
   // Before qualifying, accrual is gated (requireQualified=true) -> pays nothing.
@@ -106,8 +147,11 @@ async function main() {
   });
   assert.strictEqual(inviterTotal._sum.amount, 25, "inviter REFERRAL ledger = 25 total after back-pay");
 
-  await cleanup([inviter.id, invitee.id, inviter2.id], refIds);
-  console.log("OK: capture idempotent (1 row/invitee); rewards retroactive (delta-only back-pay)");
+  await cleanup(
+    [inviter.id, invitee.id, inviter2.id, fraudInviter.id, fraudInvitee.id, honestInvitee.id],
+    refIds,
+  );
+  console.log("OK: capture idempotent (1 row/invitee) + same-device self-referral rejected; rewards retroactive (delta-only back-pay)");
 }
 
 main().catch((e) => { console.error("FAIL:", e); process.exit(1); }).finally(() => prisma.$disconnect());

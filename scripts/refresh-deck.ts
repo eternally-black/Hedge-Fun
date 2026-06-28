@@ -2,10 +2,11 @@
 // live API per request. Run: npm run refresh-deck  (later: poller calls this each tick).
 import { PrismaClient } from "@prisma/client";
 import { fetchBlitzDeck } from "../src/lib/polymarket";
+import { DECK_FETCH_HORIZON_HOURS } from "../src/lib/deck-mix";
 
 const prisma = new PrismaClient();
 
-export async function refreshDeck(hours = 24, limit = 100): Promise<number> {
+export async function refreshDeck(hours = DECK_FETCH_HORIZON_HOURS, limit = 100): Promise<number> {
   const markets = await fetchBlitzDeck(hours, limit);
   for (const m of markets) {
     await prisma.market.upsert({

@@ -1,6 +1,7 @@
 import type { Prisma, PointsType } from "@prisma/client";
-import { ACTIVE_MULTIPLIER, type MultiplierContext } from "./multiplier";
 import { diffDays } from "./time";
+
+type StreakState = "ACTIVE" | "BURNED_RECOVERABLE" | "LOST";
 
 // Any Prisma client or transaction handle.
 type Db = Prisma.TransactionClient | import("@prisma/client").PrismaClient;
@@ -41,12 +42,22 @@ export interface ScoreResult {
   bonusFromX2: number;
 }
 
-// Pure scoring core — applies ACTIVE_MULTIPLIER to swipe points per-day, sums the rest
-// raw. DB-free so it's unit-testable. The ONLY multiplier consumer besides leaderboard SQL.
+// ── THE x2 MULTIPLIER (DECIDED, spec §8 Q1-2) ────────────────────────────────────────────────
+// The ledger stores RAW swipe points. The x2 is applied at READ time only — here in scorePoints
+// (consumed by /me) and mirrored in the leaderboard SQL. Because history is raw and we recompute
+// at read time, changing the rule below rescores EVERYONE retroactively, with zero migration.
+//
+// x2 multiplies ONLY swipe points. Login + referral points are never multiplied.
+// trigger = 7-day streak; cadence = ONE-TIME per completed 7-day window. completed windows =
+// floor(level / 7), so the EARLIEST floor(level/7)*7 swipe-days of the current streak double; the
+// rest stay raw. The bonus is paid exactly once per window, is idempotent, and resets between
+// windows (NOT continuous: level 7/14/21... each double one more window's worth).
+//
+// Pure scoring core. DB-free so it's unit-testable. The ONLY x2 consumer besides leaderboard SQL.
 export function scorePoints(
   rows: { type: PointsType; amount: number; utcDay: string }[],
-  streak: { currentLevel: number; state: MultiplierContext["streakState"] },
-  userId: string,
+  streak: { currentLevel: number; state: StreakState },
+  _userId: string, // kept for signature parity with callers/leaderboard; not used by the scoring math
 ): ScoreResult {
   const breakdown = { SWIPE: 0, LOGIN: 0, REFERRAL: 0, STREAK_X2: 0, TOPUP_SPEND: 0 } as Record<
     PointsType,
@@ -66,17 +77,17 @@ export function scorePoints(
   //
   // ponytail: heuristic with a known ceiling. The streak is held by the GM tap, NOT by
   // swiping (streak.ts: login + deck-open are one action), so swipe-days are sparser than
-  // streak-days and the anchor (latest swipe-day) can sit behind the streak's true end. The
-  // strategy then doubles the earliest floor(L/7)*7 *swipe-days* rather than the swipe-days
-  // falling in the first floor(L/7)*7 *calendar* days of the streak. On sparse-swipe streaks
-  // this can slightly OVER-pay the x2 bonus (e.g. count an open-window or just-out-of-streak
-  // swipe-day as doubled) — bounded, always in the user's favor, never claws back. Accepted
-  // for MVP (swiping is the core farm action; sparse-swipe streaks are the rare case).
-  // Upgrade path if it ever matters: add streak start-day to MultiplierContext and bound the
-  // window by calendar day, not by swipe-day ordinal.
+  // streak-days and the anchor (latest swipe-day) can sit behind the streak's true end. We
+  // then double the earliest floor(L/7)*7 *swipe-days* rather than the swipe-days falling in
+  // the first floor(L/7)*7 *calendar* days of the streak. On sparse-swipe streaks this can
+  // slightly OVER-pay the x2 bonus (e.g. count an open-window or just-out-of-streak swipe-day
+  // as doubled) — bounded, always in the user's favor, never claws back. Accepted for MVP
+  // (swiping is the core farm action; sparse-swipe streaks are the rare case). Upgrade path if
+  // it ever matters: track the streak start-day and bound the window by calendar day, not by
+  // swipe-day ordinal.
   const allDays = [...swipeByDay.keys()].sort(); // ascending 'YYYY-MM-DD'
   const anchor = allDays[allDays.length - 1]; // latest swipe-day = streak's end
-  const streakSwipeDays: MultiplierContext["streakSwipeDays"] = [];
+  const streakSwipeDays: { utcDay: string; raw: number }[] = [];
   if (anchor && streak.currentLevel > 0) {
     for (const day of allDays) {
       if (diffDays(anchor, day) <= streak.currentLevel - 1) {
@@ -85,21 +96,21 @@ export function scorePoints(
     }
   }
 
-  // The strategy scores only the current-streak days. Swipe points on days OUTSIDE the
-  // current streak (older / non-consecutive) are never doubled — they count raw.
+  // x2 only the current-streak days; swipe points OUTSIDE the current streak (older / non-
+  // consecutive) are never doubled — they count raw. completed windows = floor(level/7), so the
+  // earliest floor(level/7)*7 swipe-days double (×2), the rest stay raw (×1).
+  const doubledDays = Math.floor(streak.currentLevel / 7) * 7;
+  let streakSwipe = 0;
+  for (let i = 0; i < streakSwipeDays.length; i++) {
+    streakSwipe += streakSwipeDays[i].raw * (i < doubledDays ? 2 : 1);
+  }
   const streakRaw = streakSwipeDays.reduce((sum, d) => sum + d.raw, 0);
   const outsideStreakSwipe = breakdown.SWIPE - streakRaw;
-  const multipliedSwipe =
-    outsideStreakSwipe +
-    ACTIVE_MULTIPLIER.multipliedSwipePoints({
-      userId,
-      streakLevel: streak.currentLevel,
-      streakState: streak.state,
-      streakSwipeDays,
-    });
+  const multipliedSwipe = outsideStreakSwipe + streakSwipe;
 
-  // TOPUP_SPEND rows carry NEGATIVE amounts (points spent on a cash top-up, dormant), so they
-  // subtract here — never multiplied. Flows through this one core, so /me and admin ranking agree.
+  // TOPUP_SPEND rows carry NEGATIVE amounts (points spent on a cash top-up), so they subtract here
+  // — never multiplied. No writer ships today (the points top-up was retired), but any historical
+  // rows still net out correctly. Flows through this one core, so /me and admin ranking agree.
   const nonSwipe = breakdown.LOGIN + breakdown.REFERRAL + breakdown.STREAK_X2 + breakdown.TOPUP_SPEND;
   return {
     total: nonSwipe + multipliedSwipe,

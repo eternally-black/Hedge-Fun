@@ -1,6 +1,5 @@
 import { Prisma, PrismaClient } from "@prisma/client";
 import { awardShard } from "../src/lib/shards";
-import { START_BALANCE_CENTS } from "../src/lib/config";
 
 // ---------------------------------------------------------------------------
 // Balance model (Cash/Locked): the stake is HELD at swipe time (lockedCents += stake on
@@ -63,18 +62,22 @@ export async function settleMarket(
         where: { marketId, settlementStatus: "PENDING" },
       });
 
-      // Update the cached market status either way.
-      await tx.market.update({
-        where: { id: marketId },
-        data:
-          resolution.kind === "void"
-            ? { status: "CANCELED", resolvedOutcome: "INVALID", resolvedAt: new Date() }
-            : {
-                status: "RESOLVED",
-                resolvedOutcome: resolution.resolvedYes ? "YES" : "NO",
-                resolvedAt: new Date(),
-              },
-      });
+      // Update the cached market status at first resolution only. PENDING bets exist only on the
+      // first settle; on repeat/duplicate calls bets.length === 0, so we skip the write — otherwise
+      // resolvedAt (= new Date()) would drift forward on every re-call of an already-settled market.
+      if (bets.length > 0) {
+        await tx.market.update({
+          where: { id: marketId },
+          data:
+            resolution.kind === "void"
+              ? { status: "CANCELED", resolvedOutcome: "INVALID", resolvedAt: new Date() }
+              : {
+                  status: "RESOLVED",
+                  resolvedOutcome: resolution.resolvedYes ? "YES" : "NO",
+                  resolvedAt: new Date(),
+                },
+        });
+      }
 
       let settled = 0;
       let voided = 0;
@@ -124,10 +127,10 @@ export async function settleMarket(
         // Release the hold (lockedCents −= stake) and credit the FULL payout (balanceCents +=
         // payout). Cash net change = payout − stake = pnl. A loss has payoutCents = 0 → only the
         // hold is released. The create branch is a safety net — balance is provisioned at signup,
-        // so it should never fire; if it does, start from the config base with no hold.
+        // so it should never fire; if it does, seed ONLY the payout (no $200 base re-grant) with no hold.
         await tx.virtualBalance.upsert({
           where: { userId: bet.userId },
-          create: { userId: bet.userId, balanceCents: START_BALANCE_CENTS + payoutCents, lockedCents: 0 },
+          create: { userId: bet.userId, balanceCents: payoutCents, lockedCents: 0 },
           update: { balanceCents: { increment: payoutCents }, lockedCents: { decrement: bet.stakeCents } },
         });
 

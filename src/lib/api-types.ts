@@ -30,8 +30,9 @@ export interface ErrorResponse {
 }
 
 // ─── GET /api/deck ───────────────────────────────────────────────────────────────────────────
-// Auth: Bearer. The blitz deck — OPEN markets resolving within 48h, category-mixed, minus cards
-// the user already swiped. ISO-8601 string for resolutionDeadline (JSON has no Date).
+// Auth: Bearer. The blitz deck — OPEN markets within each category's horizon (crypto/OU <=24h,
+// sports/esports <=72h), category-mixed, minus cards the user already swiped. ISO-8601 string for
+// resolutionDeadline (JSON has no Date).
 export interface DeckCard {
   id: string;
   question: string;
@@ -49,7 +50,7 @@ export interface DeckResponse {
 // ─── POST /api/swipe ───────────────────────────────────────────────────────────────────────────
 // Auth: Bearer. Body: SwipeRequest. Paper bet Yes/No on a deck market; locks the bought side's price.
 // Errors: 400 (bad body), 409 (market not open / already swiped this market), 403 (daily cap reached),
-//         402 (insufficient Cash for stake — body { error: "insufficient_funds" }; distinct from /api/skip's 402).
+//         402 (insufficient Cash for stake — body { error: "insufficient_funds" }).
 export interface SwipeRequest {
   marketId: string;
   side: BetSide;
@@ -62,11 +63,9 @@ export interface SwipeResponse {
 }
 
 // ─── POST /api/skip ────────────────────────────────────────────────────────────────────────────
-// Auth: Bearer. No body. First skip/day free, each next costs 1 shard. Advances the deck, no bet.
-// On HTTP 402 the body is the ok:false variant (paid skip needed, no shards).
-export type SkipResponse =
-  | { ok: true; free: boolean; shardsSpent: number; skipsToday: number; shards: number }
-  | { ok: false; reason: "no_shards"; shards: number };
+// Auth: Bearer. No body. Always free + unlimited (product pivot — no shard cost). Advances the
+// deck, makes no bet, bumps the daily skip counter. Always 200.
+export type SkipResponse = { ok: true; skipsToday: number };
 
 // ─── POST /api/recover ─────────────────────────────────────────────────────────────────────────
 // Auth: Bearer. No body. Spend 1 artifact to revive a burned (recoverable) streak, resume at n+1.
@@ -78,20 +77,14 @@ export interface RecoverResponse {
 }
 
 // ─── POST /api/topup ───────────────────────────────────────────────────────────────────────────
-// Auth: Bearer. Body: { kind: "free" | "artifact" | "points" }. Credits +$200 Cash.
+// Auth: Bearer. Body: { kind: "free" | "artifact" }. Credits +$200 Cash.
 //   free     — once ever, low-cash gate.  409 (free_used / free_not_eligible).
 //   artifact — spend 1 artifact, no gate. 402 (no_artifact).
-//   points   — DORMANT (flag off).        404 (route hides it) / 402 (not_enough_points if enabled).
 export type TopupResponse =
-  | { ok: true; kind: "free" | "artifact" | "points"; grantedCents: number; balanceCents: number }
+  | { ok: true; kind: "free" | "artifact"; grantedCents: number; balanceCents: number }
   | {
       ok: false;
-      reason:
-        | "free_used"
-        | "free_not_eligible"
-        | "no_artifact"
-        | "points_disabled"
-        | "not_enough_points";
+      reason: "free_used" | "free_not_eligible" | "no_artifact";
     };
 
 // ─── POST /api/login-mark ──────────────────────────────────────────────────────────────────────

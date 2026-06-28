@@ -17,11 +17,11 @@
     "build:poller": "esbuild scripts/poller.ts --bundle --platform=node --target=node22 --format=cjs --external:@prisma/client --external:.prisma --outfile=dist/poller.cjs",
     "refresh-deck": "tsx scripts/refresh-deck.ts",
     "verify:polymarket": "tsx scripts/verify-polymarket.ts",
-    "test": "tsx scripts/test-points.ts && tsx scripts/test-engine.ts && tsx scripts/test-settle.ts && tsx scripts/test-referral.ts && tsx scripts/test-deck-mix.ts && tsx scripts/test-skip.ts && tsx scripts/test-gm-week.ts && tsx scripts/test-share.ts && tsx scripts/test-refcode.ts && tsx scripts/test-reveal-order.ts && tsx scripts/test-side-labels.ts && tsx scripts/test-admin.ts",
+    "test": "tsx scripts/test-points.ts && tsx scripts/test-engine.ts && tsx scripts/test-settle.ts && tsx scripts/test-referral.ts && tsx scripts/test-deck-mix.ts && tsx scripts/test-gm-week.ts && tsx scripts/test-share.ts && tsx scripts/test-refcode.ts && tsx scripts/test-reveal-order.ts && tsx scripts/test-side-labels.ts && tsx scripts/test-admin.ts",
     "dev:reset": "tsx scripts/dev-reset.ts",
     "smoke": "tsx scripts/smoke.ts",
     "test:db": "bash scripts/with-docker-db.sh npm run test:db:run",
-    "test:db:run": "npm run db:push && tsx scripts/test-ensure-user-race.ts && tsx scripts/test-swipe-cap.ts && tsx scripts/test-swipe-atomic.ts && tsx scripts/test-swipe-debit.ts && tsx scripts/test-topup.ts && tsx scripts/test-referral-db.ts && tsx scripts/test-effective-points.ts && tsx scripts/test-streak-db.ts && tsx scripts/test-auth.ts && tsx scripts/test-api-contract.ts && tsx scripts/smoke.ts"
+    "test:db:run": "npm run db:push && tsx scripts/test-ensure-user-race.ts && tsx scripts/test-swipe-cap.ts && tsx scripts/test-swipe-atomic.ts && tsx scripts/test-swipe-debit.ts && tsx scripts/test-cash-locked.ts && tsx scripts/test-topup.ts && tsx scripts/test-referral-db.ts && tsx scripts/test-effective-points.ts && tsx scripts/test-streak-db.ts && tsx scripts/test-auth.ts && tsx scripts/test-api-contract.ts && tsx scripts/test-me-shape.ts && tsx scripts/smoke.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.19.3",

@@ -34,14 +34,14 @@ npm run smoke             # full daily loop end-to-end on live DB + live API
 
 | Open rule | File | Change |
 |---|---|---|
-| x2 trigger + cadence | `src/lib/multiplier.ts` → `ACTIVE_MULTIPLIER` | swap to a strategy |
+| x2 trigger + cadence | `src/lib/points.ts` → `scorePoints` | applied at read time; change the rule here |
 | Login bonus size | `src/lib/config.ts` → `LOGIN_BONUS` | one constant |
 | Referral params | `src/lib/referral.ts` → `ReferralRewardParams` | recompute over logged events (retroactive) |
 | Leaderboard | ledger already ranks | add endpoint + UI |
 
 ## Layout
 
-- `src/lib/` — domain engine (config, points, multiplier, swipe, login, streak, shards, referral, polymarket, privy)
+- `src/lib/` — domain engine (config, points, swipe, login, streak, shards, referral, polymarket, privy)
 - `src/app/api/` — `me`, `deck`, `swipe`, `login-mark` (the backend; Android reuses these)
 - `src/app/` — single-screen UI + PrivyProvider
 - `scripts/` — `poller` (F4 settlement), `settle`, `refresh-deck`, `smoke`, tests

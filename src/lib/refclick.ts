@@ -46,6 +46,56 @@ export function deviceHashes(headers: Headers): { ipHash: Uint8Array<ArrayBuffer
   return { ipHash: hmac(ip), uaHash: hmac(`${ua}\n${lang}`) };
 }
 
+// A device fingerprint = the (ipHash, uaHash) pair. Used by the referral self/multi-account guard
+// (referral.ts captureReferral) to reject a binding when inviter and invitee are the same device.
+export type DeviceFingerprint = { ipHash: Uint8Array<ArrayBuffer>; uaHash: Uint8Array<ArrayBuffer> };
+
+// Same-device test: both hashes must match. Hashes are HMAC-SHA256 (32 bytes); compare byte-wise.
+export function sameDevice(a: DeviceFingerprint, b: DeviceFingerprint): boolean {
+  return bytesEqual(a.ipHash, b.ipHash) && bytesEqual(a.uaHash, b.uaHash);
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+// Resolve a user's SIGNUP device fingerprint for the referral self/multi-account guard. The device
+// (HMAC of IP / UA+lang) is captured once at account creation (privy.ts ensureUser writes
+// User.signupIpHash/signupUaHash). captureReferral compares the inviter's and invitee's stored
+// signup devices and rejects when they match — sound and symmetric: a real inviter and invitee sign
+// up on different devices -> different hashes -> allowed; one person spinning up two accounts on the
+// same device -> equal hashes -> rejected. (This replaces the old self-click inference, which was
+// circular — a code's clicks are usually the INVITEE's, so it would wrongly reject real referrals.)
+//
+// ON by default whenever REFERRAL_HASH_SECRET is set; kill-switch REFERRAL_DEVICE_GUARD="0" disables.
+// ponytail ceiling: a genuinely shared device (household / library) trips a false reject — accepted,
+// since rewards are virtual points and the guard requires BOTH ipHash AND uaHash to match (shared
+// wifi + a different phone still binds). Returns null when hashing is disabled, the guard is off, the
+// user is missing, or that user has no stored signup device (pre-guard account -> skipped, fail open).
+const deviceGuardEnabled = deviceFallbackEnabled && process.env.REFERRAL_DEVICE_GUARD !== "0";
+
+export async function resolveUserDevice(userId: string): Promise<DeviceFingerprint | null> {
+  if (!deviceGuardEnabled) return null;
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { signupIpHash: true, signupUaHash: true },
+  });
+  if (!user?.signupIpHash || !user?.signupUaHash) return null;
+  return {
+    ipHash: toArrayBufferBytes(user.signupIpHash),
+    uaHash: toArrayBufferBytes(user.signupUaHash),
+  };
+}
+
+// Prisma returns Bytes as Uint8Array; normalize to the Uint8Array<ArrayBuffer> the guard compares.
+function toArrayBufferBytes(b: Uint8Array): Uint8Array<ArrayBuffer> {
+  const out = new Uint8Array(b.byteLength);
+  out.set(b);
+  return out;
+}
+
 // Log a click. Best-effort: a failure here must never block the redirect/response, so callers
 // fire-and-forget. No-op if hashing is disabled (no secret).
 export async function logReferralClick(code: string, headers: Headers): Promise<void> {

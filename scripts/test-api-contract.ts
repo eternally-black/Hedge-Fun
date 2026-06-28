@@ -130,11 +130,11 @@ async function main() {
   const recBody = await recRes.json();
   assert.strictEqual(recBody.recovered, false, "/recover body recovered=false");
 
-  // topup: bad/missing kind -> 400; dormant points path -> 404 (route hides it); artifact w/ none -> 402.
+  // topup: bad/missing kind -> 400; unknown (retired points) kind -> 400; artifact w/ none -> 402.
   const badTopup = await topup.POST(authed("http://x/api/topup", { method: "POST", body: "{}" }));
   assert.strictEqual(badTopup.status, 400, "/topup missing kind -> 400");
   const ptsTopup = await topup.POST(authed("http://x/api/topup", { method: "POST", body: JSON.stringify({ kind: "points" }) }));
-  assert.strictEqual(ptsTopup.status, 404, "/topup dormant points path -> 404");
+  assert.strictEqual(ptsTopup.status, 400, "/topup unknown (retired points) kind -> 400");
   const artTopup = await topup.POST(authed("http://x/api/topup", { method: "POST", body: JSON.stringify({ kind: "artifact" }) }));
   assert.strictEqual(artTopup.status, 402, "/topup artifact with no artifact -> 402");
 

@@ -1,7 +1,7 @@
 // Self-check for deck mixing: never >2 same-category in a row, and the mix is random.
 // Run: npx tsx scripts/test-deck-mix.ts
 import assert from "node:assert";
-import { shuffleNoRun, categoryOf, gameOf, isContextPoor, MAX_RUN } from "../src/lib/deck-mix";
+import { shuffleNoRun, categoryOf, gameOf, isContextPoor, MAX_RUN, withinCategoryHorizon, DECK_HORIZON_HOURS } from "../src/lib/deck-mix";
 
 // ---- categoryOf: real shapes (verified live) bucket correctly ----
 assert.strictEqual(categoryOf({ question: "Bitcoin Up or Down - 9:05AM", outcomeYesLabel: "Up", outcomeNoLabel: "Down" }), "crypto");
@@ -84,6 +84,21 @@ function longestRun(cats: string[]): number {
   const a = shuffleNoRun(pool, (x) => x.cat, 30, 11).map((x) => x.id).join(",");
   const b = shuffleNoRun(pool, (x) => x.cat, 30, 99).map((x) => x.id).join(",");
   assert.notStrictEqual(a, b, "different seeds -> different order");
+}
+
+// ---- withinCategoryHorizon: per-category resolution window (crypto/OU blitz, sports/esports longer) ----
+{
+  const now = 1_000_000_000_000; // fixed clock
+  const h = (n: number) => now + n * 3_600_000;
+  const crypto = { question: "Bitcoin Up or Down", outcomeYesLabel: "Up", outcomeNoLabel: "Down" };
+  const match = { question: "Bosnia vs. Qatar", outcomeYesLabel: "Bosnia", outcomeNoLabel: "Qatar" };
+  // Crypto is capped tight: 23h in-window, 30h out (and < DECK_HORIZON_HOURS.sports so the leash differs).
+  assert.strictEqual(withinCategoryHorizon(crypto, h(23), now), true, "crypto 23h within 24h horizon");
+  assert.strictEqual(withinCategoryHorizon(crypto, h(30), now), false, "crypto 30h beyond 24h horizon");
+  // Same 30h deadline is KEPT for a sports match (longer leash) — this is the diversity fix.
+  assert.strictEqual(withinCategoryHorizon(match, h(30), now), true, "sports 30h within its longer horizon");
+  assert.strictEqual(withinCategoryHorizon(match, h(DECK_HORIZON_HOURS.sports + 1), now), false, "sports beyond its horizon dropped");
+  assert.ok(DECK_HORIZON_HOURS.crypto < DECK_HORIZON_HOURS.sports, "crypto horizon is tighter than sports");
 }
 
 console.log("deck mix: OK");

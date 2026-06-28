@@ -3,6 +3,7 @@ import { Prisma, type User } from "@prisma/client";
 import { prisma } from "./prisma";
 import { START_BALANCE_CENTS } from "./config";
 import { newReferralCode } from "./refcode";
+import { deviceHashes, type DeviceFingerprint } from "./refclick";
 
 const APP_ID = process.env.NEXT_PUBLIC_PRIVY_APP_ID ?? "";
 const APP_SECRET = process.env.PRIVY_APP_SECRET ?? "";
@@ -48,9 +49,9 @@ export function extractIdentity(pu: PrivyUser): {
 }
 
 // Provision (or fetch) the app user for a verified Privy DID. First login creates the
-// User + VirtualBalance@$1000 + CollectibleBalance + Streak + today's DailyCounter, all
+// User + VirtualBalance ($200, START_BALANCE_CENTS) + CollectibleBalance + Streak, all
 // in one transaction so a user is never half-initialised.
-export async function ensureUser(privyId: string): Promise<User> {
+export async function ensureUser(privyId: string, device?: DeviceFingerprint | null): Promise<User> {
   const existing = await prisma.user.findUnique({ where: { privyId } });
   if (existing) return existing;
   // ponytail: no per-request lastSeenAt write (M3) — a write on every authed read is
@@ -69,6 +70,8 @@ export async function ensureUser(privyId: string): Promise<User> {
         embeddedWalletAddress: id.wallet,
         referralCode: await newReferralCode(), // short code (was @default(cuid()))
         lastSeenAt: new Date(),
+        signupIpHash: device?.ipHash ?? null,
+        signupUaHash: device?.uaHash ?? null,
         virtualBalance: { create: { balanceCents: START_BALANCE_CENTS } },
         collectibleBalance: { create: {} },
         streak: { create: {} },
@@ -92,6 +95,8 @@ export async function ensureUser(privyId: string): Promise<User> {
           embeddedWalletAddress: id.wallet,
           referralCode: await newReferralCode(),
           lastSeenAt: new Date(),
+          signupIpHash: device?.ipHash ?? null,
+          signupUaHash: device?.uaHash ?? null,
           virtualBalance: { create: { balanceCents: START_BALANCE_CENTS } },
           collectibleBalance: { create: {} },
           streak: { create: {} },
@@ -116,7 +121,9 @@ export async function authUser(req: Request): Promise<User | null> {
   if (!token) return null;
   try {
     const privyId = await verifyPrivyToken(token);
-    return await ensureUser(privyId);
+    // Capture the signup device on first login (deviceHashes is null without REFERRAL_HASH_SECRET —
+    // fail-safe). ensureUser writes it only on create, so this is the per-user signup fingerprint.
+    return await ensureUser(privyId, deviceHashes(req.headers));
   } catch (e) {
     // Token verify failures are the normal unauthorized path (expired/invalid) — quiet.
     // But a thrown ensureUser (DB/Privy error) was silently becoming a 401 and hiding bugs;
