@@ -1,12 +1,12 @@
 "use client";
 
 import { useState, type ReactNode } from "react";
-import { type Me } from "../ui";
+import { num, type Me } from "../ui";
 import { INVITE_X, INVITE_TG, refLink, composeXShare, composeTgShare, openShare } from "@/lib/share";
 
 // Referral screen (ported from app design). The invite link uses the user's REAL referralCode
 // (P-11: inviter earns 20% of the invitee's swipe+login points forever, once the invitee makes
-// 10 swipes). Stats + recent invites are placeholders until a /api/referrals endpoint exists.
+// 10 swipes). Stats (friends joined, points earned) come live from /api/me (me.referrals).
 export function InviteScreen({ me }: { me: Me | null }) {
   const [copied, setCopied] = useState(false);
   const code = me?.user.referralCode ?? null;
@@ -51,11 +51,11 @@ export function InviteScreen({ me }: { me: Me | null }) {
 
       <div style={{ marginTop: 22, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
         <div style={{ background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 18, padding: 16 }}>
-          <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 26, color: "var(--energy)" }}>—</div>
+          <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 26, color: "var(--energy)" }}>{me ? num(me.referrals.joined) : "—"}</div>
           <div style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".1em", marginTop: 2 }}>Friends joined</div>
         </div>
         <div style={{ background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 18, padding: 16 }}>
-          <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 26, color: "var(--gold)" }}>—</div>
+          <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 26, color: "var(--gold)" }}>{me ? num(me.referrals.pointsEarned) : "—"}</div>
           <div style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".1em", marginTop: 2 }}>Points earned</div>
         </div>
       </div>

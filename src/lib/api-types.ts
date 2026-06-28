@@ -179,6 +179,7 @@ export interface MeResponse {
   };
   loginMarkedToday: boolean;
   unreadResults: number; // settled bets the user hasn't seen yet (seenAt IS NULL) — drives the HUD bell
+  referrals: { joined: number; pointsEarned: number }; // invitees bound + REFERRAL points earned from them (invite screen)
   // True for a brand-new account that has never started a streak and hasn't checked in today. The
   // client skips the GM/reveal open ritual for new users — straight to the deck so they feel the
   // core loop first. Derived (streak.level===0 && !loginMarkedToday), no extra query.

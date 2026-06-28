@@ -22,7 +22,7 @@ async function main() {
 
   // Top-level key set must include the new Cash/Locked/topup fields.
   assert.deepStrictEqual(Object.keys(body).sort(),
-    ["artifacts","balanceCents","cashCents","dev","isNewUser","lockedCents","loginMarkedToday","points","shards","shardsPerArtifact","skips","stakeCents","streak","swipes","topup","unreadResults","user"],
+    ["artifacts","balanceCents","cashCents","dev","isNewUser","lockedCents","loginMarkedToday","points","referrals","shards","shardsPerArtifact","skips","stakeCents","streak","swipes","topup","unreadResults","user"],
     "/me top-level keys include cashCents/lockedCents/stakeCents/topup");
   assert.deepStrictEqual(Object.keys(body.topup).sort(),
     ["artifactCost","artifactTopupAvailable","freeTopupAvailable","freeTopupUsed","grantCents"],

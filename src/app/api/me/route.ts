@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 import { effectivePoints } from "@/lib/points";
 import { evaluateStreak } from "@/lib/streak";
+import { getReferralStats } from "@/lib/referral";
 import { utcDay, weekdayMon0, streakWindowStartDay } from "@/lib/time";
 import {
   SWIPE_CAP,
@@ -25,7 +26,7 @@ export async function GET(req: Request) {
   const day = utcDay();
   // Defensive streak sweep on read (idempotent), then fan out the reads in parallel.
   await evaluateStreak(user.id);
-  const [points, balance, collectibles, streak, counter, loginMark, unreadResults] = await Promise.all([
+  const [points, balance, collectibles, streak, counter, loginMark, unreadResults, referrals] = await Promise.all([
     effectivePoints(prisma, user.id),
     prisma.virtualBalance.findUnique({ where: { userId: user.id } }),
     prisma.collectibleBalance.findUnique({ where: { userId: user.id } }),
@@ -35,6 +36,7 @@ export async function GET(req: Request) {
     prisma.bet.count({
       where: { userId: user.id, settlementStatus: { in: ["SETTLED", "VOID"] }, seenAt: null },
     }),
+    getReferralStats(user.id),
   ]);
 
   // Cash/Locked split. balanceCents is the stored total; lockedCents is the held sum (maintained
@@ -88,6 +90,7 @@ export async function GET(req: Request) {
     },
     loginMarkedToday: !!loginMark,
     unreadResults,
+    referrals,
     // Brand-new account: streak never started AND no GM today → skip the open ritual (deck first).
     isNewUser: (streak?.currentLevel ?? 0) === 0 && !loginMark,
   };

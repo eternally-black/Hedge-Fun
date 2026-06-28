@@ -5,6 +5,19 @@ import { writePoints } from "./points";
 import { REFERRAL_INVITEE_BONUS, REFERRAL_INVITER_RATE } from "./config";
 import { resolveUserDevice, sameDevice, type DeviceFingerprint } from "./refclick";
 
+// Run a transaction at Serializable isolation, retrying on a write-conflict/deadlock (P2034). The
+// bodies that use it are idempotent (delta-only high-water marks), so a retry is always safe.
+async function runSerializable<T>(fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await prisma.$transaction(fn, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    } catch (e) {
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2034" && attempt < 4) continue;
+      throw e;
+    }
+  }
+}
+
 // Capture the inviter<->invitee relationship at signup. The invitee can only ever
 // have one referral (unique inviteeId). Logs a SIGNUP event so reward can be computed
 // retroactively once params (§8 Q4-7) are decided.
@@ -127,7 +140,12 @@ export async function computeReferralRewards(
   referralId: string,
   p: ReferralRewardParams = DEFAULT_REWARD_PARAMS,
 ): Promise<{ inviteePaid: number; inviterPaid: number }> {
-  return prisma.$transaction(async (tx) => {
+  // Serializable + retry: the inviter accrual is a read-then-write on a high-water mark with no
+  // unique constraint, so two concurrent triggers for the SAME referral (the invitee's GM tap
+  // racing their own post-swipe accrual, ms apart) could both read the same alreadyPaid and
+  // double-credit the delta. Serializable makes one abort (P2034); the retry re-reads the updated
+  // mark and computes delta=0. Same isolation topup.ts/settle.ts already use for money writes.
+  return runSerializable(async (tx) => {
     const ref = await tx.referral.findUnique({ where: { id: referralId } });
     if (!ref) return { inviteePaid: 0, inviterPaid: 0 };
     if (p.requireQualified && !ref.qualifiedAt) return { inviteePaid: 0, inviterPaid: 0 };
@@ -212,6 +230,20 @@ export async function accrueReferralForInvitee(
   const ref = await prisma.referral.findUnique({ where: { inviteeId }, select: { id: true } });
   if (!ref) return;
   await computeReferralRewards(ref.id, params);
+}
+
+// Referral stats for the inviter's invite screen: how many invitees they've bound, and the total
+// points they've earned FROM those invitees (sum of INVITER_ACCRUAL rewards — excludes the user's
+// own signup bonus if they were themselves referred, so "points earned" means earned-from-friends).
+export async function getReferralStats(userId: string): Promise<{ joined: number; pointsEarned: number }> {
+  const [joined, earned] = await Promise.all([
+    prisma.referral.count({ where: { inviterId: userId } }),
+    prisma.referralEvent.aggregate({
+      where: { referral: { inviterId: userId }, type: "INVITER_ACCRUAL" },
+      _sum: { rewardAmount: true },
+    }),
+  ]);
+  return { joined, pointsEarned: earned._sum.rewardAmount ?? 0 };
 }
 
 // Q7: a referral qualifies after the invitee's 10th LIFETIME swipe (= 10 stored bets).
