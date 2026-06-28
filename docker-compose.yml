@@ -25,10 +25,12 @@ services:
         limits:
           memory: 512m
 
-  # One-shot: apply schema (prisma db push). Exits 0; app/poller wait on it.
+  # One-shot: apply committed migrations (prisma migrate deploy). Exits 0; app/poller wait on it.
+  # The existing db-push database is baselined to 0_init once by deploy.sh (P3005 detection) so
+  # this never tries to re-create the live tables.
   migrate:
     image: ghcr.io/eternally-black/hedge-fun:latest
-    command: ["npx", "prisma", "db", "push", "--skip-generate"]
+    command: ["npx", "prisma", "migrate", "deploy"]
     env_file: .env
     depends_on:
       db:

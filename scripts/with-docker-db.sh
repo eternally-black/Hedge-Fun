@@ -42,8 +42,12 @@ if [ "$engine_was_up" -eq 0 ]; then
   echo "✓ engine ready"
 fi
 
-# 2. Bring the DB container up (waits until healthy via the compose healthcheck).
-echo "↑ starting dev Postgres container..."
+# 2. Bring the DB container up on a FRESH volume (waits until healthy via the compose healthcheck).
+# `down -v` first so every test run starts from an empty database: test:db:run then `migrate deploy`s
+# the schema cleanly (no leaked fixture rows from a prior failed run, and no migrate-reset — which
+# Prisma blocks under AI agents — needed).
+echo "↑ starting dev Postgres container (fresh volume)..."
+"$DOCKER" compose -f "$COMPOSE" down -v >/dev/null 2>&1 || true
 "$DOCKER" compose -f "$COMPOSE" up -d --wait || { echo "✗ db:up failed"; exit 1; }
 
 # 3. Run the requested command; propagate its exit code (trap still runs teardown).

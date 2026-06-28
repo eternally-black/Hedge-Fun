@@ -21,8 +21,29 @@ echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
 echo "[deploy] pulling image"
 docker compose pull              # pulls ghcr.io/eternally-black/hedge-fun:latest for app/migrate/poller
 
-echo "[deploy] (re)creating changed services"
-docker compose up -d --remove-orphans   # migrate one-shot runs, then app/poller
+echo "[deploy] ensuring database is up"
+docker compose up -d db
+
+# Apply migrations, baseline-aware. A legacy db-push database has the tables but no
+# _prisma_migrations history, so `migrate deploy` would try to re-create existing tables and fail
+# with Prisma error P3005. Detect P3005 on the deploy output, baseline 0_init once (the live tables
+# already match it), then re-deploy. No-op on every subsequent deploy and on a fresh database (where
+# the first `migrate deploy` simply creates everything). Running it here (not only in the migrate
+# service) lets us recover from the P3005 first-adoption case before app/poller start.
+echo "[deploy] applying migrations (baseline-aware)"
+if ! docker compose run --rm migrate npx prisma migrate deploy 2>/tmp/hf_migrate.err; then
+  if grep -q 'P3005' /tmp/hf_migrate.err; then
+    echo "[deploy] adopting Prisma Migrate: baselining 0_init on the existing db-push database"
+    docker compose run --rm migrate npx prisma migrate resolve --applied 0_init
+    docker compose run --rm migrate npx prisma migrate deploy
+  else
+    echo "[deploy] migrate deploy failed:"; cat /tmp/hf_migrate.err; rm -f /tmp/hf_migrate.err; exit 1
+  fi
+fi
+rm -f /tmp/hf_migrate.err
+
+echo "[deploy] (re)creating services (migrate service re-runs deploy as a no-op gate, then app/poller)"
+docker compose up -d --remove-orphans
 
 echo "[deploy] pruning dangling images"
 docker image prune -f

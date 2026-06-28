@@ -11,6 +11,7 @@
     "db:down": "docker compose -f docker-compose.dev.yml down",
     "dev:db": "npm run db:up && next dev",
     "db:push": "prisma db push",
+    "db:migrate": "prisma migrate dev",
     "db:studio": "prisma studio",
     "postinstall": "prisma generate",
     "poll": "tsx scripts/poller.ts",
@@ -21,7 +22,7 @@
     "dev:reset": "tsx scripts/dev-reset.ts",
     "smoke": "tsx scripts/smoke.ts",
     "test:db": "bash scripts/with-docker-db.sh npm run test:db:run",
-    "test:db:run": "npm run db:push && tsx scripts/test-ensure-user-race.ts && tsx scripts/test-swipe-cap.ts && tsx scripts/test-swipe-atomic.ts && tsx scripts/test-swipe-debit.ts && tsx scripts/test-cash-locked.ts && tsx scripts/test-topup.ts && tsx scripts/test-referral-db.ts && tsx scripts/test-effective-points.ts && tsx scripts/test-streak-db.ts && tsx scripts/test-auth.ts && tsx scripts/test-api-contract.ts && tsx scripts/test-me-shape.ts && tsx scripts/smoke.ts"
+    "test:db:run": "prisma migrate deploy && tsx scripts/test-ensure-user-race.ts && tsx scripts/test-swipe-cap.ts && tsx scripts/test-swipe-atomic.ts && tsx scripts/test-swipe-debit.ts && tsx scripts/test-cash-locked.ts && tsx scripts/test-topup.ts && tsx scripts/test-referral-db.ts && tsx scripts/test-effective-points.ts && tsx scripts/test-streak-db.ts && tsx scripts/test-auth.ts && tsx scripts/test-api-contract.ts && tsx scripts/test-me-shape.ts && tsx scripts/smoke.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.19.3",
