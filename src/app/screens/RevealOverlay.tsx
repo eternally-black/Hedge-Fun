@@ -285,7 +285,7 @@ function RevealCard({ row, onAdvance }: { row: ResultRow; onAdvance: () => void 
         onPointerUp={swipe.handlers.onPointerUp}
         style={{
           ...cardShell(row),
-          position: "relative", zIndex: 1, // above the burst sibling
+          zIndex: 1, // above the burst sibling — keep cardShell's position:absolute/inset:0 (it sizes the card; relative would collapse it to 0 height)
           touchAction: "none", cursor: "grab", willChange: "transform",
           ...(riseAnim
             ? { animation: `hfCardRise ${RISE_MS}ms cubic-bezier(.34,1.2,.5,1) both`, transformOrigin: "center bottom" }
