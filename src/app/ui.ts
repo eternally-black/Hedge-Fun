@@ -10,7 +10,7 @@ import type { DeckCard, MeResponse } from "@/lib/api-types";
 export type Card = DeckCard;
 export type Me = MeResponse;
 
-export type Screen = "deck" | "feed" | "gm" | "vault" | "invite" | "you" | "notifications";
+export type Screen = "deck" | "football" | "feed" | "gm" | "vault" | "invite" | "you" | "notifications";
 
 // Price as Polymarket shows it: cents per share. bp/100 = cents (5150bp -> 51.5¢). Whole cents
 // when integer, one decimal otherwise. Sides need NOT sum to 100¢ (spread is real) — no rounding.
@@ -133,6 +133,11 @@ export function countdown(iso: string, nowMs: number): { text: string; urgent: b
       : mins < 60 ? `Resolves in ~${mins} min`
         : `Resolves in ~${Math.round(mins / 60)}h`;
   return { text, urgent: total < 3600, relText };
+}
+
+// Compact local kickoff label for a football fixture ("Jul 1, 19:00"). Shared by the ticker + hub.
+export function kickoffLabel(iso: string): string {
+  return new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
 // Crypto Up/Down = the quick minute/15-min markets whose question carries an ABSOLUTE resolution

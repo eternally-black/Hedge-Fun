@@ -48,6 +48,28 @@ export interface DeckResponse {
   cards: DeckCard[];
 }
 
+// ─── GET /api/football/ticker ──────────────────────────────────────────────────────────────────
+// Auth: Bearer. Live World Cup ticker rows from TxLine (server-cached, read-only display). Ordered
+// live first, then upcoming (nearest kickoff), then recently ended. homeGoals/awayGoals null pre-match;
+// over25Pct = demarginalized Over-2.5-goals probability % (null if not offered / quarter line);
+// phase: "1H" | "HT" | "2H" | "FT" | "" (upcoming).
+export interface TickerRow {
+  fixtureId: string;
+  competition: string;
+  home: string;
+  away: string;
+  homeGoals: number | null;
+  awayGoals: number | null;
+  live: boolean;
+  ended: boolean;
+  phase: string;
+  kickoff: string; // ISO-8601
+  over25Pct: number | null;
+}
+export interface TickerResponse {
+  rows: TickerRow[];
+}
+
 // ─── GET /api/feed ─────────────────────────────────────────────────────────────────────────────
 // Auth: Bearer. The post-cap "лента": an endless, crypto-first stream of near-50% binary markets
 // (all tiers), minus any the user already bet. Cursor-paginated for infinite scroll — pass the prior
@@ -154,6 +176,11 @@ export interface ResultRow {
   shards: number; // shards granted for this bet (0 or 1)
   settledAt: string; // ISO-8601
   seen: boolean; // seenAt != null
+  // Verifiable settlement: true when the bet settled on Solana-anchored data (TxLINE World Cup —
+  // scores are committed to a Solana Merkle root). Absent/false for Polymarket. onchainRef = Solscan
+  // link. Optional (additive field) so stale clients / older RN builds stay forward-compatible.
+  verified?: boolean;
+  onchainRef?: string | null;
 }
 export interface ResultsResponse {
   rows: ResultRow[];

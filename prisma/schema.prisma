@@ -40,6 +40,11 @@ enum MarketOutcome {
   INVALID
 }
 
+enum MarketSource {
+  POLYMARKET // cached from Polymarket Gamma; polymarketId = conditionId; settled via fetchResolution
+  TXODDS // TxOdds TxLINE football (World Cup); polymarketId = "txline:{fixtureId}:{kind}"; settled from scores
+}
+
 enum SettlementStatus {
   PENDING
   SETTLED
@@ -126,10 +131,18 @@ model User {
 
 model Market {
   id           String  @id @default(cuid())
-  polymarketId String  @unique // = conditionId
+  // External market id + unique upsert key. POLYMARKET: the Gamma conditionId. TXODDS: a synthetic
+  // "txline:{fixtureId}:{kind}" (kind = OU15|OU25|OU35) — reusing this key avoids a nullable migration.
+  polymarketId String  @unique
+  source       MarketSource @default(POLYMARKET)
   question     String
   category     String? // usually null on Gamma; derived/optional
   imageUrl     String?
+
+  // Verifiable settlement (TXODDS): the score the bet settled on is anchored to a Solana Merkle root
+  // (TxLINE daily_scores_roots). Drives the "⛓ Solana-anchored" badge on settled football results.
+  verifiedOnChain Boolean @default(false)
+  onchainRef      String? // Solscan-able link/ref to the on-chain anchor (TxLINE program / daily root)
 
   // Real side labels for display. Binaries aren't always Yes/No — they're teams, players,
   // Over/Under, candidates. Internal model stays binary (YES = side A / index 0, NO = side B
@@ -155,6 +168,7 @@ model Market {
 
   @@index([status, resolutionDeadline]) // deck assembly
   @@index([status, resolvedAt]) // settlement scan
+  @@index([source, status, resolutionDeadline]) // football-only deck filter (?sport=football)
   @@map("markets")
 }
 

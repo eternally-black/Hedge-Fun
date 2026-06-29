@@ -84,6 +84,28 @@ body {
 }
 @keyframes hfSpin { to { transform: rotate(360deg); } }
 
+/* ---- football ticker (бегущая строка) ---- */
+.hf-ticker {
+  position: relative;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.hf-ticker-track {
+  display: inline-flex;
+  align-items: center;
+  will-change: transform;
+  animation: hfTicker linear infinite;
+}
+@keyframes hfTicker {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); } /* content is duplicated → one set width = seamless loop */
+}
+.hf-ticker:hover .hf-ticker-track { animation-play-state: paused; } /* hover to read a row */
+@media (prefers-reduced-motion: reduce) {
+  .hf-ticker { overflow-x: auto; } /* no auto-scroll — let the user scroll the strip themselves */
+  .hf-ticker-track { animation: none; }
+}
+
 /* ---- results reveal + bell (ported from app design diff) ---- */
 /* (hfFlipIn removed — the reveal now uses hfCardRise, the deck's rise-out-of-stack, for one mechanic.) */
 @keyframes hfCoin {

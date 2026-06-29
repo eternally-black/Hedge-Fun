@@ -151,7 +151,7 @@ export function FeedScreen({
       ref={containerRef}
       style={{
         position: "absolute", inset: 0, overflowY: "auto", overflowX: "hidden",
-        scrollSnapType: "y mandatory", WebkitOverflowScrolling: "touch",
+        scrollSnapType: "y proximity", WebkitOverflowScrolling: "touch", // proximity: 2 cards/screen, gentle settle (not one-at-a-time)
       }}
     >
       {items.length === 0 ? (
@@ -200,41 +200,43 @@ const FeedCard = memo(function FeedCard({
   return (
     <section
       style={{
-        height: "100%", minHeight: "100%", scrollSnapAlign: "start", scrollSnapStop: "always",
-        display: "flex", alignItems: "stretch", padding: "8px 14px 14px",
-        contentVisibility: "auto", containIntrinsicSize: "0 640px",
+        // Half the viewport → TWO cards on screen at once (a full-screen single card read as empty).
+        // Sized to echo the reveal/result cards. minHeight floors it on short screens.
+        height: "50%", minHeight: 300, scrollSnapAlign: "start",
+        display: "flex", alignItems: "stretch", padding: "6px 12px",
+        contentVisibility: "auto", containIntrinsicSize: "0 360px",
       } as React.CSSProperties}
     >
-      <div style={{ position: "relative", flex: 1, borderRadius: 26, overflow: "hidden", background: "var(--panel2)", border: "1px solid var(--line)", boxShadow: "0 24px 50px -18px rgba(0,0,0,.7)" }}>
+      <div style={{ position: "relative", flex: 1, borderRadius: 22, overflow: "hidden", background: "var(--panel2)", border: "1px solid var(--line)", boxShadow: "0 18px 40px -20px rgba(0,0,0,.7)" }}>
         <div style={{ position: "absolute", inset: 0, background: bgGrad(cat.color) }} />
-        <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", padding: "16px 18px 18px" }}>
+        <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", padding: "14px 15px" }}>
           {/* category + countdown */}
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 7, background: "rgba(0,0,0,.4)", backdropFilter: "blur(6px)", padding: "6px 11px", borderRadius: 20 }}>
-              <div style={{ width: 7, height: 7, borderRadius: "50%", background: cat.color, boxShadow: `0 0 8px ${cat.color}` }} />
-              <span style={{ fontSize: 10, letterSpacing: ".13em", textTransform: "uppercase", fontWeight: 700, color: "#fff" }}>{cat.label}</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(0,0,0,.4)", backdropFilter: "blur(6px)", padding: "4px 9px", borderRadius: 18 }}>
+              <div style={{ width: 6, height: 6, borderRadius: "50%", background: cat.color, boxShadow: `0 0 8px ${cat.color}` }} />
+              <span style={{ fontSize: 9, letterSpacing: ".12em", textTransform: "uppercase", fontWeight: 700, color: "#fff" }}>{cat.label}</span>
             </div>
-            <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6, background: "rgba(0,0,0,.4)", backdropFilter: "blur(6px)", padding: "6px 11px", borderRadius: 20, border: `1px solid ${cd.urgent ? "color-mix(in srgb,var(--no) 60%,transparent)" : "transparent"}` }}>
-              <span style={{ fontSize: 12 }}>⏱</span>
-              <span style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 13, color: cd.urgent ? "var(--no)" : "#fff" }}>{cd.text}</span>
+            <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 5, background: "rgba(0,0,0,.4)", backdropFilter: "blur(6px)", padding: "4px 9px", borderRadius: 18, border: `1px solid ${cd.urgent ? "color-mix(in srgb,var(--no) 60%,transparent)" : "transparent"}` }}>
+              <span style={{ fontSize: 11 }}>⏱</span>
+              <span style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 12, color: cd.urgent ? "var(--no)" : "#fff" }}>{cd.text}</span>
             </div>
           </div>
 
-          {/* question */}
-          <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center", padding: "14px 0" }}>
-            <div style={{ fontFamily: "var(--df)", fontSize: 32, lineHeight: 1.04, letterSpacing: ".2px", color: "#fff", textShadow: "0 2px 20px rgba(0,0,0,.5)", textWrap: "balance" } as React.CSSProperties}>{displayQuestion(card)}</div>
+          {/* question — compact (≈ reveal card proportions), clamped so two cards stay balanced */}
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center", padding: "8px 0", minHeight: 0 }}>
+            <div style={{ fontFamily: "var(--df)", fontSize: 20, lineHeight: 1.08, letterSpacing: ".2px", color: "#fff", textShadow: "0 2px 16px rgba(0,0,0,.5)", display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" } as React.CSSProperties}>{displayQuestion(card)}</div>
             {isUpDown(card)
-              ? <div style={{ marginTop: 10, fontSize: 13, color: "rgba(255,255,255,.62)", lineHeight: 1.3 }}>{cd.relText}</div>
-              : hint ? <div style={{ marginTop: 10, fontSize: 13, color: "rgba(255,255,255,.62)", lineHeight: 1.3, textWrap: "pretty" } as React.CSSProperties}>{hint}</div> : null}
+              ? <div style={{ marginTop: 6, fontSize: 11, color: "rgba(255,255,255,.6)", lineHeight: 1.3 }}>{cd.relText}</div>
+              : hint ? <div style={{ marginTop: 6, fontSize: 11, color: "rgba(255,255,255,.6)", lineHeight: 1.3, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" } as React.CSSProperties}>{hint}</div> : null}
           </div>
 
           {/* odds split */}
-          <div style={{ marginBottom: 14 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", fontFamily: "var(--nf)", fontWeight: 700, fontSize: 13, marginBottom: 6 }}>
+          <div style={{ marginBottom: 10 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontFamily: "var(--nf)", fontWeight: 700, fontSize: 12, marginBottom: 5 }}>
               <span style={{ color: "var(--no)" }}>{labels.no} {cents(card.noPriceBp)}</span>
               <span style={{ color: "var(--yes)" }}>{cents(card.yesPriceBp)} {labels.yes}</span>
             </div>
-            <div style={{ display: "flex", height: 12, borderRadius: 8, overflow: "hidden", background: "rgba(0,0,0,.4)" }}>
+            <div style={{ display: "flex", height: 10, borderRadius: 6, overflow: "hidden", background: "rgba(0,0,0,.4)" }}>
               <div style={{ width: `${card.noPriceBp / 100}%`, background: "linear-gradient(90deg,color-mix(in srgb,var(--no) 60%,#000),var(--no))" }} />
               <div style={{ flex: 1, background: "linear-gradient(90deg,var(--yes),color-mix(in srgb,var(--yes) 60%,#000))" }} />
             </div>
@@ -249,8 +251,8 @@ const FeedCard = memo(function FeedCard({
               <BetButton label={labels.yes} payout={winPayout(card.yesPriceBp)} color="var(--yes)" disabled={expired} onClick={() => onBet(card, "YES")} />
             </div>
           )}
-          <div style={{ textAlign: "center", marginTop: 12, fontSize: 11, color: "rgba(255,255,255,.5)", letterSpacing: ".02em" }}>
-            {expired ? "Resolving — closed for new calls" : `Tap a side · ${usd(STAKE_CENTS)} stake · no points, shards on wins`}
+          <div style={{ textAlign: "center", marginTop: 8, fontSize: 10, color: "rgba(255,255,255,.5)", letterSpacing: ".02em" }}>
+            {expired ? "Resolving — closed for new calls" : `${usd(STAKE_CENTS)} · no points, shards on wins`}
           </div>
         </div>
       </div>
@@ -265,13 +267,13 @@ function BetButton({ label, payout, color, disabled, onClick }: { label: string;
       onClick={disabled ? undefined : onClick}
       disabled={disabled}
       style={{
-        flex: 1, minWidth: 0, padding: "12px 8px", borderRadius: 16, font: "inherit", cursor: disabled ? "default" : "pointer",
+        flex: 1, minWidth: 0, padding: "9px 8px", borderRadius: 14, font: "inherit", cursor: disabled ? "default" : "pointer",
         background: `color-mix(in srgb,${color} 16%,transparent)`, border: `1.5px solid color-mix(in srgb,${color} 50%,transparent)`,
-        color, display: "flex", flexDirection: "column", alignItems: "center", gap: 2, opacity: disabled ? 0.5 : 1,
+        color, display: "flex", flexDirection: "column", alignItems: "center", gap: 1, opacity: disabled ? 0.5 : 1,
       }}
     >
-      <span style={{ fontFamily: "var(--df)", fontSize: 18, lineHeight: 1, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
-      <span style={{ fontSize: 11, color: "rgba(255,255,255,.7)" }}>to win <span style={{ fontFamily: "var(--nf)", fontWeight: 700, color }}>${payout}</span></span>
+      <span style={{ fontFamily: "var(--df)", fontSize: 16, lineHeight: 1, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
+      <span style={{ fontSize: 10, color: "rgba(255,255,255,.7)" }}>to win <span style={{ fontFamily: "var(--nf)", fontWeight: 700, color }}>${payout}</span></span>
     </button>
   );
 }

@@ -17,7 +17,15 @@ export const resultBetSelect = {
   settledAt: true,
   seenAt: true,
   market: {
-    select: { question: true, category: true, outcomeYesLabel: true, outcomeNoLabel: true, resolvedOutcome: true },
+    select: {
+      question: true,
+      category: true,
+      outcomeYesLabel: true,
+      outcomeNoLabel: true,
+      resolvedOutcome: true,
+      verifiedOnChain: true,
+      onchainRef: true,
+    },
   },
   shardGrant: { select: { counted: true } },
 } satisfies Prisma.BetSelect;
@@ -46,5 +54,7 @@ export function toResultRow(b: ResultBet): ResultRow {
     shards: b.shardGrant?.counted ? 1 : 0,
     settledAt: (b.settledAt ?? new Date(0)).toISOString(), // settled rows always have settledAt; fallback is defensive
     seen: b.seenAt != null,
+    verified: b.market.verifiedOnChain, // true only for TXODDS (football) settlements
+    onchainRef: b.market.onchainRef,
   };
 }

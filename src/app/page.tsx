@@ -6,6 +6,8 @@ import { usePrivy } from "@privy-io/react-auth";
 import { useApi } from "./useApi";
 import { DeckCard, CardPreview, type SwipeAction } from "./DeckCard";
 import { Hud } from "./screens/Hud";
+import { Ticker } from "./screens/Ticker";
+import { FootballScreen } from "./screens/FootballScreen";
 import { BottomNav } from "./screens/BottomNav";
 import { Onboarding } from "./screens/Onboarding";
 import { GmScreen } from "./screens/GmScreen";
@@ -18,7 +20,7 @@ import { NotificationsScreen } from "./screens/NotificationsScreen";
 import { RevealOverlay } from "./screens/RevealOverlay";
 import { type Card, type Me, type Screen } from "./ui";
 import { DECK_MIN_LEAD_MS } from "@/lib/config";
-import type { ResultRow, ResultsResponse } from "@/lib/api-types";
+import type { ResultRow, ResultsResponse, SwipeResponse } from "@/lib/api-types";
 
 const PRIVY_ON = !!process.env.NEXT_PUBLIC_PRIVY_APP_ID;
 
@@ -70,6 +72,10 @@ function App() {
   const [me, setMe] = useState<Me | null>(null);
   const [deck, setDeck] = useState<Card[]>([]);
   const [screen, setScreen] = useState<Screen>("deck");
+  // One-shot: true only for the moment the user JUST spent their last swipe this session. Gates the
+  // "Deck's done → Feed" hand-off panel so it shows exactly once; every other time the deck is locked
+  // (relogin, post-reveal, tapping a disabled Deck tab) we route straight to the feed, no panel.
+  const [justExhausted, setJustExhausted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [pop, setPop] = useState<{ amt: number; color: string } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -256,7 +262,16 @@ function App() {
         ? api("/api/skip", { method: "POST" })
         : api("/api/swipe", { method: "POST", body: JSON.stringify({ marketId: card.id, side: action }) });
       req
-        .then(() => refreshMe()) // stats only (points/shards/balance/skip counter); never the deck
+        .then((r) => {
+          refreshMe(); // stats only (points/shards/balance/skip counter); never the deck
+          // The swipe that spends the LAST point swipe (count == cap, not over) is the moment we hand
+          // off to the feed — arm the one-shot panel. (Skips don't count; dev never caps.)
+          if (action !== "SKIP") {
+            const resp = r as SwipeResponse;
+            const cap = meRef.current?.swipes.cap ?? 0;
+            if (!resp.overCap && cap > 0 && resp.swipeCountToday >= cap) setJustExhausted(true);
+          }
+        })
         .catch((e) => {
           const status = (e as { status?: number }).status;
           // 403 = daily swipe cap hit (raced past the client gate). The bet wasn't stored;
@@ -302,8 +317,12 @@ function App() {
   const openBalance = useCallback(() => setBalanceOpen(true), []);
   const closeBalance = useCallback(() => setBalanceOpen(false), []);
   const goDeck = useCallback(() => setScreen("deck"), []);
-  const goFeed = useCallback(() => setScreen("feed"), []);
   const goNotifs = useCallback(() => setScreen("notifications"), []);
+  // Nav from the bottom bar: consume the one-shot hand-off, so after the first time the deck is
+  // locked every further navigation lands on the feed (never the panel again).
+  const navTo = useCallback((s: Screen) => { setJustExhausted(false); setScreen(s); }, []);
+  // The hand-off panel's CTA: into the feed, one-shot consumed.
+  const enterFeedFromCap = useCallback(() => { setJustExhausted(false); setScreen("feed"); }, []);
 
   // Method-scoped login: a single loginMethods entry makes Privy skip the picker and go straight to
   // that method (email → email entry, twitter → OAuth redirect). Stable so Onboarding gets the same
@@ -375,6 +394,12 @@ function App() {
   // The feed unlocks once the swipe cap is spent (dev accounts always — they never hit capReached).
   // Derived during render (no effect/stored state) — drives both the cap-screen CTA and the nav tab.
   const feedUnlocked = !!me && (me.dev || me.swipes.used >= me.swipes.cap);
+  const deckLocked = capReached; // non-dev who spent the cap: the deck is done until 00:00 UTC
+  // Once the deck is locked the FEED is home. We render it in the deck slot too (so relogin / the
+  // post-reveal landing / a tap on a stale Deck route all show the feed), EXCEPT the one-shot
+  // just-exhausted moment, which shows the hand-off panel. Pure render derivation — no redirect
+  // effect, so there's no one-frame flash of the deck before bouncing to the feed.
+  const effectiveScreen: Screen = screen === "deck" && deckLocked && !justExhausted ? "feed" : screen;
 
   return (
     <Frame>
@@ -386,9 +411,10 @@ function App() {
       {historyOpen && <HistorySheet api={api} onClose={closeHistory} />}
       {balanceOpen && <BalanceSheet me={me} api={api} onClose={closeBalance} onTopupDone={refreshMe} onToast={flashToast} />}
       <Hud me={me} pop={pop} onShards={goVault} onGM={goGmScreen} onBalance={openBalance} onBell={goNotifs} />
+      <Ticker api={api} />
 
       <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
-        {screen === "deck" && (
+        {effectiveScreen === "deck" && (
           <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column" }}>
             <div style={{ position: "relative", flex: 1, margin: "6px 14px 0" }}>
               {capReached ? (
@@ -399,7 +425,7 @@ function App() {
                   </p>
                   <button
                     type="button"
-                    onClick={goFeed}
+                    onClick={enterFeedFromCap}
                     style={{ marginTop: 6, padding: "12px 22px", borderRadius: 16, font: "inherit", cursor: "pointer", background: "var(--energy)", color: "#06070a", border: "none", fontWeight: 800, fontSize: 15, letterSpacing: ".02em" }}
                   >
                     Open the Feed →
@@ -437,15 +463,16 @@ function App() {
           </div>
         )}
 
-        {screen === "feed" && <FeedScreen api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openBalance} />}
-        {screen === "gm" && <GmScreen me={me} busy={busy} onGM={gm} onEnterDeck={goDeck} />}
-        {screen === "vault" && <VaultScreen me={me} api={api} onRefresh={refresh} />}
-        {screen === "invite" && <InviteScreen me={me} />}
-        {screen === "you" && <ProfileScreen me={me} api={api} onRefresh={refresh} onHistory={openHistory} onLogout={doLogout} />}
-        {screen === "notifications" && <NotificationsScreen api={api} onSeen={markResultsSeen} onReplay={replayReveal} />}
+        {effectiveScreen === "football" && <FootballScreen api={api} />}
+        {effectiveScreen === "feed" && <FeedScreen api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openBalance} />}
+        {effectiveScreen === "gm" && <GmScreen me={me} busy={busy} onGM={gm} onEnterDeck={goDeck} />}
+        {effectiveScreen === "vault" && <VaultScreen me={me} api={api} onRefresh={refresh} />}
+        {effectiveScreen === "invite" && <InviteScreen me={me} />}
+        {effectiveScreen === "you" && <ProfileScreen me={me} api={api} onRefresh={refresh} onHistory={openHistory} onLogout={doLogout} />}
+        {effectiveScreen === "notifications" && <NotificationsScreen api={api} onSeen={markResultsSeen} onReplay={replayReveal} />}
       </div>
 
-      <BottomNav screen={screen} onNav={setScreen} feedUnlocked={feedUnlocked} />
+      <BottomNav screen={effectiveScreen} onNav={navTo} feedUnlocked={feedUnlocked} deckLocked={deckLocked} />
 
       {/* Results reveal sits above the whole shell (HUD + nav). */}
       {reveal && (

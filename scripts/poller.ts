@@ -13,6 +13,8 @@ import { DECK_FETCH_HORIZON_HOURS } from "../src/lib/deck-mix";
 import { settleMarket, type Resolution } from "./settle";
 import { evaluateStreak } from "../src/lib/streak";
 import { refreshDeck } from "./refresh-deck";
+import { refreshFootball } from "./refresh-football";
+import { resolveFootball } from "./settle-football";
 
 const prisma = new PrismaClient();
 
@@ -37,15 +39,27 @@ export function toResolution(m: Awaited<ReturnType<typeof fetchResolution>>): Re
   return { kind: "open" };
 }
 
-async function settleOne(market: { id: string; polymarketId: string }) {
-  const remote = await fetchResolution(market.polymarketId); // may throw -> transient
-  const resolution = toResolution(remote);
+async function settleOne(market: { id: string; polymarketId: string; source: string; resolutionDeadline: Date }) {
+  // Resolution source branches on the market: Polymarket via Gamma, TXODDS football via TxLINE scores.
+  let resolution: Resolution;
+  let onchainRef: string | null = null;
+  if (market.source === "TXODDS") {
+    const r = await resolveFootball(market.polymarketId, market.resolutionDeadline.getTime()); // may throw -> transient
+    resolution = r.resolution;
+    onchainRef = r.onchainRef;
+  } else {
+    resolution = toResolution(await fetchResolution(market.polymarketId)); // may throw -> transient
+  }
   if (resolution.kind === "open") return;
   const r = await settleMarket(prisma, market.id, resolution);
-  await prisma.market.update({ where: { id: market.id }, data: { lastPolledAt: new Date() } });
+  await prisma.market.update({
+    where: { id: market.id },
+    // TXODDS: stamp the Solana-anchored proof on the now-settled market (drives the ⛓ badge).
+    data: { lastPolledAt: new Date(), ...(market.source === "TXODDS" ? { verifiedOnChain: true, onchainRef } : {}) },
+  });
   if (r.settled + r.voided > 0) {
     console.log(
-      `[settle] ${market.polymarketId.slice(0, 10)}… settled=${r.settled} void=${r.voided} shards=${r.shardsAwarded}`,
+      `[settle] ${market.source} ${market.polymarketId.slice(0, 16)}… settled=${r.settled} void=${r.voided} shards=${r.shardsAwarded}`,
     );
   }
 }
@@ -80,11 +94,19 @@ async function tick() {
     console.warn("[deck] refresh error:", (e as Error).message);
   }
 
+  // World Cup football O/U markets (TxLINE) — same cache table, mixed into the deck by the mixer.
+  try {
+    const fn = await refreshFootball();
+    console.log(`[football] refreshed ${fn} World Cup markets`);
+  } catch (e) {
+    console.warn("[football] refresh error:", (e as Error).message);
+  }
+
   // Markets that still have unsettled bets.
   const pending = await prisma.bet.findMany({
     where: { settlementStatus: "PENDING" },
     distinct: ["marketId"],
-    select: { market: { select: { id: true, polymarketId: true } } },
+    select: { market: { select: { id: true, polymarketId: true, source: true, resolutionDeadline: true } } },
   });
   const markets = pending.map((p) => p.market);
   if (markets.length) {
