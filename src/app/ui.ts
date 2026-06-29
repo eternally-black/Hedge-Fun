@@ -118,12 +118,36 @@ export function bgGrad(color: string) {
   return `radial-gradient(120% 80% at 80% 0%, ${color}2e, transparent 55%), linear-gradient(170deg, var(--panel2), var(--panel))`;
 }
 
-// Countdown to resolution, "4h 11m" or "11m 05s" near the wire.
-export function countdown(iso: string, nowMs: number): { text: string; urgent: boolean } {
+// Countdown to resolution. `text` = the precise ⏱ cutoff timer ("4h 11m" or "11m 05s"). `relText` =
+// a friendly, rounded "Resolves in ~N min" line for the quick crypto Up/Down cards (live —
+// recomputed each tick, correct for any window, not just 15 min). Both derive from the same clock.
+export function countdown(iso: string, nowMs: number): { text: string; urgent: boolean; relText: string } {
   const total = Math.max(0, Math.round((new Date(iso).getTime() - nowMs) / 1000));
   const h = Math.floor(total / 3600);
   const m = Math.floor((total % 3600) / 60);
   const s = total % 60;
   const text = h > 0 ? `${h}h ${String(m).padStart(2, "0")}m` : `${m}m ${String(s).padStart(2, "0")}s`;
-  return { text, urgent: total < 3600 };
+  const mins = Math.round(total / 60);
+  const relText =
+    total < 60 ? "Resolves in <1 min"
+      : mins < 60 ? `Resolves in ~${mins} min`
+        : `Resolves in ~${Math.round(mins / 60)}h`;
+  return { text, urgent: total < 3600, relText };
+}
+
+// Crypto Up/Down = the quick minute/15-min markets whose question carries an ABSOLUTE resolution
+// time ("Bitcoin Up or Down - 9:05AM"). Detected by the Up/Down side labels.
+export function isUpDown(card: Pick<Card, "outcomeYesLabel" | "outcomeNoLabel">): boolean {
+  return card.outcomeYesLabel.toLowerCase() === "up" && card.outcomeNoLabel.toLowerCase() === "down";
+}
+
+// Display question: for Up/Down markets, strip the trailing absolute-time/zone suffix (a dash-led
+// segment like "- 9:05AM" / "- July 1, 3PM ET", or a bare trailing "9:05AM") so the card shows the
+// market, and the relative "Resolves in ~N min" line + ⏱ cutoff carry the time. Others pass through.
+export function displayQuestion(card: Pick<Card, "question" | "outcomeYesLabel" | "outcomeNoLabel">): string {
+  if (!isUpDown(card)) return card.question;
+  return card.question
+    .replace(/\s*[-–—]\s*[^-–—]*\b(?:\d{1,2}(?::\d{2})?\s*(?:am|pm)|am|pm|et|edt|est|utc|gmt)\b[^-–—]*$/i, "")
+    .replace(/\s*\b\d{1,2}(?::\d{2})?\s*(?:am|pm)(?:\s+(?:et|edt|est|utc|gmt))?\s*$/i, "")
+    .trim();
 }

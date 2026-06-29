@@ -7,7 +7,7 @@
 //  - Resolution signal = umaResolutionStatus === "resolved" + outcomePrices collapse to 1/0.
 //  - conditionId is the stable id -> our polymarketId.
 
-import { isContextPoor, withinCategoryHorizon, DECK_FETCH_HORIZON_HOURS } from "./deck-mix";
+import { isContextPoor, isVagueEsports, withinCategoryHorizon, DECK_FETCH_HORIZON_HOURS } from "./deck-mix";
 
 const BASE = process.env.POLYMARKET_API_BASE ?? "https://gamma-api.polymarket.com";
 
@@ -200,7 +200,8 @@ export async function fetchBlitzDeck(hours = DECK_FETCH_HORIZON_HOURS, want = 10
         new Date(m.resolutionDeadline).getTime() <= maxMs && // re-assert outer window client-side
         withinCategoryHorizon(m, new Date(m.resolutionDeadline).getTime(), nowMs) && // per-category cap
         priceIsContested(m.yesPriceBp, m.noPriceBp) && // drop decided/live matches (100%/0%)
-        !isContextPoor(m) // drop bare Over/Under totals with no match named ("Games Total: O/U 4.5")
+        !isContextPoor(m) && // drop bare Over/Under totals with no match named ("Games Total: O/U 4.5")
+        !isVagueEsports(m) // drop esports we can't name a game for (bare "Esports" badge)
       ) {
         buckets[shapeOf(m)].push(m);
       }

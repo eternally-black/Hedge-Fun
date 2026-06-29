@@ -1,7 +1,7 @@
 // Self-check for deck mixing: never >2 same-category in a row, and the mix is random.
 // Run: npx tsx scripts/test-deck-mix.ts
 import assert from "node:assert";
-import { shuffleNoRun, categoryOf, gameOf, isContextPoor, MAX_RUN, withinCategoryHorizon, DECK_HORIZON_HOURS } from "../src/lib/deck-mix";
+import { shuffleNoRun, categoryOf, gameOf, isContextPoor, isVagueEsports, MAX_RUN, withinCategoryHorizon, DECK_HORIZON_HOURS } from "../src/lib/deck-mix";
 
 // ---- categoryOf: real shapes (verified live) bucket correctly ----
 assert.strictEqual(categoryOf({ question: "Bitcoin Up or Down - 9:05AM", outcomeYesLabel: "Up", outcomeNoLabel: "Down" }), "crypto");
@@ -18,6 +18,13 @@ const ou = (q: string) => ({ question: q, outcomeYesLabel: "Over", outcomeNoLabe
 assert.strictEqual(isContextPoor(ou("Games Total: O/U 4.5")), true, "bare total, no match -> poor");
 assert.strictEqual(isContextPoor(ou("Map 1 Total Rounds: Over/Under 21.5")), true, "esports signal but no match named -> poor");
 assert.strictEqual(isContextPoor(ou("Norway vs. France: Norway O/U 0.5")), false, "names the match -> usable");
+
+// ---- isVagueEsports: esports with no identifiable game is dropped; recognized games + sports stay ----
+const em = (q: string, yes: string, no: string) => ({ question: q, outcomeYesLabel: yes, outcomeNoLabel: no });
+assert.strictEqual(isVagueEsports(em("Map 1 Rounds Handicap: Millennium Esports (-6.5) vs Alpha Dominion Nation (+6.5)", "Millennium Esports", "Alpha Dominion Nation")), true, "esports, no recognizable game -> vague (dropped)");
+assert.strictEqual(isVagueEsports(em("Dota 2: L1ga Team vs 4ikibamboni", "L1ga Team", "4ikibamboni")), false, "esports with a named game (Dota 2) -> kept");
+assert.strictEqual(isVagueEsports(em("Bosnia vs. Qatar match", "Bosnia", "Qatar")), false, "sports (not esports) -> kept");
+assert.strictEqual(isVagueEsports(em("Bitcoin Up or Down - 9:05AM", "Up", "Down")), false, "crypto -> kept");
 assert.strictEqual(isContextPoor(ou("Lakers @ Celtics: Total Points O/U 210.5")), false, "@ match form -> usable");
 // non-Over/Under markets are never poor — a team name or Yes/No explains itself.
 assert.strictEqual(isContextPoor({ question: "Games Total 4.5", outcomeYesLabel: "Bosnia", outcomeNoLabel: "Qatar" }), false, "named teams -> never poor");

@@ -2,7 +2,7 @@
 // Polymarket hands "Over"/"Under" with the line buried in the question; we fold it in.
 // Run: npx tsx scripts/test-side-labels.ts
 import assert from "node:assert";
-import { sideLabels, marketHint } from "../src/app/ui";
+import { sideLabels, marketHint, isUpDown, displayQuestion } from "../src/app/ui";
 
 const card = (question: string, yes: string, no: string) => ({ question, outcomeYesLabel: yes, outcomeNoLabel: no });
 
@@ -26,5 +26,17 @@ assert.deepStrictEqual(noLine, { yes: "Over", no: "Under" }, "no number in quest
 assert.strictEqual(marketHint(card("Map 1 Total Rounds: Over/Under 21.5", "Over", "Under")), "Will the total be over or under 21.5?", "OU hint names the line");
 assert.strictEqual(marketHint(card("Bosnia vs. Qatar", "Bosnia", "Qatar")), null, "team market needs no hint");
 assert.strictEqual(marketHint(card("Will BTC hit 100k?", "Yes", "No")), null, "Yes/No needs no hint");
+
+// ---- isUpDown: only the crypto Up/Down shape ----
+assert.strictEqual(isUpDown(card("Bitcoin Up or Down - 9:05AM", "Up", "Down")), true, "Up/Down -> true");
+assert.strictEqual(isUpDown(card("Bosnia vs. Qatar", "Bosnia", "Qatar")), false, "teams -> false");
+assert.strictEqual(isUpDown(card("Will BTC hit 100k?", "Yes", "No")), false, "Yes/No -> false");
+
+// ---- displayQuestion: strip the absolute time from Up/Down questions, leave others alone ----
+assert.strictEqual(displayQuestion(card("Bitcoin Up or Down - 9:05AM", "Up", "Down")), "Bitcoin Up or Down", "dash + clock stripped");
+assert.strictEqual(displayQuestion(card("Ethereum Up or Down - July 1, 3PM ET", "Up", "Down")), "Ethereum Up or Down", "dash + date/zone stripped");
+assert.strictEqual(displayQuestion(card("Dogecoin Up or Down 11:30AM", "Up", "Down")), "Dogecoin Up or Down", "bare trailing clock stripped");
+assert.strictEqual(displayQuestion(card("Bitcoin Up or Down", "Up", "Down")), "Bitcoin Up or Down", "no time -> unchanged");
+assert.strictEqual(displayQuestion(card("Bosnia vs. Qatar at 9:05AM", "Bosnia", "Qatar")), "Bosnia vs. Qatar at 9:05AM", "non-Up/Down untouched (no strip)");
 
 console.log("test-side-labels: OK");

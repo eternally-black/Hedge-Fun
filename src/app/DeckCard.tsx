@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useEffect, useRef, useState } from "react";
-import { type Card, catOf, bgGrad, cents, usd, winPayout, countdown, sideLabels, marketHint } from "./ui";
+import { type Card, catOf, bgGrad, cents, usd, winPayout, countdown, sideLabels, marketHint, displayQuestion, isUpDown } from "./ui";
 import { STAKE_CENTS } from "@/lib/config";
 import { useCardSwipe } from "./useCardSwipe";
 
@@ -18,13 +18,14 @@ type FaceProps = {
   card: Card;
   countdownText: string;
   urgent: boolean;
+  windowText: string; // live "Resolves in ~N min" line (shown for quick crypto Up/Down)
   // drag-driven overlay/stamp intensities (0 for a static preview card)
   yesP: number;
   noP: number;
   skipP: number;
 };
 
-const CardFace = memo(function CardFace({ card, countdownText, urgent, yesP, noP, skipP }: FaceProps) {
+const CardFace = memo(function CardFace({ card, countdownText, urgent, windowText, yesP, noP, skipP }: FaceProps) {
   const cat = catOf(card);
   const stamp = (p: number) => ({ o: Math.max(0, Math.min(1, (p - 0.15) / 0.5)), s: 0.6 + 0.4 * Math.min(1, p) });
   const ys = stamp(yesP), ns = stamp(noP), ks = stamp(skipP);
@@ -60,8 +61,10 @@ const CardFace = memo(function CardFace({ card, countdownText, urgent, yesP, noP
         </div>
 
         <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center", padding: "14px 0" }}>
-          <div style={{ fontFamily: "var(--df)", fontSize: 32, lineHeight: 1.04, letterSpacing: ".2px", color: "#fff", textShadow: "0 2px 20px rgba(0,0,0,.5)", textWrap: "balance" }}>{card.question}</div>
-          {hint && <div style={{ marginTop: 10, fontSize: 13, color: "rgba(255,255,255,.62)", lineHeight: 1.3, textWrap: "pretty" }}>{hint}</div>}
+          <div style={{ fontFamily: "var(--df)", fontSize: 32, lineHeight: 1.04, letterSpacing: ".2px", color: "#fff", textShadow: "0 2px 20px rgba(0,0,0,.5)", textWrap: "balance" }}>{displayQuestion(card)}</div>
+          {isUpDown(card)
+            ? <div style={{ marginTop: 10, fontSize: 13, color: "rgba(255,255,255,.62)", lineHeight: 1.3 }}>{windowText}</div>
+            : hint && <div style={{ marginTop: 10, fontSize: 13, color: "rgba(255,255,255,.62)", lineHeight: 1.3, textWrap: "pretty" }}>{hint}</div>}
         </div>
 
         {/* odds split — sides + CENTS (Polymarket-style), not % */}
@@ -82,9 +85,9 @@ const CardFace = memo(function CardFace({ card, countdownText, urgent, yesP, noP
             <div style={{ fontSize: 8, letterSpacing: ".12em", color: "var(--muted)", textTransform: "uppercase" }}>Stake</div>
             <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 15, color: "#fff" }}>{usd(STAKE_CENTS)}</div>
           </div>
-          <div style={{ flex: 1, display: "flex", gap: 6 }}>
-            <PayBox label={`Win ${labels.no}`} val={winPayout(card.noPriceBp)} color="var(--no)" />
-            <PayBox label={`Win ${labels.yes}`} val={winPayout(card.yesPriceBp)} color="var(--yes)" />
+          <div style={{ flex: 1, minWidth: 0, display: "flex", gap: 6 }}>
+            <PayBox label={labels.no} val={winPayout(card.noPriceBp)} color="var(--no)" />
+            <PayBox label={labels.yes} val={winPayout(card.yesPriceBp)} color="var(--yes)" />
           </div>
         </div>
         <div style={{ textAlign: "center", marginTop: 12, fontSize: 11, color: "rgba(255,255,255,.55)", letterSpacing: ".02em" }}>Tap for details · swipe to call</div>
@@ -109,7 +112,7 @@ export const CardPreview = memo(function CardPreview({ card }: { card: Card }) {
   const text = useCountdown(card.resolutionDeadline, 0); // no urgency styling needed behind
   return (
     <div style={{ position: "absolute", inset: 0, borderRadius: 26, overflow: "hidden", background: "var(--panel2)", border: "1px solid var(--line)", filter: "brightness(.82)", pointerEvents: "none", transform: `scale(${PREVIEW_SCALE}) translateY(${PREVIEW_Y}px)`, transformOrigin: "center bottom" }}>
-      <CardFace card={card} countdownText={text.text} urgent={false} yesP={0} noP={0} skipP={0} />
+      <CardFace card={card} countdownText={text.text} urgent={false} windowText={text.relText} yesP={0} noP={0} skipP={0} />
     </div>
   );
 });
@@ -169,7 +172,7 @@ export function DeckCard({
           : swipe.style),
       }}
     >
-      <CardFace card={card} countdownText={cd.text} urgent={cd.urgent} yesP={swipe.progressOf("YES")} noP={swipe.progressOf("NO")} skipP={swipe.progressOf("SKIP")} />
+      <CardFace card={card} countdownText={cd.text} urgent={cd.urgent} windowText={cd.relText} yesP={swipe.progressOf("YES")} noP={swipe.progressOf("NO")} skipP={swipe.progressOf("SKIP")} />
     </div>
   );
 }

@@ -151,6 +151,20 @@ export function isContextPoor(m: {
   return !MATCH.test(m.question);
 }
 
+// "Vague esports" = classified esports but gameOf can't name the discipline (title/teams match no
+// known game, e.g. "Map 1 Rounds Handicap: Millennium Esports vs Alpha Dominion Nation"). Per
+// product: too niche to identify → don't surface it — the card would only show a bare "Esports"
+// badge the user can't act on. Esports ONLY (sports league recognition is broader, so sports stay).
+export function isVagueEsports(m: {
+  question: string;
+  category?: string | null;
+  outcomeYesLabel: string;
+  outcomeNoLabel: string;
+}): boolean {
+  const cat = categoryOf(m);
+  return cat === "esports" && gameOf(m, cat) === null;
+}
+
 // Mutable xorshift PRNG seeded from a number — deterministic given a seed (testable), random
 // in practice because callers seed from the clock. No Math.random (banned in some contexts).
 function rng(seed: number) {

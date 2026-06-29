@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 
-import { categoryOf, shuffleNoRun, isContextPoor, withinCategoryHorizon, DECK_FETCH_HORIZON_HOURS } from "@/lib/deck-mix";
+import { categoryOf, shuffleNoRun, isContextPoor, isVagueEsports, withinCategoryHorizon, DECK_FETCH_HORIZON_HOURS } from "@/lib/deck-mix";
 import type { DeckResponse } from "@/lib/api-types";
 
 // The blitz deck: cached OPEN binary markets, each kept only within ITS category's horizon
@@ -55,11 +55,12 @@ export async function GET(req: Request) {
 
   // Drop, at serve time (so it also clears already-cached rows, not just new ingests):
   //  - context-poor markets (bare Over/Under totals with no match named, e.g. "Games Total: O/U 4.5")
+  //  - vague esports (classified esports but no identifiable game → bare "Esports" badge)
   //  - markets past THEIR category horizon (a cached crypto row that drifted beyond 24h, etc.) — the
   //    real per-category enforcement; the DB query only knows the flat outer window.
   const nowMs = now.getTime();
   const usable = candidates.filter(
-    (c) => !isContextPoor(c) && withinCategoryHorizon(c, c.resolutionDeadline.getTime(), nowMs),
+    (c) => !isContextPoor(c) && !isVagueEsports(c) && withinCategoryHorizon(c, c.resolutionDeadline.getTime(), nowMs),
   );
 
   // Randomly mix categories with the rule: never >2 cards of the same category in a row.
