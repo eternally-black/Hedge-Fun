@@ -32,17 +32,22 @@ export const MarketCard = memo(function MarketCard({
   placedSide,
   nowMs,
   onBet,
+  liveBetting = false,
 }: {
   card: Card;
   placedSide: BetSide | undefined;
   nowMs: number; // shared clock (ticks ~15s) — keeps Date.now() out of render
   onBet: (card: Card, side: BetSide) => void;
+  // Football live markets: their resolutionDeadline is a synthetic kickoff+150min settle mark, NOT a
+  // real close — so the deck/feed lead-time gate would wrongly disable in-play betting. When true, the
+  // time gate is skipped (the market is bettable as long as it's OPEN, which the server enforces).
+  liveBetting?: boolean;
 }) {
   const cat = catOf(card);
   const labels = sideLabels(card);
   const hint = marketHint(card);
   const cd = countdown(card.resolutionDeadline, nowMs);
-  const expired = new Date(card.resolutionDeadline).getTime() - nowMs <= DECK_MIN_LEAD_MS;
+  const expired = !liveBetting && new Date(card.resolutionDeadline).getTime() - nowMs <= DECK_MIN_LEAD_MS;
 
   return (
     <div style={{ position: "relative", width: "100%", height: "100%", borderRadius: 22, overflow: "hidden", background: "var(--panel2)", border: "1px solid var(--line)", boxShadow: "0 18px 40px -20px rgba(0,0,0,.7)" }}>

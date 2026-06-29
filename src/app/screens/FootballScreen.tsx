@@ -195,13 +195,14 @@ function MatchDetail({
         <div style={{ textAlign: "center", marginTop: 60, color: "var(--muted)" }}>Loading markets…</div>
       ) : cards.length === 0 ? (
         <div style={{ textAlign: "center", marginTop: 60, color: "var(--muted)", fontSize: 13 }}>
-          No markets offered for this match yet. Odds open closer to kickoff.
+          No betting markets for this match right now — the data feed isn&apos;t publishing odds for it.
         </div>
       ) : (
         <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 4 }}>
           {cards.map((c) => (
             <div key={c.id} style={{ height: 300, padding: "6px 0", boxSizing: "border-box" }}>
-              <MarketCard card={c} placedSide={placed.get(c.id)} nowMs={nowMs} onBet={placeBet} />
+              {/* liveBetting: football deadlines are a synthetic settle mark, so don't lead-time-gate in-play markets */}
+              <MarketCard card={c} placedSide={placed.get(c.id)} nowMs={nowMs} onBet={placeBet} liveBetting />
             </div>
           ))}
         </div>

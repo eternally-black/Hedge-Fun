@@ -27,7 +27,9 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "market not open" }, { status: 409 });
   }
   // Freshness guard: reject a bet within DECK_MIN_LEAD_MS of resolution (stale, near-decided call).
-  if (market.resolutionDeadline.getTime() <= Date.now() + DECK_MIN_LEAD_MS) {
+  // EXEMPT TXODDS football: its resolutionDeadline is a synthetic kickoff+150min settle mark, not a
+  // real close, so live in-play betting must stay open while the market is OPEN (status enforces that).
+  if (market.source !== "TXODDS" && market.resolutionDeadline.getTime() <= Date.now() + DECK_MIN_LEAD_MS) {
     return NextResponse.json({ error: "market_expired" }, { status: 409 });
   }
 

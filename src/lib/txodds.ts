@@ -251,11 +251,16 @@ async function buildSnapshot(): Promise<TickerRow[]> {
       const { home, away } = currentScore(scores);
       const ph = phaseOf(latestGameState(scores));
       // Derive live/ended from score + kickoff, not GameState alone: the feed can report
-      // "scheduled" while a match is clearly in play (has a score, kickoff passed). Score-present
-      // or recently-kicked-off ⇒ live; that's the demo hook.
+      // "scheduled" while a match is clearly in play (kickoff passed, score present). But it can ALSO
+      // stay "scheduled" AFTER a match ends (the end is never reported), so a score alone can't mean
+      // "live" — otherwise a finished match shows "Live" forever. Gate on a generous in-play window
+      // (90' + HT + ET + stoppage ≈ 3h): within it ⇒ live; a scored fixture PAST it with a stuck
+      // GameState ⇒ treat as ended (show FT), not perpetually live.
       const started = Date.now() >= f.StartTime;
-      const ended = ph.ended;
-      const live = !ended && !ph.abandoned && (ph.live || home != null || (started && Date.now() - f.StartTime < 3 * 3_600_000));
+      const sinceKick = Date.now() - f.StartTime;
+      const inPlayWindow = started && sinceKick < 3 * 3_600_000;
+      const ended = ph.ended || (home != null && started && !inPlayWindow);
+      const live = !ended && !ph.abandoned && (ph.live || inPlayWindow);
       return {
         fixtureId: String(f.FixtureId),
         competition: f.Competition,
