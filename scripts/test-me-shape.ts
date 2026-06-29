@@ -20,10 +20,10 @@ async function main() {
 
   const body = await (await me.GET(authed("http://x/api/me"))).json();
 
-  // Top-level key set must include the new Cash/Locked/topup fields.
+  // Top-level key set must include the new Cash/Locked/topup fields + cosmetics (skins).
   assert.deepStrictEqual(Object.keys(body).sort(),
-    ["artifacts","balanceCents","cashCents","dev","isNewUser","lockedCents","loginMarkedToday","points","referrals","shards","shardsPerArtifact","skips","stakeCents","streak","swipes","topup","unreadResults","user"],
-    "/me top-level keys include cashCents/lockedCents/stakeCents/topup");
+    ["artifacts","balanceCents","cashCents","dev","isNewUser","lockedCents","loginMarkedToday","points","referrals","shards","shardsPerArtifact","skins","skips","stakeCents","streak","swipes","topup","unreadResults","user"],
+    "/me top-level keys include cashCents/lockedCents/stakeCents/topup/skins");
   assert.deepStrictEqual(Object.keys(body.topup).sort(),
     ["artifactCost","artifactTopupAvailable","freeTopupAvailable","freeTopupUsed","grantCents"],
     "/me topup sub-keys");
@@ -36,6 +36,10 @@ async function main() {
   assert.strictEqual(body.topup.grantCents, 20000, "top-up grant $200");
   assert.strictEqual(body.topup.freeTopupUsed, false, "free top-up not used on a fresh account");
   assert.strictEqual(typeof body.topup.freeTopupAvailable, "boolean", "freeTopupAvailable is bool");
+
+  // Cosmetics: a fresh account owns + equips the free Classic skin.
+  assert.deepStrictEqual(body.skins.owned, ["classic"], "fresh account owns classic");
+  assert.strictEqual(body.skins.equipped, "classic", "fresh account equips classic");
 
   // cleanup
   const u = await prisma.user.findUniqueOrThrow({ where: { privyId: STUB_DID } });

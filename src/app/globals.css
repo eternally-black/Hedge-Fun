@@ -94,17 +94,18 @@ body {
   display: inline-flex;
   align-items: center;
   will-change: transform;
-  animation: hfTicker linear infinite;
+  /* Explicit fallback duration (40s) so the marquee scrolls even if the inline per-count
+     animationDuration ever fails to apply; the component overrides it for steady speed. */
+  animation: hfTicker 40s linear infinite;
 }
 @keyframes hfTicker {
   from { transform: translateX(0); }
   to { transform: translateX(-50%); } /* content is duplicated → one set width = seamless loop */
 }
 .hf-ticker:hover .hf-ticker-track { animation-play-state: paused; } /* hover to read a row */
-@media (prefers-reduced-motion: reduce) {
-  .hf-ticker { overflow-x: auto; } /* no auto-scroll — let the user scroll the strip themselves */
-  .hf-ticker-track { animation: none; }
-}
+/* NB: deliberately NOT disabled under prefers-reduced-motion — the live ticker IS the feature, and on
+   Windows with "Show animations" off the reduce-motion fallback was leaving the strip static. Hover
+   pauses it for reading. */
 
 /* ---- results reveal + bell (ported from app design diff) ---- */
 /* (hfFlipIn removed — the reveal now uses hfCardRise, the deck's rise-out-of-stack, for one mechanic.) */

@@ -388,6 +388,7 @@ function App() {
 
   const top = deck[0];
   const next = deck[1];
+  const equippedSkin = me?.skins.equipped ?? "classic"; // drives every deck card's background
   // Hard daily cap: once a non-dev user hits the swipe cap, stop the deck and show the
   // "come back tomorrow" screen. Dev accounts swipe unlimited (and have a deck reset).
   const capReached = !!me && !me.dev && me.swipes.used >= me.swipes.cap;
@@ -432,9 +433,9 @@ function App() {
               ) : (
                 <>
                   {/* next card — FULLY rendered behind the top one (not a gray stub) */}
-                  {next && <CardPreview key={next.id} card={next} />}
+                  {next && <CardPreview key={next.id} card={next} skinId={equippedSkin} />}
                   {top ? (
-                    <DeckCard key={top.id} card={top} busy={busy} onAction={handleAction} onTap={noop} />
+                    <DeckCard key={top.id} card={top} skinId={equippedSkin} busy={busy} onAction={handleAction} onTap={noop} />
                   ) : (
                     <div style={{ position: "absolute", inset: 0, borderRadius: 26, background: "var(--panel)", border: "1px solid var(--line)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, textAlign: "center" }}>
                       <p style={{ color: "var(--muted)" }}>No more cards right now. Check back after the next batch resolves.</p>
@@ -460,10 +461,10 @@ function App() {
           </div>
         )}
 
-        {effectiveScreen === "football" && <FootballScreen api={api} />}
+        {effectiveScreen === "football" && <FootballScreen api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openBalance} />}
         {effectiveScreen === "feed" && <FeedScreen api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openBalance} />}
         {effectiveScreen === "gm" && <GmScreen me={me} busy={busy} onGM={gm} onEnterDeck={goDeck} />}
-        {effectiveScreen === "vault" && <VaultScreen me={me} api={api} onRefresh={refresh} />}
+        {effectiveScreen === "vault" && <VaultScreen me={me} api={api} onRefresh={refresh} previewCard={top ?? next} />}
         {effectiveScreen === "invite" && <InviteScreen me={me} />}
         {effectiveScreen === "you" && <ProfileScreen me={me} api={api} onRefresh={refresh} onHistory={openHistory} onLogout={doLogout} />}
         {effectiveScreen === "notifications" && <NotificationsScreen api={api} onSeen={markResultsSeen} onReplay={replayReveal} />}

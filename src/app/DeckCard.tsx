@@ -1,7 +1,8 @@
 "use client";
 
 import { memo, useEffect, useRef, useState } from "react";
-import { type Card, catOf, bgGrad, cents, usd, winPayout, countdown, sideLabels, marketHint, displayQuestion, isUpDown } from "./ui";
+import { type Card, catOf, isFootball, cents, usd, winPayout, countdown, sideLabels, marketHint, displayQuestion, isUpDown } from "./ui";
+import { skinStyle, SCRIM } from "./skins";
 import { STAKE_CENTS } from "@/lib/config";
 import { useCardSwipe } from "./useCardSwipe";
 
@@ -16,6 +17,7 @@ export const RISE_MS = 320; // how long the next card rises into the top slot (s
 // ============================================================================
 type FaceProps = {
   card: Card;
+  skinId: string; // equipped skin (or preview skin) — drives the whole card background
   countdownText: string;
   urgent: boolean;
   windowText: string; // live "Resolves in ~N min" line (shown for quick crypto Up/Down)
@@ -25,17 +27,22 @@ type FaceProps = {
   skipP: number;
 };
 
-const CardFace = memo(function CardFace({ card, countdownText, urgent, windowText, yesP, noP, skipP }: FaceProps) {
+export const CardFace = memo(function CardFace({ card, skinId, countdownText, urgent, windowText, yesP, noP, skipP }: FaceProps) {
   const cat = catOf(card);
   const stamp = (p: number) => ({ o: Math.max(0, Math.min(1, (p - 0.15) / 0.5)), s: 0.6 + 0.4 * Math.min(1, p) });
   const ys = stamp(yesP), ns = stamp(noP), ks = stamp(skipP);
   // Human-readable side labels (Over/Under markets get the line folded in) + a plain-language hint.
   const labels = sideLabels(card);
   const hint = marketHint(card);
+  // The equipped skin owns the background. Derived in render (cheap, pure) — no effect/state.
+  // Layering: bg → skin overlay → readability SCRIM → directional overlays → stamps → content.
+  const skin = skinStyle(skinId, cat.color, isFootball(card));
 
   return (
     <>
-      <div style={{ position: "absolute", inset: 0, background: bgGrad(cat.color) }} />
+      <div style={{ position: "absolute", inset: 0, background: skin.bg }} />
+      {skin.overlay ? <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>{skin.overlay}</div> : null}
+      <div style={{ position: "absolute", inset: 0, pointerEvents: "none", background: SCRIM }} />
 
       {/* directional overlays */}
       <div style={{ position: "absolute", inset: 0, pointerEvents: "none", opacity: yesP, background: "linear-gradient(270deg, color-mix(in srgb,var(--yes) 70%, transparent), transparent 65%)" }} />
@@ -108,11 +115,11 @@ const CardFace = memo(function CardFace({ card, countdownText, urgent, windowTex
 export const PREVIEW_SCALE = 0.957;
 export const PREVIEW_Y = 13;
 
-export const CardPreview = memo(function CardPreview({ card }: { card: Card }) {
+export const CardPreview = memo(function CardPreview({ card, skinId }: { card: Card; skinId: string }) {
   const text = useCountdown(card.resolutionDeadline, 0); // no urgency styling needed behind
   return (
     <div style={{ position: "absolute", inset: 0, borderRadius: 26, overflow: "hidden", background: "var(--panel2)", border: "1px solid var(--line)", filter: "brightness(.82)", pointerEvents: "none", transform: `scale(${PREVIEW_SCALE}) translateY(${PREVIEW_Y}px)`, transformOrigin: "center bottom" }}>
-      <CardFace card={card} countdownText={text.text} urgent={false} windowText={text.relText} yesP={0} noP={0} skipP={0} />
+      <CardFace card={card} skinId={skinId} countdownText={text.text} urgent={false} windowText={text.relText} yesP={0} noP={0} skipP={0} />
     </div>
   );
 });
@@ -123,11 +130,13 @@ export const CardPreview = memo(function CardPreview({ card }: { card: Card }) {
 // ============================================================================
 export function DeckCard({
   card,
+  skinId,
   busy,
   onAction,
   onTap,
 }: {
   card: Card;
+  skinId: string;
   busy?: boolean;
   onAction: (a: SwipeAction) => void;
   onTap: () => void;
@@ -172,7 +181,7 @@ export function DeckCard({
           : swipe.style),
       }}
     >
-      <CardFace card={card} countdownText={cd.text} urgent={cd.urgent} windowText={cd.relText} yesP={swipe.progressOf("YES")} noP={swipe.progressOf("NO")} skipP={swipe.progressOf("SKIP")} />
+      <CardFace card={card} skinId={skinId} countdownText={cd.text} urgent={cd.urgent} windowText={cd.relText} yesP={swipe.progressOf("YES")} noP={swipe.progressOf("NO")} skipP={swipe.progressOf("SKIP")} />
     </div>
   );
 }

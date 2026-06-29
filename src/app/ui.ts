@@ -52,6 +52,13 @@ export function catOf(card: Pick<Card, "question" | "outcomeYesLabel" | "outcome
   return game ? { ...CAT_COLORS[cat], label: game } : CAT_COLORS[cat];
 }
 
+// Soccer cards get the auto pitch+grass under the free Classic skin (category art, not a sellable
+// skin). Reuse the deck classifier's league naming: gameOf returns "Soccer" only for soccer — NFL /
+// "american football" match earlier in its table, so the word "football" never misfires here.
+export function isFootball(card: Pick<Card, "question" | "outcomeYesLabel" | "outcomeNoLabel">): boolean {
+  return gameOf({ question: card.question, outcomeYesLabel: card.outcomeYesLabel, outcomeNoLabel: card.outcomeNoLabel }) === "Soccer";
+}
+
 // Polymarket hands us raw "Over"/"Under" side labels with the threshold buried in the question
 // ("Map 1 Total Rounds: Over/Under 21.5", "Norway vs France: Norway O/U 0.5"). On their own,
 // "Over"/"Under" are jargon — a user can't tell over WHAT. We pull the line out of the question and

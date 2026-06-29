@@ -260,7 +260,11 @@ model CollectibleBalance {
   user      User     @relation(fields: [userId], references: [id])
   shards    Int      @default(0) // remainder after artifact conversion (0..19)
   artifacts Int      @default(0)
-  updatedAt DateTime @updatedAt
+  // Card-skins cosmetics: ids from the in-code catalog (src/lib/skins.ts). Everyone owns "classic"
+  // for free; premium skins are bought with artifacts (unlock pushes the id here + equips it).
+  ownedSkins   String[] @default(["classic"])
+  equippedSkin String   @default("classic")
+  updatedAt    DateTime @updatedAt
 
   @@map("collectible_balances")
 }

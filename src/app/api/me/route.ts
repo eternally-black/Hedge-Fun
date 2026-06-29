@@ -76,6 +76,9 @@ export async function GET(req: Request) {
     shards: collectibles?.shards ?? 0,
     artifacts: collectibles?.artifacts ?? 0,
     shardsPerArtifact: SHARDS_PER_ARTIFACT, // so clients render the "/N" denominator from the server, not a hardcode
+    // Cosmetics. Coalesce when the row is absent (lazily created on first shard) — a brand-new user
+    // still owns + has equipped the free Classic skin.
+    skins: { owned: collectibles?.ownedSkins ?? ["classic"], equipped: collectibles?.equippedSkin ?? "classic" },
     streak: {
       level: streak?.currentLevel ?? 0,
       state: streak?.state ?? "ACTIVE",

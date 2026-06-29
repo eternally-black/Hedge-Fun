@@ -87,6 +87,7 @@ body{background:#060608;font-family:'Hanken Grotesk',system-ui,sans-serif;overfl
             <!-- next card -->
             <div style="position:absolute;inset:0;border-radius:26px;overflow:hidden;background:var(--panel2);border:1px solid var(--line);transform:scale({{ nextScale }}) translateY(-7px)">
               <div style="position:absolute;inset:0;background:{{ next.bgGrad }}"></div>
+              <div style="position:absolute;inset:0;opacity:.55;pointer-events:none">{{ next.pitch }}</div>
               <div style="position:absolute;top:16px;left:16px;display:flex;align-items:center;gap:7px;background:rgba(0,0,0,.35);padding:5px 10px;border-radius:20px"><div style="width:7px;height:7px;border-radius:50%;background:{{ next.color }}"></div><span style="font-size:10px;letter-spacing:.12em;text-transform:uppercase;font-weight:700;color:#fff">{{ next.label }}</span></div>
               <div style="position:absolute;left:18px;right:18px;top:50px;font-family:var(--df);font-size:24px;line-height:1.05;color:rgba(255,255,255,.85)">{{ next.q }}</div>
             </div>
@@ -94,7 +95,10 @@ body{background:#060608;font-family:'Hanken Grotesk',system-ui,sans-serif;overfl
             <!-- TOP card (interactive) -->
             <div ref="{{ cardRef }}" onPointerDown="{{ onDown }}" onPointerMove="{{ onMove }}" onPointerUp="{{ onUp }}" style="position:absolute;inset:0;border-radius:26px;overflow:hidden;background:var(--panel2);border:1px solid var(--line);box-shadow:0 24px 50px -18px rgba(0,0,0,.7);touch-action:none;cursor:grab;transform:{{ topTransform }};transition:{{ topTransition }};opacity:{{ topOpacity }};will-change:transform">
               <div style="position:absolute;inset:0;background:{{ top.bgGrad }}"></div>
+              <div style="position:absolute;inset:0;pointer-events:none">{{ top.pitch }}</div>
               <div style="position:absolute;right:-30px;bottom:-30px;opacity:.10;transform:rotate(-12deg)">{{ top.watermark }}</div>
+              <!-- readability scrim: darkens top & bottom over any background pattern, keeps text/controls clean -->
+              <div style="position:absolute;inset:0;pointer-events:none;background:linear-gradient(180deg, rgba(0,0,0,.34) 0%, transparent 22%, transparent 52%, rgba(0,0,0,.5) 78%, rgba(0,0,0,.72) 100%)"></div>
 
               <!-- direction overlays -->
               <div style="position:absolute;inset:0;background:linear-gradient(270deg, color-mix(in srgb,var(--yes) 70%, transparent), transparent 65%);opacity:{{ yesOp }};pointer-events:none"></div>
@@ -209,6 +213,7 @@ body{background:#060608;font-family:'Hanken Grotesk',system-ui,sans-serif;overfl
         <div class="hf-scroll" style="position:absolute;inset:0;overflow-y:auto;padding:8px 18px 20px;text-align:center">
           <div style="font-family:var(--df);font-size:30px;margin-top:6px">The Vault</div>
           <div style="font-size:12px;color:var(--muted);margin-top:2px">Correct calls drop shards. 20 shards forge 1 artifact.</div>
+          <div style="display:inline-flex;align-items:center;gap:7px;margin-top:11px;background:color-mix(in srgb,var(--gold) 14%,var(--panel));border:1px solid color-mix(in srgb,var(--gold) 40%,var(--line));padding:7px 14px;border-radius:22px"><span style="font-size:15px">🛡</span><span style="font-family:var(--nf);font-weight:700;color:var(--gold);font-size:15px">{{ artifacts }}</span><span style="font-size:11px;color:var(--muted);letter-spacing:.04em">artifacts to spend</span></div>
 
           <div style="margin:20px auto 0;width:150px;height:150px;position:relative;display:flex;align-items:center;justify-content:center">
             <svg viewBox="0 0 120 120" style="position:absolute;inset:0;transform:rotate(-90deg)"><circle cx="60" cy="60" r="52" fill="none" stroke="var(--panel2)" stroke-width="10"/><circle cx="60" cy="60" r="52" fill="none" stroke="var(--gold)" stroke-width="10" stroke-linecap="round" stroke-dasharray="{{ shardDash }}" stroke-dashoffset="0"/></svg>
@@ -225,7 +230,7 @@ body{background:#060608;font-family:'Hanken Grotesk',system-ui,sans-serif;overfl
           </div>
 
           <!-- streak recovery -->
-          <div style="margin-top:22px;border-radius:20px;overflow:hidden;border:1px solid {{ burnBorder }}">
+          <div style="margin-top:16px;border-radius:20px;overflow:hidden;border:1px solid {{ burnBorder }}">
             <div style="padding:16px;background:{{ burnBg }};text-align:left">
               <div style="display:flex;align-items:center;gap:10px"><div style="font-size:26px">{{ burnIcon }}</div><div><div style="font-family:var(--df);font-size:20px;color:{{ burnTitleColor }}">{{ burnTitle }}</div><div style="font-size:11px;color:var(--muted)">{{ burnSub }}</div></div></div>
               <sc-if value="{{ streakBurned }}" hint-placeholder-val="{{ false }}">
@@ -236,6 +241,26 @@ body{background:#060608;font-family:'Hanken Grotesk',system-ui,sans-serif;overfl
               </sc-if>
             </div>
           </div>
+
+          <!-- card designs shop (inside the Vault) -->
+          <div style="margin-top:24px;display:flex;align-items:center;gap:8px;text-align:left">
+            <div><div style="font-family:var(--df);font-size:22px;line-height:1">Card Designs</div><div style="font-size:11px;color:var(--muted);margin-top:2px;text-wrap:pretty">Spend artifacts on new deck looks. Tap to preview before you buy.</div></div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:11px;margin-top:13px">
+            <sc-for list="{{ skinList }}" as="sk" hint-placeholder-count="8">
+              <div onClick="{{ sk.onPreview }}" style="border-radius:16px;overflow:hidden;border:1.5px solid {{ sk.tileBd }};background:var(--panel);cursor:pointer;text-align:left">
+                <div style="position:relative;height:116px;background:{{ sk.bg }}">
+                  <div style="position:absolute;inset:0;opacity:.85;pointer-events:none">{{ sk.overlay }}</div>
+                  <div style="position:absolute;top:8px;right:8px;background:{{ sk.badgeBg }};color:{{ sk.badgeColor }};font-family:var(--nf);font-weight:700;font-size:11px;padding:3px 9px;border-radius:20px;backdrop-filter:blur(3px)">{{ sk.badge }}</div>
+                </div>
+                <div style="padding:10px 11px 12px">
+                  <div style="font-weight:700;font-size:14px">{{ sk.name }}</div>
+                  <div style="font-size:11px;color:var(--muted);margin-top:2px;line-height:1.3;text-wrap:pretty">{{ sk.blurb }}</div>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+          <div style="text-align:center;margin-top:16px;font-size:11px;color:var(--muted);text-wrap:pretty">Forge 20 shards to mint an artifact · unlocked designs are yours forever.</div>
         </div>
         </sc-if>
 
@@ -360,6 +385,38 @@ body{background:#060608;font-family:'Hanken Grotesk',system-ui,sans-serif;overfl
       </div>
       </sc-if>
 
+      <!-- ===== DESIGN PREVIEW OVERLAY ===== -->
+      <sc-if value="{{ previewOpen }}" hint-placeholder-val="{{ false }}">
+      <div style="position:absolute;inset:0;z-index:60;background:rgba(4,4,8,.74);backdrop-filter:blur(10px);display:flex;flex-direction:column;animation:hfRise .26s ease">
+        <div style="display:flex;align-items:center;padding:46px 18px 4px">
+          <div style="font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:var(--muted);font-weight:700">Preview design</div>
+          <div onClick="{{ closePreview }}" style="margin-left:auto;width:34px;height:34px;border-radius:50%;background:var(--panel);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:14px;color:var(--text)">✕</div>
+        </div>
+        <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:4px 22px;min-height:0">
+          <div style="position:relative;width:262px;max-width:100%;aspect-ratio:.62;border-radius:24px;overflow:hidden;border:1px solid var(--line);box-shadow:0 26px 56px -18px rgba(0,0,0,.85)">
+            <div style="position:absolute;inset:0;background:{{ preview.bgGrad }}"></div>
+            <div style="position:absolute;inset:0;pointer-events:none">{{ preview.pitch }}</div>
+            <div style="position:absolute;right:-26px;bottom:-26px;opacity:.10;transform:rotate(-12deg)">{{ preview.watermark }}</div>
+            <div style="position:absolute;top:12px;left:12px;background:var(--energy);color:#fff;font-family:var(--df);font-size:12px;letter-spacing:.06em;padding:3px 10px;border-radius:8px;transform:rotate(-4deg);box-shadow:0 6px 16px -4px color-mix(in srgb,var(--energy) 60%,transparent)">PREVIEW</div>
+            <div style="position:absolute;inset:0;padding:14px 15px;display:flex;flex-direction:column">
+              <div style="display:flex;align-items:center;gap:8px;margin-top:24px">
+                <div style="display:flex;align-items:center;gap:6px;background:rgba(0,0,0,.42);backdrop-filter:blur(5px);padding:5px 10px;border-radius:18px"><div style="width:7px;height:7px;border-radius:50%;background:{{ preview.color }}"></div><span style="font-size:9px;letter-spacing:.12em;text-transform:uppercase;font-weight:700;color:#fff">{{ preview.label }}</span></div>
+                <div style="margin-left:auto;background:rgba(0,0,0,.42);backdrop-filter:blur(5px);padding:5px 10px;border-radius:18px;font-family:var(--nf);font-weight:700;font-size:12px;color:#fff">⏱ {{ preview.countdown }}</div>
+              </div>
+              <div style="flex:1;display:flex;align-items:center"><div style="font-family:var(--df);font-size:26px;line-height:1.03;color:#fff;text-shadow:0 2px 16px rgba(0,0,0,.5)">{{ preview.q }}</div></div>
+              <div style="display:flex;justify-content:space-between;font-family:var(--nf);font-weight:700;font-size:11px;margin-bottom:5px"><span style="color:var(--no)">NO {{ preview.no }}%</span><span style="color:var(--yes)">{{ preview.yes }}% YES</span></div>
+              <div style="display:flex;height:10px;border-radius:7px;overflow:hidden;background:rgba(0,0,0,.4)"><div style="width:{{ preview.no }}%;background:linear-gradient(90deg,color-mix(in srgb,var(--no) 60%,#000),var(--no))"></div><div style="flex:1;background:linear-gradient(90deg,var(--yes),color-mix(in srgb,var(--yes) 60%,#000))"></div></div>
+            </div>
+          </div>
+          <div style="text-align:center;margin-top:15px"><div style="font-family:var(--df);font-size:24px">{{ preview.name }}</div><div style="font-size:12px;color:var(--muted);margin-top:2px;max-width:280px">{{ preview.blurb }}</div></div>
+        </div>
+        <div style="padding:4px 20px 24px">
+          <div onClick="{{ preview.ctaAction }}" style="background:{{ preview.ctaColor }};color:{{ preview.ctaText }};font-family:var(--df);font-size:21px;text-align:center;padding:15px;border-radius:16px;cursor:pointer">{{ preview.ctaLabel }}</div>
+          <div style="text-align:center;margin-top:9px;font-size:11px;color:var(--muted)">{{ preview.hint }}</div>
+        </div>
+      </div>
+      </sc-if>
+
       <!-- ===== BOTTOM NAV ===== -->
       <div style="position:relative;z-index:40;display:flex;align-items:center;justify-content:space-around;padding:10px 8px 22px;background:linear-gradient(0deg,var(--bg) 60%,transparent);border-top:1px solid var(--line)">
         <div onClick="{{ goDeck }}" style="display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer;color:{{ navDeck }}"><span style="font-size:20px">⚡</span><span style="font-size:9px;letter-spacing:.06em;text-transform:uppercase;font-weight:700">Deck</span></div>
@@ -468,14 +525,18 @@ class Component extends DCLogic {
     this.t0 = Date.now();
     this.cats = {
       crypto:   { label:'Crypto',   color:'#ff8a3d', icon:['M12 3a9 9 0 100 18 9 9 0 000-18','M12 7v10','M9.6 9.4h4.2a1.8 1.8 0 010 3.6H9.6','M9.6 13h4.6a1.8 1.8 0 010 3.6H9.6'] },
+      football: { label:'Football', color:'#2ee36a', icon:['M12 3a9 9 0 100 18 9 9 0 000-18','M12 7.5l4.3 3.1-1.6 5h-5.4l-1.6-5z','M12 7.5V3.2','M16.3 10.6l4-1.4','M7.7 10.6l-4-1.4','M9.3 15.6l-2.6 3.4','M14.7 15.6l2.6 3.4'] },
       sports:   { label:'Sports',   color:'#3d7bff', icon:['M12 3a9 9 0 100 18 9 9 0 000-18','M3 12h18','M12 3v18','M6 5c3 4 3 10 0 14','M18 5c-3 4-3 10 0 14'] },
       esports:  { label:'Esports',  color:'#b14dff', icon:['M7 9h10a4 4 0 014 4 3.5 3.5 0 01-6.6 1.6L13.5 14h-3l-.9.6A3.5 3.5 0 013 13a4 4 0 014-4z','M7.5 11.5v3','M6 13h3','M16 12h.01','M18 13.5h.01'] },
       weather:  { label:'Weather',  color:'#19c8ff', icon:['M7 18h9a4 4 0 000-8 5 5 0 00-9.6-1.6A3.5 3.5 0 007 18z'] },
       politics: { label:'Politics', color:'#94a3b8', icon:['M4 10l8-5 8 5','M5 10v7','M9 10v7','M15 10v7','M19 10v7','M3 20h18'] }
     };
     this.markets = [
+      { cat:'football', yes:54, hrs:3.4,  q:'Will Real Madrid beat Barcelona tonight?', desc:'Resolves YES if Real Madrid win El Cl\u00e1sico in regulation + stoppage time (penalties excluded).', vol:'$2.2M' },
       { cat:'crypto',   yes:58, hrs:4.2,  q:'Will BTC close above $112,000 today?', desc:'Resolves YES if Binance BTC/USDT daily candle closes \u2265 $112,000 at 00:00 UTC.', vol:'$1.4M' },
+      { cat:'football', yes:61, hrs:5.1,  q:'Over 2.5 goals in Man City vs Arsenal?', desc:'Resolves YES if 3 or more total goals are scored across 90 minutes + stoppage time.', vol:'$1.6M' },
       { cat:'sports',   yes:47, hrs:6.1,  q:'Lakers to beat the Celtics tonight?', desc:'Resolves YES if the Lakers win the regular-season game outright (no overtime exclusions).', vol:'$890K' },
+      { cat:'football', yes:38, hrs:2.2,  q:'Haaland to score first vs Liverpool?', desc:'Resolves YES if Erling Haaland scores the opening goal of the match (own goals excluded).', vol:'$1.1M' },
       { cat:'esports',  yes:71, hrs:2.5,  q:'Will T1 win their Worlds group match?', desc:'Resolves YES if T1 wins the mapped best-of-one group stage match today.', vol:'$420K' },
       { cat:'weather',  yes:64, hrs:9.0,  q:'Will Phoenix hit 95\u00b0F today?', desc:'Resolves YES if the official NWS Phoenix Sky Harbor high reaches 95\u00b0F.', vol:'$210K' },
       { cat:'crypto',   yes:39, hrs:7.4,  q:'ETH gas under 5 gwei before midnight?', desc:'Resolves YES if the median Ethereum base fee dips below 5 gwei before 00:00 UTC.', vol:'$640K' },
@@ -497,6 +558,13 @@ class Component extends DCLogic {
     // peak-end order: end on the user's biggest win (Luka 47, +235), drop the dullest loss from the featured run
     this.featuredOrder = [0,1,2,3,5];
     this.agg = this.results.reduce((a,r)=>({ net:a.net+r.delta, w:a.w+(r.status==='win'?1:0), l:a.l+(r.status==='loss'?1:0), shards:a.shards+r.shards }),{net:0,w:0,l:0,shards:0});
+    // ===== collectible card designs (skins), bought with artifacts =====
+    this.skins = [
+      { id:'classic',  name:'Classic',     cost:0, accent:'#3d7bff', blurb:'Category tints, free for everyone.' },
+      { id:'vapor',    name:'Vapor',       cost:2, accent:'#ff3dcd', blurb:'Synthwave horizon, endless run.' },
+      { id:'aurora',   name:'Aurora',      cost:5, accent:'#7b8cff', blurb:'Iridescent silk waves over deep space.' },
+      { id:'midas',    name:'Midas',       cost:7, accent:'#ffc24b', blurb:'Gilded isometric architecture in the dark.' }
+    ];
     this.state = {
       screen: 'deck',
       idx: 0,
@@ -516,6 +584,10 @@ class Component extends DCLogic {
       streakBurned: false,
       copied: false,
       auth: true,
+      artifacts: 3,
+      ownedSkins: ['classic'],
+      equippedSkin: 'classic',
+      previewSkin: null,
       history: [
         { q:'Will BTC reclaim $108k by Friday?', side:'YES', cat:'Crypto', status:'won',  delta:'+$72' },
         { q:'Real Madrid to win El Clasico?',     side:'NO',  cat:'Sports', status:'lost', delta:'-$100' },
@@ -545,6 +617,70 @@ class Component extends DCLogic {
       c.icon.map((d,i) => React.createElement('path', { key:i, d })));
   }
 
+  buildPitch(){
+    const el = React.createElement;
+    const ln = 'rgba(225,255,235,0.26)';
+    const common = { fill:'none', stroke:ln, strokeWidth:2, vectorEffect:'non-scaling-stroke' };
+    const dot = (cx,cy) => el('circle',{key:'d'+cx+cy,cx,cy,r:2.6,fill:ln,stroke:'none'});
+    return el('svg', { viewBox:'0 0 300 470', preserveAspectRatio:'xMidYMid slice', width:'100%', height:'100%' },
+      el('rect',  { ...common, key:'b', x:14, y:14, width:272, height:442, rx:3 }),
+      el('line',  { ...common, key:'h', x1:14, y1:235, x2:286, y2:235 }),
+      el('circle',{ ...common, key:'c', cx:150, cy:235, r:48 }),
+      dot(150,235),
+      // top half
+      el('rect',  { ...common, key:'tb', x:58, y:14, width:184, height:78 }),
+      el('rect',  { ...common, key:'tg', x:106, y:14, width:88, height:32 }),
+      el('path',  { ...common, key:'ta', d:'M104 92 a 52 52 0 0 0 92 0' }),
+      dot(150,66),
+      // bottom half
+      el('rect',  { ...common, key:'bb', x:58, y:378, width:184, height:78 }),
+      el('rect',  { ...common, key:'bg', x:106, y:424, width:88, height:32 }),
+      el('path',  { ...common, key:'ba', d:'M104 378 a 52 52 0 0 1 92 0' }),
+      dot(150,404),
+      // corner arcs
+      el('path',  { ...common, key:'c1', d:'M14 28 a 14 14 0 0 1 -0 -14' }),
+      el('path',  { ...common, key:'c2', d:'M286 14 a 14 14 0 0 1 0 14' }),
+      el('path',  { ...common, key:'c3', d:'M14 442 a 14 14 0 0 0 0 14' }),
+      el('path',  { ...common, key:'c4', d:'M286 456 a 14 14 0 0 0 0 -14' })
+    );
+  }
+  buildGrid(){
+    const el=React.createElement, kids=[];
+    const cH='rgba(255,90,210,0.42)', cV='rgba(70,210,255,0.34)';
+    for(let i=-6;i<=6;i++){ kids.push(el('line',{key:'v'+i,x1:150,y1:150,x2:150+i*72,y2:470,stroke:cV,strokeWidth:1.4,vectorEffect:'non-scaling-stroke'})); }
+    let y=150, step=7;
+    for(let i=0;i<16;i++){ y+=step; step*=1.34; if(y>470) break; kids.push(el('line',{key:'h'+i,x1:0,y1:y,x2:300,y2:y,stroke:cH,strokeWidth:1.3,vectorEffect:'non-scaling-stroke'})); }
+    return el('svg',{viewBox:'0 0 300 470',preserveAspectRatio:'xMidYMid slice',width:'100%',height:'100%'},kids);
+  }
+  buildCircuit(){
+    const el=React.createElement, c='rgba(55,227,200,0.5)';
+    const segs=['M8 64 H92 V128 H156','M292 96 H212 V156 H156','M28 470 V300 H120 V214','M272 470 V330 H182 V250','M8 232 H72 V276','M292 252 H232 V200','M156 128 V172','M120 214 H182'];
+    const paths=segs.map((d,i)=>el('path',{key:'p'+i,d,fill:'none',stroke:c,strokeWidth:1.6,vectorEffect:'non-scaling-stroke'}));
+    const nodes=[[92,128],[156,128],[156,172],[212,156],[120,214],[182,250],[72,276],[232,200]].map((n,i)=>el('circle',{key:'n'+i,cx:n[0],cy:n[1],r:3.4,fill:c,stroke:'none'}));
+    return el('svg',{viewBox:'0 0 300 470',preserveAspectRatio:'xMidYMid slice',width:'100%',height:'100%'},[...paths,...nodes]);
+  }
+  buildSheen(){
+    const el=React.createElement;
+    return el('svg',{viewBox:'0 0 300 470',preserveAspectRatio:'none',width:'100%',height:'100%'},
+      [0,1,2,3,4].map(i=>el('rect',{key:'s'+i,x:-80+i*78,y:-40,width:30,height:560,fill:'rgba(255,255,255,0.11)',transform:'skewX(-20)'})));
+  }
+  buildVeins(){
+    const el=React.createElement, c='rgba(255,214,128,0.5)';
+    const ds=['M-10 120 C 60 100, 90 188, 162 152 S 280 206, 320 162','M-10 308 C 72 286, 112 368, 184 332 S 300 384, 332 344','M44 -10 C 64 84, 22 146, 84 214 S 60 364, 122 470'];
+    return el('svg',{viewBox:'0 0 300 470',preserveAspectRatio:'none',width:'100%',height:'100%'},
+      ds.map((d,i)=>el('path',{key:'g'+i,d,fill:'none',stroke:c,strokeWidth:i===2?1.2:1.9,vectorEffect:'non-scaling-stroke'})));
+  }
+  skinStyle(id, col, isFootball){
+    const grass='repeating-linear-gradient(178deg, rgba(255,255,255,0.045) 0 46px, rgba(0,0,0,0.07) 46px 92px), radial-gradient(120% 60% at 50% -8%, rgba(46,227,106,0.34), transparent 58%), linear-gradient(170deg, #123a26, #0a2014)';
+    switch(id){
+      case 'vapor':   return { bg:'radial-gradient(90% 50% at 50% 16%, rgba(255,61,205,.5), transparent 60%), radial-gradient(58% 32% at 50% 9%, rgba(255,196,75,.55), transparent 60%), radial-gradient(120% 70% at 50% 14%, rgba(54,224,255,.32), transparent 55%), linear-gradient(180deg,#2a0f3f 0%, #1a0a2e 44%, #08040f 100%)', overlay:this.buildGrid() };
+      case 'aurora':  return { bg:"#05060c center/cover no-repeat url('assets/skin-aurora.png')", overlay:null };
+      case 'midas':   return { bg:"#070501 center/cover no-repeat url('assets/skin-midas.png')", overlay:null };
+      default:
+        if(isFootball) return { bg:grass, overlay:this.buildPitch() };
+        return { bg:'radial-gradient(80% 60% at 16% 10%, '+col+'3a, transparent 60%), radial-gradient(75% 60% at 90% 6%, '+col+'22, transparent 55%), radial-gradient(100% 80% at 50% 125%, rgba(0,0,0,.45), transparent 60%), linear-gradient(165deg, var(--panel2), var(--panel))', overlay:null };
+    }
+  }
   market(i){ return this.markets[((i % this.markets.length)+this.markets.length)%this.markets.length]; }
   fmtCountdown(hrs){
     const total = Math.max(0, Math.round((this.t0 + hrs*3600000 - this.state.now)/1000));
@@ -553,15 +689,18 @@ class Component extends DCLogic {
     return m+'m '+String(s).padStart(2,'0')+'s';
   }
   pay(yes, side){ const p = side==='yes' ? yes/100 : (100-yes)/100; return Math.round(100/Math.max(0.02,p)); }
-  cardView(i){
+  cardView(i, skinId){
     const m = this.market(i); const c = this.cats[m.cat];
     const urgent = (this.t0 + m.hrs*3600000 - this.state.now) < 3600000;
+    const isFootball = m.cat==='football';
+    const skin = this.skinStyle(skinId || this.state.equippedSkin, c.color, isFootball);
     return {
       cat:m.cat, label:c.label, color:c.color, q:m.q, desc:m.desc, vol:m.vol,
       yes:m.yes, no:100-m.yes, countdown:this.fmtCountdown(m.hrs),
       payYes:this.pay(m.yes,'yes'), payNo:this.pay(m.yes,'no'),
-      bgGrad:'radial-gradient(120% 80% at 80% 0%, '+c.color+'2e, transparent 55%), linear-gradient(170deg, var(--panel2), var(--panel))',
-      watermark:this.buildIcon(m.cat, 240, c.color),
+      bgGrad: skin.bg,
+      pitch: skin.overlay,
+      watermark: skin.overlay ? null : this.buildIcon(m.cat, 240, c.color),
       urgentText: urgent ? 'var(--no)' : '#fff',
       urgentBorder: urgent ? 'color-mix(in srgb,var(--no) 60%,transparent)' : 'transparent',
       resolveAt: '<'+Math.ceil(m.hrs)+'h'
@@ -610,12 +749,17 @@ class Component extends DCLogic {
   openDetail(){ this.setState({ detail:this.cardView(this.state.idx) }); }
   closeDetail(){ this.setState({ detail:null }); }
 
-  go(s){ this.setState({ screen:s, detail:null }); }
+  go(s){ this.setState({ screen:s, detail:null, previewSkin:null }); }
   goNotifs(){ this.setState({ screen:'notifications', detail:null, unread:0 }); }
+  goSkins(){ this.setState({ screen:'skins', detail:null }); }
+  openPreview(id){ this.setState({ previewSkin:id }); }
+  closePreview(){ this.setState({ previewSkin:null }); }
+  equipSkin(id){ this.setState({ equippedSkin:id }); }
+  unlockSkin(id){ const sk=this.skins.find(x=>x.id===id); if(!sk||this.state.artifacts<sk.cost||this.state.ownedSkins.includes(id)) return; this.setState({ artifacts:this.state.artifacts-sk.cost, ownedSkins:[...this.state.ownedSkins,id], equippedSkin:id }); }
   doGM(){ if(this.state.gmDone) return; this.setState({ gmDone:true, streak:this.state.streak+1, points:this.state.points+100, shards:Math.min(20,this.state.shards+1) }); }
   gmButton(){ if(this.state.gmDone){ this.go('deck'); } else { this.doGM(); } }
   burnDemo(){ this.setState({ streakBurned:true }); }
-  reviveStreak(){ this.setState({ streakBurned:false, streak:6 }); }
+  reviveStreak(){ if(this.state.artifacts<1) return; this.setState({ streakBurned:false, streak:6, artifacts:this.state.artifacts-1 }); }
   copyInvite(){ this.setState({copied:true}); setTimeout(()=>this.setState({copied:false}),1600); }
   doAuth(){ this.setState({ auth:false }); if(this.results.length){ this.enterReveal(); } else { this.go('gm'); } }
 
@@ -728,6 +872,36 @@ class Component extends DCLogic {
 
     const net=this.agg.net;
 
+    // ===== card-design shop =====
+    const arts=s.artifacts;
+    const skinList=this.skins.map(sk=>{
+      const owned=s.ownedSkins.includes(sk.id), equipped=s.equippedSkin===sk.id, afford=arts>=sk.cost;
+      const st=this.skinStyle(sk.id, sk.accent, false);
+      let badge, badgeColor, badgeBg;
+      if(equipped){ badge='Equipped'; badgeColor='#04210f'; badgeBg='var(--yes)'; }
+      else if(owned){ badge='Owned'; badgeColor='var(--text)'; badgeBg='rgba(0,0,0,.5)'; }
+      else { badge='\ud83d\udee1 '+sk.cost; badgeColor=afford?'#1a1205':'#fff'; badgeBg=afford?'var(--gold)':'rgba(0,0,0,.55)'; }
+      return { id:sk.id, name:sk.name, blurb:sk.blurb, bg:st.bg, overlay:st.overlay, badge, badgeColor, badgeBg,
+        tileBd: equipped?'var(--yes)':'var(--line)', onPreview:(()=>this.openPreview(sk.id)) };
+    });
+
+    const pv=s.previewSkin;
+    let preview;
+    if(pv){
+      const sk=this.skins.find(x=>x.id===pv), owned=s.ownedSkins.includes(pv), equipped=s.equippedSkin===pv, afford=arts>=sk.cost;
+      const card=this.cardView(s.idx, pv);
+      let ctaLabel, ctaAction=()=>{}, ctaColor, ctaText, hint;
+      if(equipped){ ctaLabel='Equipped \u2713'; ctaColor='var(--panel2)'; ctaText='var(--muted)'; hint='This design is live on your deck.'; }
+      else if(owned){ ctaLabel='Equip design'; ctaAction=()=>this.equipSkin(pv); ctaColor='var(--energy)'; ctaText='#fff'; hint='You own this design \u2014 make it active.'; }
+      else if(afford){ ctaLabel='Unlock for \ud83d\udee1 '+sk.cost; ctaAction=()=>this.unlockSkin(pv); ctaColor='var(--gold)'; ctaText='#1a1205'; hint='Spends '+sk.cost+' of your '+arts+' artifacts \u00b7 equips instantly.'; }
+      else { ctaLabel='Need \ud83d\udee1 '+sk.cost; ctaColor='var(--panel2)'; ctaText='var(--muted)'; hint='You have '+arts+'. Forge 20 shards to mint an artifact.'; }
+      preview={ name:sk.name, blurb:sk.blurb, bgGrad:card.bgGrad, pitch:card.pitch, watermark:card.watermark,
+        label:card.label, color:card.color, q:card.q, yes:card.yes, no:card.no, countdown:card.countdown,
+        ctaLabel, ctaAction, ctaColor, ctaText, hint };
+    } else {
+      preview={ name:'', blurb:'', bgGrad:'transparent', pitch:null, watermark:null, label:'', color:'#fff', q:'', yes:50, no:50, countdown:'', ctaLabel:'', ctaAction:()=>{}, ctaColor:'var(--panel2)', ctaText:'var(--muted)', hint:'' };
+    }
+
     const detail = s.detail;
 
     return {
@@ -739,6 +913,8 @@ class Component extends DCLogic {
       doGM:()=>this.doGM(), burnDemo:()=>this.burnDemo(), reviveStreak:()=>this.reviveStreak(),
       copyInvite:()=>this.copyInvite(), doAuth:()=>this.doAuth(), closeDetail:()=>this.closeDetail(),
       goNotifs:()=>this.goNotifs(), gmButton:()=>this.gmButton(), goDeckPlain:()=>this.go('deck'),
+      goSkins:()=>this.goSkins(), closePreview:()=>this.closePreview(),
+      showSkins:s.screen==='skins', previewOpen:!!pv, artifacts:s.artifacts, skinList, preview,
       revealTap:()=>this.revealTap(), skipReveal:()=>this.skipReveal(), finishReveal:()=>this.finishReveal(), replayReveal:()=>this.replayReveal(), toggleSeeAll:()=>this.toggleSeeAll(),
 
       authOpen:s.auth,

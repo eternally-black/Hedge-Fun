@@ -1,13 +1,16 @@
 // DB-free unit test for the football settlement decision + market-id parser.
 import assert from "node:assert";
-import { parseTxMarketId, decideOuResolution } from "./settle-football";
+import { parseTxMarketId, decideOuResolution, decideWinResolution } from "./settle-football";
 
 // ── parseTxMarketId ──
-assert.deepStrictEqual(parseTxMarketId("txline:18172469:OU25"), { fixtureId: 18172469, line: 2.5 });
-assert.deepStrictEqual(parseTxMarketId("txline:1:OU15"), { fixtureId: 1, line: 1.5 });
-assert.deepStrictEqual(parseTxMarketId("txline:1:OU35"), { fixtureId: 1, line: 3.5 });
+assert.deepStrictEqual(parseTxMarketId("txline:18172469:OU25"), { fixtureId: 18172469, kind: "OU", line: 2.5 });
+assert.deepStrictEqual(parseTxMarketId("txline:1:OU15"), { fixtureId: 1, kind: "OU", line: 1.5 });
+assert.deepStrictEqual(parseTxMarketId("txline:1:OU35"), { fixtureId: 1, kind: "OU", line: 3.5 });
+assert.deepStrictEqual(parseTxMarketId("txline:1:WINH"), { fixtureId: 1, kind: "WIN", team: "home" });
+assert.deepStrictEqual(parseTxMarketId("txline:1:WINA"), { fixtureId: 1, kind: "WIN", team: "away" });
 assert.strictEqual(parseTxMarketId("0xc0ffee"), null, "polymarket id is not a tx id");
 assert.strictEqual(parseTxMarketId("txline:1:OU99"), null, "unknown line kind");
+assert.strictEqual(parseTxMarketId("txline:1:WIND"), null, "unknown win kind");
 assert.strictEqual(parseTxMarketId("txline:abc:OU25"), null, "non-numeric fixture");
 
 // ── decideOuResolution: Over wins iff total goals > line ──
@@ -27,5 +30,14 @@ assert.deepStrictEqual(decideOuResolution({ line: 2.5, home: 1, away: 0, endedPh
 
 // ── time-fallback: past the settle deadline WITH data settles even if the phase still lags ──
 assert.deepStrictEqual(decideOuResolution({ line: 2.5, home: 1, away: 0, endedPhase: false, abandoned: false, pastDeadline: true }), { kind: "resolved", resolvedYes: false }, "past deadline + data → settle (1 < 2.5 Under)");
+
+// ── decideWinResolution: "{team} to win?" wins iff that team outscores the other; draw → NO on both ──
+assert.deepStrictEqual(decideWinResolution({ team: "home", home: 2, away: 1, ...ended }), { kind: "resolved", resolvedYes: true }, "home 2-1 → home wins");
+assert.deepStrictEqual(decideWinResolution({ team: "away", home: 2, away: 1, ...ended }), { kind: "resolved", resolvedYes: false }, "away loses 1-2");
+assert.deepStrictEqual(decideWinResolution({ team: "away", home: 1, away: 3, ...ended }), { kind: "resolved", resolvedYes: true }, "away 3-1 → away wins");
+assert.deepStrictEqual(decideWinResolution({ team: "home", home: 1, away: 1, ...ended }), { kind: "resolved", resolvedYes: false }, "draw → home-win NO");
+assert.deepStrictEqual(decideWinResolution({ team: "away", home: 1, away: 1, ...ended }), { kind: "resolved", resolvedYes: false }, "draw → away-win NO");
+assert.deepStrictEqual(decideWinResolution({ team: "home", home: null, away: null, endedPhase: true, abandoned: false, pastDeadline: true }), { kind: "open" }, "win: no data → never settle");
+assert.deepStrictEqual(decideWinResolution({ team: "home", home: 1, away: 0, endedPhase: false, abandoned: true, pastDeadline: true }), { kind: "open" }, "win: abandoned → open");
 
 console.log("settle-football: OK");

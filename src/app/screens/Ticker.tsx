@@ -90,7 +90,7 @@ export function Ticker({ api }: { api: Api }) {
   // Derived during render (rerender-derived-state-no-effect): duplicate the row set for a seamless
   // marquee loop, and scale duration to content so scroll speed stays steady as the count changes.
   const items = [...rows, ...rows];
-  const durationS = Math.max(24, rows.length * 5);
+  const durationS = Math.max(18, rows.length * 4); // ~steady scroll speed; scales with row count
 
   return (
     <div

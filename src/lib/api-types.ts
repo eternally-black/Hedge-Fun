@@ -93,6 +93,20 @@ export interface FeedBetResponse {
   betId: string;
 }
 
+// ─── GET /api/football/match ─────────────────────────────────────────────────────────────────────
+// Auth: Bearer. Query ?fixtureId=<id>. The relevant binary markets for ONE World Cup fixture —
+// "{team} to win?" (from 1X2) + Over/Under total goals (1.5/2.5/3.5) — read from the cached TXODDS
+// Market rows (the same store the deck/feed read; NOT band-filtered, so favorites show too). Cards
+// reuse DeckCard; placedSide = the side the user already bet on that market (null if none), so the
+// detail view shows it locked. Bet via POST /api/feed/bet (these are ordinary Market rows). Empty
+// cards = no odds offered for this fixture yet (O/U coverage is bursty). 400 if fixtureId is missing.
+export interface FootballMarketCard extends DeckCard {
+  placedSide?: BetSide | null;
+}
+export interface FootballMatchResponse {
+  cards: FootballMarketCard[];
+}
+
 // ─── POST /api/swipe ───────────────────────────────────────────────────────────────────────────
 // Auth: Bearer. Body: SwipeRequest. Paper bet Yes/No on a deck market; locks the bought side's price.
 // Errors: 400 (bad body), 409 (market not open / already swiped this market), 403 (daily cap reached),
@@ -221,6 +235,9 @@ export interface MeResponse {
   shards: number;
   artifacts: number;
   shardsPerArtifact: number; // shards needed to forge 1 artifact (so clients don't hardcode it)
+  // Card-skins cosmetics. `owned` = skin ids the user has (always includes "classic"); `equipped` =
+  // the id applied to every deck card. Catalog (cost/name/look) is client-side (src/lib/skins.ts).
+  skins: { owned: string[]; equipped: string };
   streak: {
     level: number;
     state: StreakState;
@@ -235,6 +252,17 @@ export interface MeResponse {
   // client skips the GM/reveal open ritual for new users — straight to the deck so they feel the
   // core loop first. Derived (streak.level===0 && !loginMarkedToday), no extra query.
   isNewUser: boolean;
+}
+
+// ─── POST /api/skins ─────────────────────────────────────────────────────────────────────────────
+// Auth: Bearer. Body: { action: "unlock" | "equip", skinId }. unlock spends `skinById(id).cost`
+// artifacts (then auto-equips); equip just switches (no cost, must already own). Returns the fresh
+// owned/equipped/artifacts so the client repaints without a second /api/me round-trip.
+// Errors: 400 bad action/id · 402 not enough artifacts · 409 already owned (unlock) / not owned (equip).
+export interface SkinActionResponse {
+  owned: string[];
+  equipped: string;
+  artifacts: number;
 }
 
 // ─── POST /api/capture-ref ───────────────────────────────────────────────────────────────────────

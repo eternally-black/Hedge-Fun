@@ -100,13 +100,14 @@ export async function fetchScores(fixtureId: number): Promise<TxScoreRecord[]> {
 // demarginalized %). Returns YES(over)/NO(under) prices in basis points. Used by market generation.
 export const OU_LINES = ["1.5", "2.5", "3.5"] as const;
 export const OU_KIND: Record<string, string> = { "1.5": "OU15", "2.5": "OU25", "3.5": "OU35" };
+export const WIN_KIND: Record<"home" | "away", string> = { home: "WINH", away: "WINA" };
 export interface OuMarket {
   line: string; // "1.5" | "2.5" | "3.5"
   overBp: number; // YES side (Over) price in bp
   underBp: number; // NO side (Under) price in bp
 }
-export async function fetchOuMarkets(fixtureId: number): Promise<OuMarket[]> {
-  const odds = await fetchOdds(fixtureId);
+// Pure: extract O/U markets from an already-fetched odds snapshot (so callers fetch odds once).
+export function parseOuMarkets(odds: TxOddsPayload[]): OuMarket[] {
   const out: OuMarket[] = [];
   for (const line of OU_LINES) {
     const o = odds.find(
@@ -123,6 +124,37 @@ export async function fetchOuMarkets(fixtureId: number): Promise<OuMarket[]> {
     const underBp = Math.round(parseFloat(un) * 100);
     if (Number.isFinite(overBp) && Number.isFinite(underBp)) out.push({ line, overBp, underBp });
   }
+  return out;
+}
+export async function fetchOuMarkets(fixtureId: number): Promise<OuMarket[]> {
+  return parseOuMarkets(await fetchOdds(fixtureId));
+}
+
+// Binary "{team} to win?" markets, derived from the full-match 1X2 demarginalized %: home YES =
+// P(part1), away YES = P(part2); NO = the rest (draw or the other team). Skipped if 1X2 isn't
+// offered or the % is NA. PriceNames are part1/draw/part2 — matched by name, positional [0]/[2] fallback.
+export interface WinMarket {
+  team: "home" | "away";
+  winBp: number; // YES side ("team wins") price in bp; NO side = 10000 − winBp
+}
+export function parseWinMarkets(odds: TxOddsPayload[]): WinMarket[] {
+  const o = odds.find(
+    (x) => x.SuperOddsType === "1X2_PARTICIPANT_RESULT" && (x.MarketPeriod == null || x.MarketPeriod === ""),
+  );
+  if (!o) return [];
+  const names = o.PriceNames ?? [];
+  const idx = (want: RegExp, fallback: number) => {
+    const i = names.findIndex((n) => want.test(n));
+    return i >= 0 ? i : fallback;
+  };
+  const out: WinMarket[] = [];
+  const push = (team: "home" | "away", raw: string | undefined) => {
+    if (!raw || raw === "NA") return;
+    const bp = Math.round(parseFloat(raw) * 100);
+    if (Number.isFinite(bp) && bp > 0 && bp < 10000) out.push({ team, winBp: bp });
+  };
+  push("home", o.Pct?.[idx(/1$|home|part1/i, 0)]);
+  push("away", o.Pct?.[idx(/2$|away|part2/i, 2)]);
   return out;
 }
 
