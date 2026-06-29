@@ -391,9 +391,6 @@ function App() {
   // Hard daily cap: once a non-dev user hits the swipe cap, stop the deck and show the
   // "come back tomorrow" screen. Dev accounts swipe unlimited (and have a deck reset).
   const capReached = !!me && !me.dev && me.swipes.used >= me.swipes.cap;
-  // The feed unlocks once the swipe cap is spent (dev accounts always — they never hit capReached).
-  // Derived during render (no effect/stored state) — drives both the cap-screen CTA and the nav tab.
-  const feedUnlocked = !!me && (me.dev || me.swipes.used >= me.swipes.cap);
   const deckLocked = capReached; // non-dev who spent the cap: the deck is done until 00:00 UTC
   // Once the deck is locked the FEED is home. We render it in the deck slot too (so relogin / the
   // post-reveal landing / a tap on a stale Deck route all show the feed), EXCEPT the one-shot
@@ -472,7 +469,7 @@ function App() {
         {effectiveScreen === "notifications" && <NotificationsScreen api={api} onSeen={markResultsSeen} onReplay={replayReveal} />}
       </div>
 
-      <BottomNav screen={effectiveScreen} onNav={navTo} feedUnlocked={feedUnlocked} deckLocked={deckLocked} />
+      <BottomNav screen={effectiveScreen} onNav={navTo} deckLocked={deckLocked} devFeed={!!me?.dev} />
 
       {/* Results reveal sits above the whole shell (HUD + nav). */}
       {reveal && (
