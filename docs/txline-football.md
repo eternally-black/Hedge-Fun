@@ -3,7 +3,8 @@
 Live World Cup football on top of HedgeFun's crypto/Polymarket core, sourced from **TxOdds TxLINE**
 (cryptographically-verifiable, Solana-anchored sports data): a global live ticker, a World Cup hub,
 swipeable Over/Under markets, and **settlement on Solana-anchored scores**. Shipped 2026-06-29
-(commits `0b02004` + `cf26b08`), live at https://app.hedgeyour.fun.
+(commits `0b02004` + `cf26b08`), live at https://app.hedgeyour.fun. Prod upgraded to **mainnet SL12
+real-time** 2026-06-30.
 
 This doc is the full record: overview → Solana angle → architecture → verified API facts → on-chain
 bootstrap & cost → settlement → data model → verification → deploy/ops runbook → limitations.
@@ -29,8 +30,10 @@ TxLINE serves data off-chain (REST) but commits **daily Merkle roots of every sc
 program, and gates access by an on-chain `subscribe()` transaction — our operator wallet is a
 registered subscriber on-chain.
 
-- **Proof of Solana sign-up** — the one-time `subscribe()` tx (free World Cup tier, 0 TxL), devnet:
-  `https://solscan.io/tx/29wXqMk2B8x7qa6HYWD41Nm1tT65bMXxjM5wNuEpKxqtReKpTCCA4v2SZR1aTQmGevT8T3wxyoJaijzpQ4zeVo11?cluster=devnet`
+- **Proof of Solana sign-up** — the one-time `subscribe()` tx (free World Cup tier, 0 TxL):
+  - **mainnet** (live, SL12 real-time — on-chain decode confirms `serviceLevelId=12`):
+    `https://solscan.io/tx/3oB8RMLEjDHBtvdwNhb9DjYBCVL1Xo4QUHw3DK1XLhMAr1YeRercCDrPKJWXQLNd9xzGsXRGUVMhFC48DegXohpL`
+  - devnet (SL1): `https://solscan.io/tx/29wXqMk2B8x7qa6HYWD41Nm1tT65bMXxjM5wNuEpKxqtReKpTCCA4v2SZR1aTQmGevT8T3wxyoJaijzpQ4zeVo11?cluster=devnet`
 - **Verifiable settlement** — football bets settle on scores anchored to the program's Merkle roots;
   the result badge links the on-chain anchor (`onchainAnchorRef()` → Solscan, per network).
 - **Deferred deepening** — full client-side Merkle-membership verification via the
@@ -246,7 +249,7 @@ test`) when changing a response contract.
 
 ## 11. Known limitations / deferred
 
-- Devnet SL1 = 60s-delayed data (the prod ticker updates ~once/minute). Mainnet SL12 = real-time.
+- Prod runs **mainnet SL12 (real-time)** as of 2026-06-30. Devnet SL1 (60s-delayed) is the local-dev default.
 - Devnet subscription is short-lived; re-bootstrap to refresh the token.
 - Full client-side Merkle-membership verification (`/scores/stat-validation`) is deferred — the badge
   links the on-chain anchor, it does not recompute the proof.
