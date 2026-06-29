@@ -18,6 +18,7 @@
 
 // String enums mirrored from Prisma so this file stays @prisma/client-free (RN has no Prisma).
 export type BetSide = "YES" | "NO";
+export type BetSource = "DECK" | "FEED"; // DECK = swipe deck (points + capped shards); FEED = post-cap feed (no points, uncapped shards)
 export type StreakState = "ACTIVE" | "BURNED_RECOVERABLE" | "LOST";
 export type PointsType = "SWIPE" | "LOGIN" | "REFERRAL" | "STREAK_X2";
 export type BetStatus = "PENDING" | "WIN" | "LOSS" | "PUSH";
@@ -45,6 +46,29 @@ export interface DeckCard {
 }
 export interface DeckResponse {
   cards: DeckCard[];
+}
+
+// ─── GET /api/feed ─────────────────────────────────────────────────────────────────────────────
+// Auth: Bearer. The post-cap "лента": an endless, crypto-first stream of near-50% binary markets
+// (all tiers), minus any the user already bet. Cursor-paginated for infinite scroll — pass the prior
+// response's `nextCursor` as ?cursor= to get the next page; nextCursor is null when the pool is dry.
+// Cards reuse the DeckCard shape verbatim (same fields). Betting here is points-FREE (shards uncapped).
+export interface FeedResponse {
+  cards: DeckCard[];
+  nextCursor: string | null; // opaque cursor for the next page, or null at the end of the pool
+}
+
+// ─── POST /api/feed/bet ────────────────────────────────────────────────────────────────────────
+// Auth: Bearer. Body: FeedBetRequest. Paper bet on a feed market — same $10 stake/cash-hold as a
+// swipe, but NO points and NO daily cap (shards still accrue on a win, uncapped). NOT gated by the
+// swipe cap (the feed is what you get AFTER the cap). Errors: 400 (bad body), 402 (insufficient Cash —
+// { error: "insufficient_funds" }), 409 (market not open / already bet / market_expired).
+export interface FeedBetRequest {
+  marketId: string;
+  side: BetSide;
+}
+export interface FeedBetResponse {
+  betId: string;
 }
 
 // ─── POST /api/swipe ───────────────────────────────────────────────────────────────────────────

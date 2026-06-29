@@ -135,7 +135,9 @@ export async function settleMarket(
         });
 
         if (won) {
-          const r = await awardShard(tx, bet.userId, bet.id, bet.createdAt);
+          // FEED bets earn shards UNCAPPED (and off the deck's daily-cap ledger); DECK bets stay
+          // capped at SHARD_DAILY_CAP. The bet's own source decides — see awardShard bypassCap.
+          const r = await awardShard(tx, bet.userId, bet.id, bet.createdAt, { bypassCap: bet.source === "FEED" });
           if (r.shardAwarded) shardsAwarded++;
         }
         settled++;

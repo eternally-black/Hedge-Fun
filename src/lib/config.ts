@@ -20,7 +20,14 @@ export const DECK_MIN_LEAD_MS = 5 * 60_000; // 5 minutes
 
 // ---- Daily caps (DECIDED) ----
 export const SWIPE_CAP = 10; // point-earning swipes/day (over-cap allowed, 0 pts)
-export const SHARD_DAILY_CAP = 10; // 1 win = 1 shard, max 10/day
+export const SHARD_DAILY_CAP = 10; // 1 win = 1 shard, max 10/day (DECK only — feed shards are UNCAPPED)
+
+// ---- Feed (the post-cap "лента") (DECIDED) ----
+// Once the SWIPE_CAP is spent, the deck dead-ends; the feed takes over with an endless vertical
+// stream of near-coin-flip binary markets. Bets there earn NO points (leaderboard stays scarce) but
+// DO earn shards, UNCAPPED (see awardShard bypassCap). Same $10 stake / same Market cache as the deck.
+export const FEED_BAND_BP = { min: 3800, max: 6200 }; // near-50% selection band (38–62%) — the one tuning knob
+export const FEED_PAGE_SIZE = 25; // markets per /api/feed page (cursor-paginated infinite scroll)
 
 // ---- Collectibles (DECIDED) ----
 export const SHARDS_PER_ARTIFACT = 20; // 20 shards -> 1 artifact

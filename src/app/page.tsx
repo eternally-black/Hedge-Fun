@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { usePrivy } from "@privy-io/react-auth";
 import { useApi } from "./useApi";
 import { DeckCard, CardPreview, type SwipeAction } from "./DeckCard";
@@ -20,6 +21,10 @@ import { DECK_MIN_LEAD_MS } from "@/lib/config";
 import type { ResultRow, ResultsResponse } from "@/lib/api-types";
 
 const PRIVY_ON = !!process.env.NEXT_PUBLIC_PRIVY_APP_ID;
+
+// The feed is only reachable AFTER the swipe cap, so lazy-load it (next/dynamic, ssr:false) — its
+// component + paging logic stay out of the initial deck bundle every user pays for on first paint.
+const FeedScreen = dynamic(() => import("./screens/FeedScreen").then((m) => m.FeedScreen), { ssr: false });
 
 // Stealth referral code readers. The middleware sets a non-httpOnly `hf_ref` cookie on a
 // /r/<code> click and redirects to a clean "/" (no ?ref= in the URL). We read it from the cookie,
@@ -297,6 +302,7 @@ function App() {
   const openBalance = useCallback(() => setBalanceOpen(true), []);
   const closeBalance = useCallback(() => setBalanceOpen(false), []);
   const goDeck = useCallback(() => setScreen("deck"), []);
+  const goFeed = useCallback(() => setScreen("feed"), []);
   const goNotifs = useCallback(() => setScreen("notifications"), []);
 
   // Method-scoped login: a single loginMethods entry makes Privy skip the picker and go straight to
@@ -366,6 +372,9 @@ function App() {
   // Hard daily cap: once a non-dev user hits the swipe cap, stop the deck and show the
   // "come back tomorrow" screen. Dev accounts swipe unlimited (and have a deck reset).
   const capReached = !!me && !me.dev && me.swipes.used >= me.swipes.cap;
+  // The feed unlocks once the swipe cap is spent (dev accounts always — they never hit capReached).
+  // Derived during render (no effect/stored state) — drives both the cap-screen CTA and the nav tab.
+  const feedUnlocked = !!me && (me.dev || me.swipes.used >= me.swipes.cap);
 
   return (
     <Frame>
@@ -384,10 +393,18 @@ function App() {
             <div style={{ position: "relative", flex: 1, margin: "6px 14px 0" }}>
               {capReached ? (
                 <div style={{ position: "absolute", inset: 0, borderRadius: 26, background: "var(--panel)", border: "1px solid var(--line)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 28, textAlign: "center", gap: 10 }}>
-                  <div style={{ fontFamily: "var(--df)", fontSize: 34 }}>That&apos;s a wrap.</div>
+                  <div style={{ fontFamily: "var(--df)", fontSize: 34 }}>Deck&apos;s done.</div>
                   <p style={{ color: "var(--muted)", fontSize: 14 }}>
-                    You hit today&apos;s {me?.swipes.cap} swipes. Come back after 00:00 UTC for a fresh deck.
+                    You spent today&apos;s {me?.swipes.cap} point swipes. Fresh deck at 00:00 UTC — meanwhile, the feed never sleeps.
                   </p>
+                  <button
+                    type="button"
+                    onClick={goFeed}
+                    style={{ marginTop: 6, padding: "12px 22px", borderRadius: 16, font: "inherit", cursor: "pointer", background: "var(--energy)", color: "#06070a", border: "none", fontWeight: 800, fontSize: 15, letterSpacing: ".02em" }}
+                  >
+                    Open the Feed →
+                  </button>
+                  <p style={{ color: "var(--muted)", fontSize: 11, marginTop: 2 }}>No points here — but shards still drop on every win.</p>
                 </div>
               ) : (
                 <>
@@ -420,6 +437,7 @@ function App() {
           </div>
         )}
 
+        {screen === "feed" && <FeedScreen api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openBalance} />}
         {screen === "gm" && <GmScreen me={me} busy={busy} onGM={gm} onEnterDeck={goDeck} />}
         {screen === "vault" && <VaultScreen me={me} api={api} onRefresh={refresh} />}
         {screen === "invite" && <InviteScreen me={me} />}
@@ -427,7 +445,7 @@ function App() {
         {screen === "notifications" && <NotificationsScreen api={api} onSeen={markResultsSeen} onReplay={replayReveal} />}
       </div>
 
-      <BottomNav screen={screen} onNav={setScreen} />
+      <BottomNav screen={screen} onNav={setScreen} feedUnlocked={feedUnlocked} />
 
       {/* Results reveal sits above the whole shell (HUD + nav). */}
       {reveal && (

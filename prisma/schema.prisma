@@ -53,6 +53,11 @@ enum BetResult {
   PUSH
 }
 
+enum BetSource {
+  DECK // the daily swipe deck: earns points (capped) + capped shards
+  FEED // the post-cap feed: NO points, shards UNCAPPED
+}
+
 enum PointsType {
   SWIPE // RAW 1/swipe, capped 10/day — the ONLY type x2 multiplies
   LOGIN // daily GM bonus (config constant), never multiplied
@@ -167,6 +172,10 @@ model Bet {
   lockedPriceBp Int // price of the BOUGHT side in bp at swipe time (yes-bet -> yes price, no-bet -> no price)
   utcDay        String  @db.VarChar(10)
   earnedPoint   Boolean @default(false) // over-cap swipes = false
+  // Where this bet came from. DECK = the daily swipe deck (points + capped shards).
+  // FEED = the post-cap feed (no points; shards UNCAPPED — see awardShard bypassCap).
+  // Default DECK so every pre-feed row backfills correctly (non-breaking migration).
+  source        BetSource @default(DECK)
 
   settlementStatus SettlementStatus @default(PENDING)
   result           BetResult        @default(PENDING)
