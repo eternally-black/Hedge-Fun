@@ -191,9 +191,34 @@ async function main() {
       `(c) inviter REFERRAL ledger = floor(${eligibleRaw} * ${REFERRAL_INVITER_RATE}) = ${expectedInviter}`);
     assert.ok(expectedInviter > 0, "(c) sanity: the eligible total is large enough to pay a non-zero share");
 
+    // ===================================================================================
+    // (d) FRESHNESS guard: a swipe on a market within the lead cutoff (<5min) -> 409 market_expired
+    //     and NO Bet row; the deck route also won't serve such a market (lower-bound filter).
+    // ===================================================================================
+    const expDid = did("expire");
+    const expAuth = authAs("expire-tok", expDid);
+    assert.strictEqual((await me.GET(expAuth("http://x/api/me"))).status, 200, "(d) /me provisions user");
+    const expUser = await prisma.user.findUniqueOrThrow({ where: { privyId: expDid } });
+    userIds.push(expUser.id);
+    const expiring = await prisma.market.create({
+      data: {
+        polymarketId: `${mktPrefix}-expiring`, question: "RG expiring?", status: "OPEN",
+        yesPriceBp: 5000, noPriceBp: 5000, resolutionDeadline: new Date(Date.now() + 60_000), // ~1 min < lead
+        outcomeYesLabel: "Yes", outcomeNoLabel: "No",
+      },
+      select: { id: true },
+    });
+    const expRes = await swipe.POST(expAuth("http://x/api/swipe",
+      { method: "POST", body: JSON.stringify({ marketId: expiring.id, side: "YES" }) }));
+    assert.strictEqual(expRes.status, 409, "(d) swipe within the lead cutoff -> 409");
+    assert.strictEqual((await expRes.json()).error, "market_expired", "(d) 409 reason = market_expired");
+    assert.strictEqual(await prisma.bet.count({ where: { userId: expUser.id } }), 0, "(d) no Bet row for the expiring market");
+    const dIds = new Set(((await (await deck.GET(expAuth("http://x/api/deck"))).json()).cards as { id: string }[]).map((c) => c.id));
+    assert.ok(!dIds.has(expiring.id), "(d) deck route excludes the <lead market (lower-bound filter)");
+
     console.log(
       `OK: route guards — (a) over-cap 403 + 0 extra bets; (b) deck anti-join excludes swiped; ` +
-      `(c) referral E2E pays inviter ${expectedInviter} (20% of ${eligibleRaw})`,
+      `(c) referral E2E pays inviter ${expectedInviter} (20% of ${eligibleRaw}); (d) <lead market -> 409 + not served`,
     );
   } finally {
     // Clean up everything this run created, children before parents, even on assertion failure

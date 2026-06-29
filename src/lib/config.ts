@@ -12,6 +12,12 @@ export const TOPUP_GRANT_CENTS = 20_000; // +$200.00 Cash per top-up
 export const FREE_TOPUP_CASH_GATE_CENTS = 3_000; // free top-up only enabled when Cash < $30
 export const TOPUP_ARTIFACT_COST = 1; // artifacts spent per paid top-up (1 artifact = SHARDS_PER_ARTIFACT shards)
 
+// ---- Deck freshness (DECIDED) ----
+// Nothing with less than this much time left reaches the top of the deck: the deck route won't serve
+// it, the client prunes it live, and a swipe on a market this close to resolution is rejected (409).
+// Stops a card from resolving (⏱ -> 0:00) before the user reaches/swipes it.
+export const DECK_MIN_LEAD_MS = 5 * 60_000; // 5 minutes
+
 // ---- Daily caps (DECIDED) ----
 export const SWIPE_CAP = 10; // point-earning swipes/day (over-cap allowed, 0 pts)
 export const SHARD_DAILY_CAP = 10; // 1 win = 1 shard, max 10/day

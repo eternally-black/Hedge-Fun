@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 
 import { categoryOf, shuffleNoRun, isContextPoor, isVagueEsports, withinCategoryHorizon, DECK_FETCH_HORIZON_HOURS } from "@/lib/deck-mix";
+import { DECK_MIN_LEAD_MS } from "@/lib/config";
 import type { DeckResponse } from "@/lib/api-types";
 
 // The blitz deck: cached OPEN binary markets, each kept only within ITS category's horizon
@@ -29,7 +30,9 @@ export async function GET(req: Request) {
   const candidates = await prisma.market.findMany({
     where: {
       status: "OPEN",
-      resolutionDeadline: { gt: now, lte: max },
+      // Lower bound = now + lead: never serve a card already within the freshness cutoff (the client
+      // also prunes live as cards age, and the swipe route rejects a stale market — defense in depth).
+      resolutionDeadline: { gt: new Date(now.getTime() + DECK_MIN_LEAD_MS), lte: max },
       bets: { none: { userId: user.id } }, // anti-join: never re-serve a card the user already bet
       // Contested-price band (15%..85%): re-assert at serve time, because a market cached while
       // fair can collapse to ~100%/0% once its match goes live. Drops decided/live cards so the

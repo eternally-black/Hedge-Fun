@@ -16,6 +16,7 @@ import { BalanceSheet } from "./screens/BalanceSheet";
 import { NotificationsScreen } from "./screens/NotificationsScreen";
 import { RevealOverlay } from "./screens/RevealOverlay";
 import { type Card, type Me, type Screen } from "./ui";
+import { DECK_MIN_LEAD_MS } from "@/lib/config";
 import type { ResultRow, ResultsResponse } from "@/lib/api-types";
 
 const PRIVY_ON = !!process.env.NEXT_PUBLIC_PRIVY_APP_ID;
@@ -32,6 +33,12 @@ function readRef(): string | null {
   const c = readRefCookie();
   if (c) return c;
   try { return localStorage.getItem("hf_ref"); } catch { return null; }
+}
+
+// A card is "fresh" while it has more than the lead buffer (DECK_MIN_LEAD_MS) left before resolution.
+// Stale cards are pruned from the deck so a swipe never lands on a near-resolved (⏱ -> 0:00) market.
+function isFresh(c: Card, nowMs: number): boolean {
+  return new Date(c.resolutionDeadline).getTime() - nowMs > DECK_MIN_LEAD_MS;
 }
 
 export default function Home() {
@@ -181,6 +188,23 @@ function App() {
     [api],
   );
 
+  // Live freshness prune: every few seconds drop cards that aged within the lead buffer, so a card
+  // the user is slowly reaching (or sitting on) never decays to ⏱ -> 0:00 at the top — the next fresh
+  // card rises in its place, and a drained deck triggers a refill. Cheap: only re-renders when a card
+  // actually crosses the line (otherwise the array is returned unchanged → no state update).
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      setDeck((d) => {
+        const now = Date.now();
+        const fresh = d.filter((c) => isFresh(c, now));
+        if (fresh.length === d.length) return d;
+        void topUpIfLow(fresh.length);
+        return fresh;
+      });
+    }, 5000);
+    return () => window.clearInterval(id);
+  }, [topUpIfLow]);
+
   const flashPop = useCallback((amt: number, color: string) => {
     setPop({ amt, color });
     window.clearTimeout(popTimer.current);
@@ -200,7 +224,9 @@ function App() {
     (card: Card, action: SwipeAction) => {
       const advance = () =>
         setDeck((d) => {
-          const next = d.filter((c) => c.id !== card.id);
+          // Drop the acted card AND any now-stale cards, so the next one up is always fresh.
+          const now = Date.now();
+          const next = d.filter((c) => c.id !== card.id && isFresh(c, now));
           void topUpIfLow(next.length);
           return next;
         });

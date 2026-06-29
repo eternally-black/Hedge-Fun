@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 import { recordSwipe, isOverCap, SwipeCapReachedError, InsufficientFundsError } from "@/lib/swipe";
 import { maybeQualifyReferralOnSwipe } from "@/lib/referral";
+import { DECK_MIN_LEAD_MS } from "@/lib/config";
 import { isDevUser } from "@/lib/dev";
 import type { SwipeRequest, SwipeResponse } from "@/lib/api-types";
 
@@ -30,6 +31,13 @@ export async function POST(req: Request) {
   const market = await prisma.market.findUnique({ where: { id: body.marketId } });
   if (!market || market.status !== "OPEN" || market.yesPriceBp == null || market.noPriceBp == null) {
     return NextResponse.json({ error: "market not open" }, { status: 409 });
+  }
+  // Freshness guard: reject a bet within DECK_MIN_LEAD_MS of resolution. A market can still be
+  // cached OPEN while already past (or seconds from) its deadline before the poller settles it —
+  // betting then is a stale, near-decided call. The client (deck prune) should keep these off the
+  // top; this is the server safety net. 409 -> the client advances the card silently.
+  if (market.resolutionDeadline.getTime() <= Date.now() + DECK_MIN_LEAD_MS) {
+    return NextResponse.json({ error: "market_expired" }, { status: 409 });
   }
 
   // Lock the price of the side the user actually bought (Polymarket yes+no don't sum to
