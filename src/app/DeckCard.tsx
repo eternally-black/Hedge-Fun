@@ -180,9 +180,11 @@ export function DeckCard({
 // Self-contained 1s countdown tick, scoped to whoever uses it — so the clock re-renders ONLY
 // the card that owns it, never the whole app. Starts at 0 (server) then ticks client-side.
 function useCountdown(iso: string, _seed = 0) {
-  const [nowMs, setNowMs] = useState(0);
+  // Lazy init to the real time so the first paint is correct AND we avoid a setState-in-effect
+  // cascade. Safe from hydration mismatch: DeckCard renders only after the client deck fetch, so it
+  // is never in the SSR tree with a card. The interval then drives the per-card tick.
+  const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
-    setNowMs(Date.now());
     const t = window.setInterval(() => setNowMs(Date.now()), 1000);
     return () => window.clearInterval(t);
   }, []);

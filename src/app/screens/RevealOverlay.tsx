@@ -229,20 +229,37 @@ function RevealCardPreview({ row }: { row: ResultRow }) {
   );
 }
 
+// Tiny deterministic PRNG (mulberry32 + a string hash) so per-card coin positions are stable AND the
+// useMemo stays pure — no Math.random() during render (React purity rule).
+function hashStr(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+function mulberry32(seed: number): () => number {
+  let s = seed >>> 0;
+  return () => {
+    s = (s + 0x6d2b79f5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 // Coin fountain for a win — bursts UP from the card's TOP edge and flies out above it. Rendered as a
 // sibling of the card shell (not inside it) so the card's overflow:hidden doesn't clip the coins.
-// Positions are fixed once per card (useMemo keyed by row.id) so they don't re-randomize each frame.
+// Positions are fixed once per card (useMemo keyed by row.id, deterministic via the seeded rng).
 function CoinBurst({ row }: { row: ResultRow }) {
-  const coins = useMemo(
-    () => Array.from({ length: 14 }, (_, k) => ({
+  const coins = useMemo(() => {
+    const rand = mulberry32(hashStr(row.id));
+    return Array.from({ length: 14 }, (_, k) => ({
       key: k,
-      left: `${8 + Math.random() * 84}%`,
-      size: `${15 + Math.random() * 13}px`,
-      cx: `${(Math.random() * 120 - 60).toFixed(0)}px`,
-      anim: `hfCoin ${(1 + Math.random() * 0.7).toFixed(2)}s ${(Math.random() * 0.35).toFixed(2)}s ease-out forwards`,
-    })),
-    [row.id], // eslint-disable-line react-hooks/exhaustive-deps -- positions fixed per card
-  );
+      left: `${8 + rand() * 84}%`,
+      size: `${15 + rand() * 13}px`,
+      cx: `${(rand() * 120 - 60).toFixed(0)}px`,
+      anim: `hfCoin ${(1 + rand() * 0.7).toFixed(2)}s ${(rand() * 0.35).toFixed(2)}s ease-out forwards`,
+    }));
+  }, [row.id]);
   return (
     <div style={{ position: "absolute", inset: 0, zIndex: 0, overflow: "visible", pointerEvents: "none" }}>
       {coins.map((c) => (

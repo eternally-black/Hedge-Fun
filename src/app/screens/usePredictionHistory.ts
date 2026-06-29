@@ -46,13 +46,14 @@ export function usePredictionHistory(api: Api) {
   // Only run the per-second clock when a row is still counting down (PENDING + deadline in the
   // future). Once everything is settled (or past its deadline → frozen "Awaiting result"), the
   // countdown text never changes, so ticking would just re-render for nothing. Derived during render
-  // (no effect-stored state) so the gate flips the moment the rows that decide it arrive.
+  // from the `nowMs` state (NOT Date.now() — keep render pure) so the gate flips when rows arrive
+  // and again when the clock ticks a row past its deadline.
   const needsTick = !!rows && rows.some(
-    (r) => r.status === "PENDING" && new Date(r.resolutionDeadline).getTime() > Date.now(),
+    (r) => r.status === "PENDING" && new Date(r.resolutionDeadline).getTime() > nowMs,
   );
   useEffect(() => {
     if (!needsTick) return;
-    setNowMs(Date.now());
+    // No synchronous setState here — nowMs is seeded by the lazy initializer, the interval drives it.
     const t = window.setInterval(() => setNowMs(Date.now()), 1000);
     return () => window.clearInterval(t);
   }, [needsTick]);

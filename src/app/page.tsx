@@ -78,8 +78,9 @@ function App() {
   const revealMode = useRef<"ritual" | "replay">("ritual");
   // Latest `me` mirrored into a ref so event handlers (e.g. exitReveal) can read the CURRENT value
   // without depending on `me` — that keeps those callbacks stable across the frequent me refreshes.
+  // Written in an effect (after commit), not during render, so it's safe under concurrent rendering.
   const meRef = useRef<Me | null>(null);
-  meRef.current = me;
+  useEffect(() => { meRef.current = me; }, [me]);
   // First-paint gate: stay on the spinner until me + results have loaded and we've DECIDED whether
   // the reveal plays. This prevents the deck flashing for a frame before the reveal floats up — the
   // very first content frame is already the right screen (reveal or deck), never an intermediate.
@@ -269,6 +270,8 @@ function App() {
   // Stable handlers for the keyed DeckCard so it isn't handed new function props each render.
   // handleAction reads the current top via a ref (kept in sync below).
   const topRef = useRef<Card | undefined>(undefined);
+  // Keep the gesture handler's "current top" in sync AFTER commit (not via a render-time ref write).
+  useEffect(() => { topRef.current = deck[0]; }, [deck]);
   const handleAction = useCallback((a: SwipeAction) => { if (topRef.current) act(topRef.current, a); }, [act]);
   const noop = useCallback(() => {}, []); // tap-for-detail: sheet TODO
 
@@ -360,7 +363,6 @@ function App() {
 
   const top = deck[0];
   const next = deck[1];
-  topRef.current = top; // keep the stable handleAction pointed at the live top card
   // Hard daily cap: once a non-dev user hits the swipe cap, stop the deck and show the
   // "come back tomorrow" screen. Dev accounts swipe unlimited (and have a deck reset).
   const capReached = !!me && !me.dev && me.swipes.used >= me.swipes.cap;
