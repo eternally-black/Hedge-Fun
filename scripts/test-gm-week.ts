@@ -3,7 +3,7 @@
 // Run: npx tsx scripts/test-gm-week.ts
 import assert from "node:assert";
 import { weekdayMon0, streakWindowStartDay } from "../src/lib/time";
-import { buildGmWeek } from "../src/app/screens/GmScreen";
+import { buildGmWeek, gmStatus } from "../src/app/screens/GmScreen";
 
 // ---- weekdayMon0: Mon=0..Sun=6 ----
 assert.strictEqual(weekdayMon0("2026-06-25"), 3, "2026-06-25 is Thursday -> 3");
@@ -40,4 +40,11 @@ assert.ok(!w2[0].isDone && !w2[4].isDone, "Mon and Fri not filled");
 const w3 = buildGmWeek(3, 3, 0, false);
 assert.ok(w3[3].isToday && !w3[3].isDone, "today not done before check-in");
 
-console.log("OK: GM week grid — weekday math, window start, cutoff, today column");
+// ---- gmStatus: broken states must NOT show the normal claim CTA ----
+assert.strictEqual(gmStatus("ACTIVE", false, 0), "claim", "active + not done -> claim");
+assert.strictEqual(gmStatus("ACTIVE", true, 0), "checkedIn", "active + done -> checkedIn");
+assert.strictEqual(gmStatus("BURNED_RECOVERABLE", false, 1), "burnedHasArtifact", "burned + artifact -> revivable");
+assert.strictEqual(gmStatus("BURNED_RECOVERABLE", false, 0), "burnedNoArtifact", "burned + no artifact -> can't restore");
+assert.strictEqual(gmStatus("LOST", false, 5), "lost", "lost -> lost even with artifacts (window closed)");
+
+console.log("OK: GM week grid — weekday math, window start, cutoff, today column, streak-broken status");

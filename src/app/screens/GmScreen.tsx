@@ -1,5 +1,6 @@
 "use client";
 
+import type { StreakState } from "@prisma/client";
 import { type Me } from "../ui";
 
 // Daily GM check-in (ported from app design). One tap = streak day + login bonus (1 pt, P-2) +
@@ -36,19 +37,43 @@ export function buildGmWeek(
   });
 }
 
-export function GmScreen({ me, busy, onGM, onEnterDeck }: { me: Me | null; busy: boolean; onGM: () => void; onEnterDeck: () => void }) {
+// Which GM hero to render. BURNED_RECOVERABLE/LOST are broken states the grid alone can't convey:
+//  - lost: window closed, gone for good; tapping GM starts a fresh streak (backend fresh-restart).
+//  - burned_has_artifact: revivable now — send them to the Vault to spend one.
+//  - burned_no_artifact: revivable ONLY with an artifact they don't hold; resets to 0 when the window closes.
+// Kept pure + module-level so it's unit-testable (scripts/test-gm-week.ts).
+export type GmStatus = "checkedIn" | "claim" | "burnedHasArtifact" | "burnedNoArtifact" | "lost";
+export function gmStatus(state: StreakState, done: boolean, artifacts: number): GmStatus {
+  if (state === "LOST") return "lost";
+  if (state === "BURNED_RECOVERABLE") return artifacts > 0 ? "burnedHasArtifact" : "burnedNoArtifact";
+  return done ? "checkedIn" : "claim";
+}
+
+const GM_SUBTITLE: Record<GmStatus, string> = {
+  checkedIn: "You're checked in. Streak is safe — come back tomorrow.",
+  claim: "Check in to keep your streak burning.",
+  burnedHasArtifact: "Your streak broke. Revive it in the Vault with an artifact before the window closes — or it resets to 0.",
+  burnedNoArtifact: "Your streak broke. Without an artifact it can't be restored, and it resets to 0 when the recovery window closes.",
+  lost: "Your streak broke and the recovery window closed — it can't be restored. Tap to start a fresh one.",
+};
+
+export function GmScreen({ me, busy, onGM, onEnterDeck, onEnterVault }: { me: Me | null; busy: boolean; onGM: () => void; onEnterDeck: () => void; onEnterVault: () => void }) {
   const done = me?.loginMarkedToday ?? false;
   const streak = me?.streak.level ?? 0;
   const todayWeekday = me?.streak.todayWeekday ?? 0;
   const windowStartWeekday = me?.streak.windowStartWeekday ?? 0;
   const week = buildGmWeek(todayWeekday, windowStartWeekday, streak, done);
 
+  const status = gmStatus(me?.streak.state ?? "ACTIVE", done, me?.artifacts ?? 0);
+  const burned = status === "burnedHasArtifact" || status === "burnedNoArtifact";
+  const broken = burned || status === "lost";
+
   return (
     <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 24, textAlign: "center", background: "radial-gradient(120% 70% at 50% 30%, color-mix(in srgb,var(--energy) 22%,transparent), transparent 60%)" }}>
-      <div style={{ fontSize: 64, animation: "hfFlame 1.6s ease-in-out infinite" }}>🔥</div>
-      <div style={{ fontFamily: "var(--df)", fontSize: 50, lineHeight: 0.95, marginTop: 10 }}>GM, DEGEN</div>
-      <div style={{ fontSize: 14, color: "var(--muted)", maxWidth: 260, marginTop: 8, textWrap: "pretty" }}>
-        {done ? "You're checked in. Streak is safe — come back tomorrow." : "Check in to keep your streak burning."}
+      <div style={{ fontSize: 64, animation: broken ? undefined : "hfFlame 1.6s ease-in-out infinite" }}>{broken ? "💀" : "🔥"}</div>
+      <div style={{ fontFamily: "var(--df)", fontSize: 50, lineHeight: 0.95, marginTop: 10 }}>{broken ? "STREAK BROKEN" : "GM, DEGEN"}</div>
+      <div style={{ fontSize: 14, color: broken ? "var(--no)" : "var(--muted)", maxWidth: 280, marginTop: 8, textWrap: "pretty" }}>
+        {GM_SUBTITLE[status]}
       </div>
 
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 24 }}>
@@ -77,17 +102,28 @@ export function GmScreen({ me, busy, onGM, onEnterDeck }: { me: Me | null; busy:
         <div><div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 22, color: "var(--gold)" }}>🔥 {streak}</div><div style={{ fontSize: 9, letterSpacing: ".1em", textTransform: "uppercase", color: "var(--muted)" }}>Streak</div></div>
       </div>
 
-      {/* Before claim: claim CTA. After claim: the button flips to "Enter the deck →" (the natural
-          next step in the daily-open ritual), and a quiet "Skip to the deck" link sits below it. */}
-      <button
-        type="button"
-        onClick={busy ? undefined : done ? onEnterDeck : onGM}
-        disabled={busy}
-        style={{ margin: 0, font: "inherit", border: "none", marginTop: 26, width: "100%", maxWidth: 300, background: "linear-gradient(135deg,var(--energy),color-mix(in srgb,var(--energy) 55%,#000))", color: "#fff", fontFamily: "var(--df)", fontSize: 22, padding: 16, borderRadius: 18, cursor: busy ? "default" : "pointer", boxShadow: "0 14px 30px -8px color-mix(in srgb,var(--energy) 60%,transparent)" }}
-      >
-        {done ? "Enter the deck →" : "☀ Claim & keep streak"}
-      </button>
-      {done && (
+      {/* CTA by state: claim (fresh day) → onGM; checked-in → deck; burned → Vault (recovery lives
+          there, wired to /api/recover); lost → onGM which starts a brand-new streak. A quiet "Skip to
+          the deck" link sits below whenever the primary isn't the deck itself. */}
+      {(() => {
+        const primary =
+          status === "checkedIn" ? { onClick: onEnterDeck, label: "Enter the deck →" }
+          : status === "claim" ? { onClick: onGM, label: "☀ Claim & keep streak" }
+          : status === "lost" ? { onClick: onGM, label: "☀ Start a new streak" }
+          : status === "burnedHasArtifact" ? { onClick: onEnterVault, label: "🛡 Revive in the Vault →" }
+          : { onClick: onEnterVault, label: "Open the Vault →" }; // burnedNoArtifact
+        return (
+          <button
+            type="button"
+            onClick={busy ? undefined : primary.onClick}
+            disabled={busy}
+            style={{ margin: 0, font: "inherit", border: "none", marginTop: 26, width: "100%", maxWidth: 300, background: "linear-gradient(135deg,var(--energy),color-mix(in srgb,var(--energy) 55%,#000))", color: "#fff", fontFamily: "var(--df)", fontSize: 22, padding: 16, borderRadius: 18, cursor: busy ? "default" : "pointer", boxShadow: "0 14px 30px -8px color-mix(in srgb,var(--energy) 60%,transparent)" }}
+          >
+            {primary.label}
+          </button>
+        );
+      })()}
+      {(done || broken) && (
         <button type="button" onClick={onEnterDeck} style={{ background: "none", border: "none", padding: 0, font: "inherit", marginTop: 12, fontSize: 12, color: "var(--muted)", textDecoration: "underline", cursor: "pointer" }}>Skip to the deck →</button>
       )}
     </div>
