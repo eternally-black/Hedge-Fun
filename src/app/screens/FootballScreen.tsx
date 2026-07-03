@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { BetSide, FootballMarketCard, FootballMatchResponse, TickerResponse, TickerRow } from "@/lib/api-types";
-import { type Me, kickoffLabel } from "../ui";
+import { type Me, type Screen, kickoffLabel } from "../ui";
 import { MarketCard, useMarketBet } from "./MarketCard";
 
 // The World Cup hub: a live/upcoming/recent scoreboard fed by the same server-cached TxLINE snapshot
@@ -22,6 +22,8 @@ export function FootballScreen({
   onTopup,
   selected,
   onSelect,
+  backTo,
+  onBack,
 }: {
   api: Api;
   me: Me | null;
@@ -31,6 +33,10 @@ export function FootballScreen({
   // Which match is open, lifted to the parent so the global ticker can open one directly.
   selected: TickerRow | null;
   onSelect: (row: TickerRow | null) => void;
+  // backTo = the screen a ticker-opened match returns to (null = opened from the list). onBack does
+  // the actual navigation; the label just reflects the entry point.
+  backTo: Screen | null;
+  onBack: () => void;
 }) {
   const [rows, setRows] = useState<TickerRow[] | null>(null);
 
@@ -58,7 +64,8 @@ export function FootballScreen({
         api={api}
         me={me}
         row={selected}
-        onBack={() => onSelect(null)}
+        onBack={onBack}
+        backLabel={backTo ? "‹ Back" : "‹ All matches"}
         onRefreshMe={onRefreshMe}
         onToast={onToast}
         onTopup={onTopup}
@@ -131,6 +138,7 @@ function MatchDetail({
   me,
   row,
   onBack,
+  backLabel,
   onRefreshMe,
   onToast,
   onTopup,
@@ -139,6 +147,7 @@ function MatchDetail({
   me: Me | null;
   row: TickerRow;
   onBack: () => void;
+  backLabel: string;
   onRefreshMe: () => void;
   onToast: (msg: string) => void;
   onTopup: () => void;
@@ -180,7 +189,7 @@ function MatchDetail({
         onClick={onBack}
         style={{ background: "none", border: "none", padding: "4px 0", margin: 0, font: "inherit", cursor: "pointer", color: "var(--muted)", fontSize: 13 }}
       >
-        ‹ All matches
+        {backLabel}
       </button>
 
       {/* match header */}
