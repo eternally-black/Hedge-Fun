@@ -3,13 +3,15 @@
 import { useEffect, useState } from "react";
 import { useLinkAccount, usePrivy } from "@privy-io/react-auth";
 import { type Me, num, usd } from "../ui";
+import { XIcon, TelegramIcon } from "../icons";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
-// Founder support contacts — external links, open in a new tab. Hoisted so it isn't re-created per render.
+// Founder support contacts — external links, open in a new tab. Brand marks reuse the same SVGs as
+// the Invite share buttons (../icons). Hoisted so it isn't re-created per render.
 const SUPPORT_CONTACTS = [
-  { label: "Telegram", handle: "@SirHi_Crypto", href: "https://t.me/SirHi_Crypto", icon: "✈" },
-  { label: "𝕏 (Twitter)", handle: "@SirHi_Talk", href: "https://x.com/SirHi_Talk", icon: "𝕏" },
+  { label: "Telegram", handle: "@SirHi_Crypto", href: "https://t.me/SirHi_Crypto", Icon: TelegramIcon },
+  { label: "𝕏 (Twitter)", handle: "@SirHi_Talk", href: "https://x.com/SirHi_Talk", Icon: XIcon },
 ] as const;
 
 // Profile / "You" (ported from app design). Real stats from /api/me. Prediction history is a
@@ -173,7 +175,7 @@ export function ProfileScreen({ me, api, onRefresh, onHistory, onLogout }: { me:
       <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 10 }}>
         {SUPPORT_CONTACTS.map((c) => (
           <a key={c.href} href={c.href} target="_blank" rel="noopener noreferrer" style={{ textDecoration: "none", color: "inherit", background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 14, padding: "12px 14px", display: "flex", alignItems: "center", gap: 12 }}>
-            <div style={{ fontSize: 18, width: 22, textAlign: "center", flexShrink: 0 }}>{c.icon}</div>
+            <div style={{ width: 22, display: "flex", justifyContent: "center", flexShrink: 0 }}><c.Icon size={16} /></div>
             <div style={{ minWidth: 0, flex: 1 }}>
               <div style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: "var(--muted)" }}>{c.label}</div>
               <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.handle}</div>
