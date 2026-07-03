@@ -39,8 +39,8 @@ export function buildGmWeek(
 
 // Which GM hero to render. BURNED_RECOVERABLE/LOST are broken states the grid alone can't convey:
 //  - lost: window closed, gone for good; tapping GM starts a fresh streak (backend fresh-restart).
-//  - burned_has_artifact: revivable now — send them to the Vault to spend one.
-//  - burned_no_artifact: revivable ONLY with an artifact they don't hold; resets to 0 when the window closes.
+//  - burnedHasArtifact: revivable now — spend 1 artifact right here (onRevive → /api/recover).
+//  - burnedNoArtifact: revivable ONLY with an artifact they don't hold; resets to 0 when the window closes.
 // Kept pure + module-level so it's unit-testable (scripts/test-gm-week.ts).
 export type GmStatus = "checkedIn" | "claim" | "burnedHasArtifact" | "burnedNoArtifact" | "lost";
 export function gmStatus(state: StreakState, done: boolean, artifacts: number): GmStatus {
@@ -52,12 +52,12 @@ export function gmStatus(state: StreakState, done: boolean, artifacts: number): 
 const GM_SUBTITLE: Record<GmStatus, string> = {
   checkedIn: "You're checked in. Streak is safe — come back tomorrow.",
   claim: "Check in to keep your streak burning.",
-  burnedHasArtifact: "Your streak broke. Revive it in the Vault with an artifact before the window closes — or it resets to 0.",
+  burnedHasArtifact: "Your streak broke. Spend an artifact to revive it before the window closes — or it resets to 0.",
   burnedNoArtifact: "Your streak broke. Without an artifact it can't be restored, and it resets to 0 when the recovery window closes.",
   lost: "Your streak broke and the recovery window closed — it can't be restored. Tap to start a fresh one.",
 };
 
-export function GmScreen({ me, busy, onGM, onEnterDeck, onEnterVault }: { me: Me | null; busy: boolean; onGM: () => void; onEnterDeck: () => void; onEnterVault: () => void }) {
+export function GmScreen({ me, busy, onGM, onEnterDeck, onRevive }: { me: Me | null; busy: boolean; onGM: () => void; onEnterDeck: () => void; onRevive: () => void }) {
   const done = me?.loginMarkedToday ?? false;
   const streak = me?.streak.level ?? 0;
   const todayWeekday = me?.streak.todayWeekday ?? 0;
@@ -102,27 +102,29 @@ export function GmScreen({ me, busy, onGM, onEnterDeck, onEnterVault }: { me: Me
         <div><div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 22, color: "var(--gold)" }}>🔥 {streak}</div><div style={{ fontSize: 9, letterSpacing: ".1em", textTransform: "uppercase", color: "var(--muted)" }}>Streak</div></div>
       </div>
 
-      {/* CTA by state: claim (fresh day) → onGM; checked-in → deck; burned → Vault (recovery lives
-          there, wired to /api/recover); lost → onGM which starts a brand-new streak. A quiet "Skip to
-          the deck" link sits below whenever the primary isn't the deck itself. */}
-      {(() => {
-        const primary =
-          status === "checkedIn" ? { onClick: onEnterDeck, label: "Enter the deck →" }
-          : status === "claim" ? { onClick: onGM, label: "☀ Claim & keep streak" }
-          : status === "lost" ? { onClick: onGM, label: "☀ Start a new streak" }
-          : status === "burnedHasArtifact" ? { onClick: onEnterVault, label: "🛡 Revive in the Vault →" }
-          : { onClick: onEnterVault, label: "Open the Vault →" }; // burnedNoArtifact
-        return (
-          <button
-            type="button"
-            onClick={busy ? undefined : primary.onClick}
-            disabled={busy}
-            style={{ margin: 0, font: "inherit", border: "none", marginTop: 26, width: "100%", maxWidth: 300, background: "linear-gradient(135deg,var(--energy),color-mix(in srgb,var(--energy) 55%,#000))", color: "#fff", fontFamily: "var(--df)", fontSize: 22, padding: 16, borderRadius: 18, cursor: busy ? "default" : "pointer", boxShadow: "0 14px 30px -8px color-mix(in srgb,var(--energy) 60%,transparent)" }}
-          >
-            {primary.label}
-          </button>
-        );
-      })()}
+      {/* CTA by state: claim (fresh day) → onGM; checked-in → deck; lost → onGM (starts a brand-new
+          streak); burned → spend 1 artifact to revive right here (onRevive → /api/recover), or a
+          disabled "no artifact" when there's none. A quiet "Skip to the deck" link sits below when the
+          primary isn't the deck itself. */}
+      {burned ? (
+        <button
+          type="button"
+          onClick={busy || status === "burnedNoArtifact" ? undefined : onRevive}
+          disabled={busy || status === "burnedNoArtifact"}
+          style={{ margin: 0, font: "inherit", border: "none", marginTop: 26, width: "100%", maxWidth: 300, background: status === "burnedNoArtifact" ? "var(--panel2)" : "linear-gradient(135deg,var(--gold),#c98a1e)", color: status === "burnedNoArtifact" ? "var(--muted)" : "#1a1205", fontFamily: "var(--df)", fontSize: 20, padding: 16, borderRadius: 18, cursor: busy || status === "burnedNoArtifact" ? "default" : "pointer" }}
+        >
+          {status === "burnedHasArtifact" ? "🛡 Spend 1 Artifact → Revive streak" : "No artifact to revive"}
+        </button>
+      ) : (
+        <button
+          type="button"
+          onClick={busy ? undefined : status === "checkedIn" ? onEnterDeck : onGM}
+          disabled={busy}
+          style={{ margin: 0, font: "inherit", border: "none", marginTop: 26, width: "100%", maxWidth: 300, background: "linear-gradient(135deg,var(--energy),color-mix(in srgb,var(--energy) 55%,#000))", color: "#fff", fontFamily: "var(--df)", fontSize: 22, padding: 16, borderRadius: 18, cursor: busy ? "default" : "pointer", boxShadow: "0 14px 30px -8px color-mix(in srgb,var(--energy) 60%,transparent)" }}
+        >
+          {status === "checkedIn" ? "Enter the deck →" : status === "lost" ? "☀ Start a new streak" : "☀ Claim & keep streak"}
+        </button>
+      )}
       {(done || broken) && (
         <button type="button" onClick={onEnterDeck} style={{ background: "none", border: "none", padding: 0, font: "inherit", marginTop: 12, fontSize: 12, color: "var(--muted)", textDecoration: "underline", cursor: "pointer" }}>Skip to the deck →</button>
       )}

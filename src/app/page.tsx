@@ -309,6 +309,18 @@ function App() {
     }
   }, [api, refreshMe]);
 
+  // Spend 1 artifact to revive a burned (recoverable) streak — the recovery flow now lives on the GM
+  // screen (was in the Vault). refreshMe repaints streak state + artifact balance; deck is untouched.
+  const revive = useCallback(async () => {
+    setBusy(true);
+    try {
+      await api("/api/recover", { method: "POST" });
+      await refreshMe();
+    } finally {
+      setBusy(false);
+    }
+  }, [api, refreshMe]);
+
   // Stable nav callbacks so memo'd Hud/BottomNav don't re-render on unrelated state changes.
   const goVault = useCallback(() => setScreen("vault"), []);
   const goGmScreen = useCallback(() => setScreen("gm"), []);
@@ -463,7 +475,7 @@ function App() {
 
         {effectiveScreen === "football" && <FootballScreen api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openBalance} />}
         {effectiveScreen === "feed" && <FeedScreen api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openBalance} />}
-        {effectiveScreen === "gm" && <GmScreen me={me} busy={busy} onGM={gm} onEnterDeck={goDeck} onEnterVault={goVault} />}
+        {effectiveScreen === "gm" && <GmScreen me={me} busy={busy} onGM={gm} onEnterDeck={goDeck} onRevive={revive} />}
         {effectiveScreen === "vault" && <VaultScreen me={me} api={api} onRefresh={refresh} previewCard={top ?? next} />}
         {effectiveScreen === "invite" && <InviteScreen me={me} />}
         {effectiveScreen === "you" && <ProfileScreen me={me} api={api} onRefresh={refresh} onHistory={openHistory} onLogout={doLogout} />}
