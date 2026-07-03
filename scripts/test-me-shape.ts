@@ -25,7 +25,7 @@ async function main() {
     ["artifacts","balanceCents","cashCents","dev","isNewUser","lockedCents","loginMarkedToday","points","referrals","shards","shardsPerArtifact","skins","skips","stakeCents","streak","swipes","topup","unreadResults","user"],
     "/me top-level keys include cashCents/lockedCents/stakeCents/topup/skins");
   assert.deepStrictEqual(Object.keys(body.topup).sort(),
-    ["artifactCost","artifactTopupAvailable","freeTopupAvailable","freeTopupUsed","grantCents"],
+    ["artifactCashGateCents","artifactCost","artifactTopupAvailable","freeTopupAvailable","freeTopupUsed","grantCents"],
     "/me topup sub-keys");
 
   // Fresh user: $200 balance, no holds → Cash $200, Locked 0, stake $10.

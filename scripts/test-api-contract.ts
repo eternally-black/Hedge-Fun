@@ -84,7 +84,7 @@ async function main() {
   assert.deepStrictEqual(Object.keys(meBody.points).sort(), ["bonusFromX2","breakdown","total"], "/me points keys");
   assert.deepStrictEqual(Object.keys(meBody.swipes).sort(), ["cap","used"], "/me swipes keys");
   assert.deepStrictEqual(Object.keys(meBody.topup).sort(),
-    ["artifactCost","artifactTopupAvailable","freeTopupAvailable","freeTopupUsed","grantCents"], "/me topup keys");
+    ["artifactCashGateCents","artifactCost","artifactTopupAvailable","freeTopupAvailable","freeTopupUsed","grantCents"], "/me topup keys");
   assert.deepStrictEqual(Object.keys(meBody.streak).sort(),
     ["level","recoverableUntil","state","todayWeekday","windowStartWeekday"], "/me streak keys");
 

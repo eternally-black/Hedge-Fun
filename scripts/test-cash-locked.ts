@@ -6,7 +6,7 @@ import { prisma } from "../src/lib/prisma";
 import { recordSwipe, InsufficientFundsError } from "../src/lib/swipe";
 import { settleMarket } from "./settle";
 import { topUp } from "../src/lib/topup";
-import { STAKE_CENTS, FREE_TOPUP_CASH_GATE_CENTS, TOPUP_GRANT_CENTS } from "../src/lib/config";
+import { STAKE_CENTS, FREE_TOPUP_CASH_GATE_CENTS, ARTIFACT_TOPUP_CASH_GATE_CENTS, TOPUP_GRANT_CENTS } from "../src/lib/config";
 import { randomCode } from "../src/lib/refcode";
 
 async function main() {
@@ -65,15 +65,22 @@ async function main() {
   vb = await prisma.virtualBalance.findUniqueOrThrow({ where: { userId: user.id } });
   assert.strictEqual(vb.lockedCents, 0, "re-settle didn't drive lockedCents negative");
 
-  // 7. TOP-UP ARTIFACT (no gate, has cash): spends the 1 artifact, +$200.
-  const balBeforeTop = vb.balanceCents;
+  // 7. TOP-UP ARTIFACT GATE: it bails out a near-empty balance, so it's gated to Cash < $50. Cash is
+  //    high here → blocked (cash_too_high) and the artifact is NOT spent.
+  assert.ok(vb.balanceCents - vb.lockedCents >= ARTIFACT_TOPUP_CASH_GATE_CENTS, "cash above the artifact gate");
+  const rArtHigh = await topUp(user.id, "artifact");
+  assert.ok(!rArtHigh.ok && rArtHigh.reason === "cash_too_high", "artifact top-up blocked when cash is high");
+  assert.strictEqual((await prisma.collectibleBalance.findUniqueOrThrow({ where: { userId: user.id } })).artifacts, 1, "artifact retained while gated");
+
+  // 8. TOP-UP ARTIFACT SUCCESS: drop Cash below the gate → spends the 1 artifact, +$200.
+  await prisma.virtualBalance.update({ where: { userId: user.id }, data: { balanceCents: 0 } });
   const rArt = await topUp(user.id, "artifact");
-  assert.ok(rArt.ok, "artifact top-up granted");
+  assert.ok(rArt.ok, "artifact top-up granted when cash is low");
   vb = await prisma.virtualBalance.findUniqueOrThrow({ where: { userId: user.id } });
-  assert.strictEqual(vb.balanceCents, balBeforeTop + TOPUP_GRANT_CENTS, "artifact top-up +grant");
+  assert.strictEqual(vb.balanceCents, TOPUP_GRANT_CENTS, "artifact top-up +grant from 0");
   assert.strictEqual((await prisma.collectibleBalance.findUniqueOrThrow({ where: { userId: user.id } })).artifacts, 0, "artifact spent");
 
-  // 8. FREE TOP-UP GATE: cash is high now → free path not eligible.
+  // 9. FREE TOP-UP GATE: the +$200 grant put cash above the free gate → free path not eligible.
   assert.ok(vb.balanceCents - vb.lockedCents >= FREE_TOPUP_CASH_GATE_CENTS, "cash above the free gate");
   const rFree = await topUp(user.id, "free");
   assert.ok(!rFree.ok && rFree.reason === "free_not_eligible", "free top-up blocked when cash is high");
