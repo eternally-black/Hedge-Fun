@@ -6,6 +6,12 @@ import { type Me, num, usd } from "../ui";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
+// Founder support contacts — external links, open in a new tab. Hoisted so it isn't re-created per render.
+const SUPPORT_CONTACTS = [
+  { label: "Telegram", handle: "@SirHi_Crypto", href: "https://t.me/SirHi_Crypto", icon: "✈" },
+  { label: "𝕏 (Twitter)", handle: "@SirHi_Talk", href: "https://x.com/SirHi_Talk", icon: "𝕏" },
+] as const;
+
 // Profile / "You" (ported from app design). Real stats from /api/me. Prediction history is a
 // placeholder until /api/history. (No user-facing leaderboard — ranking is admin-only.)
 export function ProfileScreen({ me, api, onRefresh, onHistory, onLogout }: { me: Me | null; api: Api; onRefresh: () => Promise<void>; onHistory: () => void; onLogout: () => void }) {
@@ -161,6 +167,21 @@ export function ProfileScreen({ me, api, onRefresh, onHistory, onLogout }: { me:
               : null)}
       </div>
       {xError ? <div style={{ marginTop: 8, fontSize: 12, color: "var(--no)" }}>{xError}</div> : null}
+
+      {/* Support — reach the founder directly. External links open in a new tab. */}
+      <div style={{ marginTop: 22, fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700 }}>Support</div>
+      <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 10 }}>
+        {SUPPORT_CONTACTS.map((c) => (
+          <a key={c.href} href={c.href} target="_blank" rel="noopener noreferrer" style={{ textDecoration: "none", color: "inherit", background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 14, padding: "12px 14px", display: "flex", alignItems: "center", gap: 12 }}>
+            <div style={{ fontSize: 18, width: 22, textAlign: "center", flexShrink: 0 }}>{c.icon}</div>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: "var(--muted)" }}>{c.label}</div>
+              <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.handle}</div>
+            </div>
+            <div style={{ flexShrink: 0, color: "var(--muted)", fontSize: 16 }}>↗</div>
+          </a>
+        ))}
+      </div>
     </div>
   );
 }
