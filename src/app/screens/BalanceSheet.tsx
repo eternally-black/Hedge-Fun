@@ -105,9 +105,16 @@ function TopupButton({ me, busy, onTopup }: { me: Me | null; busy: boolean; onTo
   const t = me.topup;
   const grant = usd(t.grantCents);
 
+  // Holds an artifact but Cash is at/above the gate → the top-up is intentionally locked (it bails
+  // out a low balance, not a full one). Show it inactive with the $ threshold, not "earn an artifact".
+  const hasArtifact = me.artifacts >= t.artifactCost;
+  const cashTooHigh = me.cashCents >= t.artifactCashGateCents;
+  const gate = usd(t.artifactCashGateCents);
+
   let label: string, kind: "free" | "artifact" | null, primary = false;
   if (t.freeTopupAvailable) { label = `Claim free ${grant}`; kind = "free"; primary = true; }
   else if (t.artifactTopupAvailable) { label = `Top up ${grant} · 1 ◆`; kind = "artifact"; primary = true; }
+  else if (hasArtifact && cashTooHigh) { label = `Top-up locked — Cash must be under ${gate}`; kind = null; }
   else if (!t.freeTopupUsed) { label = "Free top-up unlocks when low on cash"; kind = null; }
   else { label = "Earn an artifact to top up"; kind = null; }
 

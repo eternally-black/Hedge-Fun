@@ -11,6 +11,7 @@ export const STAKE_CENTS = 1_000; // $10.00 fixed per swipe
 export const TOPUP_GRANT_CENTS = 20_000; // +$200.00 Cash per top-up
 export const FREE_TOPUP_CASH_GATE_CENTS = 3_000; // free top-up only enabled when Cash < $30
 export const TOPUP_ARTIFACT_COST = 1; // artifacts spent per paid top-up (1 artifact = SHARDS_PER_ARTIFACT shards)
+export const ARTIFACT_TOPUP_CASH_GATE_CENTS = 5_000; // artifact top-up only enabled when Cash < $50 (a bail-out for a low balance, not stackable on a full one)
 
 // ---- Deck freshness (DECIDED) ----
 // Nothing with less than this much time left reaches the top of the deck: the deck route won't serve

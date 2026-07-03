@@ -5,7 +5,7 @@ import type { TopupResponse } from "@/lib/api-types";
 
 // Top up Cash by +$200. Body: { kind: "free" | "artifact" }.
 //  - free: once ever, low-cash gate (re-derived server-side).      409 if used / not eligible.
-//  - artifact: spend 1 artifact, no gate.                          402 if no artifact.
+//  - artifact: spend 1 artifact, Cash < $50 gate (re-derived).     402 if no artifact, 409 if cash too high.
 export async function POST(req: Request) {
   const user = await authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });

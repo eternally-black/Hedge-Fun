@@ -52,7 +52,8 @@ export interface DeckResponse {
 // Auth: Bearer. Live World Cup ticker rows from TxLine (server-cached, read-only display). Ordered
 // live first, then upcoming (nearest kickoff), then recently ended. homeGoals/awayGoals null pre-match;
 // over25Pct = demarginalized Over-2.5-goals probability % (null if not offered / quarter line);
-// phase: "1H" | "HT" | "2H" | "FT" | "" (upcoming).
+// homeWinPct/awayWinPct = demarginalized 1X2 win probability % (null if not offered); phase:
+// "1H" | "HT" | "2H" | "FT" | "" (upcoming).
 export interface TickerRow {
   fixtureId: string;
   competition: string;
@@ -65,6 +66,8 @@ export interface TickerRow {
   phase: string;
   kickoff: string; // ISO-8601
   over25Pct: number | null;
+  homeWinPct: number | null;
+  awayWinPct: number | null;
 }
 export interface TickerResponse {
   rows: TickerRow[];
@@ -138,13 +141,13 @@ export interface RecoverResponse {
 
 // ─── POST /api/topup ───────────────────────────────────────────────────────────────────────────
 // Auth: Bearer. Body: { kind: "free" | "artifact" }. Credits +$200 Cash.
-//   free     — once ever, low-cash gate.  409 (free_used / free_not_eligible).
-//   artifact — spend 1 artifact, no gate. 402 (no_artifact).
+//   free     — once ever, low-cash gate.          409 (free_used / free_not_eligible).
+//   artifact — spend 1 artifact, Cash < $50 gate. 402 (no_artifact) / 409 (cash_too_high).
 export type TopupResponse =
   | { ok: true; kind: "free" | "artifact"; grantedCents: number; balanceCents: number }
   | {
       ok: false;
-      reason: "free_used" | "free_not_eligible" | "no_artifact";
+      reason: "free_used" | "free_not_eligible" | "no_artifact" | "cash_too_high";
     };
 
 // ─── POST /api/login-mark ──────────────────────────────────────────────────────────────────────
@@ -224,9 +227,10 @@ export interface MeResponse {
   topup: {
     freeTopupUsed: boolean; // lifetime free top-up consumed
     freeTopupAvailable: boolean; // free path enabled (low-cash gate met)
-    artifactTopupAvailable: boolean; // user holds >=1 artifact (no cash gate)
+    artifactTopupAvailable: boolean; // holds >=1 artifact AND Cash below the gate
     grantCents: number; // +Cash per top-up
     artifactCost: number; // artifacts per paid top-up
+    artifactCashGateCents: number; // artifact top-up disabled once Cash >= this (client renders the $ hint)
   };
   points: { total: number; breakdown: Record<PointsType, number>; bonusFromX2: number };
   swipes: { used: number; cap: number };

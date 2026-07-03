@@ -6,6 +6,7 @@ import {
   TOPUP_GRANT_CENTS,
   FREE_TOPUP_CASH_GATE_CENTS,
   TOPUP_ARTIFACT_COST,
+  ARTIFACT_TOPUP_CASH_GATE_CENTS,
 } from "./config";
 
 export type TopupKind = "free" | "artifact";
@@ -14,14 +15,15 @@ export type TopupResult =
   | { ok: true; kind: TopupKind; grantedCents: number; balanceCents: number }
   | {
       ok: false;
-      reason: "free_used" | "free_not_eligible" | "no_artifact";
+      reason: "free_used" | "free_not_eligible" | "no_artifact" | "cash_too_high";
     };
 
 // Credit +TOPUP_GRANT_CENTS of Cash. Two paths, one Serializable tx each (serializes concurrent
 // top-ups per user so the free flag / artifact decrement can't double-fire):
 //   free     — once ever, gated to low-cash users. Eligibility is RE-DERIVED here (never trust the
 //              client's freeTopupAvailable): Cash < $30 AND Cash can't charge the rest of today's deck.
-//   artifact — costs 1 artifact, NO cash gate (artifacts are the currency; user decides).
+//   artifact — costs 1 artifact, gated to Cash < $50 (a top-up bails out a near-empty balance; it's
+//              not free money to stack on a full one). Gate RE-DERIVED here, never trusting the client.
 // Mirrors the artifact-spend pattern in streak.ts recoverStreak().
 export async function topUp(userId: string, kind: TopupKind, at = new Date()): Promise<TopupResult> {
   // Serializable + P2034 retry (src/lib/tx): serializes concurrent top-ups per user so the free
@@ -50,9 +52,13 @@ export async function topUp(userId: string, kind: TopupKind, at = new Date()): P
         return { ok: true, kind, grantedCents: TOPUP_GRANT_CENTS, balanceCents: updated.balanceCents };
       }
 
-      // kind === "artifact" — costs 1 artifact, no cash gate.
+      // kind === "artifact" — costs 1 artifact, but only while Cash is low (< $50). Check
+      // artifact-presence first (the more fundamental blocker), then the cash gate. Cash = balance −
+      // locked (the maintained hold). Neither the artifact nor the grant fires while gated.
       const cb = await tx.collectibleBalance.findUnique({ where: { userId } });
       if (!cb || cb.artifacts < TOPUP_ARTIFACT_COST) return { ok: false, reason: "no_artifact" };
+      const cash = vb.balanceCents - vb.lockedCents;
+      if (cash >= ARTIFACT_TOPUP_CASH_GATE_CENTS) return { ok: false, reason: "cash_too_high" };
       await tx.collectibleBalance.update({
         where: { userId },
         data: { artifacts: { decrement: TOPUP_ARTIFACT_COST } },

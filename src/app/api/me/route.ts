@@ -12,6 +12,7 @@ import {
   TOPUP_GRANT_CENTS,
   FREE_TOPUP_CASH_GATE_CENTS,
   TOPUP_ARTIFACT_COST,
+  ARTIFACT_TOPUP_CASH_GATE_CENTS,
 } from "@/lib/config";
 import { isDevUser } from "@/lib/dev";
 import type { MeResponse } from "@/lib/api-types";
@@ -59,10 +60,13 @@ export async function GET(req: Request) {
     topup: {
       freeTopupUsed,
       freeTopupAvailable,
-      // Artifact top-up: any time the user holds >=1 artifact (no cash gate).
-      artifactTopupAvailable: (collectibles?.artifacts ?? 0) >= TOPUP_ARTIFACT_COST,
+      // Artifact top-up: holds >=1 artifact AND Cash below the $50 gate (a top-up bails out a low
+      // balance, not a full one). Server-authoritative — topUp() re-derives the same gate.
+      artifactTopupAvailable:
+        (collectibles?.artifacts ?? 0) >= TOPUP_ARTIFACT_COST && cashCents < ARTIFACT_TOPUP_CASH_GATE_CENTS,
       grantCents: TOPUP_GRANT_CENTS,
       artifactCost: TOPUP_ARTIFACT_COST,
+      artifactCashGateCents: ARTIFACT_TOPUP_CASH_GATE_CENTS,
     },
     points: { total: points.total, breakdown: points.breakdown, bonusFromX2: points.bonusFromX2 },
     swipes: { used: counter?.swipeCount ?? 0, cap: SWIPE_CAP },

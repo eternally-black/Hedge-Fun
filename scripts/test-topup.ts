@@ -3,7 +3,7 @@
 import assert from "node:assert";
 import { prisma } from "../src/lib/prisma";
 import { topUp } from "../src/lib/topup";
-import { TOPUP_GRANT_CENTS, FREE_TOPUP_CASH_GATE_CENTS } from "../src/lib/config";
+import { TOPUP_GRANT_CENTS, FREE_TOPUP_CASH_GATE_CENTS, ARTIFACT_TOPUP_CASH_GATE_CENTS } from "../src/lib/config";
 import { randomCode } from "../src/lib/refcode";
 
 async function mkUser(tag: string, balanceCents: number, artifacts = 0) {
@@ -40,35 +40,44 @@ async function main() {
   assert.ok(!r2.ok && r2.reason === "free_not_eligible", "free blocked when cash above gate");
   await cleanup(u2.id);
 
-  // (3) ARTIFACT: spend 1 artifact, no cash gate (user has plenty of cash). Decrements + grants.
-  const u3 = await mkUser(`${base}-art`, 100000, 2);
+  // (3) ARTIFACT: spend 1 artifact when Cash is below the $50 gate. Decrements + grants.
+  const lowArtCash = ARTIFACT_TOPUP_CASH_GATE_CENTS - 1; // under $50 → gate open
+  const u3 = await mkUser(`${base}-art`, lowArtCash, 2);
   const r3 = await topUp(u3.id, "artifact");
-  assert.ok(r3.ok && r3.kind === "artifact", "artifact top-up granted with cash present (no gate)");
+  assert.ok(r3.ok && r3.kind === "artifact", "artifact top-up granted with Cash below the gate");
   const cb3 = await prisma.collectibleBalance.findUniqueOrThrow({ where: { userId: u3.id } });
   assert.strictEqual(cb3.artifacts, 1, "one artifact spent");
   const vb3 = await prisma.virtualBalance.findUniqueOrThrow({ where: { userId: u3.id } });
-  assert.strictEqual(vb3.balanceCents, 100000 + TOPUP_GRANT_CENTS, "artifact grant added to balance");
+  assert.strictEqual(vb3.balanceCents, lowArtCash + TOPUP_GRANT_CENTS, "artifact grant added to balance");
   assert.strictEqual(vb3.topupCount, 1, "topupCount incremented");
   await cleanup(u3.id);
 
-  // (4) ARTIFACT RACE: exactly 1 artifact → two concurrent top-ups, only ONE succeeds.
-  const u4 = await mkUser(`${base}-race`, 100000, 1);
+  // (3b) ARTIFACT GATE: Cash at/above the $50 gate → cash_too_high, artifact NOT spent.
+  const u3b = await mkUser(`${base}-artgate`, ARTIFACT_TOPUP_CASH_GATE_CENTS, 1);
+  const r3b = await topUp(u3b.id, "artifact");
+  assert.ok(!r3b.ok && r3b.reason === "cash_too_high", "artifact blocked when Cash >= $50 gate");
+  const cb3b = await prisma.collectibleBalance.findUniqueOrThrow({ where: { userId: u3b.id } });
+  assert.strictEqual(cb3b.artifacts, 1, "artifact not spent when gated");
+  await cleanup(u3b.id);
+
+  // (4) ARTIFACT RACE: exactly 1 artifact → two concurrent top-ups, only ONE succeeds. Low cash so the gate is open.
+  const u4 = await mkUser(`${base}-race`, ARTIFACT_TOPUP_CASH_GATE_CENTS - 1, 1);
   const race = await Promise.allSettled([topUp(u4.id, "artifact"), topUp(u4.id, "artifact")]);
   const granted = race.filter((r) => r.status === "fulfilled" && (r.value as { ok: boolean }).ok).length;
   assert.strictEqual(granted, 1, `exactly one artifact top-up wins the race (got ${granted})`);
   const cb4 = await prisma.collectibleBalance.findUniqueOrThrow({ where: { userId: u4.id } });
   assert.strictEqual(cb4.artifacts, 0, "artifact not double-spent");
   const vb4 = await prisma.virtualBalance.findUniqueOrThrow({ where: { userId: u4.id } });
-  assert.strictEqual(vb4.balanceCents, 100000 + TOPUP_GRANT_CENTS, "balance credited once, not twice");
+  assert.strictEqual(vb4.balanceCents, (ARTIFACT_TOPUP_CASH_GATE_CENTS - 1) + TOPUP_GRANT_CENTS, "balance credited once, not twice");
   await cleanup(u4.id);
 
-  // (5) ARTIFACT with none → no_artifact.
+  // (5) ARTIFACT with none → no_artifact (checked before the cash gate, so high cash still reports no_artifact).
   const u5 = await mkUser(`${base}-noart`, 100000, 0);
   const r5 = await topUp(u5.id, "artifact");
   assert.ok(!r5.ok && r5.reason === "no_artifact", "no artifact → rejected");
   await cleanup(u5.id);
 
-  console.log("OK: free once+gated, artifact spend race-safe");
+  console.log("OK: free once+gated, artifact cash-gated + spend race-safe");
 }
 
 main().catch((e) => { console.error("FAIL:", e); process.exit(1); }).finally(() => prisma.$disconnect());
