@@ -11,7 +11,11 @@ export type Category = "crypto" | "esports" | "sports" | "overunder" | "politics
 // question AND the outcome labels, because named-binary markets carry the real category in the
 // side names (e.g. "Boston Red Sox" / "Colorado Rockies") while the question is just a market
 // type ("Spread: Boston Red Sox (-1.5)").
-const ESPORTS = /\b(dota|counter-?strike|cs2|cs:go|csgo|valorant|league of legends|lol|overwatch|honor of kings|mobile legends|rainbow six|rocket league|starcraft|king of glory|pubg|esports|map \d|bo[135]\b)\b/i;
+// "map ..." is an esports-only bet term (CS2/Dota/Valorant series play over maps; no traditional
+// sport uses it). Catch the series-level lines too — "Map Handicap", "Map Advantage", "Total Maps" —
+// not just numbered "Map 1", so a CS2 match with unknown teams still classifies esports and gets
+// hidden by isVagueEsports instead of leaking to the deck as a bare "SPORTS" card.
+const ESPORTS = /\b(dota|counter-?strike|cs2|cs:go|csgo|valorant|league of legends|lol|overwatch|honor of kings|mobile legends|rainbow six|rocket league|starcraft|king of glory|pubg|esports|map \d|map handicap|map advantage|map spread|total maps|bo[135]\b)\b/i;
 // Crypto: ticker/coin names, ETF flow markets, and the Up/Down shape.
 const CRYPTO = /\b(bitcoin|btc|ethereum|eth|solana|sol|xrp|bnb|dogecoin|doge|hyperliquid|cardano|ada|crypto|etf flows?|gas\b|gwei)\b/i;
 // Sports: leagues + the "type" words that head named-binary sports markets (spread, handicap,

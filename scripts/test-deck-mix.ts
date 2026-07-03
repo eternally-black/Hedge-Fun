@@ -25,6 +25,11 @@ assert.strictEqual(isVagueEsports(em("Map 1 Rounds Handicap: Millennium Esports 
 assert.strictEqual(isVagueEsports(em("Dota 2: L1ga Team vs 4ikibamboni", "L1ga Team", "4ikibamboni")), false, "esports with a named game (Dota 2) -> kept");
 assert.strictEqual(isVagueEsports(em("Bosnia vs. Qatar match", "Bosnia", "Qatar")), false, "sports (not esports) -> kept");
 assert.strictEqual(isVagueEsports(em("Bitcoin Up or Down - 9:05AM", "Up", "Down")), false, "crypto -> kept");
+// "Map Handicap" CS2-style series markets: "map" is an esports bet term, so they classify esports —
+// with unknown teams/game gameOf is null -> vague -> hidden (the reported "SPORTS: Map Handicap" bug).
+assert.strictEqual(categoryOf(em("Map Handicap: Entropy (-1.5) vs SAW (+1.5)", "SAW", "Entropy")), "esports", "map handicap -> esports, not sports");
+assert.strictEqual(isVagueEsports(em("Map Handicap: Entropy (-1.5) vs SAW (+1.5)", "SAW", "Entropy")), true, "map handicap + unknown teams -> vague (dropped)");
+assert.strictEqual(isVagueEsports(em("CS2 Map Handicap: NAVI (-1.5) vs FaZe (+1.5)", "NAVI", "FaZe")), false, "map handicap + named game (CS2) -> kept, not over-hidden");
 assert.strictEqual(isContextPoor(ou("Lakers @ Celtics: Total Points O/U 210.5")), false, "@ match form -> usable");
 // non-Over/Under markets are never poor — a team name or Yes/No explains itself.
 assert.strictEqual(isContextPoor({ question: "Games Total 4.5", outcomeYesLabel: "Bosnia", outcomeNoLabel: "Qatar" }), false, "named teams -> never poor");
