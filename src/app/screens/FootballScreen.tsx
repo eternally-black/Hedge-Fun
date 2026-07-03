@@ -20,15 +20,19 @@ export function FootballScreen({
   onRefreshMe,
   onToast,
   onTopup,
+  selected,
+  onSelect,
 }: {
   api: Api;
   me: Me | null;
   onRefreshMe: () => void;
   onToast: (msg: string) => void;
   onTopup: () => void;
+  // Which match is open, lifted to the parent so the global ticker can open one directly.
+  selected: TickerRow | null;
+  onSelect: (row: TickerRow | null) => void;
 }) {
   const [rows, setRows] = useState<TickerRow[] | null>(null);
-  const [selected, setSelected] = useState<TickerRow | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -54,7 +58,7 @@ export function FootballScreen({
         api={api}
         me={me}
         row={selected}
-        onBack={() => setSelected(null)}
+        onBack={() => onSelect(null)}
         onRefreshMe={onRefreshMe}
         onToast={onToast}
         onTopup={onTopup}
@@ -82,7 +86,7 @@ export function FootballScreen({
       ) : (
         <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 8 }}>
           {rows.map((r) => (
-            <MatchRow key={r.fixtureId} row={r} onOpen={() => setSelected(r)} />
+            <MatchRow key={r.fixtureId} row={r} onOpen={() => onSelect(r)} />
           ))}
         </div>
       )}

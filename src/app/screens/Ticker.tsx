@@ -16,7 +16,7 @@ const POLL_MS = 5000;
 const FLASH_MS = 2600;
 const FLASH_COLOR: Record<FlashKind, string> = { goal: "var(--gold)", up: "var(--yes)", down: "var(--no)" };
 
-export function Ticker({ api }: { api: Api }) {
+export function Ticker({ api, onOpenMatch }: { api: Api; onOpenMatch: (row: TickerRow) => void }) {
   const [rows, setRows] = useState<TickerRow[]>([]);
   const [flash, setFlash] = useState<Record<string, FlashKind>>({});
   // Transient cross-poll state — refs so the per-poll diff/timer bookkeeping never triggers a render
@@ -102,25 +102,34 @@ export function Ticker({ api }: { api: Api }) {
         {items.map((r, i) => (
           // i < rows.length = first copy, else the duplicate — a stable key per (fixture, copy) so
           // changing rows don't remount items / churn the marquee.
-          <TickerItem key={`${r.fixtureId}-${i >= rows.length ? 1 : 0}`} row={r} flash={flash[r.fixtureId]} />
+          <TickerItem key={`${r.fixtureId}-${i >= rows.length ? 1 : 0}`} row={r} flash={flash[r.fixtureId]} onOpen={onOpenMatch} />
         ))}
       </div>
     </div>
   );
 }
 
-function TickerItem({ row, flash }: { row: TickerRow; flash?: FlashKind }) {
+function TickerItem({ row, flash, onOpen }: { row: TickerRow; flash?: FlashKind; onOpen: (row: TickerRow) => void }) {
   const score = row.homeGoals == null ? null : `${row.homeGoals}–${row.awayGoals}`;
   const status = row.live ? row.phase || "LIVE" : row.ended ? "FT" : kickoffLabel(row.kickoff);
   const arrow = flash === "up" ? "▲" : flash === "down" ? "▼" : "";
   return (
-    <span
+    <button
+      type="button"
+      onClick={() => onOpen(row)}
+      aria-label={`Bet ${row.home} vs ${row.away}`}
+      title="Open markets"
       style={{
         display: "inline-flex",
         alignItems: "center",
         gap: 8,
         padding: "6px 16px",
+        margin: 0,
+        font: "inherit",
+        color: "var(--text)",
+        cursor: "pointer",
         fontSize: 12,
+        border: "none",
         borderRight: "1px solid var(--line)",
         background: flash === "goal" ? "color-mix(in srgb, var(--gold) 22%, transparent)" : "transparent",
         transition: "background .3s ease",
@@ -152,6 +161,6 @@ function TickerItem({ row, flash }: { row: TickerRow; flash?: FlashKind }) {
           O2.5 {Math.round(row.over25Pct)}% {arrow}
         </span>
       ) : null}
-    </span>
+    </button>
   );
 }
