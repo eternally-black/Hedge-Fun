@@ -104,8 +104,9 @@ export function GmScreen({ me, busy, onGM, onEnterDeck, onRevive }: { me: Me | n
 
       {/* CTA by state: claim (fresh day) → onGM; checked-in → deck; lost → onGM (starts a brand-new
           streak); burned → spend 1 artifact to revive right here (onRevive → /api/recover), or a
-          disabled "no artifact" when there's none. A quiet "Skip to the deck" link sits below when the
-          primary isn't the deck itself. */}
+          disabled "no artifact" when there's none. No "skip to the deck" link — this is a normal
+          navigable screen (reached via the Streak button), not a ritual gate; the bottom nav is the
+          way out. */}
       {burned ? (
         <button
           type="button"
@@ -124,9 +125,6 @@ export function GmScreen({ me, busy, onGM, onEnterDeck, onRevive }: { me: Me | n
         >
           {status === "checkedIn" ? "Enter the deck →" : status === "lost" ? "☀ Start a new streak" : "☀ Claim & keep streak"}
         </button>
-      )}
-      {(done || broken) && (
-        <button type="button" onClick={onEnterDeck} style={{ background: "none", border: "none", padding: 0, font: "inherit", marginTop: 12, fontSize: 12, color: "var(--muted)", textDecoration: "underline", cursor: "pointer" }}>Skip to the deck →</button>
       )}
     </div>
   );
