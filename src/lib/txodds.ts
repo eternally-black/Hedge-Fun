@@ -261,6 +261,13 @@ async function buildSnapshot(): Promise<TickerRow[]> {
       const inPlayWindow = started && sinceKick < 3 * 3_600_000;
       const ended = ph.ended || (home != null && started && !inPlayWindow);
       const live = !ended && !ph.abandoned && (ph.live || inPlayWindow);
+      // 1X2 win probabilities from the same already-fetched odds (no extra call). winBp → % to match
+      // over25Pct's scale so the ticker can cite both markets in one event line.
+      const wins = parseWinMarkets(odds);
+      const winPct = (team: "home" | "away") => {
+        const w = wins.find((x) => x.team === team);
+        return w ? w.winBp / 100 : null;
+      };
       return {
         fixtureId: String(f.FixtureId),
         competition: f.Competition,
@@ -273,6 +280,8 @@ async function buildSnapshot(): Promise<TickerRow[]> {
         phase: ended ? "FT" : ph.abandoned ? "ABD" : live ? ph.label || "LIVE" : "",
         kickoff: new Date(f.StartTime).toISOString(),
         over25Pct: over25Pct(odds),
+        homeWinPct: winPct("home"),
+        awayWinPct: winPct("away"),
       };
     }),
   );
