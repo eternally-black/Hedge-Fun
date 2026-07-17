@@ -50,3 +50,22 @@ export const REFERRAL_INVITER_RATE = 0.2; // inviter gets 20% of referral's poin
 // ---- x2 multiplier (DECIDED) ----
 // The rule itself lives in src/lib/points.ts (scorePoints — applied at read time).
 // DECIDED: trigger = 7-day streak; cadence = one-time per completed 7-day window. Swipe-only.
+
+// ---- Hedge engine (phase 2 — S1 wallet hedge) ----
+// Sizing PERCENTAGES are PRODUCT RULES, not hedge math (spec §2): copy must never claim
+// equivalence. Basis points of the holding's current notional (D3: exposure = market value).
+// Majors (SOL / wrapped BTC/ETH): 5–10% band → we size at the midpoint. Long-tail SPL aggregate:
+// ~3% into a SOL-short PROXY (basis risk — labelled a proxy, not a hedge).
+export const HEDGE_MAJOR_PCT_BP = 700; // 7.0% of a major holding's notional (within the 5–10% band)
+export const HEDGE_PROXY_PCT_BP = 300; // 3.0% of the aggregate SPL notional → SOL-short proxy
+// Absolute clamps on a proposed hedge stake (before the per-user Cash clamp at accept time).
+export const HEDGE_MIN_STAKE_CENTS = 100; // $1.00 — below this a hedge is noise; skip the suggestion
+export const HEDGE_MAX_STAKE_CENTS = 50_000; // $500.00 — cap any single paper hedge
+// A holding worth less than this is dust — never worth a suggestion (avoids $0.03-token spam).
+export const HEDGE_MIN_NOTIONAL_CENTS = 500; // $5.00
+// A candidate market must resolve at least this far out to be a usable hedge (not seconds away).
+export const HEDGE_MIN_LEAD_MS = 30 * 60_000; // 30 minutes
+// WalletSnapshot TTL. Birdeye wallet APIs are beta-capped (5 rps / 75 rpm, D4) → the snapshot is a
+// mandatory cache; NEVER call Birdeye synchronously per request while a fresh snapshot exists.
+export const WALLET_SNAPSHOT_TTL_MS = 6 * 3_600_000; // 6h — exposure (Helius+Jupiter) refresh window
+export const WALLET_PNL_TTL_MS = 6 * 3_600_000; // 6h — Birdeye avg-cost refresh window (separate, slower)

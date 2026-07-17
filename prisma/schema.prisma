@@ -61,6 +61,31 @@ enum BetResult {
 enum BetSource {
   DECK // the daily swipe deck: earns points (capped) + capped shards
   FEED // the post-cap feed: NO points, shards UNCAPPED
+  HEDGE // an accepted hedge suggestion (wallet/life-event): VARIABLE stake, NO points, NO daily cap; settles via the SAME poller as a standard bet (D6/D8)
+}
+
+// Hedge suggestion kind (spec §2/§5). S1_* ship in this packet; S2/FALLBACK are reserved for the
+// life-event packet (kept in the enum so the telemetry table doesn't need a later migration).
+enum HedgeSuggestionKind {
+  S1_MAJOR // direct hedge on a major holding (SOL / wrapped BTC / wrapped ETH)
+  S1_PROXY // long-tail SPL aggregate -> SOL-short proxy (basis risk)
+  S2 // reserved: life-event hedge
+  FALLBACK // reserved: discovery fallback (never presented as a hedge)
+}
+
+// The parsed direction of a strike market = which side (YES / outcome index 0) benefits from an
+// UP move. "Bitcoin above 62,600" / "reach"/"hit" => UP (YES wins on a rise); "dip to"/"below" =>
+// DOWN (YES wins on a fall). Hedging a LONG holding picks the opposite side of an UP market.
+enum HedgeMarketDirection {
+  UP
+  DOWN
+}
+
+// Telemetry lifecycle for a suggestion (advisor consensus: "without this we learn nothing").
+enum HedgeEventType {
+  IMPRESSION
+  ACCEPT
+  DISMISS
 }
 
 enum PointsType {
@@ -111,17 +136,19 @@ model User {
   signupIpHash          Bytes?
   signupUaHash          Bytes?
 
-  bets               Bet[]
-  pointsLedger       PointsLedger[]
-  virtualBalance     VirtualBalance?
-  collectibleBalance CollectibleBalance?
-  shardGrants        ShardGrant[]
-  dailyCounters      DailyCounter[]
-  loginMarks         LoginMark[]
-  streak             Streak?
-  streakEvents       StreakEvent[]
-  referralsMade      Referral[]          @relation("Inviter")
-  referralReceived   Referral?           @relation("Invitee")
+  bets                  Bet[]
+  pointsLedger          PointsLedger[]
+  virtualBalance        VirtualBalance?
+  collectibleBalance    CollectibleBalance?
+  shardGrants           ShardGrant[]
+  dailyCounters         DailyCounter[]
+  loginMarks            LoginMark[]
+  streak                Streak?
+  streakEvents          StreakEvent[]
+  referralsMade         Referral[]             @relation("Inviter")
+  referralReceived      Referral?              @relation("Invitee")
+  hedgeWallets          HedgeWallet[]
+  hedgeSuggestionEvents HedgeSuggestionEvent[]
 
   @@index([createdAt])
   @@map("users")
@@ -130,10 +157,10 @@ model User {
 // ============================================================ MARKET (cached from Polymarket)
 
 model Market {
-  id           String  @id @default(cuid())
+  id           String       @id @default(cuid())
   // External market id + unique upsert key. POLYMARKET: the Gamma conditionId. TXODDS: a synthetic
   // "txline:{fixtureId}:{kind}" (kind = OU15|OU25|OU35) — reusing this key avoids a nullable migration.
-  polymarketId String  @unique
+  polymarketId String       @unique
   source       MarketSource @default(POLYMARKET)
   question     String
   category     String? // usually null on Gamma; derived/optional
@@ -164,7 +191,9 @@ model Market {
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
-  bets Bet[]
+  bets        Bet[]
+  meta        MarketMeta?
+  hedgeEvents HedgeSuggestionEvent[]
 
   @@index([status, resolutionDeadline]) // deck assembly
   @@index([status, resolvedAt]) // settlement scan
@@ -184,12 +213,17 @@ model Bet {
   side          BetSide
   stakeCents    Int // 10000 == $100.00 (config STAKE_CENTS)
   lockedPriceBp Int // price of the BOUGHT side in bp at swipe time (yes-bet -> yes price, no-bet -> no price)
-  utcDay        String  @db.VarChar(10)
-  earnedPoint   Boolean @default(false) // over-cap swipes = false
+  utcDay        String    @db.VarChar(10)
+  earnedPoint   Boolean   @default(false) // over-cap swipes = false
   // Where this bet came from. DECK = the daily swipe deck (points + capped shards).
   // FEED = the post-cap feed (no points; shards UNCAPPED — see awardShard bypassCap).
   // Default DECK so every pre-feed row backfills correctly (non-breaking migration).
   source        BetSource @default(DECK)
+
+  // Hedge provenance (D6/D8): the DETERMINISTIC suggestion id this bet was accepted from
+  // (src/lib/hedge/id.ts — hash of address+marketId+kind+sizing). Null for deck/feed bets. Powers
+  // idempotent accept (re-accepting a suggestion returns this bet, never a duplicate) + telemetry.
+  hedgeSuggestionId String?
 
   settlementStatus SettlementStatus @default(PENDING)
   result           BetResult        @default(PENDING)
@@ -210,6 +244,7 @@ model Bet {
   @@index([marketId, settlementStatus])
   @@index([userId, utcDay])
   @@index([userId, settlementStatus, seenAt]) // unread-results scan (/api/me unreadResults, /api/results/seen)
+  @@index([userId, hedgeSuggestionId]) // idempotent hedge-accept lookup (re-accept -> existing bet)
   @@map("bets")
 }
 
@@ -223,7 +258,7 @@ model PointsLedger {
   amount Int // RAW points, never pre-multiplied
   utcDay String     @db.VarChar(10)
 
-  betId      String? @unique // SWIPE provenance + idempotency (1 pt/bet)
+  betId      String?  @unique // SWIPE provenance + idempotency (1 pt/bet)
   referralId String? // REFERRAL provenance
   metadata   Json?
   createdAt  DateTime @default(now())
@@ -256,10 +291,10 @@ model VirtualBalance {
 // ============================================================ COLLECTIBLES
 
 model CollectibleBalance {
-  userId    String   @id
-  user      User     @relation(fields: [userId], references: [id])
-  shards    Int      @default(0) // remainder after artifact conversion (0..19)
-  artifacts Int      @default(0)
+  userId       String   @id
+  user         User     @relation(fields: [userId], references: [id])
+  shards       Int      @default(0) // remainder after artifact conversion (0..19)
+  artifacts    Int      @default(0)
   // Card-skins cosmetics: ids from the in-code catalog (src/lib/skins.ts). Everyone owns "classic"
   // for free; premium skins are bought with artifacts (unlock pushes the id here + equips it).
   ownedSkins   String[] @default(["classic"])
@@ -410,4 +445,84 @@ model LeaderboardSnapshot {
   @@unique([utcDay, userId])
   @@index([utcDay, rank])
   @@map("leaderboard_snapshots")
+}
+
+// ============================================================ HEDGE ENGINE (phase 2, workstream A)
+
+// A read-only Solana address the user linked for wallet-hedge suggestions (S1). We never ask for
+// keys. Multiple addresses per user are allowed later; unique per (user, address) for now.
+model HedgeWallet {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  address   String // base58 Solana address (validated at link time)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, address])
+  @@index([address])
+  @@map("hedge_wallets")
+}
+
+// Cached exposure + Birdeye PnL for one address, keyed by ADDRESS (shared across users who link the
+// same wallet). exposure/avgCost are DERIVED JSON blobs (re-buildable from Helius+Jupiter+Birdeye),
+// so no relational modelling — the snapshot is a TTL cache, not a source of truth. Birdeye wallet
+// APIs are beta-capped (5 rps / 75 rpm, D4) so pnlFetchedAt gates a SEPARATE, slower refresh: the
+// exposure half can refresh without paying a Birdeye call every time.
+model WalletSnapshot {
+  address            String    @id // base58 address is the cache key
+  exposure           Json // ExposureResult: per-asset balances × prices × notional (see src/lib/hedge/exposure.ts)
+  avgCost            Json? // { <mint>: avgBuyCostCents } from Birdeye; null when Birdeye degraded (graceful)
+  totalNotionalCents Int       @default(0)
+  fetchedAt          DateTime  @default(now()) // exposure TTL anchor (WALLET_SNAPSHOT_TTL_MS)
+  pnlFetchedAt       DateTime? // Birdeye avg-cost TTL anchor (separate, rate-capped)
+
+  @@map("wallet_snapshots")
+}
+
+// Enrichment layer over the Market cache for hedge matching. One row per cached Market. Populated by
+// scripts/refresh-hedge-index.ts from Gamma tag discovery + deterministic slug/question parsing.
+// parseOk = strike + date + direction ALL machine-parsed -> the market qualifies for S1 matching.
+model MarketMeta {
+  id       String @id @default(cuid())
+  marketId String @unique
+  market   Market @relation(fields: [marketId], references: [id])
+
+  asset          String? // "BTC" | "ETH" | "SOL" (the underlying major), null if not a major
+  tagSlug        String? // gamma tag slug the market was discovered under (bitcoin/ethereum/solana)
+  eventSlug      String? // gamma event slug (context)
+  eventTicker    String? // gamma event ticker (context)
+  series         String? // gamma series title (context)
+  strikeCents    Int? // parsed strike in integer cents ($62,600 -> 6_260_000)
+  direction      HedgeMarketDirection? // UP (above/reach/hit) | DOWN (dip/below/under)
+  parsedDeadline DateTime? // canonical resolution instant (Gamma endDate)
+  liquidityCents Int? // for ranking candidates (rounded USD liquidity × 100)
+  volumeCents    Int? // for ranking candidates (rounded USD volume × 100)
+  parseOk        Boolean               @default(false) // strike + date + direction all parsed -> S1-eligible
+  updatedAt      DateTime              @updatedAt
+
+  @@index([asset, parseOk])
+  @@map("market_meta")
+}
+
+// Append-only telemetry: one row per (user, suggestion, event). Deduped per event type so re-sending
+// an impression / accept / dismiss is idempotent (upsert on the unique key). betId set on ACCEPT.
+model HedgeSuggestionEvent {
+  id                 String              @id @default(cuid())
+  suggestionId       String // deterministic id (src/lib/hedge/id.ts) — stable across re-derivation
+  userId             String
+  user               User                @relation(fields: [userId], references: [id])
+  address            String // the hedged wallet address
+  marketId           String
+  market             Market              @relation(fields: [marketId], references: [id])
+  kind               HedgeSuggestionKind
+  side               BetSide // the side that hedges the holding (down-benefit)
+  proposedStakeCents Int
+  event              HedgeEventType
+  betId              String? // set on ACCEPT (the Bet created)
+  createdAt          DateTime            @default(now())
+
+  @@unique([userId, suggestionId, event]) // idempotent telemetry (one impression/accept/dismiss per user per suggestion)
+  @@index([suggestionId])
+  @@index([userId, createdAt])
+  @@map("hedge_suggestion_events")
 }

@@ -298,3 +298,86 @@ export interface AdminLeaderboardResponse {
   rows: AdminLeaderboardRow[];
   generatedAt: string; // ISO-8601
 }
+
+// ─── HEDGE ENGINE (phase 2, workstream A) ────────────────────────────────────────────────────────
+// The S1 wallet-hedge surface. Suggestions are DETERMINISTIC and re-derivable server-side (D1 — no
+// LLM in the loop), settle as standard paper Bet rows through the existing poller (D6), and carry a
+// VARIABLE stake (D8). Every shape here is the contract the web + Android clients render.
+
+// Which hedge a suggestion is. "S1-major" = a direct hedge on a major holding (SOL / wrapped BTC or
+// ETH). "S1-proxy" = the long-tail SPL aggregate hedged via a SOL short (BASIS RISK — the client MUST
+// label it a proxy, never a hedge). (S2 / life-event kinds arrive in a later packet.)
+export type HedgeSuggestionKind = "S1-major" | "S1-proxy";
+
+// ─── POST /api/hedge/wallet ──────────────────────────────────────────────────────────────────────
+// Auth: Bearer. Body: HedgeWalletRequest. Validates the base58 Solana address, links it (read-only —
+// keys are NEVER requested), builds/refreshes the cached WalletSnapshot, and returns the exposure
+// summary. Errors: 400 (missing/invalid base58 address), 502 (balances/prices upstream unavailable —
+// { error: "exposure_unavailable" }).
+export interface HedgeWalletRequest {
+  address: string; // base58 Solana address
+}
+export interface HedgeExposureAsset {
+  asset: string; // "SOL" | "BTC" | "ETH" for majors; token symbol / short mint for SPL
+  mint: string | null; // null = native SOL
+  amount: string; // UI token amount as a decimal STRING (avoids float drift on the wire)
+  notionalCents: number; // current USD value (D3 = market value), integer cents
+  isMajor: boolean; // directly hedgeable (SOL / wrapped BTC / wrapped ETH)
+  avgBuyCostCents: number | null; // Birdeye avg buy cost per token; null when unavailable (graceful)
+}
+export interface HedgeWalletResponse {
+  address: string;
+  totalNotionalCents: number;
+  majors: HedgeExposureAsset[]; // SOL / BTC / ETH exposure, biggest first
+  splAggregateCents: number; // Σ long-tail SPL notional (the proxy-hedge basis)
+  snapshotFetchedAt: string; // ISO-8601 (cache freshness)
+  pnlAvailable: boolean; // false => Birdeye degraded => no avg-cost narrative lines
+}
+
+// ─── GET /api/hedge/suggestions ──────────────────────────────────────────────────────────────────
+// Auth: Bearer. Deterministic S1 suggestions for the caller's linked wallet(s). Each card reuses the
+// DeckCard field family + hedge metadata. `suggestionId` is a stable content hash (re-derivable) so
+// POST /accept is idempotent. `walletLinked` is false when the user has linked no wallet yet.
+export interface HedgeSuggestion extends DeckCard {
+  suggestionId: string; // deterministic; pass to /accept and /event
+  kind: HedgeSuggestionKind; // "S1-major" | "S1-proxy"
+  side: BetSide; // the side that hedges the holding (benefits if the price falls)
+  sideLabel: string; // display label of that side (e.g. "No")
+  proposedStakeCents: number; // sized 5–10% majors / ~3% SPL-proxy, clamped (D8)
+  hedgedAsset: string; // "SOL" | "BTC" | "ETH" ("SOL" is the shorting instrument for a proxy)
+  hedgedNotionalCents: number; // the exposure being hedged
+  isProxy: boolean; // true => S1-proxy => UI must show the basis-risk / "proxy, not a hedge" label
+  avgBuyCostNarrative: string | null; // "You bought SOL at ~$X" — null when Birdeye unavailable
+}
+export interface HedgeSuggestionsResponse {
+  suggestions: HedgeSuggestion[];
+  walletLinked: boolean; // false => prompt the user to link a wallet first
+}
+
+// ─── POST /api/hedge/accept ──────────────────────────────────────────────────────────────────────
+// Auth: Bearer. Body: HedgeAcceptRequest. Re-derives the suggestion server-side from the id (never
+// trusts client market/side/stake), then creates a STANDARD paper Bet with the variable stake,
+// locking it against Cash exactly like a swipe (atomic guard). Idempotent: re-accepting the same
+// suggestion returns the existing bet (alreadyAccepted:true). Errors: 400 (bad body), 402
+// (insufficient Cash — { error: "insufficient_funds" }), 404 (suggestion not found / stale — client
+// should refetch suggestions), 409 (market not open / already bet this market).
+export interface HedgeAcceptRequest {
+  suggestionId: string;
+}
+export interface HedgeAcceptResponse {
+  betId: string;
+  stakeCents: number; // the ACTUAL locked stake (may be clamped down to available Cash)
+  alreadyAccepted: boolean; // true => idempotent replay, returns the pre-existing bet
+}
+
+// ─── POST /api/hedge/event ───────────────────────────────────────────────────────────────────────
+// Auth: Bearer. Body: HedgeEventRequest. Suggestion telemetry (impression / dismiss; accept is
+// recorded by /accept). Idempotent per (user, suggestion, event). Errors: 400 (bad body), 404
+// (suggestion not derivable for the user's wallet — stale).
+export interface HedgeEventRequest {
+  suggestionId: string;
+  event: "impression" | "dismiss";
+}
+export interface HedgeEventResponse {
+  ok: true;
+}

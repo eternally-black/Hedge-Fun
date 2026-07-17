@@ -1,0 +1,170 @@
+// Suggestion orchestrator (DB glue over the pure cores). Loads the S1-eligible market index +
+// the caller's cached wallet exposure, runs matchS1 + sizeS1, and builds the HedgeSuggestion cards
+// with stable ids + the optional avg-cost narrative. Suggestions are NOT stored — they are
+// re-derivable, which is exactly what makes /accept idempotent (same inputs -> same suggestionId).
+
+import { prisma } from "../prisma";
+import { matchS1, type IndexedMarket } from "./match";
+import { sizeS1 } from "./size";
+import { suggestionId } from "./id";
+import { WSOL_MINT } from "./exposure";
+import type { HedgeAsset, ParsedDirection } from "./parse";
+import { getSnapshot, getCachedSnapshot, type SnapshotData } from "./snapshot";
+import type { HedgeSuggestion, HedgeSuggestionKind } from "../api-types";
+
+// Internal derived item: the wire suggestion + the fields /accept and telemetry need (address, the
+// Prisma enum kind) that don't belong in the public card shape.
+export interface DerivedSuggestion {
+  address: string;
+  enumKind: "S1_MAJOR" | "S1_PROXY";
+  suggestion: HedgeSuggestion;
+}
+
+function wireKind(k: "S1_MAJOR" | "S1_PROXY"): HedgeSuggestionKind {
+  return k === "S1_MAJOR" ? "S1-major" : "S1-proxy";
+}
+
+export function enumKind(wire: HedgeSuggestionKind): "S1_MAJOR" | "S1_PROXY" {
+  return wire === "S1-major" ? "S1_MAJOR" : "S1_PROXY";
+}
+
+// Load parsed, S1-eligible, OPEN majors markets as the pure matcher's IndexedMarket[].
+export async function loadIndexedMarkets(): Promise<IndexedMarket[]> {
+  const rows = await prisma.marketMeta.findMany({
+    where: {
+      parseOk: true,
+      asset: { in: ["BTC", "ETH", "SOL"] },
+      direction: { not: null },
+      strikeCents: { not: null },
+      market: { is: { status: "OPEN" } },
+    },
+    select: {
+      asset: true,
+      direction: true,
+      strikeCents: true,
+      liquidityCents: true,
+      parsedDeadline: true,
+      market: { select: { id: true, yesPriceBp: true, noPriceBp: true, resolutionDeadline: true } },
+    },
+  });
+
+  const out: IndexedMarket[] = [];
+  for (const r of rows) {
+    if (!r.asset || r.strikeCents == null || !r.direction) continue;
+    const deadline = r.parsedDeadline ?? r.market.resolutionDeadline;
+    out.push({
+      marketId: r.market.id,
+      asset: r.asset as HedgeAsset,
+      direction: r.direction as ParsedDirection,
+      strikeCents: r.strikeCents,
+      deadlineMs: deadline.getTime(),
+      liquidityCents: r.liquidityCents,
+      yesPriceBp: r.market.yesPriceBp,
+      noPriceBp: r.market.noPriceBp,
+    });
+  }
+  return out;
+}
+
+// The "you bought at $X" line (D4) — only for a DIRECT major hedge (a proxy hedges an SPL aggregate,
+// which has no single cost basis). Null whenever Birdeye is unavailable or has no cost for the asset.
+function avgCostNarrative(snapshot: SnapshotData, hedgedAsset: string, isProxy: boolean): string | null {
+  if (isProxy || !snapshot.avgCost) return null;
+  const mint =
+    hedgedAsset === "SOL" ? WSOL_MINT : snapshot.exposure.majors.find((a) => a.asset === hedgedAsset)?.mint ?? null;
+  if (!mint) return null;
+  const cents = snapshot.avgCost[mint];
+  if (cents == null || !(cents > 0)) return null;
+  const dollars = (cents / 100).toLocaleString("en-US", { maximumFractionDigits: 2 });
+  return `You bought ${hedgedAsset} at ~$${dollars}`;
+}
+
+// Build the derived suggestions for one snapshot against the given market index.
+export async function deriveSuggestions(
+  snapshot: SnapshotData,
+  indexed: IndexedMarket[],
+  nowMs: number,
+): Promise<DerivedSuggestion[]> {
+  const candidates = matchS1(snapshot.exposure, indexed, nowMs);
+  if (candidates.length === 0) return [];
+
+  const markets = await prisma.market.findMany({
+    where: { id: { in: candidates.map((c) => c.marketId) } },
+    select: {
+      id: true,
+      question: true,
+      category: true,
+      outcomeYesLabel: true,
+      outcomeNoLabel: true,
+      yesPriceBp: true,
+      noPriceBp: true,
+      resolutionDeadline: true,
+      status: true,
+    },
+  });
+  const byId = new Map(markets.map((m) => [m.id, m]));
+
+  const items: DerivedSuggestion[] = [];
+  for (const c of candidates) {
+    const m = byId.get(c.marketId);
+    if (!m || m.status !== "OPEN" || m.yesPriceBp == null || m.noPriceBp == null) continue;
+    const stake = sizeS1(c.hedgedNotionalCents, c.kind);
+    if (stake <= 0) continue; // below the min clamp -> not worth suggesting
+
+    const sid = suggestionId({
+      address: snapshot.address,
+      marketId: c.marketId,
+      kind: c.kind,
+      side: c.side,
+      hedgedNotionalCents: c.hedgedNotionalCents,
+      proposedStakeCents: stake,
+    });
+    const sideLabel = c.side === "YES" ? m.outcomeYesLabel : m.outcomeNoLabel;
+
+    items.push({
+      address: snapshot.address,
+      enumKind: c.kind,
+      suggestion: {
+        id: m.id,
+        question: m.question,
+        category: m.category,
+        outcomeYesLabel: m.outcomeYesLabel,
+        outcomeNoLabel: m.outcomeNoLabel,
+        yesPriceBp: m.yesPriceBp,
+        noPriceBp: m.noPriceBp,
+        resolutionDeadline: m.resolutionDeadline.toISOString(),
+        suggestionId: sid,
+        kind: wireKind(c.kind),
+        side: c.side,
+        sideLabel,
+        proposedStakeCents: stake,
+        hedgedAsset: c.hedgedAsset,
+        hedgedNotionalCents: c.hedgedNotionalCents,
+        isProxy: c.isProxy,
+        avgBuyCostNarrative: avgCostNarrative(snapshot, c.hedgedAsset, c.isProxy),
+      },
+    });
+  }
+  return items;
+}
+
+// Derive every S1 suggestion for a user across their linked wallet(s). `cacheOnly` (used by /accept)
+// reads only a pre-built snapshot — no external Helius/Jupiter/Birdeye calls — so accept stays fast
+// and deterministic; a missing snapshot yields no items (the caller 404s as stale).
+export async function deriveForUser(
+  userId: string,
+  opts: { cacheOnly?: boolean } = {},
+): Promise<{ items: DerivedSuggestion[]; walletLinked: boolean }> {
+  const wallets = await prisma.hedgeWallet.findMany({ where: { userId }, select: { address: true } });
+  if (wallets.length === 0) return { items: [], walletLinked: false };
+
+  const nowMs = Date.now();
+  const indexed = await loadIndexedMarkets();
+  const items: DerivedSuggestion[] = [];
+  for (const w of wallets) {
+    const snap = opts.cacheOnly ? await getCachedSnapshot(w.address) : await getSnapshot(w.address);
+    if (!snap) continue;
+    items.push(...(await deriveSuggestions(snap, indexed, nowMs)));
+  }
+  return { items, walletLinked: true };
+}

@@ -41,6 +41,14 @@ interface GammaMarket {
   closed?: boolean;
   active?: boolean;
   umaResolutionStatus?: string;
+  // Hedge-index enrichment only (fetchMajorsMarkets): the slug carries the machine-parseable
+  // strike+date+direction; liquidity/volume drive candidate ranking; events carry context.
+  slug?: string;
+  liquidityNum?: number;
+  liquidity?: string | number;
+  volumeNum?: number;
+  volume?: string | number;
+  events?: { slug?: string; ticker?: string; title?: string; series?: { title?: string }[] }[];
 }
 
 function parseJsonArray(s: string | undefined): string[] | null {
@@ -243,4 +251,72 @@ export async function fetchResolution(conditionId: string): Promise<MarketCache 
   const match = raw.find((m) => m.conditionId === conditionId);
   if (!match) return null;
   return mapMarket(match);
+}
+
+// ─── Hedge index (phase 2, workstream A) ─────────────────────────────────────────────────────────
+// Tag-based discovery of the crypto majors for the hedge engine. Unlike fetchBlitzDeck (which mixes
+// a fresh deck), this pulls EVERY open market under one major's tag slug (bitcoin=235, ethereum=39,
+// solana=818 — verified live 2026-07-17) so the ingest can parse strike+date+direction from the slug
+// and store MarketMeta. Carries the raw slug + liquidity/volume + event context alongside the mapped
+// cache row. Read-only Gamma, same idioms as fetchBlitzDeck (offset paging, 100/page cap).
+
+export interface MajorsMarketRaw {
+  cache: MarketCache; // mapped row for upserting the Market cache
+  slug: string | null; // machine-parseable strike/date/direction lives here
+  liquidityNum: number | null; // USD liquidity (ranking)
+  volumeNum: number | null; // USD volume (ranking)
+  eventSlug: string | null;
+  eventTicker: string | null;
+  seriesTitle: string | null;
+}
+
+function num(...vals: (number | string | undefined)[]): number | null {
+  for (const v of vals) {
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+    if (typeof v === "string" && v.trim() && Number.isFinite(Number(v))) return Number(v);
+  }
+  return null;
+}
+
+// Fetch all OPEN, future-resolving markets under one Gamma tag id. `maxPages` bounds the scan
+// (default 8 = up to 800 markets/tag). Returns only markets mapMarket accepts (binary, has an id).
+export async function fetchMajorsMarkets(
+  tagId: number,
+  opts: { maxPages?: number } = {},
+): Promise<MajorsMarketRaw[]> {
+  const maxPages = opts.maxPages ?? 8;
+  const now = new Date();
+  const out: MajorsMarketRaw[] = [];
+
+  for (let page = 0; page < maxPages; page++) {
+    const qs = new URLSearchParams({
+      tag_id: String(tagId),
+      active: "true",
+      closed: "false",
+      end_date_min: now.toISOString(),
+      order: "endDate",
+      ascending: "true",
+      limit: String(GAMMA_PAGE),
+      offset: String(page * GAMMA_PAGE),
+    });
+    const raw = await gammaGet(`/markets?${qs.toString()}`);
+    if (raw.length === 0) break;
+
+    for (const r of raw) {
+      const cache = mapMarket(r);
+      if (!cache) continue;
+      const ev = r.events?.[0];
+      out.push({
+        cache,
+        slug: r.slug ?? null,
+        liquidityNum: num(r.liquidityNum, r.liquidity),
+        volumeNum: num(r.volumeNum, r.volume),
+        eventSlug: ev?.slug ?? null,
+        eventTicker: ev?.ticker ?? null,
+        seriesTitle: ev?.series?.[0]?.title ?? ev?.title ?? null,
+      });
+    }
+    if (raw.length < GAMMA_PAGE) break; // last page
+  }
+  return out;
 }
