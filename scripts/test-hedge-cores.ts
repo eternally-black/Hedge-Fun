@@ -74,6 +74,26 @@ import {
   assert.strictEqual(noDate.strikeCents, 6_260_000, "strike parsed without a date");
   assert.strictEqual(noDate.hasDate, false, "no date token");
   assert.strictEqual(noDate.parseOk, false, "strike but no date -> not eligible");
+
+  // F17 regression 1 — leading word boundary on the strike regexes: a direction keyword BURIED inside
+  // another token ("under" inside "thunder") must NOT fake a strike. Asset + date are present, but the
+  // buried "under-100" is not a real DOWN strike, so it parses asset-only -> parseOk false.
+  const buried = p("btc-thunder-100-on-july-20-2026");
+  assert.strictEqual(buried.asset, "BTC", "asset still tagged");
+  assert.strictEqual(buried.hasDate, true, "july-20 is a real date");
+  assert.strictEqual(buried.strikeCents, null, "'under' inside 'thunder' is not a strike (leading boundary)");
+  assert.strictEqual(buried.direction, null, "no direction from a buried keyword");
+  assert.strictEqual(buried.parseOk, false, "buried keyword -> not S1-eligible");
+
+  // F17 regression 2 — tightened date gate: a bare month WORD not followed by a number ("may" the
+  // modal verb) is not a date. A real strike is present, but the missing date keeps it out of S1.
+  const bareMonth = p("will-bitcoin-above-100000-someday-in-may");
+  assert.strictEqual(bareMonth.strikeCents, 10_000_000, "strike still parses");
+  assert.strictEqual(bareMonth.direction, "UP", "direction still parses");
+  assert.strictEqual(bareMonth.hasDate, false, "bare 'may' (no following number) is not a date");
+  assert.strictEqual(bareMonth.parseOk, false, "strike but no real date -> not eligible");
+  // Same month WITH a day IS a date (the tightening keeps every real form).
+  assert.strictEqual(p("will-bitcoin-above-100000-on-may-3-2026").hasDate, true, "may-3 is a real date");
 }
 
 // ─── exposure: majors (native SOL + wSOL merge, wrapped BTC/ETH) vs long-tail SPL aggregate ─────────

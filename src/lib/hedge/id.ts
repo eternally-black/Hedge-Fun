@@ -38,3 +38,11 @@ export function s2SuggestionId(parts: {
   const canonical = ["S2v1", parts.kind, parts.marketId, parts.side, parts.proposedStakeCents].join("|");
   return createHash("sha256").update(canonical).digest("hex").slice(0, 32);
 }
+
+// Cheap shape guard: EVERY suggestion id (S1 and S2/FALLBACK) is the low 32 hex chars of a sha256
+// digest. A caller can reject a malformed id — truncated client state, telemetry spam — before doing
+// ANY DB re-derivation (F14). It only proves the SHAPE; a well-formed id that no longer derives is
+// still resolved to null downstream (stale → 404).
+export function isHexSuggestionId(sid: string): boolean {
+  return /^[0-9a-f]{32}$/.test(sid);
+}

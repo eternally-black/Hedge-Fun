@@ -37,12 +37,20 @@ const ASSET_PATTERNS: [RegExp, HedgeAsset][] = [
 
 // A direction keyword immediately followed (optionally via "-to") by the strike number, optional
 // "k" (×1000). UP = the YES side wins on a rise; DOWN = the YES side wins on a fall.
-const UP_STRIKE = /(?:above|over|exceeds?|reach(?:es)?|hits?|greater-than|at-least)(?:-to)?-(\d+(?:\.\d+)?)(k)?(?:-|$)/;
-const DOWN_STRIKE = /(?:below|under|beneath|dips?|drops?|falls?|less-than)(?:-to)?-(\d+(?:\.\d+)?)(k)?(?:-|$)/;
+// LEADING `(?:^|-)` word boundary (F17): the keyword must start the slug or sit on a hyphen, so a
+// keyword buried INSIDE another token can't fake a strike ("thunder-100" no longer parses as DOWN
+// via the "under" substring; "takeover-50" no longer as UP via "over"). Every real Gamma slug puts
+// the keyword on a hyphen boundary ("-above-62600", "-dip-to-57k"), so coverage is untouched.
+const UP_STRIKE = /(?:^|-)(?:above|over|exceeds?|reach(?:es)?|hits?|greater-than|at-least)(?:-to)?-(\d+(?:\.\d+)?)(k)?(?:-|$)/;
+const DOWN_STRIKE = /(?:^|-)(?:below|under|beneath|dips?|drops?|falls?|less-than)(?:-to)?-(\d+(?:\.\d+)?)(k)?(?:-|$)/;
 
-// A month name anywhere = a machine-readable date is present (the exact resolution INSTANT comes
-// from Gamma's endDate downstream; this gate just enforces the spec's "strike + date" requirement).
-const DATE_RE = /(?:^|-)(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)(?:-|$)/;
+// A month token IMMEDIATELY FOLLOWED BY A NUMBER (day or year) = a machine-readable date is present.
+// Tightened (F17) from "any month token anywhere": a bare month word ("...-may-rally", "march-to-100k")
+// is an English word, not a date, and used to fake the gate. Requiring a trailing `-\d` matches every
+// real Gamma date form ("july-17", "december-31-2026", "july-2026") while dropping the word-only false
+// positives. The exact resolution INSTANT still comes from Gamma's endDate downstream; this gate only
+// enforces the spec's "strike + date parsed from slug/question" requirement.
+const DATE_RE = /(?:^|-)(?:january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)-\d/;
 
 function assetOf(text: string): HedgeAsset | null {
   for (const [re, a] of ASSET_PATTERNS) if (re.test(text)) return a;

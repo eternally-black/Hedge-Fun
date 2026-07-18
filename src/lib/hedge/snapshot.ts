@@ -46,6 +46,15 @@ export async function getCachedSnapshot(address: string): Promise<SnapshotData |
   return row ? rowToData(row) : null;
 }
 
+// In-process single-flight for the rebuild half (F15): N concurrent callers past the TTL would each
+// duplicate the Helius + Jupiter (+ Birdeye) round-trip; coalescing them onto one in-flight rebuild
+// per address kills the stampede (the Birdeye sub-call is already single-flighted internally). Same
+// process-local caveat as the Birdeye guard: correct for the single-container deploy, but under a
+// MULTI-INSTANCE deploy each container keeps its own map, so cross-instance duplication can still
+// happen — acceptable (a few extra rebuilds), and the WalletSnapshot upsert is the shared source of
+// truth either way. A `force` rebuild bypasses the coalescing (it must read truly fresh upstream).
+const rebuildInFlight = new Map<string, Promise<SnapshotData>>();
+
 // Return the cached snapshot when fresh (within TTL), else rebuild it. `force` bypasses the TTL.
 export async function getSnapshot(address: string, opts: { force?: boolean } = {}): Promise<SnapshotData> {
   const now = Date.now();
@@ -55,7 +64,30 @@ export async function getSnapshot(address: string, opts: { force?: boolean } = {
     return rowToData(existing);
   }
 
-  // Rebuild exposure (Helius + Jupiter). Throwing here propagates to the route -> 502.
+  // Coalesce concurrent non-forced rebuilds for this address onto a single in-flight promise.
+  if (!opts.force) {
+    const flight = rebuildInFlight.get(address);
+    if (flight) return flight;
+  }
+
+  const p = rebuildSnapshot(address, existing, now);
+  if (!opts.force) {
+    rebuildInFlight.set(address, p);
+    // Clear the slot once settled (success OR failure) so the next stale read rebuilds afresh.
+    void p.finally(() => {
+      if (rebuildInFlight.get(address) === p) rebuildInFlight.delete(address);
+    });
+  }
+  return p;
+}
+
+// The actual rebuild: Helius balances × Jupiter prices (+ Birdeye avg-cost when its own half is stale),
+// then upsert. Extracted so getSnapshot can single-flight it. Throwing here propagates to the route -> 502.
+async function rebuildSnapshot(
+  address: string,
+  existing: { avgCost: Prisma.JsonValue | null; pnlFetchedAt: Date | null } | null,
+  now: number,
+): Promise<SnapshotData> {
   const balances = await getWalletBalances(address);
   const mints = [WSOL_MINT, ...balances.map((b) => b.mint).filter((m): m is string => m !== null)];
   const prices = await getPrices(mints);

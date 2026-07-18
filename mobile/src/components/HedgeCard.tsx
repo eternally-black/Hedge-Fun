@@ -7,7 +7,7 @@
 // (D4 degradation — no placeholder), and accept/dismiss in place of the two-sided bet buttons.
 // The accept button shows the PROPOSED stake; the confirmation banner shows the stake the server
 // RETURNED (it may be clamped to free Cash — said out loud when it happens).
-import { memo, useEffect } from "react";
+import { memo } from "react";
 import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import type { HedgeSuggestion } from "../../lib/api-types";
 import { colors, withAlpha } from "../theme";
@@ -25,7 +25,6 @@ export const HedgeCard = memo(function HedgeCard({
   nowMs,
   onAccept,
   onDismiss,
-  onImpression,
 }: {
   s: HedgeSuggestion;
   acceptedInfo: AcceptedInfo | undefined;
@@ -33,11 +32,9 @@ export const HedgeCard = memo(function HedgeCard({
   nowMs: number; // shared screen clock — keeps Date.now() out of render
   onAccept: (s: HedgeSuggestion) => void;
   onDismiss: (s: HedgeSuggestion) => void;
-  onImpression: (suggestionId: string) => void;
+  // Impression telemetry lives in the screen's ImpressionArea wrapper now (F9 — fires on first viewport
+  // overlap, not mount), so this card is impression-agnostic.
 }) {
-  // Exactly one impression per card mount; the screen-level Set dedupes remounts within a visit.
-  useEffect(() => { onImpression(s.suggestionId); }, [onImpression, s.suggestionId]);
-
   // F13: a fallback card is discovery whether the server flags isDiscovery OR only tags kind:"fallback"
   // — either alone must never render as a plain hedge. Key every discovery branch off both.
   const discovery = s.isDiscovery === true || s.kind === "fallback";

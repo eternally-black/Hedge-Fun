@@ -335,6 +335,19 @@ export interface HedgeWalletResponse {
   pnlAvailable: boolean; // false => Birdeye degraded => no avg-cost narrative lines
 }
 
+// ─── GET /api/hedge/wallet ─────────────────────────────────────────────────────────────────────────
+// Auth: Bearer. Returning-user state (F18a): the caller's linked-wallet status + the CACHED exposure
+// summary of their primary (most-recently-linked) wallet, so a returning user sees their exposure panel
+// without re-pasting the address. CACHE-ONLY — never triggers a Helius/Jupiter/Birdeye call: when no
+// snapshot has been built yet `exposure` is null and `stale` is true. `stale` is also true when the
+// cached snapshot is older than the freshness window (the client may offer a refresh). Never errors on
+// upstream outage (it does no upstream work); the paste form stays reachable regardless.
+export interface HedgeWalletStateResponse {
+  walletLinked: boolean; // true => the caller has at least one linked wallet
+  exposure: HedgeWalletResponse | null; // primary wallet's CACHED summary; null when unlinked or never snapshotted
+  stale: boolean; // true => exposure is null OR its snapshot is past the freshness window (offer a refresh)
+}
+
 // ─── GET /api/hedge/suggestions ──────────────────────────────────────────────────────────────────
 // Auth: Bearer. Deterministic S1 suggestions for the caller's linked wallet(s). Each card reuses the
 // DeckCard field family + hedge metadata. `suggestionId` is a stable content hash (re-derivable) so

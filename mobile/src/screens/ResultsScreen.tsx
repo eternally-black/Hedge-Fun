@@ -2,21 +2,25 @@
 // feed) plus the pending half of HistorySheet (open predictions with a live countdown). Opening
 // the screen marks every settled result seen — POST /api/results/seen is fire-and-forget (the
 // badge was already cleared locally via onSeen; a failed mark just re-syncs from the next /api/me).
-import { useEffect, useState } from "react";
-import { ActivityIndicator, Linking, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { memo, useEffect, useState } from "react";
+import { ActivityIndicator, FlatList, Linking, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import type { HistoryResponse, HistoryRow, ResultsResponse, ResultRow } from "../../lib/api-types";
 import { type Api } from "../api";
 import { colors } from "../theme";
 import { catOf, cents, countdown, deltaStr, resultMeta, usd } from "../format";
 
-// Per-screen 1s clock — drives the live ⏱ countdown on PENDING rows (web: the history sheet's
-// nowMs prop). Ticks only while this screen is mounted.
-function useNowMs(): number {
+// Per-screen 1s clock — drives the live ⏱ countdown on PENDING rows (web: the history sheet's nowMs
+// prop). F12: ticks ONLY while there are pending rows to count down; a settled-only inbox (which needs
+// no countdown) never re-renders every second. When it stops, nowMs simply freezes — settled rows
+// don't read it, so nothing stales.
+function useNowMs(active: boolean): number {
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
+    if (!active) return;
+    setNowMs(Date.now());
     const id = setInterval(() => setNowMs(Date.now()), 1000);
     return () => clearInterval(id);
-  }, []);
+  }, [active]);
   return nowMs;
 }
 
@@ -24,7 +28,9 @@ export function ResultsScreen({ api, onSeen }: { api: Api; onSeen: () => void })
   const [data, setData] = useState<{ pending: HistoryRow[]; settled: ResultRow[] } | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [nonce, setNonce] = useState(0);
-  const nowMs = useNowMs();
+  // F12: the 1Hz clock only runs when there are pending rows (the sole countdown consumers).
+  const hasPending = (data?.pending.length ?? 0) > 0;
+  const nowMs = useNowMs(hasPending);
 
   // Load open + settled, then mark seen. Pending comes from /api/history (PENDING-first rows),
   // settled from /api/results (the inbox feed — seen/shards/verified live there, not in history).
@@ -45,8 +51,11 @@ export function ResultsScreen({ api, onSeen }: { api: Api; onSeen: () => void })
     return () => { alive = false; };
   }, [api, onSeen, nonce]);
 
-  return (
-    <ScrollView style={styles.scroll} contentContainerStyle={styles.content}>
+  // F12: the settled history is the potentially-huge list, so it's the FlatList's windowed data; the
+  // title, load/empty states, and the (small, bounded) pending section ride in the header. SettledRow
+  // is memoized and never reads nowMs, so the 1Hz pending clock doesn't re-render settled rows.
+  const header = (
+    <View>
       <View style={styles.headerRow}>
         <Text style={styles.title}>Results</Text>
         <Text style={styles.subtitle}>Every call you&apos;ve made — open and settled.</Text>
@@ -77,13 +86,30 @@ export function ResultsScreen({ api, onSeen }: { api: Api; onSeen: () => void })
       )}
 
       {data && data.settled.length > 0 && (
-        <View style={styles.section}>
-          <Text style={styles.sectionLabel}>Settled</Text>
-          {data.settled.map((row) => <SettledRow key={row.id} row={row} />)}
-        </View>
+        <Text style={[styles.sectionLabel, styles.settledLabel]}>Settled</Text>
       )}
-    </ScrollView>
+    </View>
   );
+
+  return (
+    <FlatList
+      style={styles.scroll}
+      contentContainerStyle={styles.content}
+      data={data?.settled ?? []}
+      keyExtractor={(row) => row.id}
+      renderItem={({ item }) => <SettledRow row={item} />}
+      ListHeaderComponent={header}
+      initialNumToRender={12}
+      windowSize={11}
+      removeClippedSubviews
+      ItemSeparatorComponent={SettledSeparator}
+    />
+  );
+}
+
+// 8px gap between settled rows (the old ScrollView section used `gap: 8`).
+function SettledSeparator() {
+  return <View style={styles.settledGap} />;
 }
 
 // One open prediction (native port of HistoryRow.tsx, PENDING branch): side chip, question,
@@ -117,7 +143,9 @@ function PendingRow({ row, nowMs }: { row: HistoryRow; nowMs: number }) {
 
 // One settled result (native port of the web InboxRow): category icon, question, your call vs the
 // resolved outcome, payout delta + WIN/LOSS/VOID tag, shard drop, and the Solana-anchored badge.
-function SettledRow({ row }: { row: ResultRow }) {
+// F12: memoized (its `row` is stable and it never reads the 1Hz clock) so the pending countdown can't
+// re-render hundreds of settled rows every second — combined with FlatList windowing above.
+const SettledRow = memo(function SettledRow({ row }: { row: ResultRow }) {
   const cat = catOf(row);
   const m = resultMeta(row.status);
   const sideColor = row.side === "YES" ? colors.yes : colors.no;
@@ -148,7 +176,7 @@ function SettledRow({ row }: { row: ResultRow }) {
       </View>
     </View>
   );
-}
+});
 
 const styles = StyleSheet.create({
   scroll: { flex: 1 },
@@ -164,6 +192,8 @@ const styles = StyleSheet.create({
   retryText: { color: colors.energy, fontWeight: "700", fontSize: 14 },
   section: { marginTop: 16, gap: 8 },
   sectionLabel: { color: colors.muted, fontSize: 10, letterSpacing: 1.4, textTransform: "uppercase", fontWeight: "700" },
+  settledLabel: { marginTop: 16, marginBottom: 8 }, // the "Settled" header above the windowed FlatList rows
+  settledGap: { height: 8 }, // ItemSeparator between settled rows (matches the old section gap)
   row: {
     flexDirection: "row", gap: 11, backgroundColor: colors.panel, borderWidth: 1,
     borderColor: colors.line, borderRadius: 14, paddingVertical: 12, paddingHorizontal: 13,

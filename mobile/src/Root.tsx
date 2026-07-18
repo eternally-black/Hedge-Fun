@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Platform, StatusBar as RNStatusBar, StyleSheet, Text, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { usePrivy } from "@privy-io/expo";
-import { useApi } from "./api";
+import { useApi, statusOf } from "./api";
 import { colors } from "./theme";
 import { clearRefCode, readInstallReferrerCode, readRefCode, saveRefCode } from "./refCode";
 import type { CaptureRefResponse, MeResponse, ResultsResponse } from "../lib/api-types";
@@ -34,16 +34,35 @@ export default function Root() {
   useEffect(() => { meRef.current = me; }, [me]);
   useEffect(() => () => clearTimeout(toastTimer.current), []);
 
-  // Stats only — after any economy action. The deck refetches itself; this never touches it.
-  const refreshMe = useCallback(async () => {
-    setMe((await api("/api/me")) as MeResponse);
-  }, [api]);
-
   const flashToast = useCallback((msg: string) => {
     setToast(msg);
     clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(null), 2200);
   }, []);
+
+  // Sign out: clear local account state so a re-login boots fresh, then end the Privy session.
+  const doLogout = useCallback(async () => {
+    setMe(null);
+    setScreen("deck");
+    setBooted(false);
+    ritualDone.current = false;
+    await logout().catch(console.error);
+  }, [logout]);
+
+  // Stats only — after any economy action. The deck refetches itself; this never touches it.
+  // F11: owns its OWN error handling so every fire-and-forget caller (`void onRefreshMe()`) can't leak
+  // an unhandled rejection. A dead Privy session surfaces as a 401 → sign the user out to the login
+  // screen instead of looping on a call that will never succeed; any other blip leaves the last-known
+  // HUD in place and flashes a quiet notice (the next successful action re-syncs it).
+  const refreshMe = useCallback(async () => {
+    try {
+      setMe((await api("/api/me")) as MeResponse);
+    } catch (e) {
+      if (statusOf(e) === 401) { await doLogout(); return; }
+      console.error(e);
+      flashToast("Couldn't refresh — showing last balance");
+    }
+  }, [api, doLogout, flashToast]);
 
   // Boot: one coherent first-load sequence per auth (mirrors the web ritual):
   //   1. referral capture on open — /api/capture-ref, NEVER marks the GM day (idempotent);
@@ -81,15 +100,6 @@ export default function Root() {
       }
     })();
   }, [isReady, user, api]);
-
-  // Sign out: clear local account state so a re-login boots fresh, then end the Privy session.
-  const doLogout = useCallback(async () => {
-    setMe(null);
-    setScreen("deck");
-    setBooted(false);
-    ritualDone.current = false;
-    await logout().catch(console.error);
-  }, [logout]);
 
   // Opening the inbox clears the badge optimistically; ResultsScreen POSTs /api/results/seen and
   // the next /api/me confirms unreadResults=0.

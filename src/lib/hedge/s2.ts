@@ -12,7 +12,7 @@
 // (D1): here the LLM only re-seeds the DETERMINISTIC search with extracted entities.
 
 import { prisma } from "../prisma";
-import { s2SuggestionId } from "./id";
+import { s2SuggestionId, isHexSuggestionId } from "./id";
 import { deriveForUser, type DerivedSuggestion } from "./suggest";
 import {
   scoreMatch,
@@ -383,4 +383,62 @@ export async function resolveDerivedSuggestion(userId: string, sid: string): Pro
 
   const fb = await deriveFallbackForAccept();
   return fb.find((i) => i.suggestion.suggestionId === sid) ?? null;
+}
+
+// ── telemetry re-derivation cache (F14) ──────────────────────────────────────────────────────────
+// /api/hedge/event fires impression/dismiss at up to 60/min/user, and each call re-derived the ENTIRE
+// suggestion universe (per-user S1 snapshot + every open S2 market's two sides + the ≤300-row fallback
+// pool) just to resolve ONE id. That is far too heavy for a fire-and-forget endpoint. A few-second
+// in-process cache of the derived id→suggestion maps collapses a telemetry burst to one derivation per
+// window, and a cheap 32-hex shape pre-check rejects malformed ids before any DB work. The stored
+// event fields (kind/side/market/address/proposedStake) are all pure functions of the id, so a slightly
+// stale map is harmless. /accept deliberately does NOT use this — it re-reads the live market + band.
+const DERIVE_CACHE_TTL_MS = 5_000;
+const S1_CACHE_MAX_USERS = 1_000; // bound the per-user map so a long-lived process can't leak
+let s2MapCache: { at: number; map: Map<string, DerivedSuggestion> } | null = null;
+let fbMapCache: { at: number; map: Map<string, DerivedSuggestion> } | null = null;
+const s1MapCache = new Map<string, { at: number; map: Map<string, DerivedSuggestion> }>();
+
+function toSidMap(items: DerivedSuggestion[]): Map<string, DerivedSuggestion> {
+  return new Map(items.map((i) => [i.suggestion.suggestionId, i]));
+}
+
+async function cachedS2Map(): Promise<Map<string, DerivedSuggestion>> {
+  if (s2MapCache && Date.now() - s2MapCache.at < DERIVE_CACHE_TTL_MS) return s2MapCache.map;
+  const map = toSidMap(await deriveS2ForAccept());
+  s2MapCache = { at: Date.now(), map };
+  return map;
+}
+
+async function cachedFallbackMap(): Promise<Map<string, DerivedSuggestion>> {
+  if (fbMapCache && Date.now() - fbMapCache.at < DERIVE_CACHE_TTL_MS) return fbMapCache.map;
+  const map = toSidMap(await deriveFallbackForAccept());
+  fbMapCache = { at: Date.now(), map };
+  return map;
+}
+
+async function cachedS1Map(userId: string): Promise<Map<string, DerivedSuggestion>> {
+  const hit = s1MapCache.get(userId);
+  if (hit && Date.now() - hit.at < DERIVE_CACHE_TTL_MS) return hit.map;
+  const { items } = await deriveForUser(userId, { cacheOnly: true });
+  if (s1MapCache.size >= S1_CACHE_MAX_USERS) {
+    // Sweep expired entries (and, if still full, this is a cheap bounded reset) before inserting.
+    const cutoff = Date.now() - DERIVE_CACHE_TTL_MS;
+    for (const [k, v] of s1MapCache) if (v.at < cutoff) s1MapCache.delete(k);
+    if (s1MapCache.size >= S1_CACHE_MAX_USERS) s1MapCache.clear();
+  }
+  const map = toSidMap(items);
+  s1MapCache.set(userId, { at: Date.now(), map });
+  return map;
+}
+
+// Cached twin of resolveDerivedSuggestion for the telemetry path. Same result (unknown/malformed id →
+// null → the route 404s), but backed by the short-TTL maps above and short-circuited on a bad shape.
+export async function resolveDerivedSuggestionCached(userId: string, sid: string): Promise<DerivedSuggestion | null> {
+  if (!isHexSuggestionId(sid)) return null;
+  const s1 = (await cachedS1Map(userId)).get(sid);
+  if (s1) return s1;
+  const s2 = (await cachedS2Map()).get(sid);
+  if (s2) return s2;
+  return (await cachedFallbackMap()).get(sid) ?? null;
 }

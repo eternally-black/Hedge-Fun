@@ -20,6 +20,7 @@ import type {
   HedgeSuggestion,
   HedgeSuggestionsResponse,
   HedgeWalletResponse,
+  HedgeWalletStateResponse,
 } from "@/lib/api-types";
 
 // Whatever useApi resolves to — a thrown error carries `.status` (mirrors page.tsx's catch blocks).
@@ -109,8 +110,22 @@ export function HedgeScreen({
     }
   }, [api]);
 
+  // Returning-user state (F18a): the CACHED exposure of the primary linked wallet (no external calls),
+  // so a returning user sees their exposure panel + linked state immediately without re-pasting the
+  // address. Best-effort — on any failure the suggestions load still owns walletLinked and the paste
+  // form stays reachable. Runs alongside loadSuggestions on mount (both set walletLinked; they agree).
+  const loadWalletState = useCallback(async () => {
+    try {
+      const res = (await api("/api/hedge/wallet")) as HedgeWalletStateResponse;
+      setWalletLinked(res.walletLinked);
+      if (res.exposure) setExposure(res.exposure);
+    } catch {
+      /* non-fatal: loadSuggestions owns walletLinked; "Different wallet" form stays reachable */
+    }
+  }, [api]);
+
   // First load on mount.
-  useEffect(() => { void loadSuggestions(); }, [loadSuggestions]);
+  useEffect(() => { void loadWalletState(); void loadSuggestions(); }, [loadWalletState, loadSuggestions]);
 
   // POST the wallet link (the Refresh button reuses it with the already-linked address). The server
   // validates, links (idempotent), builds/refreshes the cached snapshot, and returns the exposure
@@ -590,8 +605,30 @@ const HedgeCard = memo(function HedgeCard({
   onDismiss: (s: HedgeSuggestion) => void;
   onImpression: (suggestionId: string) => void;
 }) {
-  // Exactly one impression per card mount; the screen-level Set dedupes remounts/StrictMode.
-  useEffect(() => { onImpression(s.suggestionId); }, [onImpression, s.suggestionId]);
+  // F9: fire the impression on first VIEWPORT visibility, not mount — a below-the-fold card must not
+  // log an impression until the user actually scrolls it into view (spec §5 honesty). One IO per card;
+  // it disconnects after the first intersection, and the screen-level Set still dedupes across remounts.
+  const cardRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = cardRef.current;
+    if (!el) return;
+    // Guard for SSR / very old browsers with no IntersectionObserver — fall back to a mount fire.
+    if (typeof IntersectionObserver === "undefined") { onImpression(s.suggestionId); return; }
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting) {
+            onImpression(s.suggestionId);
+            io.disconnect();
+            break;
+          }
+        }
+      },
+      { threshold: 0.35 }, // "in view" = a meaningful slice of the card is on screen
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [onImpression, s.suggestionId]);
 
   const cat = catOf(s);
   const labels = sideLabels(s);
@@ -623,7 +660,7 @@ const HedgeCard = memo(function HedgeCard({
         : "Paper bet · sizing is a product rule, not hedge math.";
 
   return (
-    <div style={{ position: "relative", borderRadius: 22, overflow: "hidden", background: "var(--panel2)", border: discovery ? "1px dashed color-mix(in srgb,var(--muted) 60%,transparent)" : "1px solid var(--line)", boxShadow: "0 18px 40px -20px rgba(0,0,0,.7)" }}>
+    <div ref={cardRef} style={{ position: "relative", borderRadius: 22, overflow: "hidden", background: "var(--panel2)", border: discovery ? "1px dashed color-mix(in srgb,var(--muted) 60%,transparent)" : "1px solid var(--line)", boxShadow: "0 18px 40px -20px rgba(0,0,0,.7)" }}>
       {/* Discovery cards drop the hedge-category gradient tint — a flat neutral panel keeps them from
           reading as a sized hedge, reinforcing the "not a hedge" badge. */}
       <div style={{ position: "absolute", inset: 0, background: discovery ? "linear-gradient(170deg, var(--panel2), var(--panel))" : bgGrad(cat.color) }} />

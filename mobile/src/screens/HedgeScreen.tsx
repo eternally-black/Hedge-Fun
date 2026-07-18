@@ -7,8 +7,18 @@
 // RETURNED stakeCents, which may be clamped to free Cash. 402 → the shared TopupSheet, exactly
 // like the deck's 402 path. Telemetry: ONE impression per suggestionId per screen mount (deduped
 // here; the server is idempotent per (user, suggestion, event) anyway).
-import { useCallback, useEffect, useRef, useState } from "react";
-import { ActivityIndicator, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
+import { useCallback, useEffect, useRef, useState, type MutableRefObject, type ReactNode } from "react";
+import {
+  ActivityIndicator,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+} from "react-native";
 import type {
   HedgeAcceptResponse,
   HedgePickerLeague,
@@ -17,6 +27,7 @@ import type {
   HedgeSuggestion,
   HedgeSuggestionsResponse,
   HedgeWalletResponse,
+  HedgeWalletStateResponse,
   MeResponse,
 } from "../../lib/api-types";
 import { statusOf, type Api } from "../api";
@@ -67,6 +78,26 @@ export function HedgeScreen({ me, api, onRefreshMe, onToast, onTopup }: {
   // suggestions, so reloads/searches filter them out to keep a dismissal stable within the mount.
   const dismissed = useRef(new Set<string>());
 
+  // F9 viewport-impression plumbing. `scrollAreaRef` wraps the ScrollView so we can read the viewport's
+  // window bounds; each card registers a `check` fn in `impressionSubs`; on scroll / (re)layout we ask
+  // every registered card to measure itself and fire its impression once it actually overlaps the
+  // viewport. `viewport.bottom` starts at 0 so NOTHING counts as visible until the viewport is measured
+  // (a below-the-fold card must never log an impression on mount — spec §5).
+  const scrollAreaRef = useRef<View>(null);
+  const viewport = useRef<{ top: number; bottom: number }>({ top: 0, bottom: 0 });
+  const impressionSubs = useRef(new Set<() => void>());
+
+  const remeasureViewport = useCallback(() => {
+    scrollAreaRef.current?.measureInWindow((x, y, w, h) => {
+      if (h > 0) viewport.current = { top: y, bottom: y + h };
+      impressionSubs.current.forEach((fn) => fn()); // re-check every card against the fresh viewport
+    });
+  }, []);
+
+  const onScroll = useCallback((_e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    impressionSubs.current.forEach((fn) => fn());
+  }, []);
+
   // One shared, gently-ticked clock for all cards' countdowns + the exposure staleness stamp.
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
@@ -90,8 +121,28 @@ export function HedgeScreen({ me, api, onRefreshMe, onToast, onTopup }: {
     }
   }, [api]);
 
+  // Returning-user state (F18a): the CACHED exposure of the primary linked wallet (no external calls),
+  // so a returning user sees their exposure panel + linked state immediately without re-pasting the
+  // address. Best-effort — on any failure loadSuggestions still owns walletLinked and the paste form
+  // stays reachable. Runs alongside loadSuggestions on mount (both set walletLinked; they agree).
+  const loadWalletState = useCallback(async () => {
+    try {
+      const res = (await api("/api/hedge/wallet")) as HedgeWalletStateResponse;
+      setWalletLinked(res.walletLinked);
+      if (res.exposure) setExposure(res.exposure);
+    } catch {
+      /* non-fatal: loadSuggestions owns walletLinked; "different wallet" form stays reachable */
+    }
+  }, [api]);
+
   // First load on mount.
-  useEffect(() => { void loadSuggestions(); }, [loadSuggestions]);
+  useEffect(() => { void loadWalletState(); void loadSuggestions(); }, [loadWalletState, loadSuggestions]);
+
+  // Measure the viewport once the first frame is laid out, so above-the-fold cards fire promptly.
+  useEffect(() => {
+    const raf = requestAnimationFrame(remeasureViewport);
+    return () => cancelAnimationFrame(raf);
+  }, [remeasureViewport]);
 
   // POST the wallet link (the Refresh button reuses it with the already-linked address). The server
   // validates, links (idempotent), builds/refreshes the cached snapshot, and returns the exposure
@@ -279,23 +330,38 @@ export function HedgeScreen({ me, api, onRefreshMe, onToast, onTopup }: {
     [api, beginPending, endPending],
   );
 
+  // F9: wrap each card in an ImpressionArea that fires the impression on first viewport overlap (not on
+  // mount). HedgeCard itself no longer knows about impressions — the wrapper owns the timing.
   const renderCard = (s: HedgeSuggestion) => (
-    <HedgeCard
+    <ImpressionArea
       key={s.suggestionId}
-      s={s}
-      acceptedInfo={accepted.get(s.suggestionId)}
-      busy={pending.has(s.suggestionId)}
-      nowMs={nowMs}
-      onAccept={accept}
-      onDismiss={dismiss}
+      id={s.suggestionId}
       onImpression={fireImpression}
-    />
+      viewport={viewport}
+      subs={impressionSubs}
+    >
+      <HedgeCard
+        s={s}
+        acceptedInfo={accepted.get(s.suggestionId)}
+        busy={pending.has(s.suggestionId)}
+        nowMs={nowMs}
+        onAccept={accept}
+        onDismiss={dismiss}
+      />
+    </ImpressionArea>
   );
 
   const activeTeams = leagues?.find((l) => l.slug === activeLeague)?.teams ?? [];
 
   return (
-    <ScrollView style={styles.scroll} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+    <View style={styles.scrollArea} ref={scrollAreaRef} collapsable={false} onLayout={remeasureViewport}>
+    <ScrollView
+      style={styles.scroll}
+      contentContainerStyle={styles.content}
+      keyboardShouldPersistTaps="handled"
+      onScroll={onScroll}
+      scrollEventThrottle={100}
+    >
       <View style={styles.headerRow}>
         <Text style={styles.title}>🛡 Hedge</Text>
         <Text style={styles.subtitle}>Paper hedges for your bag & your team</Text>
@@ -474,10 +540,59 @@ export function HedgeScreen({ me, api, onRefreshMe, onToast, onTopup }: {
         </View>
       )}
     </ScrollView>
+    </View>
+  );
+}
+
+// F9: fires ONE impression the first time its wrapped card overlaps the viewport. Registers a `check`
+// with the screen's subscriber set; the screen re-runs every check on scroll / (re)layout. `check` also
+// runs on this view's own onLayout (covers cards that mount already on-screen). measureInWindow +
+// `collapsable={false}` keeps the measurement reliable on Android. Fires once, then unsubscribes.
+function ImpressionArea({
+  id,
+  onImpression,
+  viewport,
+  subs,
+  children,
+}: {
+  id: string;
+  onImpression: (id: string) => void;
+  viewport: MutableRefObject<{ top: number; bottom: number }>;
+  subs: MutableRefObject<Set<() => void>>;
+  children: ReactNode;
+}) {
+  const ref = useRef<View>(null);
+  const fired = useRef(false);
+  // Once fired, `fired.current` makes every later invocation a cheap no-op (returns before measuring);
+  // the effect below removes the subscription on unmount, so we never self-reference `check` to unsub.
+  const check = useCallback(() => {
+    if (fired.current) return;
+    ref.current?.measureInWindow((x, y, w, h) => {
+      if (fired.current) return;
+      const vp = viewport.current;
+      // real height + vertical overlap with the measured viewport band
+      if (h > 0 && y < vp.bottom && y + h > vp.top) {
+        fired.current = true;
+        onImpression(id);
+      }
+    });
+  }, [id, onImpression, viewport]);
+
+  useEffect(() => {
+    const s = subs.current;
+    s.add(check);
+    return () => { s.delete(check); };
+  }, [check, subs]);
+
+  return (
+    <View ref={ref} collapsable={false} onLayout={check}>
+      {children}
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  scrollArea: { flex: 1 },
   scroll: { flex: 1 },
   content: { paddingHorizontal: 16, paddingTop: 6, paddingBottom: 24 },
   headerRow: { flexDirection: "row", alignItems: "baseline", gap: 10, marginTop: 4, flexWrap: "wrap" },
