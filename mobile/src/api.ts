@@ -28,16 +28,26 @@ export function useApi(): Api {
   return useCallback(
     async (path: string, init?: RequestInit) => {
       const token = await getAccessToken();
-      const res = await fetch(`${API_BASE}${path}`, {
-        ...init,
-        headers: {
-          ...(init?.headers ?? {}),
-          "content-type": "application/json",
-          ...(token ? { authorization: `Bearer ${token}` } : {}),
-        },
-      });
-      if (!res.ok) throw new ApiError(path, res.status);
-      return res.json();
+      // F10: bound every request so a hung socket on flaky cellular (captive portal, stalled TLS) can't
+      // leave a form spinning forever. Abort at 15s; the thrown AbortError carries no ApiError.status,
+      // so callers fall through to their generic retry-toast path exactly like any other failure.
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15_000);
+      try {
+        const res = await fetch(`${API_BASE}${path}`, {
+          ...init,
+          signal: controller.signal,
+          headers: {
+            ...(init?.headers ?? {}),
+            "content-type": "application/json",
+            ...(token ? { authorization: `Bearer ${token}` } : {}),
+          },
+        });
+        if (!res.ok) throw new ApiError(path, res.status);
+        return await res.json();
+      } finally {
+        clearTimeout(timeout);
+      }
     },
     [getAccessToken],
   );

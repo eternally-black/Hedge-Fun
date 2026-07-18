@@ -224,13 +224,21 @@ export function HedgeScreen({ me, api, onRefreshMe, onToast, onTopup }: {
       const m = meRef.current;
       if (m && m.cashCents <= 0) { onToast("No free cash — top up to keep going"); onTopup(); return; }
       beginPending(s.suggestionId);
+      // D9: OPTIMISTIC — flip the card to an accepted "placing…" state on this tick; the gesture never
+      // blocks on the network. The POST below reconciles to server truth (success → returned stake;
+      // any failure → roll the entry back out of the map + a non-blocking retry toast).
+      setAccepted((prev) => new Map(prev).set(s.suggestionId, { stakeCents: s.proposedStakeCents, already: false, placing: true }));
       api("/api/hedge/accept", { method: "POST", body: JSON.stringify({ suggestionId: s.suggestionId }) })
         .then((r) => {
           const res = r as HedgeAcceptResponse;
-          setAccepted((prev) => new Map(prev).set(s.suggestionId, { stakeCents: res.stakeCents, already: res.alreadyAccepted }));
+          // Reconcile with the RETURNED stake (may be clamped to Cash — the banner says so) + already flag.
+          setAccepted((prev) => new Map(prev).set(s.suggestionId, { stakeCents: res.stakeCents, already: res.alreadyAccepted, placing: false }));
           void onRefreshMe(); // the stake locks against Cash — repaint the HUD balance
         })
         .catch((e) => {
+          // Roll the optimistic accept back to an actionable card — every failure (any 4xx, incl. a
+          // backend out-of-band-price 409) is a clean non-blocking notice, never a stuck card.
+          setAccepted((prev) => { const n = new Map(prev); n.delete(s.suggestionId); return n; });
           const status = statusOf(e);
           if (status === 402) { onToast("No free cash — top up to keep going"); onTopup(); }
           else if (status === 404 || status === 409) {

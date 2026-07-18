@@ -13,7 +13,10 @@ import type { HedgeSuggestion } from "../../lib/api-types";
 import { colors, withAlpha } from "../theme";
 import { catOf, cents, countdown, displayQuestion, sideLabels, usd, winPayout } from "../format";
 
-export type AcceptedInfo = { stakeCents: number; already: boolean };
+// `placing` = the D9 optimistic state: the tap flipped the card to accepted instantly and the POST is
+// still in flight. Success reconciles to the server-returned stakeCents/already; any failure removes
+// the entry (card returns to actionable) + a non-blocking retry toast.
+export type AcceptedInfo = { stakeCents: number; already: boolean; placing: boolean };
 
 export const HedgeCard = memo(function HedgeCard({
   s,
@@ -35,7 +38,9 @@ export const HedgeCard = memo(function HedgeCard({
   // Exactly one impression per card mount; the screen-level Set dedupes remounts within a visit.
   useEffect(() => { onImpression(s.suggestionId); }, [onImpression, s.suggestionId]);
 
-  const discovery = s.isDiscovery === true;
+  // F13: a fallback card is discovery whether the server flags isDiscovery OR only tags kind:"fallback"
+  // — either alone must never render as a plain hedge. Key every discovery branch off both.
+  const discovery = s.isDiscovery === true || s.kind === "fallback";
   const cat = catOf(s);
   const labels = sideLabels(s);
   const cd = countdown(s.resolutionDeadline, nowMs);
@@ -143,7 +148,8 @@ export const HedgeCard = memo(function HedgeCard({
 // The kind badge the spec insists on: a proxy is labeled a proxy (basis risk), a discovery card is
 // labeled NOT a hedge — neither may ever pass as a plain "hedge".
 function KindBadge({ s }: { s: HedgeSuggestion }) {
-  const discovery = s.isDiscovery === true;
+  // F13: discovery keys off the flag OR kind:"fallback" — never mislabel a fallback as a plain hedge.
+  const discovery = s.isDiscovery === true || s.kind === "fallback";
   const color = discovery ? colors.muted : s.isProxy ? "#ff8a3d" : s.kind === "S2" ? colors.skip : colors.yes;
   const label = discovery
     ? "Discovery · not a hedge"
@@ -163,6 +169,18 @@ function KindBadge({ s }: { s: HedgeSuggestion }) {
 // proposed size to available Cash — said out loud when it happens).
 function AcceptedBanner({ s, info }: { s: HedgeSuggestion; info: AcceptedInfo }) {
   const color = s.side === "YES" ? colors.yes : colors.no;
+  // D9 optimistic: the tap already flipped the card here; the POST reconciles this in the background.
+  if (info.placing) {
+    return (
+      <View style={[styles.acceptedBanner, { backgroundColor: withAlpha(color, "1f"), borderColor: withAlpha(color, "66") }]}>
+        <Text style={styles.acceptedText}>
+          Placing <Text style={{ color, fontFamily: "monospace", fontWeight: "700" }}>{usd(s.proposedStakeCents)}</Text>
+          {" on "}
+          <Text style={{ color, fontWeight: "800" }}>{s.sideLabel}</Text>…
+        </Text>
+      </View>
+    );
+  }
   const clamped = info.stakeCents < s.proposedStakeCents;
   return (
     <View style={[styles.acceptedBanner, { backgroundColor: withAlpha(color, "2e"), borderColor: withAlpha(color, "8c") }]}>

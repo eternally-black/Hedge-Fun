@@ -25,7 +25,10 @@ import type {
 // Whatever useApi resolves to — a thrown error carries `.status` (mirrors page.tsx's catch blocks).
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
-type AcceptedInfo = { stakeCents: number; already: boolean };
+// `placing` = the D9 optimistic state: the tap flipped the card to accepted instantly and the POST is
+// still in flight. Success reconciles to the server-returned stakeCents/already; any failure rolls the
+// entry back out of the map (card returns to actionable) + a non-blocking retry toast.
+type AcceptedInfo = { stakeCents: number; already: boolean; placing: boolean };
 type LinkError = "invalid" | "unavailable" | "generic";
 type LoadError = "unavailable" | "generic";
 
@@ -51,13 +54,13 @@ const LINK_ERROR_COPY: Record<LinkError, string> = {
 // ============================================================================
 export function HedgeScreen({
   api,
-  me,
   onRefreshMe,
   onToast,
   onTopup,
 }: {
   api: Api;
-  me: Me | null;
+  me: Me | null; // kept in the contract (page.tsx passes it); accept no longer pre-gates on it — the
+  // server's 402 is authoritative, so an already-accepted id can still replay for free at $0 Cash (F7).
   onRefreshMe: () => void;
   onToast: (msg: string) => void;
   onTopup: () => void; // open the BalanceSheet top-up when Cash can't cover a hedge stake
@@ -73,9 +76,6 @@ export function HedgeScreen({
   const [accepted, setAccepted] = useState<Map<string, AcceptedInfo>>(new Map());
   const [pending, setPending] = useState<ReadonlySet<string>>(new Set()); // in-flight accept/dismiss, for render
 
-  // Latest-value ref so the accept callback stays identity-stable across /api/me refreshes.
-  const meRef = useRef<Me | null>(me);
-  useEffect(() => { meRef.current = me; }, [me]);
   // In-flight guard (ref, so stable callbacks can read it) — `pending` above is its render mirror.
   const inFlight = useRef(new Set<string>());
   // One impression per suggestionId per SCREEN mount — the Set dies with the screen (nav unmounts
@@ -184,16 +184,23 @@ export function HedgeScreen({
   const accept = useCallback(
     (s: HedgeSuggestion, onStale?: (id: string) => void) => {
       if (inFlight.current.has(s.suggestionId)) return;
-      const m = meRef.current;
-      if (m && m.cashCents <= 0) { onToast("No free cash — top up to keep going"); onTopup(); return; }
       beginPending(s.suggestionId);
+      // D9: OPTIMISTIC — flip the card to an accepted "placing…" state on this tick; the gesture never
+      // blocks on the network. The POST below reconciles to server truth. No client zero-Cash pre-gate
+      // (F7): the server's 402 owns that, and dropping it lets an already-accepted id replay for free
+      // (idempotent 200) even at $0 Cash — e.g. a re-tap after a mid-flight nav wiped this map.
+      setAccepted((prev) => new Map(prev).set(s.suggestionId, { stakeCents: s.proposedStakeCents, already: false, placing: true }));
       api("/api/hedge/accept", { method: "POST", body: JSON.stringify({ suggestionId: s.suggestionId }) })
         .then((r) => {
           const res = r as HedgeAcceptResponse;
-          setAccepted((prev) => new Map(prev).set(s.suggestionId, { stakeCents: res.stakeCents, already: res.alreadyAccepted }));
+          // Reconcile with the RETURNED stake (may be clamped to Cash — the banner says so) + already flag.
+          setAccepted((prev) => new Map(prev).set(s.suggestionId, { stakeCents: res.stakeCents, already: res.alreadyAccepted, placing: false }));
           onRefreshMe(); // the stake locks against Cash — repaint the HUD balance
         })
         .catch((e) => {
+          // Roll the optimistic accept back to an actionable card; every failure is a non-blocking notice
+          // (any 4xx — incl. a backend out-of-band-price 409 — lands on a clean toast, never a stuck card).
+          setAccepted((prev) => { const n = new Map(prev); n.delete(s.suggestionId); return n; });
           const status = (e as { status?: number }).status;
           if (status === 402) { onToast("No free cash — top up to keep going"); onTopup(); }
           else if (status === 404 || status === 409) { onToast("That suggestion went stale — refreshing"); if (onStale) onStale(s.suggestionId); else void loadSuggestions(); }
@@ -357,6 +364,9 @@ function LifeHedgeSection({
   const [searchState, setSearchState] = useState<SearchState>("idle");
   const [isDiscovery, setIsDiscovery] = useState(false);
   const [matchedEntity, setMatchedEntity] = useState<string | null>(null);
+  // F8: monotonic request id — only the latest search may write results/header, so a slow earlier
+  // response can't land under a newer query (e.g. tap "Lakers" then "Real Madrid" in quick succession).
+  const searchSeq = useRef(0);
 
   const loadPickers = useCallback(async () => {
     setPickersError(false);
@@ -377,15 +387,18 @@ function LifeHedgeSection({
     async (raw: string) => {
       const q = raw.trim();
       if (!q) return;
+      const seq = ++searchSeq.current; // claim this as the newest search
       setLastQuery(q);
       setSearchState("loading");
       try {
         const res = (await api("/api/hedge/search", { method: "POST", body: JSON.stringify({ text: q }) })) as HedgeSearchResponse;
+        if (seq !== searchSeq.current) return; // a newer search superseded us — drop this stale response
         setResults(res.suggestions.filter((s) => !isDismissed(s.suggestionId)));
         setIsDiscovery(res.isDiscovery);
         setMatchedEntity(res.matchedEntity);
         setSearchState("done");
       } catch {
+        if (seq !== searchSeq.current) return; // stale failure — the newer search owns the UI now
         setSearchState("error");
       }
     },
@@ -590,7 +603,9 @@ const HedgeCard = memo(function HedgeCard({
   // Kind drives the framing: S2 = "bets AGAINST the entity you support" (the returned side IS that
   // against-bet — we never re-derive it here); a discovery fallback is NOT a hedge and carries no
   // hedge framing at all. `foe` is the supported entity we're betting against (server-provided).
-  const discovery = s.isDiscovery === true;
+  // F13: a fallback card is discovery whether the server flags isDiscovery OR only tags kind:"fallback"
+  // — either alone must never render as a plain "Direct hedge". Key every discovery branch off both.
+  const discovery = s.isDiscovery === true || s.kind === "fallback";
   const isS2 = s.kind === "S2";
   const foe = s.matchedEntity && s.matchedEntity.trim() ? s.matchedEntity : "your side";
   const stake = usd(s.proposedStakeCents);
@@ -723,7 +738,8 @@ const HedgeCard = memo(function HedgeCard({
 // labeled a life-event bet AGAINST the supported side, and a discovery fallback is loudly flagged
 // "not a hedge" (muted + dashed to read as a different species from the hedges above it).
 function KindBadge({ s }: { s: HedgeSuggestion }) {
-  const meta = s.isDiscovery
+  // F13: discovery keys off the flag OR kind:"fallback" — never mislabel a fallback as "Direct hedge".
+  const meta = s.isDiscovery === true || s.kind === "fallback"
     ? { color: "var(--muted)", label: "Discovery — not a hedge", dashed: true }
     : s.kind === "S2"
       ? { color: "var(--energy)", label: "Life hedge · against", dashed: false }
@@ -743,6 +759,20 @@ function KindBadge({ s }: { s: HedgeSuggestion }) {
 // proposed size to available Cash — said out loud when it happens).
 function AcceptedBanner({ s, info }: { s: HedgeSuggestion; info: AcceptedInfo }) {
   const color = s.side === "YES" ? "var(--yes)" : "var(--no)";
+  // D9 optimistic: the tap already flipped the card here; the POST reconciles this in the background.
+  if (info.placing) {
+    return (
+      <div style={{ padding: "12px", borderRadius: 16, background: `color-mix(in srgb,${color} 12%,transparent)`, border: `1.5px solid color-mix(in srgb,${color} 40%,transparent)` }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+          <span style={{ fontSize: 13, color: "#fff" }}>
+            Placing{" "}
+            <span style={{ fontFamily: "var(--nf)", fontWeight: 700, color }}>{usd(s.proposedStakeCents)}</span> on{" "}
+            <span style={{ fontFamily: "var(--df)", color }}>{s.sideLabel}</span>…
+          </span>
+        </div>
+      </div>
+    );
+  }
   const clamped = info.stakeCents < s.proposedStakeCents;
   return (
     <div style={{ padding: "12px", borderRadius: 16, background: `color-mix(in srgb,${color} 18%,transparent)`, border: `1.5px solid color-mix(in srgb,${color} 55%,transparent)` }}>
