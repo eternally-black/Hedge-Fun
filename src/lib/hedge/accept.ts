@@ -10,7 +10,7 @@ import { runSerializable } from "../tx";
 import { utcDay } from "../time";
 import { InsufficientFundsError } from "../swipe";
 import { DECK_MIN_LEAD_MS, HEDGE_MIN_STAKE_CENTS } from "../config";
-import { deriveForUser } from "./suggest";
+import { resolveDerivedSuggestion } from "./s2";
 
 // The suggestion id doesn't resolve to a current suggestion for the user's wallet(s) — stale
 // (snapshot refreshed / index changed / market closed). Route -> 404; the client refetches.
@@ -44,9 +44,8 @@ export async function acceptSuggestion(userId: string, sid: string): Promise<Acc
   });
   if (prior) return { betId: prior.id, stakeCents: prior.stakeCents, alreadyAccepted: true };
 
-  // 2) Re-derive (cache-only) and locate the suggestion the id refers to.
-  const { items } = await deriveForUser(userId, { cacheOnly: true });
-  const item = items.find((i) => i.suggestion.suggestionId === sid);
+  // 2) Re-derive (cache-only for S1; open S2/fallback markets otherwise) and locate the suggestion.
+  const item = await resolveDerivedSuggestion(userId, sid);
   if (!item) throw new SuggestionNotFoundError();
   const s = item.suggestion;
   const marketId = s.id;

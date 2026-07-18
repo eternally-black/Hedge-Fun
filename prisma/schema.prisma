@@ -498,9 +498,20 @@ model MarketMeta {
   liquidityCents Int? // for ranking candidates (rounded USD liquidity × 100)
   volumeCents    Int? // for ranking candidates (rounded USD volume × 100)
   parseOk        Boolean               @default(false) // strike + date + direction all parsed -> S1-eligible
-  updatedAt      DateTime              @updatedAt
+
+  // S2 (life-event hedge) enrichment. A NAMED sports/esports (later: entertainment) market whose
+  // side labels are the entities a user might support. Populated by scripts/refresh-hedge-index.ts
+  // from Gamma discovery + deck-mix league classification. s2Eligible gates the pickers/matcher;
+  // the two side labels live on Market (outcomeYesLabel/outcomeNoLabel), startsAt on Market too.
+  s2Eligible  Boolean @default(false) // NAMED, contested, upcoming -> usable for S2 pickers + matching
+  leagueSlug  String? // slugified league/competition (e.g. "nba", "cs2", "soccer") for grouping
+  leagueLabel String? // display league/competition (e.g. "NBA", "CS2") from deck-mix gameOf; null if unknown
+  sportKind   String? // "sports" | "esports" | "entertainment" (from deck-mix categoryOf)
+
+  updatedAt DateTime @updatedAt
 
   @@index([asset, parseOk])
+  @@index([s2Eligible])
   @@map("market_meta")
 }
 

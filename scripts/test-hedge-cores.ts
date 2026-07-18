@@ -5,13 +5,22 @@ import { parseStrikeMarket } from "../src/lib/hedge/parse";
 import { exposureFromBalances, WSOL_MINT, type ExposureResult } from "../src/lib/hedge/exposure";
 import { sizeS1 } from "../src/lib/hedge/size";
 import { matchS1, type IndexedMarket } from "../src/lib/hedge/match";
-import { suggestionId } from "../src/lib/hedge/id";
+import { suggestionId, s2SuggestionId } from "../src/lib/hedge/id";
+import {
+  normalize,
+  scoreMatch,
+  opposingSide,
+  isNamedEntityShape,
+  type S2Candidate,
+} from "../src/lib/hedge/s2match";
+import { parseNluResponse } from "../src/lib/hedge/nlu";
 import {
   HEDGE_MAJOR_PCT_BP,
   HEDGE_PROXY_PCT_BP,
   HEDGE_MAX_STAKE_CENTS,
   HEDGE_MIN_NOTIONAL_CENTS,
   HEDGE_MIN_LEAD_MS,
+  S2_CONFIDENCE_THRESHOLD,
 } from "../src/lib/config";
 
 // ─── parse: strike + date + direction from real Gamma slugs (verified live 2026-07-17) ──────────────
@@ -149,6 +158,89 @@ import {
   assert.strictEqual(a.length, 32, "32-hex id");
   assert.notStrictEqual(a, suggestionId({ ...base, proposedStakeCents: 8000 }), "different sizing -> different id");
   assert.notStrictEqual(a, suggestionId({ ...base, side: "YES" }), "different side -> different id");
+}
+
+// ─── S2 normalize: lowercase, diacritics, punctuation, stopwords, Cyrillic survives ─────────────────
+{
+  assert.deepStrictEqual(normalize("Real Madrid"), ["real", "madrid"], "basic tokenization");
+  assert.deepStrictEqual(normalize("FC Barcelona!"), ["barcelona"], "drops 'fc' stopword + punctuation");
+  assert.deepStrictEqual(normalize("Atlético"), ["atletico"], "strips diacritics");
+  assert.deepStrictEqual(normalize("я болею за Реал"), ["реал"], "RU stopwords dropped, Cyrillic entity survives");
+  assert.deepStrictEqual(normalize("   "), [], "whitespace only -> no tokens");
+}
+
+// ─── S2 scoreMatch: exact / alias / substring / trigram + threshold + ranking ───────────────────────
+{
+  const cands: S2Candidate[] = [
+    { ref: "e|m1|YES", label: "Barcelona", kind: "entity" },
+    { ref: "e|m1|NO", label: "Real Madrid", kind: "entity" },
+    { ref: "e|m2|YES", label: "Manchester United", kind: "entity" },
+    { ref: "l|soccer", label: "Soccer", kind: "league" },
+    { ref: "q|m1", label: "Barcelona vs Real Madrid: who wins?", kind: "question" },
+  ];
+
+  // Exact entity match tops the ranking at ~1.0.
+  const exact = scoreMatch("Barcelona", cands);
+  assert.strictEqual(exact[0].ref, "e|m1|YES", "exact entity ranks first");
+  assert.strictEqual(exact[0].score, 1, "exact match scores 1.0");
+  assert.ok(exact[0].score >= S2_CONFIDENCE_THRESHOLD, "exact passes threshold");
+
+  // Alias/translit: "барса" (RU nickname) -> Barcelona via the curated alias table, above threshold.
+  const alias = scoreMatch("барса", cands);
+  assert.strictEqual(alias[0].ref, "e|m1|YES", "alias resolves барса -> Barcelona");
+  assert.strictEqual(alias[0].method, "alias", "flagged as an alias match");
+  assert.ok(alias[0].score >= S2_CONFIDENCE_THRESHOLD, "alias passes threshold");
+
+  // Multi-token partial: "man united" -> "Manchester United" via token coverage, above threshold.
+  const partial = scoreMatch("man united", cands);
+  assert.strictEqual(partial[0].ref, "e|m2|YES", "man united -> Manchester United");
+  assert.ok(partial[0].score >= S2_CONFIDENCE_THRESHOLD, "strong partial passes threshold");
+
+  // Garbage query matches nothing above threshold (would trigger NLU edge / fallback in the DB layer).
+  const junk = scoreMatch("zzqqxwv", cands);
+  assert.ok(junk.length === 0 || junk[0].score < S2_CONFIDENCE_THRESHOLD, "garbage falls below threshold");
+
+  // Empty query -> no matches.
+  assert.deepStrictEqual(scoreMatch("   ", cands), [], "empty query -> []");
+
+  // Deterministic: same inputs -> identical ranking (re-derivable).
+  assert.deepStrictEqual(scoreMatch("Barcelona", cands), exact, "scoreMatch is deterministic");
+}
+
+// ─── S2 against-side selection + shape guard (pure) ─────────────────────────────────────────────────
+{
+  assert.strictEqual(opposingSide("YES"), "NO", "support YES side -> hedge NO");
+  assert.strictEqual(opposingSide("NO"), "YES", "support NO side -> hedge YES");
+
+  assert.ok(isNamedEntityShape("Barcelona", "Real Madrid"), "team vs team is a named shape");
+  assert.ok(!isNamedEntityShape("Over", "Under"), "Over/Under is NOT a hedgeable named shape");
+  assert.ok(!isNamedEntityShape("Up", "Down"), "Up/Down is not named");
+  assert.ok(!isNamedEntityShape("Yes", "No"), "Yes/No is not named");
+  assert.ok(!isNamedEntityShape("", "Real Madrid"), "empty label -> not named");
+}
+
+// ─── S2 id: deterministic, namespace-disjoint from S1, side/kind-sensitive ──────────────────────────
+{
+  const s = s2SuggestionId({ marketId: "m1", kind: "S2", side: "NO", proposedStakeCents: 1000 });
+  assert.strictEqual(s, s2SuggestionId({ marketId: "m1", kind: "S2", side: "NO", proposedStakeCents: 1000 }), "stable");
+  assert.strictEqual(s.length, 32, "32-hex id");
+  assert.notStrictEqual(s, s2SuggestionId({ marketId: "m1", kind: "S2", side: "YES", proposedStakeCents: 1000 }), "side-sensitive");
+  assert.notStrictEqual(s, s2SuggestionId({ marketId: "m1", kind: "FALLBACK", side: "NO", proposedStakeCents: 1000 }), "kind-sensitive");
+}
+
+// ─── NLU parse: strict JSON extraction from a MOCKED model response (no network in tests) ───────────
+{
+  // Well-formed, wrapped in prose + code fences (tolerant extraction).
+  const ok = parseNluResponse('Here you go:\n```json\n{"category":"sports","entities":["Real Madrid"],"keywords":["match"]}\n```');
+  assert.deepStrictEqual(ok, { category: "sports", entities: ["Real Madrid"], keywords: ["match"] }, "parses fenced JSON");
+
+  // Coerces/cleans: non-string array members dropped, category lowercased, blanks removed.
+  const coerced = parseNluResponse('{"category":"Entertainment","entities":["Dune",2,""],"keywords":[" film "]}');
+  assert.deepStrictEqual(coerced, { category: "entertainment", entities: ["Dune"], keywords: ["film"] }, "coerces + trims");
+
+  assert.strictEqual(parseNluResponse("not json at all"), null, "no JSON -> null");
+  assert.strictEqual(parseNluResponse('{"category":null,"entities":[],"keywords":[]}'), null, "empty signal -> null");
+  assert.strictEqual(parseNluResponse("{ broken"), null, "malformed JSON -> null");
 }
 
 console.log("hedge cores: OK");

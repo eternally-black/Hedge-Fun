@@ -24,3 +24,17 @@ export function suggestionId(parts: {
   ].join("|");
   return createHash("sha256").update(canonical).digest("hex").slice(0, 32);
 }
+
+// S2 / FALLBACK suggestion id. Same scheme (content hash), but S2 has NO wallet/notional — a
+// life-event suggestion is a pure function of (market, side, fixed stake, kind). This is what lets
+// /accept re-derive it WITHOUT the original free-text query: enumerate open S2/fallback markets,
+// hash each, match the id. The "S2v1" prefix keeps this namespace disjoint from S1 ids.
+export function s2SuggestionId(parts: {
+  marketId: string;
+  kind: string; // "S2" | "FALLBACK"
+  side: string; // "YES" | "NO"
+  proposedStakeCents: number;
+}): string {
+  const canonical = ["S2v1", parts.kind, parts.marketId, parts.side, parts.proposedStakeCents].join("|");
+  return createHash("sha256").update(canonical).digest("hex").slice(0, 32);
+}

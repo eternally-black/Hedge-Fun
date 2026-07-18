@@ -7,7 +7,14 @@
 //  - Resolution signal = umaResolutionStatus === "resolved" + outcomePrices collapse to 1/0.
 //  - conditionId is the stable id -> our polymarketId.
 
-import { isContextPoor, isVagueEsports, withinCategoryHorizon, DECK_FETCH_HORIZON_HOURS } from "./deck-mix";
+import {
+  isContextPoor,
+  isVagueEsports,
+  withinCategoryHorizon,
+  DECK_FETCH_HORIZON_HOURS,
+  categoryOf,
+  gameOf,
+} from "./deck-mix";
 
 const BASE = process.env.POLYMARKET_API_BASE ?? "https://gamma-api.polymarket.com";
 
@@ -150,7 +157,9 @@ const MAX_PAGES = 15; // backstop: never page forever (15 * 100 = 1500 markets s
 // so even moderately skewed lines are dropped; only genuinely contested markets reach the deck.
 const PRICE_FLOOR_BP = 1500; // 15%
 const PRICE_CEIL_BP = 8500; // 85%
-function priceIsContested(yesBp: number, noBp: number): boolean {
+// Exported for the S2 discovery FALLBACK (spec §2: "3 random open CONTESTED markets — reuse the
+// price-contested gate"). Same band the deck uses so a discovery card is never a dead 100%/0% swipe.
+export function priceIsContested(yesBp: number, noBp: number): boolean {
   return yesBp >= PRICE_FLOOR_BP && yesBp <= PRICE_CEIL_BP && noBp >= PRICE_FLOOR_BP && noBp <= PRICE_CEIL_BP;
 }
 
@@ -314,6 +323,75 @@ export async function fetchMajorsMarkets(
         eventSlug: ev?.slug ?? null,
         eventTicker: ev?.ticker ?? null,
         seriesTitle: ev?.series?.[0]?.title ?? ev?.title ?? null,
+      });
+    }
+    if (raw.length < GAMMA_PAGE) break; // last page
+  }
+  return out;
+}
+
+// ─── S2 sports/esports index (phase 2, workstream A2) ──────────────────────────────────────────────
+// Discovery of upcoming NAMED sports/esports markets for the life-event hedge (S2). Reuses the SAME
+// Gamma idioms as fetchBlitzDeck (offset paging, mapMarket) and the SAME league knowledge as the deck
+// (deck-mix categoryOf/gameOf) — no duplicated classification tables. Keeps only entity-vs-entity
+// ("named") markets whose two side labels are the teams a user might support; the caller (the hedge
+// index refresh) applies the S2 price band + upserts MarketMeta. Lists churn with the poller cadence
+// (spec risk 4) — this is a live fetch, never a static import.
+
+export interface SportsMarketRaw {
+  cache: MarketCache; // mapped row for upserting the Market cache (so an accepted S2 hedge settles)
+  slug: string | null;
+  liquidityNum: number | null;
+  volumeNum: number | null;
+  eventSlug: string | null;
+  eventTicker: string | null;
+  seriesTitle: string | null;
+  category: "sports" | "esports"; // from deck-mix categoryOf
+  league: string | null; // from deck-mix gameOf (e.g. "NBA", "CS2"); null when not specifically known
+}
+
+// Fetch OPEN, future-resolving NAMED sports/esports markets within `hours` (default 10 days — the
+// pickers want UPCOMING matches, a longer leash than the blitz deck). `maxPages` bounds the scan.
+export async function fetchSportsMarkets(opts: { hours?: number; maxPages?: number } = {}): Promise<SportsMarketRaw[]> {
+  const hours = opts.hours ?? 240; // 10 days
+  const maxPages = opts.maxPages ?? 15;
+  const now = new Date();
+  const max = new Date(now.getTime() + hours * 3_600_000);
+  const out: SportsMarketRaw[] = [];
+
+  for (let page = 0; page < maxPages; page++) {
+    const qs = new URLSearchParams({
+      active: "true",
+      closed: "false",
+      enableOrderBook: "true",
+      end_date_min: now.toISOString(),
+      end_date_max: max.toISOString(),
+      order: "endDate",
+      ascending: "true",
+      limit: String(GAMMA_PAGE),
+      offset: String(page * GAMMA_PAGE),
+    });
+    const raw = await gammaGet(`/markets?${qs.toString()}`);
+    if (raw.length === 0) break;
+
+    for (const r of raw) {
+      const cache = mapMarket(r);
+      if (!cache || cache.status !== "OPEN" || cache.yesPriceBp === null || cache.noPriceBp === null) continue;
+      if (shapeOf(cache) !== "named") continue; // entity-vs-entity only (the AGAINST-side needs two teams)
+      const cat = categoryOf(cache);
+      if (cat !== "sports" && cat !== "esports") continue;
+      if (isContextPoor(cache) || isVagueEsports(cache)) continue; // drop jargon totals / unnamed esports
+      const ev = r.events?.[0];
+      out.push({
+        cache,
+        slug: r.slug ?? null,
+        liquidityNum: num(r.liquidityNum, r.liquidity),
+        volumeNum: num(r.volumeNum, r.volume),
+        eventSlug: ev?.slug ?? null,
+        eventTicker: ev?.ticker ?? null,
+        seriesTitle: ev?.series?.[0]?.title ?? ev?.title ?? null,
+        category: cat,
+        league: gameOf(cache, cat),
       });
     }
     if (raw.length < GAMMA_PAGE) break; // last page

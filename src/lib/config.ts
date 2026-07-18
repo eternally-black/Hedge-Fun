@@ -69,3 +69,22 @@ export const HEDGE_MIN_LEAD_MS = 30 * 60_000; // 30 minutes
 // mandatory cache; NEVER call Birdeye synchronously per request while a fresh snapshot exists.
 export const WALLET_SNAPSHOT_TTL_MS = 6 * 3_600_000; // 6h — exposure (Helius+Jupiter) refresh window
 export const WALLET_PNL_TTL_MS = 6 * 3_600_000; // 6h — Birdeye avg-cost refresh window (separate, slower)
+
+// ---- Hedge engine (phase 2 — S2 life-event hedge) ----
+// S2 has NO position notional to size against (you SUPPORT a team; there is no holding value), so
+// the stake is a FIXED product rule — not a percentage. Defaults to the standard swipe stake ($10).
+export const HEDGE_S2_STAKE_CENTS = STAKE_CENTS; // $10.00 fixed per life-event hedge
+// Deterministic match confidence (0..1) at/above which a free-text match is trusted. Below it we
+// fall to the NLU edge (D2), then to the discovery fallback. Tuned so exact/alias/strong-substring
+// pass and weak partials defer to the LLM (see src/lib/hedge/s2match.ts).
+export const S2_CONFIDENCE_THRESHOLD = 0.55;
+// A market is S2-eligible only if BOTH sides price within [floor, ceil] bp. WIDER than the deck's
+// 15–85% contested band: a pre-match heavy favourite (a cheap, high-value hedge) must stay; only a
+// live/decided price collapse (~99.5/0.5) is dropped. (The FALLBACK path uses the tighter deck gate.)
+export const S2_SIDE_FLOOR_BP = 200; // 2%
+export const S2_SIDE_CEIL_BP = 9800; // 98%
+// Discovery fallback: N random open CONTESTED markets when nothing matches. Labelled discovery in
+// the response (is_discovery), NEVER presented as a hedge (spec §2). Bounded pool keeps accept
+// re-derivation cheap + deterministic (the shown 3 are a random subset of the same pool).
+export const HEDGE_FALLBACK_COUNT = 3;
+export const HEDGE_FALLBACK_POOL_MAX = 300; // cap the contested pool scanned for the fallback

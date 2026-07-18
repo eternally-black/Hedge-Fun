@@ -4,15 +4,14 @@
 // re-send is idempotent. Returns false when the id no longer resolves (stale) so the route can 404.
 
 import { prisma } from "../prisma";
-import { deriveForUser } from "./suggest";
+import { resolveDerivedSuggestion } from "./s2";
 
 export async function recordSuggestionEvent(
   userId: string,
   sid: string,
   event: "IMPRESSION" | "DISMISS",
 ): Promise<boolean> {
-  const { items } = await deriveForUser(userId, { cacheOnly: true });
-  const item = items.find((i) => i.suggestion.suggestionId === sid);
+  const item = await resolveDerivedSuggestion(userId, sid);
   if (!item) return false;
   const s = item.suggestion;
 

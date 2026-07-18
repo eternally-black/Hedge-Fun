@@ -7,8 +7,9 @@
 //
 // Follows scripts/refresh-deck.ts: pure fetch/parse lives in src/lib, this script owns the upserts.
 import { PrismaClient } from "@prisma/client";
-import { fetchMajorsMarkets } from "../src/lib/polymarket";
+import { fetchMajorsMarkets, fetchSportsMarkets } from "../src/lib/polymarket";
 import { parseStrikeMarket, type HedgeAsset } from "../src/lib/hedge/parse";
+import { S2_SIDE_FLOOR_BP, S2_SIDE_CEIL_BP } from "../src/lib/config";
 
 const prisma = new PrismaClient();
 
@@ -19,16 +20,34 @@ const MAJOR_TAGS: { slug: string; tagId: number; asset: HedgeAsset }[] = [
   { slug: "solana", tagId: 818, asset: "SOL" },
 ];
 
+// league label -> stable grouping slug ("Dota 2" -> "dota-2", "NBA" -> "nba").
+function slugify(label: string): string {
+  return label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
 export interface HedgeIndexStats {
   discovered: number;
   upserted: number;
   parsed: number; // strike+date+direction all machine-parsed (S1-eligible)
   skipped: number; // discovered but not parseable (e.g. Up/Down dailies with no strike)
   byAsset: Record<string, { discovered: number; parsed: number; skipped: number }>;
+  // S2 sports/esports index (life-event hedge).
+  sports: {
+    discovered: number; // NAMED sports/esports markets Gamma returned
+    eligible: number; // within the S2 price band -> s2Eligible upserted
+    byLeague: Record<string, number>; // eligible count per league label (or "(unknown)")
+  };
 }
 
 export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
-  const stats: HedgeIndexStats = { discovered: 0, upserted: 0, parsed: 0, skipped: 0, byAsset: {} };
+  const stats: HedgeIndexStats = {
+    discovered: 0,
+    upserted: 0,
+    parsed: 0,
+    skipped: 0,
+    byAsset: {},
+    sports: { discovered: 0, eligible: 0, byLeague: {} },
+  };
 
   for (const tag of MAJOR_TAGS) {
     const rows = await fetchMajorsMarkets(tag.tagId);
@@ -104,6 +123,72 @@ export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
     }
   }
 
+  // ── S2 sports/esports pass (life-event hedge index) ────────────────────────────────────────────────
+  // Discover upcoming NAMED sports/esports markets, keep the ones inside the S2 price band (a live/
+  // decided price collapse is dropped; a pre-match favourite stays), and enrich MarketMeta so the
+  // pickers + free-text matcher can turn them into AGAINST hedges. Same upsert idiom as the crypto pass.
+  const sports = await fetchSportsMarkets();
+  stats.sports.discovered = sports.length;
+  for (const s of sports) {
+    const m = s.cache;
+    if (m.yesPriceBp == null || m.noPriceBp == null) continue;
+    if (m.yesPriceBp < S2_SIDE_FLOOR_BP || m.yesPriceBp > S2_SIDE_CEIL_BP) continue;
+    if (m.noPriceBp < S2_SIDE_FLOOR_BP || m.noPriceBp > S2_SIDE_CEIL_BP) continue;
+
+    const leagueLabel = s.league;
+    const leagueSlug = leagueLabel ? slugify(leagueLabel) : null;
+
+    const market = await prisma.market.upsert({
+      where: { polymarketId: m.polymarketId },
+      create: {
+        polymarketId: m.polymarketId,
+        question: m.question,
+        category: m.category,
+        outcomeYesLabel: m.outcomeYesLabel,
+        outcomeNoLabel: m.outcomeNoLabel,
+        yesPriceBp: m.yesPriceBp,
+        noPriceBp: m.noPriceBp,
+        startsAt: m.startsAt ? new Date(m.startsAt) : null,
+        resolutionDeadline: new Date(m.resolutionDeadline),
+        status: m.status,
+      },
+      update: {
+        question: m.question,
+        outcomeYesLabel: m.outcomeYesLabel,
+        outcomeNoLabel: m.outcomeNoLabel,
+        yesPriceBp: m.yesPriceBp,
+        noPriceBp: m.noPriceBp,
+        startsAt: m.startsAt ? new Date(m.startsAt) : null,
+        resolutionDeadline: new Date(m.resolutionDeadline),
+        status: m.status,
+        lastPolledAt: new Date(),
+      },
+      select: { id: true },
+    });
+
+    const meta = {
+      s2Eligible: true,
+      sportKind: s.category, // "sports" | "esports"
+      leagueSlug,
+      leagueLabel,
+      eventSlug: s.eventSlug,
+      eventTicker: s.eventTicker,
+      series: s.seriesTitle,
+      liquidityCents: s.liquidityNum != null ? Math.round(s.liquidityNum * 100) : null,
+      volumeCents: s.volumeNum != null ? Math.round(s.volumeNum * 100) : null,
+      parsedDeadline: new Date(m.resolutionDeadline),
+    };
+    await prisma.marketMeta.upsert({
+      where: { marketId: market.id },
+      create: { marketId: market.id, ...meta },
+      update: meta,
+    });
+
+    stats.sports.eligible++;
+    const key = leagueLabel ?? "(unknown)";
+    stats.sports.byLeague[key] = (stats.sports.byLeague[key] ?? 0) + 1;
+  }
+
   return stats;
 }
 
@@ -112,10 +197,15 @@ if (process.argv[1] && process.argv[1].endsWith("refresh-hedge-index.ts")) {
   refreshHedgeIndex()
     .then((s) => {
       const pct = s.discovered ? ((s.parsed / s.discovered) * 100).toFixed(1) : "0.0";
-      console.log(`refresh-hedge-index: discovered=${s.discovered} upserted=${s.upserted} parsed=${s.parsed} skipped=${s.skipped} (coverage ${pct}%)`);
+      console.log(`refresh-hedge-index [S1 crypto]: discovered=${s.discovered} upserted=${s.upserted} parsed=${s.parsed} skipped=${s.skipped} (coverage ${pct}%)`);
       for (const [asset, a] of Object.entries(s.byAsset)) {
         const apct = a.discovered ? ((a.parsed / a.discovered) * 100).toFixed(1) : "0.0";
         console.log(`  ${asset}: discovered=${a.discovered} parsed=${a.parsed} skipped=${a.skipped} (coverage ${apct}%)`);
+      }
+      const spct = s.sports.discovered ? ((s.sports.eligible / s.sports.discovered) * 100).toFixed(1) : "0.0";
+      console.log(`refresh-hedge-index [S2 sports]: discovered=${s.sports.discovered} eligible=${s.sports.eligible} (coverage ${spct}%)`);
+      for (const [league, n] of Object.entries(s.sports.byLeague).sort((a, b) => b[1] - a[1])) {
+        console.log(`  ${league}: ${n}`);
       }
       return prisma.$disconnect();
     })

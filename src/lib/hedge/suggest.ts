@@ -12,11 +12,16 @@ import type { HedgeAsset, ParsedDirection } from "./parse";
 import { getSnapshot, getCachedSnapshot, type SnapshotData } from "./snapshot";
 import type { HedgeSuggestion, HedgeSuggestionKind } from "../api-types";
 
+// The Prisma HedgeSuggestionKind values (mirrored so this module stays @prisma/client-free at the
+// type level). S1_* are wallet hedges; S2 / FALLBACK are the life-event + discovery kinds (A2).
+export type PrismaHedgeKind = "S1_MAJOR" | "S1_PROXY" | "S2" | "FALLBACK";
+
 // Internal derived item: the wire suggestion + the fields /accept and telemetry need (address, the
-// Prisma enum kind) that don't belong in the public card shape.
+// Prisma enum kind) that don't belong in the public card shape. `address` is the hedged wallet for
+// S1; empty string for S2/FALLBACK (no wallet in a life-event hedge).
 export interface DerivedSuggestion {
   address: string;
-  enumKind: "S1_MAJOR" | "S1_PROXY";
+  enumKind: PrismaHedgeKind;
   suggestion: HedgeSuggestion;
 }
 
@@ -24,8 +29,13 @@ function wireKind(k: "S1_MAJOR" | "S1_PROXY"): HedgeSuggestionKind {
   return k === "S1_MAJOR" ? "S1-major" : "S1-proxy";
 }
 
-export function enumKind(wire: HedgeSuggestionKind): "S1_MAJOR" | "S1_PROXY" {
-  return wire === "S1-major" ? "S1_MAJOR" : "S1_PROXY";
+export function enumKind(wire: HedgeSuggestionKind): PrismaHedgeKind {
+  switch (wire) {
+    case "S1-major": return "S1_MAJOR";
+    case "S1-proxy": return "S1_PROXY";
+    case "S2": return "S2";
+    case "fallback": return "FALLBACK";
+  }
 }
 
 // Load parsed, S1-eligible, OPEN majors markets as the pure matcher's IndexedMarket[].

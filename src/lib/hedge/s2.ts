@@ -1,0 +1,382 @@
+// S2 (life-event hedge) DB glue over the pure cores (s2match + nlu). Owns three surfaces:
+//   • getPickers()  — the PRIMARY structured team/league lists (TTL-cached), built ONLY from entities
+//                     that currently have an open, upcoming market (spec §2 "pickers primary").
+//   • searchS2()    — the SECONDARY free-text path: deterministic match -> NLU edge (below threshold,
+//                     D2) -> re-run -> discovery fallback. A team you SUPPORT -> an AGAINST suggestion
+//                     on its nearest upcoming market. Fallback = 3 random contested markets (discovery).
+//   • resolveDerivedSuggestion() — the accept/telemetry re-derivation path: given a suggestion id,
+//                     re-build it from persisted state (S1 snapshot, or open S2/fallback markets) WITHOUT
+//                     the original query, so /accept and /event stay idempotent for S2/FALLBACK too.
+//
+// Suggestions are NOT stored — they are re-derivable, exactly like S1. LLM never picks side/size/market
+// (D1): here the LLM only re-seeds the DETERMINISTIC search with extracted entities.
+
+import { prisma } from "../prisma";
+import { s2SuggestionId } from "./id";
+import { deriveForUser, type DerivedSuggestion } from "./suggest";
+import {
+  scoreMatch,
+  opposingSide,
+  isNamedEntityShape,
+  type S2Candidate,
+  type S2Match,
+} from "./s2match";
+import { extractEntities } from "./nlu";
+import { priceIsContested } from "../polymarket";
+import type { BetSide, HedgeSuggestion, HedgePickersResponse } from "../api-types";
+import {
+  DECK_MIN_LEAD_MS,
+  HEDGE_S2_STAKE_CENTS,
+  S2_CONFIDENCE_THRESHOLD,
+  HEDGE_FALLBACK_COUNT,
+  HEDGE_FALLBACK_POOL_MAX,
+} from "../config";
+
+// One open, upcoming, S2-eligible market with the fields the matcher + suggestion builder need.
+interface S2MarketRow {
+  marketId: string;
+  question: string;
+  category: string | null;
+  yesLabel: string;
+  noLabel: string;
+  yesPriceBp: number;
+  noPriceBp: number;
+  deadline: Date;
+  leagueSlug: string | null;
+  leagueLabel: string | null;
+}
+
+// Load the S2-eligible market index: NAMED sports/esports markets, OPEN, still far enough from
+// resolution to be a usable hedge (same lead the accept path enforces). Prices are non-null (a hedge
+// needs a lockable side price). Churns as the refresh poller updates MarketMeta (spec risk 4).
+async function loadS2Candidates(nowMs: number): Promise<S2MarketRow[]> {
+  const rows = await prisma.marketMeta.findMany({
+    where: {
+      s2Eligible: true,
+      market: {
+        is: {
+          status: "OPEN",
+          yesPriceBp: { not: null },
+          noPriceBp: { not: null },
+          resolutionDeadline: { gt: new Date(nowMs + DECK_MIN_LEAD_MS) },
+        },
+      },
+    },
+    select: {
+      leagueSlug: true,
+      leagueLabel: true,
+      market: {
+        select: {
+          id: true,
+          question: true,
+          category: true,
+          outcomeYesLabel: true,
+          outcomeNoLabel: true,
+          yesPriceBp: true,
+          noPriceBp: true,
+          resolutionDeadline: true,
+        },
+      },
+    },
+  });
+
+  const out: S2MarketRow[] = [];
+  for (const r of rows) {
+    const m = r.market;
+    if (m.yesPriceBp == null || m.noPriceBp == null) continue;
+    if (!isNamedEntityShape(m.outcomeYesLabel, m.outcomeNoLabel)) continue; // defensive: shape guard
+    out.push({
+      marketId: m.id,
+      question: m.question,
+      category: m.category,
+      yesLabel: m.outcomeYesLabel,
+      noLabel: m.outcomeNoLabel,
+      yesPriceBp: m.yesPriceBp,
+      noPriceBp: m.noPriceBp,
+      deadline: m.resolutionDeadline,
+      leagueSlug: r.leagueSlug,
+      leagueLabel: r.leagueLabel,
+    });
+  }
+  return out;
+}
+
+// ── pickers (TTL-cached) ───────────────────────────────────────────────────────────────────────────
+
+let pickersCache: { at: number; data: HedgePickersResponse } | null = null;
+const PICKERS_TTL_MS = 60_000; // 1 min — cheap freshness; the underlying index refreshes on poller cadence
+
+export async function getPickers(): Promise<HedgePickersResponse> {
+  if (pickersCache && Date.now() - pickersCache.at < PICKERS_TTL_MS) return pickersCache.data;
+
+  const rows = await loadS2Candidates(Date.now());
+  const byLeague = new Map<string, { slug: string; label: string; teams: Set<string> }>();
+  for (const r of rows) {
+    if (!r.leagueSlug || !r.leagueLabel) continue; // only markets with a recognised league land in a picker
+    let g = byLeague.get(r.leagueSlug);
+    if (!g) {
+      g = { slug: r.leagueSlug, label: r.leagueLabel, teams: new Set() };
+      byLeague.set(r.leagueSlug, g);
+    }
+    if (r.yesLabel.trim()) g.teams.add(r.yesLabel.trim());
+    if (r.noLabel.trim()) g.teams.add(r.noLabel.trim());
+  }
+  const leagues = [...byLeague.values()]
+    .map((g) => ({ slug: g.slug, label: g.label, teams: [...g.teams].sort((a, b) => a.localeCompare(b)) }))
+    .filter((l) => l.teams.length > 0)
+    .sort((a, b) => a.label.localeCompare(b.label));
+
+  const data: HedgePickersResponse = { leagues };
+  pickersCache = { at: Date.now(), data };
+  return data;
+}
+
+// ── suggestion builders (deterministic) ─────────────────────────────────────────────────────────────
+
+// The AGAINST suggestion for a supported entity: bet the OPPOSITE side of the market it plays in.
+// Returns null if that side has no price (can't lock a hedge). matchConfidence is display-only (search).
+function buildS2Suggestion(row: S2MarketRow, supportedSide: BetSide, matchConfidence?: number): HedgeSuggestion | null {
+  const side = opposingSide(supportedSide);
+  const priceBp = side === "YES" ? row.yesPriceBp : row.noPriceBp;
+  if (priceBp == null) return null;
+  const sideLabel = side === "YES" ? row.yesLabel : row.noLabel;
+  const matchedEntity = supportedSide === "YES" ? row.yesLabel : row.noLabel;
+  const sid = s2SuggestionId({ marketId: row.marketId, kind: "S2", side, proposedStakeCents: HEDGE_S2_STAKE_CENTS });
+  return {
+    id: row.marketId,
+    question: row.question,
+    category: row.category,
+    outcomeYesLabel: row.yesLabel,
+    outcomeNoLabel: row.noLabel,
+    yesPriceBp: row.yesPriceBp,
+    noPriceBp: row.noPriceBp,
+    resolutionDeadline: row.deadline.toISOString(),
+    suggestionId: sid,
+    kind: "S2",
+    side,
+    sideLabel,
+    proposedStakeCents: HEDGE_S2_STAKE_CENTS,
+    hedgedAsset: "", // no crypto asset in a life-event hedge
+    hedgedNotionalCents: 0, // no position notional to size against
+    isProxy: false,
+    avgBuyCostNarrative: null,
+    isDiscovery: false,
+    matchedEntity,
+    league: row.leagueLabel,
+    matchConfidence,
+  };
+}
+
+// A discovery fallback card from ANY open contested market. NOT a hedge — isDiscovery flags it so the
+// client labels it honestly. Canonical side = YES so the id is stable + re-derivable on accept.
+function buildFallbackSuggestion(row: {
+  id: string;
+  question: string;
+  category: string | null;
+  outcomeYesLabel: string;
+  outcomeNoLabel: string;
+  yesPriceBp: number;
+  noPriceBp: number;
+  resolutionDeadline: Date;
+}): HedgeSuggestion {
+  const sid = s2SuggestionId({ marketId: row.id, kind: "FALLBACK", side: "YES", proposedStakeCents: HEDGE_S2_STAKE_CENTS });
+  return {
+    id: row.id,
+    question: row.question,
+    category: row.category,
+    outcomeYesLabel: row.outcomeYesLabel,
+    outcomeNoLabel: row.outcomeNoLabel,
+    yesPriceBp: row.yesPriceBp,
+    noPriceBp: row.noPriceBp,
+    resolutionDeadline: row.resolutionDeadline.toISOString(),
+    suggestionId: sid,
+    kind: "fallback",
+    side: "YES",
+    sideLabel: row.outcomeYesLabel,
+    proposedStakeCents: HEDGE_S2_STAKE_CENTS,
+    hedgedAsset: "",
+    hedgedNotionalCents: 0,
+    isProxy: false,
+    avgBuyCostNarrative: null,
+    isDiscovery: true,
+    matchedEntity: null,
+    league: null,
+  };
+}
+
+// ── free-text search (deterministic-first; NLU edge below threshold; discovery fallback) ─────────────
+
+// Build the matcher candidate set from the open index: two ENTITY candidates per market (the two side
+// labels), one LEAGUE candidate per distinct league, and the market QUESTION (spec §3: candidates =
+// team names, league labels, market questions). Only ENTITY matches become AGAINST suggestions.
+function buildMatchCandidates(rows: S2MarketRow[]): S2Candidate[] {
+  const cands: S2Candidate[] = [];
+  const seenLeague = new Set<string>();
+  for (const r of rows) {
+    cands.push({ ref: `e|${r.marketId}|YES`, label: r.yesLabel, kind: "entity" });
+    cands.push({ ref: `e|${r.marketId}|NO`, label: r.noLabel, kind: "entity" });
+    if (r.leagueSlug && r.leagueLabel && !seenLeague.has(r.leagueSlug)) {
+      seenLeague.add(r.leagueSlug);
+      cands.push({ ref: `l|${r.leagueSlug}`, label: r.leagueLabel, kind: "league" });
+    }
+    cands.push({ ref: `q|${r.marketId}`, label: r.question, kind: "question" });
+  }
+  return cands;
+}
+
+// For a matched entity label, find its NEAREST upcoming market (soonest deadline) and build the
+// AGAINST suggestion. Handles the same team appearing in several upcoming markets.
+function buildNearestAgainst(rows: S2MarketRow[], entityLabel: string, confidence: number): HedgeSuggestion | null {
+  const target = entityLabel.trim().toLowerCase();
+  let best: { row: S2MarketRow; supportedSide: BetSide } | null = null;
+  for (const r of rows) {
+    let supportedSide: BetSide | null = null;
+    if (r.yesLabel.trim().toLowerCase() === target) supportedSide = "YES";
+    else if (r.noLabel.trim().toLowerCase() === target) supportedSide = "NO";
+    if (!supportedSide) continue;
+    if (!best || r.deadline.getTime() < best.row.deadline.getTime()) best = { row: r, supportedSide };
+  }
+  if (!best) return null;
+  return buildS2Suggestion(best.row, best.supportedSide, confidence);
+}
+
+export interface S2SearchOutcome {
+  suggestions: HedgeSuggestion[];
+  isDiscovery: boolean;
+  matchedEntity: string | null;
+  usedNlu: boolean;
+}
+
+// Keep the best distinct-entity matches at/above threshold, most-confident first.
+function passingEntityMatches(matches: S2Match[]): S2Match[] {
+  return matches.filter((m) => m.kind === "entity" && m.score >= S2_CONFIDENCE_THRESHOLD);
+}
+
+export async function searchS2(query: string): Promise<S2SearchOutcome> {
+  const nowMs = Date.now();
+  const rows = await loadS2Candidates(nowMs);
+  const candidates = buildMatchCandidates(rows);
+
+  let matches = passingEntityMatches(scoreMatch(query, candidates));
+  let usedNlu = false;
+
+  // NLU edge (D2): only when the deterministic pass fell below threshold AND a key is configured.
+  if (matches.length === 0) {
+    const nlu = await extractEntities(query);
+    usedNlu = nlu.usedNlu;
+    if (nlu.result && (nlu.result.entities.length > 0 || nlu.result.keywords.length > 0)) {
+      const requery = [...nlu.result.entities, ...nlu.result.keywords].join(" ");
+      matches = passingEntityMatches(scoreMatch(requery, candidates));
+    }
+  }
+
+  // Build AGAINST suggestions for the top distinct entities (each -> its nearest upcoming market).
+  const suggestions: HedgeSuggestion[] = [];
+  const usedEntities = new Set<string>();
+  for (const m of matches) {
+    const key = m.label.trim().toLowerCase();
+    if (usedEntities.has(key)) continue;
+    const built = buildNearestAgainst(rows, m.label, m.score);
+    if (built) {
+      suggestions.push(built);
+      usedEntities.add(key);
+    }
+    if (suggestions.length >= 3) break;
+  }
+
+  if (suggestions.length === 0) {
+    // Discovery fallback: 3 random open contested markets, honestly flagged (never a hedge).
+    const fb = await searchFallback(nowMs);
+    return { suggestions: fb, isDiscovery: true, matchedEntity: null, usedNlu };
+  }
+  return { suggestions, isDiscovery: false, matchedEntity: suggestions[0].matchedEntity ?? null, usedNlu };
+}
+
+// ── discovery fallback pool ──────────────────────────────────────────────────────────────────────
+
+// The bounded contested pool the fallback draws from. Bounded + deterministically ordered so accept
+// re-derivation (which enumerates the whole pool) stays cheap and matches whatever 3 were shown.
+async function loadFallbackPool(nowMs: number) {
+  const rows = await prisma.market.findMany({
+    where: {
+      status: "OPEN",
+      yesPriceBp: { not: null },
+      noPriceBp: { not: null },
+      resolutionDeadline: { gt: new Date(nowMs + DECK_MIN_LEAD_MS) },
+    },
+    select: {
+      id: true,
+      question: true,
+      category: true,
+      outcomeYesLabel: true,
+      outcomeNoLabel: true,
+      yesPriceBp: true,
+      noPriceBp: true,
+      resolutionDeadline: true,
+    },
+    orderBy: { resolutionDeadline: "asc" },
+    take: HEDGE_FALLBACK_POOL_MAX,
+  });
+  return rows.filter(
+    (r): r is typeof r & { yesPriceBp: number; noPriceBp: number } =>
+      r.yesPriceBp != null && r.noPriceBp != null && priceIsContested(r.yesPriceBp, r.noPriceBp),
+  );
+}
+
+// Clock-seeded xorshift (no Math.random). Determinism doesn't matter for accept — any pool member
+// re-derives — but seeding from the clock churns the shown discovery cards between requests.
+function seededPick<T>(items: T[], n: number, seed: number): T[] {
+  const pool = items.slice();
+  let s = seed >>> 0 || 0x9e3779b9;
+  const rand = () => {
+    s ^= s << 13; s ^= s >>> 17; s ^= s << 5;
+    return ((s >>> 0) % 1_000_000) / 1_000_000;
+  };
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+  return pool.slice(0, Math.min(n, pool.length));
+}
+
+async function searchFallback(nowMs: number): Promise<HedgeSuggestion[]> {
+  const pool = await loadFallbackPool(nowMs);
+  return seededPick(pool, HEDGE_FALLBACK_COUNT, nowMs).map(buildFallbackSuggestion);
+}
+
+// ── accept / telemetry re-derivation ────────────────────────────────────────────────────────────
+
+// Enumerate every open S2 market's TWO against-suggestions (support side A -> against B, and vice
+// versa) so /accept can match ANY S2 id the client holds, WITHOUT the original free text.
+async function deriveS2ForAccept(): Promise<DerivedSuggestion[]> {
+  const rows = await loadS2Candidates(Date.now());
+  const items: DerivedSuggestion[] = [];
+  for (const r of rows) {
+    for (const supportedSide of ["YES", "NO"] as const) {
+      const suggestion = buildS2Suggestion(r, supportedSide);
+      if (suggestion) items.push({ address: "", enumKind: "S2", suggestion });
+    }
+  }
+  return items;
+}
+
+// Enumerate the whole fallback pool so /accept can match any FALLBACK id that was shown as discovery.
+async function deriveFallbackForAccept(): Promise<DerivedSuggestion[]> {
+  const pool = await loadFallbackPool(Date.now());
+  return pool.map((r) => ({ address: "", enumKind: "FALLBACK" as const, suggestion: buildFallbackSuggestion(r) }));
+}
+
+// Resolve a suggestion id back to its derived form for /accept + /event. Tries S1 (the caller's cached
+// wallet snapshot), then the open S2 markets, then the fallback pool. Null => stale (the route 404s).
+export async function resolveDerivedSuggestion(userId: string, sid: string): Promise<DerivedSuggestion | null> {
+  const { items } = await deriveForUser(userId, { cacheOnly: true });
+  const s1 = items.find((i) => i.suggestion.suggestionId === sid);
+  if (s1) return s1;
+
+  const s2 = await deriveS2ForAccept();
+  const m2 = s2.find((i) => i.suggestion.suggestionId === sid);
+  if (m2) return m2;
+
+  const fb = await deriveFallbackForAccept();
+  return fb.find((i) => i.suggestion.suggestionId === sid) ?? null;
+}
