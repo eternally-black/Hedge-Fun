@@ -30,6 +30,8 @@ import {
   S2_CONFIDENCE_THRESHOLD,
   HEDGE_FALLBACK_COUNT,
   HEDGE_FALLBACK_POOL_MAX,
+  S2_SIDE_FLOOR_BP,
+  S2_SIDE_CEIL_BP,
 } from "../config";
 
 // One open, upcoming, S2-eligible market with the fields the matcher + suggestion builder need.
@@ -47,8 +49,10 @@ interface S2MarketRow {
 }
 
 // Load the S2-eligible market index: NAMED sports/esports markets, OPEN, still far enough from
-// resolution to be a usable hedge (same lead the accept path enforces). Prices are non-null (a hedge
-// needs a lockable side price). Churns as the refresh poller updates MarketMeta (spec risk 4).
+// resolution to be a usable hedge (same lead the accept path enforces). BOTH side prices must be
+// within the S2 band [S2_SIDE_FLOOR_BP, S2_SIDE_CEIL_BP] — a read-time re-check (F2) so a live/decided
+// price collapse (~99.5/0.5) is dropped even between refresh runs (before the refresh clear-pass has
+// demoted s2Eligible). Churns as the refresh poller updates MarketMeta (spec risk 4).
 async function loadS2Candidates(nowMs: number): Promise<S2MarketRow[]> {
   const rows = await prisma.marketMeta.findMany({
     where: {
@@ -56,8 +60,8 @@ async function loadS2Candidates(nowMs: number): Promise<S2MarketRow[]> {
       market: {
         is: {
           status: "OPEN",
-          yesPriceBp: { not: null },
-          noPriceBp: { not: null },
+          yesPriceBp: { gte: S2_SIDE_FLOOR_BP, lte: S2_SIDE_CEIL_BP },
+          noPriceBp: { gte: S2_SIDE_FLOOR_BP, lte: S2_SIDE_CEIL_BP },
           resolutionDeadline: { gt: new Date(nowMs + DECK_MIN_LEAD_MS) },
         },
       },

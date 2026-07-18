@@ -527,7 +527,11 @@ model HedgeSuggestionEvent {
   market             Market              @relation(fields: [marketId], references: [id])
   kind               HedgeSuggestionKind
   side               BetSide // the side that hedges the holding (down-benefit)
-  proposedStakeCents Int
+  proposedStakeCents Int // the SIZED stake we OFFERED (before the per-user Cash clamp)
+  // The stake actually LOCKED on ACCEPT — equals proposedStakeCents unless it was clamped down to
+  // available Cash (D8). Null on IMPRESSION/DISMISS (no bet). Funnel analytics must read THIS for the
+  // real accepted notional; proposedStakeCents overstates it whenever a clamp fired (F16).
+  actualStakeCents   Int?
   event              HedgeEventType
   betId              String? // set on ACCEPT (the Bet created)
   createdAt          DateTime            @default(now())

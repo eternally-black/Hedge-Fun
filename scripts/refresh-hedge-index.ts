@@ -35,6 +35,7 @@ export interface HedgeIndexStats {
   sports: {
     discovered: number; // NAMED sports/esports markets Gamma returned
     eligible: number; // within the S2 price band -> s2Eligible upserted
+    clearedStale: number; // previously-eligible rows demoted this run (fell out of the fetch/band)
     byLeague: Record<string, number>; // eligible count per league label (or "(unknown)")
   };
 }
@@ -46,7 +47,7 @@ export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
     parsed: 0,
     skipped: 0,
     byAsset: {},
-    sports: { discovered: 0, eligible: 0, byLeague: {} },
+    sports: { discovered: 0, eligible: 0, clearedStale: 0, byLeague: {} },
   };
 
   for (const tag of MAJOR_TAGS) {
@@ -129,6 +130,10 @@ export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
   // pickers + free-text matcher can turn them into AGAINST hedges. Same upsert idiom as the crypto pass.
   const sports = await fetchSportsMarkets();
   stats.sports.discovered = sports.length;
+  // Every market that PASSES the band this run stays/becomes s2Eligible; anything previously eligible
+  // but NOT re-affirmed here (dropped from the Gamma fetch, or fell out of the price band because the
+  // match started/decided) is demoted below (F2) so it can never surface in a picker/search/accept.
+  const eligibleMarketIds: string[] = [];
   for (const s of sports) {
     const m = s.cache;
     if (m.yesPriceBp == null || m.noPriceBp == null) continue;
@@ -184,10 +189,22 @@ export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
       update: meta,
     });
 
+    eligibleMarketIds.push(market.id);
     stats.sports.eligible++;
     const key = leagueLabel ?? "(unknown)";
     stats.sports.byLeague[key] = (stats.sports.byLeague[key] ?? 0) + 1;
   }
+
+  // Demote every row that was s2Eligible but did NOT pass this run: a match that started/decided
+  // (price collapsed out of band) or a market Gamma stopped returning. Clearing the flag is what
+  // pulls it out of loadS2Candidates (pickers/search) AND deriveS2ForAccept — so a stale sports
+  // market can no longer be suggested or accepted (F2). `notIn: []` matches all rows, which is the
+  // correct behaviour when nothing was eligible this run (demote everything).
+  const cleared = await prisma.marketMeta.updateMany({
+    where: { s2Eligible: true, marketId: { notIn: eligibleMarketIds } },
+    data: { s2Eligible: false },
+  });
+  stats.sports.clearedStale = cleared.count;
 
   return stats;
 }
@@ -203,7 +220,7 @@ if (process.argv[1] && process.argv[1].endsWith("refresh-hedge-index.ts")) {
         console.log(`  ${asset}: discovered=${a.discovered} parsed=${a.parsed} skipped=${a.skipped} (coverage ${apct}%)`);
       }
       const spct = s.sports.discovered ? ((s.sports.eligible / s.sports.discovered) * 100).toFixed(1) : "0.0";
-      console.log(`refresh-hedge-index [S2 sports]: discovered=${s.sports.discovered} eligible=${s.sports.eligible} (coverage ${spct}%)`);
+      console.log(`refresh-hedge-index [S2 sports]: discovered=${s.sports.discovered} eligible=${s.sports.eligible} clearedStale=${s.sports.clearedStale} (coverage ${spct}%)`);
       for (const [league, n] of Object.entries(s.sports.byLeague).sort((a, b) => b[1] - a[1])) {
         console.log(`  ${league}: ${n}`);
       }

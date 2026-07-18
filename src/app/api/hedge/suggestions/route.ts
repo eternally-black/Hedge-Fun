@@ -3,6 +3,7 @@ import { authUser } from "@/lib/privy";
 import { rateLimit } from "@/lib/ratelimit";
 import { deriveForUser } from "@/lib/hedge/suggest";
 import { HeliusUnavailableError } from "@/lib/helius";
+import { JupiterUnavailableError } from "@/lib/prices";
 import type { HedgeSuggestionsResponse } from "@/lib/api-types";
 
 // Deterministic S1 hedge suggestions for the caller's linked wallet(s). Reads the cached snapshot
@@ -22,8 +23,9 @@ export async function GET(req: Request) {
     };
     return NextResponse.json(res);
   } catch (e) {
-    // A stale snapshot rebuild needs Helius/Jupiter; if they're down we can't derive exposure.
-    if (e instanceof HeliusUnavailableError) {
+    // A stale snapshot rebuild needs Helius (balances) AND Jupiter (prices); if either is down we
+    // can't derive exposure -> the same typed 502 (F4). The prior snapshot row survives untouched.
+    if (e instanceof HeliusUnavailableError || e instanceof JupiterUnavailableError) {
       return NextResponse.json({ error: "exposure_unavailable" }, { status: 502 });
     }
     throw e;

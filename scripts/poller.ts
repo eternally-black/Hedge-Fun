@@ -15,11 +15,21 @@ import { evaluateStreak } from "../src/lib/streak";
 import { refreshDeck } from "./refresh-deck";
 import { refreshFootball } from "./refresh-football";
 import { resolveFootball } from "./settle-football";
+import { refreshHedgeIndex } from "./refresh-hedge-index";
 
 const prisma = new PrismaClient();
 
 const POLL_INTERVAL_MS = 60_000;
 const CONCURRENCY = 4;
+
+// The hedge market index (crypto S1 + sports/esports S2) rides the SAME poller as the deck (spec §2:
+// "same poller cadence") but on a SLOWER sibling cadence — it's a heavier Gamma pull (majors tags +
+// sports) than the deck refresh and hedge markets are longer-horizon, so per-minute freshness buys
+// nothing. Every 5th tick ≈ every 5 minutes: fresh enough that a market resolving early on Polymarket
+// (the F1 stale-cache snipe) is re-priced/closed within one window, cheap enough not to hammer Gamma.
+// The accept-time price-band gate (src/lib/hedge/accept.ts) closes the intra-window remainder.
+const HEDGE_INDEX_EVERY_N_TICKS = 5;
+let tickCount = 0;
 
 // Liveness signal: touched at the end of every successful tick. The compose healthcheck
 // fails the container when this file is stale (mtime older than ~3x the interval) so a
@@ -100,6 +110,23 @@ async function tick() {
     console.log(`[football] refreshed ${fn} World Cup markets`);
   } catch (e) {
     console.warn("[football] refresh error:", (e as Error).message);
+  }
+
+  // Hedge market index (S1 crypto majors + S2 sports/esports) — SLOWER sibling cadence (every Nth
+  // tick). Runs on the FIRST tick after boot then every HEDGE_INDEX_EVERY_N_TICKS ticks, so a fresh
+  // poller populates it promptly and it stays warm thereafter. Freshness kills the F1 snipe window
+  // (a market resolved-early on Polymarket gets re-priced/closed here); F2's clear-pass drops rows
+  // that fell out of the fetch/band. A refresh failure is transient — log and keep the tick alive.
+  tickCount++;
+  if ((tickCount - 1) % HEDGE_INDEX_EVERY_N_TICKS === 0) {
+    try {
+      const hs = await refreshHedgeIndex();
+      console.log(
+        `[hedge-index] S1 parsed=${hs.parsed}/${hs.discovered} | S2 eligible=${hs.sports.eligible}/${hs.sports.discovered} cleared=${hs.sports.clearedStale}`,
+      );
+    } catch (e) {
+      console.warn("[hedge-index] refresh error:", (e as Error).message);
+    }
   }
 
   // Markets that still have unsettled bets.

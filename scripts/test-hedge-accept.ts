@@ -11,7 +11,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../src/lib/prisma";
 import { randomCode } from "../src/lib/refcode";
 import { deriveForUser } from "../src/lib/hedge/suggest";
-import { acceptSuggestion } from "../src/lib/hedge/accept";
+import { acceptSuggestion, SuggestionNotFoundError, HedgeMarketUnavailableError } from "../src/lib/hedge/accept";
 import { InsufficientFundsError } from "../src/lib/swipe";
 import { recordSuggestionEvent } from "../src/lib/hedge/telemetry";
 import { sizeS1 } from "../src/lib/hedge/size";
@@ -85,7 +85,10 @@ async function main() {
       strikeCents: 20_000,
       direction: "UP",
       parsedDeadline: market.resolutionDeadline,
-      liquidityCents: 500_000,
+      // Hermeticity (F5): matchS1 offers only the TOP-liquidity market per asset (perAsset=1), so on
+      // a populated dev DB a real SOL market would outrank a modest seed and the scoped find would
+      // miss. Near-Int-max liquidity makes the seed deterministically rank first everywhere.
+      liquidityCents: 2_000_000_000,
       parseOk: true,
     },
   });
@@ -97,8 +100,12 @@ async function main() {
 
   const { items, walletLinked } = await deriveForUser(userA.id, { cacheOnly: true });
   assert.strictEqual(walletLinked, true, "wallet linked");
-  const sug = items.find((i) => i.suggestion.hedgedAsset === "SOL" && i.suggestion.kind === "S1-major")?.suggestion;
-  assert.ok(sug, "a SOL major suggestion was derived");
+  // Hermeticity (F5): scope every lookup to the SEEDED market id — on a populated dev DB the real
+  // index derives extra suggestions (higher-liquidity SOL markets rank first) and an unscoped
+  // kind-only find matches one of those instead (proven live: locked 9855 vs expected 6000).
+  const sug = items.find((i) => i.suggestion.id === market.id && i.suggestion.kind === "S1-major")?.suggestion;
+  assert.ok(sug, "the seeded SOL major suggestion was derived");
+  assert.strictEqual(sug!.hedgedAsset, "SOL", "suggestion hedges the SOL holding");
   const expectedStake = sizeS1(SOL_NOTIONAL_CENTS, "S1_MAJOR");
   assert.strictEqual(sug!.proposedStakeCents, expectedStake, "proposed stake = sizeS1(major)");
   assert.strictEqual(sug!.side, "NO", "UP market -> NO side hedges the long");
@@ -145,7 +152,7 @@ async function main() {
   const addrB = `${tag}-addrB`;
   await linkSnapshot(userB.id, addrB, SOL_NOTIONAL_CENTS);
   const dB = await deriveForUser(userB.id, { cacheOnly: true });
-  const sugB = dB.items.find((i) => i.suggestion.kind === "S1-major")!.suggestion;
+  const sugB = dB.items.find((i) => i.suggestion.id === market.id && i.suggestion.kind === "S1-major")!.suggestion;
   assert.ok(sugB.proposedStakeCents > lowCash, "proposed exceeds Cash (so the clamp is exercised)");
   const accB = await acceptSuggestion(userB.id, sugB.suggestionId);
   assert.strictEqual(accB.stakeCents, lowCash, "stake clamped down to available Cash");
@@ -157,7 +164,7 @@ async function main() {
   const addrC = `${tag}-addrC`;
   await linkSnapshot(userC.id, addrC, SOL_NOTIONAL_CENTS);
   const dC = await deriveForUser(userC.id, { cacheOnly: true });
-  const sugC = dC.items.find((i) => i.suggestion.kind === "S1-major")!.suggestion;
+  const sugC = dC.items.find((i) => i.suggestion.id === market.id && i.suggestion.kind === "S1-major")!.suggestion;
   let threw = false;
   try {
     await acceptSuggestion(userC.id, sugC.suggestionId);
@@ -166,6 +173,97 @@ async function main() {
   }
   assert.ok(threw, "below-floor Cash -> InsufficientFundsError");
   assert.strictEqual(await prisma.bet.count({ where: { userId: userC.id } }), 0, "nothing stored on insufficient Cash");
+
+  // ── Gap test: CONCURRENT double-accept — exactly one bet, one hold (audit gap #1). ───────────────
+  // Exercises the Serializable-retry + P2002-idempotent path under a real race; a regression there
+  // would double-hold Cash silently.
+  const userD = await makeUser(`${tag}-d`, 20_000);
+  const addrD = `${tag}-addrD`;
+  await linkSnapshot(userD.id, addrD, SOL_NOTIONAL_CENTS);
+  const dD = await deriveForUser(userD.id, { cacheOnly: true });
+  const sugD = dD.items.find((i) => i.suggestion.id === market.id && i.suggestion.kind === "S1-major")!.suggestion;
+  const race = await Promise.all([acceptSuggestion(userD.id, sugD.suggestionId), acceptSuggestion(userD.id, sugD.suggestionId)]);
+  assert.strictEqual(race.filter((r) => !r.alreadyAccepted).length, 1, "exactly one racer placed the bet");
+  assert.strictEqual(race[0].betId, race[1].betId, "both racers resolve to the same bet");
+  assert.strictEqual(await prisma.bet.count({ where: { userId: userD.id } }), 1, "one bet row under race");
+  const vbD = await prisma.virtualBalance.findUniqueOrThrow({ where: { userId: userD.id } });
+  assert.strictEqual(vbD.lockedCents, expectedStake, "one hold under race (no double-spend)");
+
+  // ── Gap test: mid-flow transitions (audit gap #2). ────────────────────────────────────────────────
+  // The derive path itself filters status/band/lead, so a market that went CLOSED between suggestion
+  // display and accept resolves to a stale id -> SuggestionNotFoundError (404, client refetches).
+  // The step-3 guards in accept.ts (market-not-open / market_expired / price_out_of_band 409s) cover
+  // the narrower intra-request TOCTOU; the pure band gate is unit-tested in test-hedge-cores.
+  const userE = await makeUser(`${tag}-e`, 20_000);
+  const addrE = `${tag}-addrE`;
+  await linkSnapshot(userE.id, addrE, SOL_NOTIONAL_CENTS);
+  const dE = await deriveForUser(userE.id, { cacheOnly: true });
+  const sugE = dE.items.find((i) => i.suggestion.id === market.id && i.suggestion.kind === "S1-major")!.suggestion;
+  await prisma.market.update({ where: { id: market.id }, data: { status: "CLOSED" } });
+  let closedThrew: unknown = null;
+  try {
+    await acceptSuggestion(userE.id, sugE.suggestionId);
+  } catch (e) {
+    closedThrew = e;
+  }
+  assert.ok(
+    closedThrew instanceof SuggestionNotFoundError || closedThrew instanceof HedgeMarketUnavailableError,
+    "accept on a CLOSED market is rejected (stale 404 or unavailable 409 — both protective)",
+  );
+  assert.strictEqual(await prisma.bet.count({ where: { userId: userE.id } }), 0, "no bet stored on closed market");
+  await prisma.market.update({ where: { id: market.id }, data: { status: "OPEN" } }); // restore for settlement below
+  let bogusThrew = false;
+  try {
+    await acceptSuggestion(userE.id, "S1v1-bogus-suggestion-id");
+  } catch (e) {
+    bogusThrew = e instanceof SuggestionNotFoundError;
+  }
+  assert.ok(bogusThrew, "unresolvable suggestion id -> SuggestionNotFoundError");
+
+  // ── Gap test: a CLAMPED hedge bet settles as a LOSS correctly (audit gap #3). ─────────────────────
+  // Second seeded market resolving YES so the NO hedge LOSES: hold released, stake forfeited.
+  const marketY = await prisma.market.create({
+    data: {
+      polymarketId: `${tag}-sol-above-y`,
+      question: "Solana above 300 on some future date?",
+      outcomeYesLabel: "Yes",
+      outcomeNoLabel: "No",
+      yesPriceBp: 4000,
+      noPriceBp: 6000,
+      status: "OPEN",
+      resolutionDeadline: new Date(Date.now() + 2 * 3_600_000),
+    },
+  });
+  await prisma.marketMeta.create({
+    data: {
+      marketId: marketY.id,
+      asset: "SOL",
+      tagSlug: "solana",
+      strikeCents: 30_000,
+      direction: "UP",
+      parsedDeadline: marketY.resolutionDeadline,
+      // Above market's 2_000_000_000 so marketY is the top SOL pick at F's derive time (perAsset=1).
+      liquidityCents: 2_100_000_000,
+      parseOk: true,
+    },
+  });
+  const lowCashF = 5_000;
+  const userF = await makeUser(`${tag}-f`, lowCashF);
+  const addrF = `${tag}-addrF`;
+  await linkSnapshot(userF.id, addrF, SOL_NOTIONAL_CENTS);
+  const dF = await deriveForUser(userF.id, { cacheOnly: true });
+  const sugF = dF.items.find((i) => i.suggestion.id === marketY.id && i.suggestion.kind === "S1-major")!.suggestion;
+  const accF = await acceptSuggestion(userF.id, sugF.suggestionId);
+  assert.strictEqual(accF.stakeCents, lowCashF, "F's stake clamped down to available Cash");
+  await settleMarket(prisma, marketY.id, { kind: "resolved", resolvedYes: true }); // YES resolves -> NO bet LOSES
+  const betF = await prisma.bet.findUniqueOrThrow({ where: { id: accF.betId } });
+  assert.strictEqual(betF.settlementStatus, "SETTLED", "clamped hedge bet settled");
+  assert.strictEqual(betF.result, "LOSS", "NO bet loses when the market resolves YES");
+  const vbF = await prisma.virtualBalance.findUniqueOrThrow({ where: { userId: userF.id } });
+  assert.strictEqual(vbF.lockedCents, 0, "hold released on LOSS");
+  // Phase-1 Cash/Locked semantics (test-cash-locked.ts): a LOSS credits nothing and only releases
+  // the hold — balanceCents is untouched. The clamped hedge bet must follow the same model.
+  assert.strictEqual(vbF.balanceCents, lowCashF, "LOSS credited nothing; balance untouched (established model)");
 
   // ── Settlement: the hedge bet rides the EXISTING poller. Resolve NO -> the NO bets WIN. ───────────
   // Runs LAST (after B/C derived): settling flips the market to RESOLVED, which correctly removes
@@ -179,15 +277,15 @@ async function main() {
   assert.ok(vbA.balanceCents > 20_000, "winning payout credited");
 
   // ── cleanup (children before parents) ────────────────────────────────────────────────────────────
-  const userIds = [userA.id, userB.id, userC.id];
+  const userIds = [userA.id, userB.id, userC.id, userD.id, userE.id, userF.id];
   await prisma.shardGrant.deleteMany({ where: { userId: { in: userIds } } });
   await prisma.dailyCounter.deleteMany({ where: { userId: { in: userIds } } }); // settle's capped shard path writes these
   await prisma.hedgeSuggestionEvent.deleteMany({ where: { userId: { in: userIds } } });
   await prisma.bet.deleteMany({ where: { userId: { in: userIds } } });
-  await prisma.marketMeta.deleteMany({ where: { marketId: market.id } });
-  await prisma.market.delete({ where: { id: market.id } });
+  await prisma.marketMeta.deleteMany({ where: { marketId: { in: [market.id, marketY.id] } } });
+  await prisma.market.deleteMany({ where: { id: { in: [market.id, marketY.id] } } });
   await prisma.hedgeWallet.deleteMany({ where: { userId: { in: userIds } } });
-  await prisma.walletSnapshot.deleteMany({ where: { address: { in: [addrA, addrB, addrC] } } });
+  await prisma.walletSnapshot.deleteMany({ where: { address: { in: [addrA, addrB, addrC, addrD, addrE, addrF] } } });
   await prisma.virtualBalance.deleteMany({ where: { userId: { in: userIds } } });
   await prisma.collectibleBalance.deleteMany({ where: { userId: { in: userIds } } });
   await prisma.streak.deleteMany({ where: { userId: { in: userIds } } });

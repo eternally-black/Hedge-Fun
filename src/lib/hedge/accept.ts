@@ -9,8 +9,20 @@ import { prisma } from "../prisma";
 import { runSerializable } from "../tx";
 import { utcDay } from "../time";
 import { InsufficientFundsError } from "../swipe";
-import { DECK_MIN_LEAD_MS, HEDGE_MIN_STAKE_CENTS } from "../config";
+import {
+  DECK_MIN_LEAD_MS,
+  HEDGE_MIN_STAKE_CENTS,
+  HEDGE_ACCEPT_SIDE_FLOOR_BP,
+  HEDGE_ACCEPT_SIDE_CEIL_BP,
+} from "../config";
 import { resolveDerivedSuggestion } from "./s2";
+
+// The final accept-time price-sanity gate (F1). True when the side we're about to LOCK is priced
+// inside the sane band — a decided/collapsed price (≤1% or ≥99%) fails, so a stale-cache snipe can't
+// lock a degenerate price regardless of the index refresh cadence. Pure + exported for direct testing.
+export function sideWithinAcceptBand(priceBp: number): boolean {
+  return priceBp >= HEDGE_ACCEPT_SIDE_FLOOR_BP && priceBp <= HEDGE_ACCEPT_SIDE_CEIL_BP;
+}
 
 // The suggestion id doesn't resolve to a current suggestion for the user's wallet(s) — stale
 // (snapshot refreshed / index changed / market closed). Route -> 404; the client refetches.
@@ -59,6 +71,11 @@ export async function acceptSuggestion(userId: string, sid: string): Promise<Acc
     throw new HedgeMarketUnavailableError("market_expired");
   }
   const lockedPriceBp = s.side === "YES" ? market.yesPriceBp : market.noPriceBp;
+  // Final price-sanity gate on the FRESHLY-read market (F1): a decided/collapsed side price that a
+  // poller refresh landed after re-derivation -> 409, so a stale-cache snipe can't lock it.
+  if (!sideWithinAcceptBand(lockedPriceBp)) {
+    throw new HedgeMarketUnavailableError("price_out_of_band");
+  }
   const day = utcDay();
 
   // 4) Atomic hold + bet + telemetry (Serializable so concurrent accepts can't double-spend Cash).
@@ -93,11 +110,12 @@ export async function acceptSuggestion(userId: string, sid: string): Promise<Acc
           marketId,
           kind: item.enumKind,
           side: s.side,
-          proposedStakeCents: s.proposedStakeCents,
+          proposedStakeCents: s.proposedStakeCents, // the OFFERED (sized) stake
+          actualStakeCents: stake, // the LOCKED stake (clamped down to Cash if needed) — F16
           event: "ACCEPT",
           betId: bet.id,
         },
-        update: { betId: bet.id },
+        update: { betId: bet.id, actualStakeCents: stake },
       });
       return { betId: bet.id, stakeCents: stake, alreadyAccepted: false };
     });

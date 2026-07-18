@@ -5,6 +5,8 @@
 // unparseable body all resolve to null -> the caller falls straight to the discovery fallback. One
 // call, 5s timeout, no retries, raw fetch against api.anthropic.com (no SDK dependency).
 
+import { createHash } from "node:crypto";
+
 export interface NluResult {
   category: string | null; // "sports" | "esports" | "entertainment" | "crypto" | "other" | null
   entities: string[]; // proper nouns: teams, clubs, people, titles
@@ -70,8 +72,16 @@ export interface NluOutcome {
   latencyMs: number;
 }
 
+// Stable, non-reversible fingerprint of the free text — lets us correlate/replay a request (D2)
+// WITHOUT spilling the raw query (personal plans / PII) into container logs (F6). First 12 hex chars
+// of sha256 is plenty to group identical inputs; it is NOT the raw text and can't be reversed to it.
+function inputFingerprint(text: string): string {
+  return createHash("sha256").update(text).digest("hex").slice(0, 12);
+}
+
 // The single NLU call. Returns { result:null, usedNlu:false } instantly when no key is configured
-// (the common case, incl. the test env). Logs input/output/latency to the console (D2 replayability).
+// (the common case, incl. the test env). Logs a hash of the input + the parsed output + latency for
+// replayability (D2); the RAW input text is logged ONLY when HEDGE_NLU_LOG_RAW=1 (debug, off in prod).
 export async function extractEntities(text: string): Promise<NluOutcome> {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) return { result: null, usedNlu: false, latencyMs: 0 };
@@ -103,7 +113,13 @@ export async function extractEntities(text: string): Promise<NluOutcome> {
     }
     const data = await res.json();
     const result = parseNluResponse(extractText(data));
-    console.log(`[hedge/nlu] in=${JSON.stringify(text)} out=${JSON.stringify(result)} latency=${latencyMs}ms`);
+    // Default: hash(input) + parsed output + latency (replayable, no raw PII). Raw text is gated
+    // behind an explicit debug flag (HEDGE_NLU_LOG_RAW=1, documented in .env.example).
+    if (process.env.HEDGE_NLU_LOG_RAW === "1") {
+      console.log(`[hedge/nlu] in=${JSON.stringify(text)} out=${JSON.stringify(result)} latency=${latencyMs}ms`);
+    } else {
+      console.log(`[hedge/nlu] inHash=${inputFingerprint(text)} out=${JSON.stringify(result)} latency=${latencyMs}ms`);
+    }
     return { result, usedNlu: true, latencyMs };
   } catch (e) {
     const latencyMs = Date.now() - started;

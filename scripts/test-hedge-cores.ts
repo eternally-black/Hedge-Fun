@@ -14,6 +14,8 @@ import {
   type S2Candidate,
 } from "../src/lib/hedge/s2match";
 import { parseNluResponse } from "../src/lib/hedge/nlu";
+import { sideWithinAcceptBand } from "../src/lib/hedge/accept";
+import { HEDGE_ACCEPT_SIDE_FLOOR_BP, HEDGE_ACCEPT_SIDE_CEIL_BP } from "../src/lib/config";
 import {
   HEDGE_MAJOR_PCT_BP,
   HEDGE_PROXY_PCT_BP,
@@ -241,6 +243,19 @@ import {
   assert.strictEqual(parseNluResponse("not json at all"), null, "no JSON -> null");
   assert.strictEqual(parseNluResponse('{"category":null,"entities":[],"keywords":[]}'), null, "empty signal -> null");
   assert.strictEqual(parseNluResponse("{ broken"), null, "malformed JSON -> null");
+}
+
+// ── accept-time price band (F1 TOCTOU gate) ────────────────────────────────────────────────────────
+// The derive path band-filters with the same bounds, so integration can't stage an out-of-band
+// accept; the pure gate is asserted directly at its boundaries instead.
+{
+  assert.strictEqual(sideWithinAcceptBand(HEDGE_ACCEPT_SIDE_FLOOR_BP), true, "floor is inside the band");
+  assert.strictEqual(sideWithinAcceptBand(HEDGE_ACCEPT_SIDE_CEIL_BP), true, "ceil is inside the band");
+  assert.strictEqual(sideWithinAcceptBand(HEDGE_ACCEPT_SIDE_FLOOR_BP - 1), false, "below floor -> degenerate");
+  assert.strictEqual(sideWithinAcceptBand(HEDGE_ACCEPT_SIDE_CEIL_BP + 1), false, "above ceil -> degenerate");
+  assert.strictEqual(sideWithinAcceptBand(50), false, "collapsed 0.5% side (decided market) rejected");
+  assert.strictEqual(sideWithinAcceptBand(9950), false, "collapsed 99.5% side (decided market) rejected");
+  assert.strictEqual(sideWithinAcceptBand(5000), true, "mid-book price accepted");
 }
 
 console.log("hedge cores: OK");

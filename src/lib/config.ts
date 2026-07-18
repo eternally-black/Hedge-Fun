@@ -65,6 +65,15 @@ export const HEDGE_MAX_STAKE_CENTS = 50_000; // $500.00 — cap any single paper
 export const HEDGE_MIN_NOTIONAL_CENTS = 500; // $5.00
 // A candidate market must resolve at least this far out to be a usable hedge (not seconds away).
 export const HEDGE_MIN_LEAD_MS = 30 * 60_000; // 30 minutes
+// Accept-time side-price sanity band (F1). The suggestion pipeline already band-filters at DERIVE
+// time (matchS1 uses the SAME 1–99% band; S2 uses [S2_SIDE_FLOOR_BP, S2_SIDE_CEIL_BP]; the fallback
+// uses the tighter contested gate), so a bad price normally drops out as a 404 stale. This is the
+// FINAL gate re-checked against the freshly-read market price at accept time: it closes the TOCTOU
+// window where a poller price refresh lands a decided/collapsed (~99.5/0.5) price between the
+// re-derivation read and the price lock — an out-of-band lock -> 409, never a silent snipe. Kept
+// equal to the widest matcher band so it never contradicts a legitimately-shown suggestion.
+export const HEDGE_ACCEPT_SIDE_FLOOR_BP = 100; // 1% — below this the locked side is degenerate/decided
+export const HEDGE_ACCEPT_SIDE_CEIL_BP = 9900; // 99% — above this the locked side is degenerate/decided
 // WalletSnapshot TTL. Birdeye wallet APIs are beta-capped (5 rps / 75 rpm, D4) → the snapshot is a
 // mandatory cache; NEVER call Birdeye synchronously per request while a fresh snapshot exists.
 export const WALLET_SNAPSHOT_TTL_MS = 6 * 3_600_000; // 6h — exposure (Helius+Jupiter) refresh window
