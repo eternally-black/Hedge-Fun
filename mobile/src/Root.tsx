@@ -14,6 +14,7 @@ import { TopupSheet } from "./components/TopupSheet";
 import { LoginScreen } from "./screens/LoginScreen";
 import { HomeScreen } from "./screens/HomeScreen";
 import { DeckScreen } from "./screens/DeckScreen";
+import { HedgeScreen } from "./screens/HedgeScreen";
 import { ResultsScreen } from "./screens/ResultsScreen";
 import { ProfileScreen } from "./screens/ProfileScreen";
 
@@ -113,6 +114,7 @@ export default function Root() {
       <View style={styles.body}>
         {screen === "home" && <HomeScreen me={me} api={api} onRefreshMe={refreshMe} onEnterDeck={goDeck} />}
         {screen === "deck" && <DeckScreen me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openTopup} />}
+        {screen === "hedge" && <HedgeScreen me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openTopup} />}
         {screen === "results" && <ResultsScreen api={api} onSeen={markResultsSeen} />}
         {screen === "profile" && <ProfileScreen me={me} api={api} onLogout={doLogout} onToast={flashToast} />}
       </View>

@@ -307,8 +307,9 @@ export interface AdminLeaderboardResponse {
 
 // Which hedge a suggestion is. "S1-major" = a direct hedge on a major holding (SOL / wrapped BTC or
 // ETH). "S1-proxy" = the long-tail SPL aggregate hedged via a SOL short (BASIS RISK — the client MUST
-// label it a proxy, never a hedge). (S2 / life-event kinds arrive in a later packet.)
-export type HedgeSuggestionKind = "S1-major" | "S1-proxy";
+// label it a proxy, never a hedge). "S2" = a life-event hedge (bet AGAINST a team you support).
+// "fallback" = a discovery card (NOT a hedge — client MUST label it discovery; see isDiscovery).
+export type HedgeSuggestionKind = "S1-major" | "S1-proxy" | "S2" | "fallback";
 
 // ─── POST /api/hedge/wallet ──────────────────────────────────────────────────────────────────────
 // Auth: Bearer. Body: HedgeWalletRequest. Validates the base58 Solana address, links it (read-only —
@@ -341,18 +342,53 @@ export interface HedgeWalletResponse {
 // POST /accept is idempotent. `walletLinked` is false when the user has linked no wallet yet.
 export interface HedgeSuggestion extends DeckCard {
   suggestionId: string; // deterministic; pass to /accept and /event
-  kind: HedgeSuggestionKind; // "S1-major" | "S1-proxy"
+  kind: HedgeSuggestionKind; // "S1-major" | "S1-proxy" | "S2" | "fallback"
   side: BetSide; // the side that hedges the holding (benefits if the price falls)
   sideLabel: string; // display label of that side (e.g. "No")
-  proposedStakeCents: number; // sized 5–10% majors / ~3% SPL-proxy, clamped (D8)
-  hedgedAsset: string; // "SOL" | "BTC" | "ETH" ("SOL" is the shorting instrument for a proxy)
-  hedgedNotionalCents: number; // the exposure being hedged
+  proposedStakeCents: number; // sized 5–10% majors / ~3% SPL-proxy, clamped (D8); fixed for S2/fallback
+  hedgedAsset: string; // "SOL" | "BTC" | "ETH" ("SOL" is the shorting instrument for a proxy); "" for S2/fallback
+  hedgedNotionalCents: number; // the exposure being hedged; 0 for S2/fallback (no position notional)
   isProxy: boolean; // true => S1-proxy => UI must show the basis-risk / "proxy, not a hedge" label
-  avgBuyCostNarrative: string | null; // "You bought SOL at ~$X" — null when Birdeye unavailable
+  avgBuyCostNarrative: string | null; // "You bought SOL at ~$X" — null when Birdeye unavailable / non-S1
+  // ── S2 / fallback extras (optional; absent/neutral on S1 so stale clients stay compatible) ──
+  isDiscovery?: boolean; // true => a fallback discovery card, NOT a hedge (client MUST label it so)
+  matchedEntity?: string | null; // the team/entity the user supports (we bet AGAINST it); null on fallback
+  league?: string | null; // league/competition label for an S2 card (e.g. "NBA"); null if unknown/non-S2
+  matchConfidence?: number; // 0..1 free-text match confidence (S2 search only; omitted on accept re-derivation)
 }
 export interface HedgeSuggestionsResponse {
   suggestions: HedgeSuggestion[];
   walletLinked: boolean; // false => prompt the user to link a wallet first
+}
+
+// ─── GET /api/hedge/pickers ────────────────────────────────────────────────────────────────────────
+// Auth: Bearer. The PRIMARY S2 UX (spec §2): structured team/league pickers built from Polymarket's
+// own sports/esports metadata, restricted to entities that actually have an OPEN, upcoming market
+// (so a pick always resolves to a live hedge). Churns with the poller cadence (never a static list);
+// server-side in-process TTL cache keeps it cheap. `teams` are the side labels under that league.
+export interface HedgePickerLeague {
+  slug: string; // "nba" | "cs2" | "soccer" ... (stable grouping key)
+  label: string; // display label ("NBA", "CS2")
+  teams: string[]; // distinct team/entity labels with an open market, sorted
+}
+export interface HedgePickersResponse {
+  leagues: HedgePickerLeague[];
+}
+
+// ─── POST /api/hedge/search ──────────────────────────────────────────────────────────────────────
+// Auth: Bearer. Body: HedgeSearchRequest. The SECONDARY S2 UX: free text ("я болею за Реал", "иду на
+// фильм X") -> deterministic alias/FTS match -> (below threshold + ANTHROPIC_API_KEY set) ONE NLU
+// call -> re-run -> still nothing => discovery fallback. A team you SUPPORT yields an AGAINST
+// suggestion on its nearest upcoming market. `isDiscovery` is true ONLY on the fallback (3 random
+// contested markets, honestly flagged as discovery, never a hedge). Errors: 400 (empty / too-long text).
+export interface HedgeSearchRequest {
+  text: string; // free text; trimmed, max 200 chars
+}
+export interface HedgeSearchResponse {
+  suggestions: HedgeSuggestion[]; // S2 against-hedges (isDiscovery=false) OR fallback cards (isDiscovery=true)
+  isDiscovery: boolean; // true => the fallback discovery path; the client MUST label the cards discovery
+  matchedEntity: string | null; // the entity we matched the text to (null on fallback)
+  usedNlu: boolean; // true => the NLU edge was invoked (below-threshold + key present)
 }
 
 // ─── POST /api/hedge/accept ──────────────────────────────────────────────────────────────────────

@@ -1,11 +1,12 @@
-// Bottom tab bar for the vertical slice: Deck / GM / Results / You.
+// Bottom tab bar for the vertical slice: Deck / Hedge / GM / Results / You.
 import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { colors } from "../theme";
 
-export type Screen = "deck" | "home" | "results" | "profile";
+export type Screen = "deck" | "hedge" | "home" | "results" | "profile";
 
 const TABS: { key: Screen; glyph: string; label: string }[] = [
   { key: "deck", glyph: "🃏", label: "Deck" },
+  { key: "hedge", glyph: "🛡", label: "Hedge" },
   { key: "home", glyph: "🔥", label: "GM" },
   { key: "results", glyph: "🔔", label: "Results" },
   { key: "profile", glyph: "👤", label: "You" },
