@@ -14,6 +14,9 @@ import {
 } from "../ui";
 import type {
   HedgeAcceptResponse,
+  HedgePickerLeague,
+  HedgePickersResponse,
+  HedgeSearchResponse,
   HedgeSuggestion,
   HedgeSuggestionsResponse,
   HedgeWalletResponse,
@@ -176,8 +179,10 @@ export function HedgeScreen({
 
   // Accept → a standard paper Bet server-side. The server re-derives the suggestion from the id and
   // may clamp the stake to available Cash — we render the RETURNED stakeCents, never the proposal.
+  // `onStale` lets each surface own its stale-card cleanup: S1 reloads its deterministic list; the S2
+  // surface (no persistent list to reload) just drops the card. Shared by S1 + S2/fallback ids.
   const accept = useCallback(
-    (s: HedgeSuggestion) => {
+    (s: HedgeSuggestion, onStale?: (id: string) => void) => {
       if (inFlight.current.has(s.suggestionId)) return;
       const m = meRef.current;
       if (m && m.cashCents <= 0) { onToast("No free cash — top up to keep going"); onTopup(); return; }
@@ -191,8 +196,8 @@ export function HedgeScreen({
         .catch((e) => {
           const status = (e as { status?: number }).status;
           if (status === 402) { onToast("No free cash — top up to keep going"); onTopup(); }
-          else if (status === 404 || status === 409) { onToast("That suggestion went stale — refreshing"); void loadSuggestions(); }
-          else { onToast("Couldn't place the hedge — try again"); console.error(e); }
+          else if (status === 404 || status === 409) { onToast("That suggestion went stale — refreshing"); if (onStale) onStale(s.suggestionId); else void loadSuggestions(); }
+          else { onToast("Couldn't place that bet — try again"); console.error(e); }
         })
         .finally(() => endPending(s.suggestionId));
     },
@@ -201,13 +206,16 @@ export function HedgeScreen({
 
   // Dismiss → telemetry event + optimistic removal. 404 = the suggestion stopped deriving (stale);
   // the card is already gone locally, so there's nothing to roll back. The id also goes into the
-  // session dismissed-set so the next reload doesn't resurrect it (see loadSuggestions).
+  // session dismissed-set so the next reload doesn't resurrect it (see loadSuggestions; the S2
+  // surface honors it too via isDismissed). `removeFromList` lets the S2 surface drop the card from
+  // its own results list instead of the S1 list.
   const dismiss = useCallback(
-    (s: HedgeSuggestion) => {
+    (s: HedgeSuggestion, removeFromList?: (id: string) => void) => {
       if (inFlight.current.has(s.suggestionId)) return;
       beginPending(s.suggestionId);
       dismissed.current.add(s.suggestionId);
-      setSuggestions((prev) => prev?.filter((x) => x.suggestionId !== s.suggestionId) ?? prev);
+      if (removeFromList) removeFromList(s.suggestionId);
+      else setSuggestions((prev) => prev?.filter((x) => x.suggestionId !== s.suggestionId) ?? prev);
       api("/api/hedge/event", { method: "POST", body: JSON.stringify({ suggestionId: s.suggestionId, event: "dismiss" }) })
         .catch((e) => {
           const status = (e as { status?: number }).status;
@@ -217,6 +225,10 @@ export function HedgeScreen({
     },
     [api, beginPending, endPending],
   );
+
+  // Whether an id was dismissed this session — the S2 surface filters freshly-fetched search results
+  // through this so a just-dismissed card doesn't resurrect on a re-search (mirrors loadSuggestions).
+  const isDismissed = useCallback((id: string) => dismissed.current.has(id), []);
 
   const retryLoad = useCallback(() => { setLoadError(null); void loadSuggestions(); }, [loadSuggestions]);
   // Opening the form wipes any stale link error left by a previous attempt/refresh.
@@ -290,7 +302,254 @@ export function HedgeScreen({
           )}
         </>
       )}
+
+      {/* S2 — the life-event surface. NOT gated on a linked wallet (it hits its own endpoints), so it
+          renders in every S1 state above: intro, loading, linked, or an S1 feed outage. */}
+      <LifeHedgeSection
+        api={api}
+        accepted={accepted}
+        pending={pending}
+        nowMs={nowMs}
+        onAccept={accept}
+        onDismiss={dismiss}
+        onImpression={fireImpression}
+        isDismissed={isDismissed}
+      />
     </div>
+  );
+}
+
+// ============================================================================
+// LifeHedgeSection — the S2 (life-event) surface. Works WITHOUT a linked wallet: it hits its own
+// endpoints (GET /api/hedge/pickers, POST /api/hedge/search) and reuses the shared accept / dismiss /
+// impression machinery + HedgeCard. Pickers are PRIMARY (tap a league → team chips → a pick is a
+// search for that team); free-text is SECONDARY; a discovery fallback (isDiscovery) is visually
+// distinct and NEVER framed as a hedge (the server returns it when nothing matched).
+// ============================================================================
+type SearchState = "idle" | "loading" | "error" | "done";
+
+function LifeHedgeSection({
+  api,
+  accepted,
+  pending,
+  nowMs,
+  onAccept,
+  onDismiss,
+  onImpression,
+  isDismissed,
+}: {
+  api: Api;
+  accepted: Map<string, AcceptedInfo>;
+  pending: ReadonlySet<string>;
+  nowMs: number;
+  onAccept: (s: HedgeSuggestion, onStale?: (id: string) => void) => void;
+  onDismiss: (s: HedgeSuggestion, removeFromList?: (id: string) => void) => void;
+  onImpression: (suggestionId: string) => void;
+  isDismissed: (id: string) => boolean;
+}) {
+  const [pickers, setPickers] = useState<HedgePickerLeague[] | null>(null); // null = loading
+  const [pickersError, setPickersError] = useState(false);
+  const [openLeague, setOpenLeague] = useState<string | null>(null); // expanded league slug
+
+  const [text, setText] = useState("");
+  const [lastQuery, setLastQuery] = useState("");
+  const [results, setResults] = useState<HedgeSuggestion[] | null>(null); // null = no search this session
+  const [searchState, setSearchState] = useState<SearchState>("idle");
+  const [isDiscovery, setIsDiscovery] = useState(false);
+  const [matchedEntity, setMatchedEntity] = useState<string | null>(null);
+
+  const loadPickers = useCallback(async () => {
+    setPickersError(false);
+    try {
+      const res = (await api("/api/hedge/pickers")) as HedgePickersResponse;
+      setPickers(res.leagues);
+    } catch {
+      setPickers([]); // an empty list still routes the user to the free-text path
+      setPickersError(true);
+    }
+  }, [api]);
+
+  useEffect(() => { void loadPickers(); }, [loadPickers]);
+
+  // A pick OR a free-text submit is ONE POST /api/hedge/search (the team name IS the query text).
+  // Freshly-fetched results are filtered through isDismissed so a just-dismissed card can't resurrect.
+  const runSearch = useCallback(
+    async (raw: string) => {
+      const q = raw.trim();
+      if (!q) return;
+      setLastQuery(q);
+      setSearchState("loading");
+      try {
+        const res = (await api("/api/hedge/search", { method: "POST", body: JSON.stringify({ text: q }) })) as HedgeSearchResponse;
+        setResults(res.suggestions.filter((s) => !isDismissed(s.suggestionId)));
+        setIsDiscovery(res.isDiscovery);
+        setMatchedEntity(res.matchedEntity);
+        setSearchState("done");
+      } catch {
+        setSearchState("error");
+      }
+    },
+    [api, isDismissed],
+  );
+
+  const submitText = useCallback(() => { void runSearch(text); }, [runSearch, text]);
+  const pickTeam = useCallback((team: string) => { setText(team); void runSearch(team); }, [runSearch]);
+
+  // The S2 surface has no persistent list to reload, so dropping the card from results IS the cleanup
+  // for both a dismiss and an accept that came back stale (404/409).
+  const removeResult = useCallback((id: string) => {
+    setResults((prev) => (prev ? prev.filter((s) => s.suggestionId !== id) : prev));
+  }, []);
+  const handleAccept = useCallback((s: HedgeSuggestion) => onAccept(s, removeResult), [onAccept, removeResult]);
+  const handleDismiss = useCallback((s: HedgeSuggestion) => onDismiss(s, removeResult), [onDismiss, removeResult]);
+
+  const leagues = pickers ?? [];
+  const openTeams = openLeague ? leagues.find((l) => l.slug === openLeague)?.teams ?? [] : [];
+  const noPickers = pickers !== null && leagues.length === 0;
+
+  return (
+    <div style={{ marginTop: 26 }}>
+      {/* section divider + heading */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+        <div style={{ height: 1, flex: 1, background: "var(--line)" }} />
+        <div style={{ fontSize: 10, letterSpacing: ".16em", color: "var(--muted)", textTransform: "uppercase", fontWeight: 700 }}>Life hedge</div>
+        <div style={{ height: 1, flex: 1, background: "var(--line)" }} />
+      </div>
+      <div style={{ fontFamily: "var(--df)", fontSize: 22, lineHeight: 1.06 }}>🎟 Bet against the outcome you dread</div>
+      <p style={{ color: "var(--muted)", fontSize: 12, lineHeight: 1.5, marginTop: 5 }}>
+        Rooting for a team? Put a little on them losing — soften the sting either way. No wallet needed.
+      </p>
+
+      {/* pickers — the PRIMARY path */}
+      <div style={{ background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 18, padding: "14px 16px", marginTop: 12 }}>
+        {pickers === null ? (
+          <div style={{ fontSize: 12, color: "var(--muted)" }}>Loading pick lists…</div>
+        ) : noPickers ? (
+          <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.5 }}>
+            {pickersError
+              ? "Couldn't load the pick lists right now — you can still describe it below."
+              : "No upcoming sports to pick from right now — describe who you're rooting for below."}
+            {pickersError && (
+              <div style={{ marginTop: 10 }}><GhostButton onClick={loadPickers}>↻ Try again</GhostButton></div>
+            )}
+          </div>
+        ) : (
+          <>
+            <div style={{ fontSize: 10, letterSpacing: ".12em", color: "var(--muted)", textTransform: "uppercase", marginBottom: 8 }}>Pick a league</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+              {leagues.map((l) => (
+                <Chip key={l.slug} active={openLeague === l.slug} onClick={() => setOpenLeague((cur) => (cur === l.slug ? null : l.slug))}>
+                  {l.label}
+                </Chip>
+              ))}
+            </div>
+            {openLeague && (
+              <div style={{ marginTop: 12 }}>
+                <div style={{ fontSize: 10, letterSpacing: ".12em", color: "var(--muted)", textTransform: "uppercase", marginBottom: 8 }}>Who are you rooting for?</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+                  {openTeams.map((t) => (
+                    <Chip key={t} accent onClick={() => pickTeam(t)}>{t}</Chip>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* free-text — the SECONDARY path */}
+      <div style={{ marginTop: 10 }}>
+        <div style={{ fontSize: 10, letterSpacing: ".12em", color: "var(--muted)", textTransform: "uppercase", marginBottom: 6 }}>Or describe it</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") submitText(); }}
+            maxLength={200}
+            placeholder="e.g. I'm rooting for the Lakers"
+            aria-label="Describe who or what you're rooting for"
+            style={{ flex: 1, minWidth: 0, background: "var(--panel2)", border: "1px solid var(--line)", borderRadius: 14, padding: "12px 14px", color: "var(--text)", fontFamily: "var(--nf)", fontSize: 12, outline: "none" }}
+          />
+          <button
+            type="button"
+            onClick={searchState === "loading" ? undefined : submitText}
+            disabled={searchState === "loading" || !text.trim()}
+            style={{ padding: "0 16px", borderRadius: 14, fontFamily: "var(--nf)", fontWeight: 700, fontSize: 13, cursor: searchState === "loading" || !text.trim() ? "default" : "pointer", border: "1px solid color-mix(in srgb,var(--energy) 50%,transparent)", background: "color-mix(in srgb,var(--energy) 16%,transparent)", color: "var(--energy)", opacity: searchState === "loading" || !text.trim() ? 0.5 : 1 }}
+          >
+            {searchState === "loading" ? "…" : "Find"}
+          </button>
+        </div>
+      </div>
+
+      {/* results */}
+      {searchState === "loading" ? (
+        <div style={{ textAlign: "center", marginTop: 18, color: "var(--muted)", fontSize: 12 }}>Finding markets…</div>
+      ) : searchState === "error" ? (
+        <div style={{ textAlign: "center", marginTop: 18, padding: "0 12px" }}>
+          <p style={{ color: "var(--muted)", fontSize: 12, lineHeight: 1.5 }}>Couldn&apos;t run that search. Give it another go.</p>
+          <div style={{ marginTop: 10 }}><GhostButton onClick={() => void runSearch(lastQuery)}>↻ Try again</GhostButton></div>
+        </div>
+      ) : searchState === "done" && results ? (
+        results.length === 0 ? (
+          // Defensive: the API returns a discovery fallback instead of nothing, so an empty result set
+          // is unreachable in practice — handled so a contract change never renders a blank surface.
+          <div style={{ textAlign: "center", marginTop: 18, color: "var(--muted)", fontSize: 12, lineHeight: 1.5 }}>
+            Nothing to bet on for that right now — try another team or event.
+          </div>
+        ) : (
+          <div style={{ marginTop: 14 }}>
+            {isDiscovery ? (
+              // Discovery header (spec §2): honest, distinct, NOT a hedge. Each card also carries its
+              // own "Discovery — not a hedge" badge (see HedgeCard).
+              <div style={{ marginBottom: 10, padding: "10px 12px", borderRadius: 14, border: "1px dashed color-mix(in srgb,var(--muted) 55%,transparent)", background: "color-mix(in srgb,var(--muted) 10%,transparent)" }}>
+                <div style={{ fontSize: 12, color: "var(--text)", lineHeight: 1.45 }}>
+                  Nothing clean to hedge in your situation — but here are {results.length} markets you might like.
+                </div>
+                <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 3 }}>Discovery picks, not hedges.</div>
+              </div>
+            ) : (
+              <div style={{ marginBottom: 10, fontSize: 12, color: "var(--muted)" }}>
+                Betting against <span style={{ color: "var(--text)", fontWeight: 700 }}>{matchedEntity ?? lastQuery}</span>
+              </div>
+            )}
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {results.map((s) => (
+                <HedgeCard
+                  key={s.suggestionId}
+                  s={s}
+                  acceptedInfo={accepted.get(s.suggestionId)}
+                  busy={pending.has(s.suggestionId)}
+                  nowMs={nowMs}
+                  onAccept={handleAccept}
+                  onDismiss={handleDismiss}
+                  onImpression={onImpression}
+                />
+              ))}
+            </div>
+          </div>
+        )
+      ) : null}
+    </div>
+  );
+}
+
+// A tappable pill for the league / team pickers. `active` = the currently-expanded league; `accent` =
+// a team chip (energy-tinted — the actionable "pick" that fires a search).
+function Chip({ active, accent, onClick, children }: { active?: boolean; accent?: boolean; onClick: () => void; children: React.ReactNode }) {
+  const idle = accent ? "var(--energy)" : "var(--text)";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        padding: "7px 12px", borderRadius: 999, font: "inherit", fontSize: 12, fontWeight: 700, cursor: "pointer",
+        color: active ? "#0b0b12" : idle,
+        background: active ? "var(--energy)" : accent ? "color-mix(in srgb,var(--energy) 14%,transparent)" : "var(--panel2)",
+        border: `1px solid ${active ? "var(--energy)" : accent ? "color-mix(in srgb,var(--energy) 45%,transparent)" : "var(--line)"}`,
+      }}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -328,17 +587,44 @@ const HedgeCard = memo(function HedgeCard({
   const sidePriceBp = s.side === "YES" ? s.yesPriceBp : s.noPriceBp;
   const payout = winPayout(sidePriceBp, s.proposedStakeCents);
 
+  // Kind drives the framing: S2 = "bets AGAINST the entity you support" (the returned side IS that
+  // against-bet — we never re-derive it here); a discovery fallback is NOT a hedge and carries no
+  // hedge framing at all. `foe` is the supported entity we're betting against (server-provided).
+  const discovery = s.isDiscovery === true;
+  const isS2 = s.kind === "S2";
+  const foe = s.matchedEntity && s.matchedEntity.trim() ? s.matchedEntity : "your side";
+  const stake = usd(s.proposedStakeCents);
+  const ctaLabel = discovery
+    ? `Bet ${stake} on ${s.sideLabel}`
+    : isS2
+      ? `Bet ${stake} against ${foe}`
+      : `Hedge ${stake} on ${s.sideLabel}`;
+  const footnote = discovery
+    ? "Discovery — a market you might like. Not a hedge, not sized to anything you hold."
+    : isS2
+      ? "Paper bet against your own side — a fixed stake, not hedge math."
+      : s.isProxy
+        ? "Proxy — shorts SOL, not your exact tokens. Basis risk · sizing is a product rule, not hedge math."
+        : "Paper bet · sizing is a product rule, not hedge math.";
+
   return (
-    <div style={{ position: "relative", borderRadius: 22, overflow: "hidden", background: "var(--panel2)", border: "1px solid var(--line)", boxShadow: "0 18px 40px -20px rgba(0,0,0,.7)" }}>
-      <div style={{ position: "absolute", inset: 0, background: bgGrad(cat.color) }} />
+    <div style={{ position: "relative", borderRadius: 22, overflow: "hidden", background: "var(--panel2)", border: discovery ? "1px dashed color-mix(in srgb,var(--muted) 60%,transparent)" : "1px solid var(--line)", boxShadow: "0 18px 40px -20px rgba(0,0,0,.7)" }}>
+      {/* Discovery cards drop the hedge-category gradient tint — a flat neutral panel keeps them from
+          reading as a sized hedge, reinforcing the "not a hedge" badge. */}
+      <div style={{ position: "absolute", inset: 0, background: discovery ? "linear-gradient(170deg, var(--panel2), var(--panel))" : bgGrad(cat.color) }} />
       <div style={{ position: "relative", display: "flex", flexDirection: "column", padding: "14px 15px" }}>
-        {/* kind badge + category + countdown */}
+        {/* kind badge + category (+ league on S2) + countdown */}
         <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-          <KindBadge proxy={s.isProxy} />
+          <KindBadge s={s} />
           <div style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(0,0,0,.4)", backdropFilter: "blur(6px)", padding: "4px 9px", borderRadius: 18 }}>
             <div style={{ width: 6, height: 6, borderRadius: "50%", background: cat.color, boxShadow: `0 0 8px ${cat.color}` }} />
             <span style={{ fontSize: 9, letterSpacing: ".12em", textTransform: "uppercase", fontWeight: 700, color: "#fff" }}>{cat.label}</span>
           </div>
+          {isS2 && s.league && s.league !== cat.label && (
+            <div style={{ display: "flex", alignItems: "center", background: "rgba(0,0,0,.4)", backdropFilter: "blur(6px)", padding: "4px 9px", borderRadius: 18 }}>
+              <span style={{ fontSize: 9, letterSpacing: ".12em", textTransform: "uppercase", fontWeight: 700, color: "var(--energy)" }}>{s.league}</span>
+            </div>
+          )}
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 5, background: "rgba(0,0,0,.4)", backdropFilter: "blur(6px)", padding: "4px 9px", borderRadius: 18, border: `1px solid ${cd.urgent ? "color-mix(in srgb,var(--no) 60%,transparent)" : "transparent"}` }}>
             <span style={{ fontSize: 11 }}>⏱</span>
             <span style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 12, color: cd.urgent ? "var(--no)" : "#fff" }}>{cd.text}</span>
@@ -348,12 +634,30 @@ const HedgeCard = memo(function HedgeCard({
         {/* question + hedge context */}
         <div style={{ padding: "10px 0" }}>
           <div style={{ fontFamily: "var(--df)", fontSize: 20, lineHeight: 1.08, letterSpacing: ".2px", color: "#fff", textShadow: "0 2px 16px rgba(0,0,0,.5)" }}>{displayQuestion(s)}</div>
-          <div style={{ marginTop: 6, fontSize: 12, color: "rgba(255,255,255,.75)" }}>
-            Hedges your <span style={{ fontWeight: 700, color: "#fff" }}>{s.hedgedAsset}</span> · {usd(s.hedgedNotionalCents)} exposure
-          </div>
-          {/* D4 degradation: the avg-buy-cost line renders ONLY when the server sends one. */}
-          {s.avgBuyCostNarrative && (
-            <div style={{ marginTop: 3, fontSize: 11, color: "rgba(255,255,255,.6)" }}>{s.avgBuyCostNarrative}</div>
+          {isS2 ? (
+            // S2 framing: we bet AGAINST the entity the user supports. The side below IS that
+            // against-bet (server-derived) — the copy names it, it never re-derives the side.
+            <div style={{ marginTop: 6, fontSize: 12, color: "rgba(255,255,255,.78)" }}>
+              Bets against <span style={{ fontWeight: 700, color: "#fff" }}>{foe}</span>
+              <div style={{ marginTop: 2, fontSize: 11, color: "rgba(255,255,255,.6)" }}>
+                You win if {foe} slip — the side below is that bet.
+              </div>
+            </div>
+          ) : discovery ? (
+            // Discovery: NO hedge framing anywhere — just an honest "you might like this" nudge.
+            <div style={{ marginTop: 6, fontSize: 11.5, color: "rgba(255,255,255,.6)" }}>
+              A contested market you might like.
+            </div>
+          ) : (
+            <>
+              <div style={{ marginTop: 6, fontSize: 12, color: "rgba(255,255,255,.75)" }}>
+                Hedges your <span style={{ fontWeight: 700, color: "#fff" }}>{s.hedgedAsset}</span> · {usd(s.hedgedNotionalCents)} exposure
+              </div>
+              {/* D4 degradation: the avg-buy-cost line renders ONLY when the server sends one. */}
+              {s.avgBuyCostNarrative && (
+                <div style={{ marginTop: 3, fontSize: 11, color: "rgba(255,255,255,.6)" }}>{s.avgBuyCostNarrative}</div>
+              )}
+            </>
           )}
         </div>
 
@@ -397,7 +701,7 @@ const HedgeCard = memo(function HedgeCard({
               ) : (
                 <>
                   <span style={{ fontFamily: "var(--df)", fontSize: 16, lineHeight: 1, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    Hedge {usd(s.proposedStakeCents)} on {s.sideLabel}
+                    {ctaLabel}
                   </span>
                   <span style={{ fontSize: 10, color: "rgba(255,255,255,.7)" }}>to win <span style={{ fontFamily: "var(--nf)", fontWeight: 700, color: sideColor }}>${payout}</span></span>
                 </>
@@ -406,24 +710,30 @@ const HedgeCard = memo(function HedgeCard({
           </div>
         )}
 
-        {/* honesty footnote — proxy is labeled a proxy, sizing never claims hedge-math equivalence */}
+        {/* honesty footnote — proxy is a proxy, discovery is never a hedge, sizing never claims math */}
         <div style={{ textAlign: "center", marginTop: 8, fontSize: 10, color: "rgba(255,255,255,.5)", letterSpacing: ".02em" }}>
-          {s.isProxy
-            ? "Proxy — shorts SOL, not your exact tokens. Basis risk · sizing is a product rule, not hedge math."
-            : "Paper bet · sizing is a product rule, not hedge math."}
+          {footnote}
         </div>
       </div>
     </div>
   );
 });
 
-// The kind badge the spec insists on: an S1-proxy is labeled a proxy (basis risk), never a hedge.
-function KindBadge({ proxy }: { proxy: boolean }) {
-  const color = proxy ? "#ff8a3d" : "var(--yes)";
+// The kind badge the spec insists on: an S1-proxy is labeled a proxy (basis risk), an S2 card is
+// labeled a life-event bet AGAINST the supported side, and a discovery fallback is loudly flagged
+// "not a hedge" (muted + dashed to read as a different species from the hedges above it).
+function KindBadge({ s }: { s: HedgeSuggestion }) {
+  const meta = s.isDiscovery
+    ? { color: "var(--muted)", label: "Discovery — not a hedge", dashed: true }
+    : s.kind === "S2"
+      ? { color: "var(--energy)", label: "Life hedge · against", dashed: false }
+      : s.isProxy
+        ? { color: "#ff8a3d", label: "Proxy · basis risk", dashed: false }
+        : { color: "var(--yes)", label: "Direct hedge", dashed: false };
   return (
-    <div style={{ display: "flex", alignItems: "center", padding: "4px 9px", borderRadius: 18, background: `color-mix(in srgb,${color} 18%,transparent)`, border: `1px solid color-mix(in srgb,${color} 55%,transparent)` }}>
-      <span style={{ fontSize: 9, letterSpacing: ".12em", textTransform: "uppercase", fontWeight: 800, color }}>
-        {proxy ? "Proxy · basis risk" : "Direct hedge"}
+    <div style={{ display: "flex", alignItems: "center", padding: "4px 9px", borderRadius: 18, background: `color-mix(in srgb,${meta.color} 18%,transparent)`, border: `1px ${meta.dashed ? "dashed" : "solid"} color-mix(in srgb,${meta.color} 55%,transparent)` }}>
+      <span style={{ fontSize: 9, letterSpacing: ".12em", textTransform: "uppercase", fontWeight: 800, color: meta.color }}>
+        {meta.label}
       </span>
     </div>
   );
