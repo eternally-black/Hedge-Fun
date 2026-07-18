@@ -17,6 +17,7 @@ import { ProfileScreen } from "./screens/ProfileScreen";
 import { HistorySheet } from "./screens/HistorySheet";
 import { BalanceSheet } from "./screens/BalanceSheet";
 import { NotificationsScreen } from "./screens/NotificationsScreen";
+import { HedgeScreen } from "./screens/HedgeScreen";
 import { RevealOverlay } from "./screens/RevealOverlay";
 import { type Card, type Me, type Screen } from "./ui";
 import { DECK_MIN_LEAD_MS } from "@/lib/config";
@@ -499,6 +500,7 @@ function App() {
 
         {effectiveScreen === "football" && <FootballScreen api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openBalance} selected={footballMatch} onSelect={selectMatch} backTo={matchBackTo} onBack={backFromMatch} />}
         {effectiveScreen === "feed" && <FeedScreen api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openBalance} />}
+        {effectiveScreen === "hedge" && <HedgeScreen api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openBalance} />}
         {effectiveScreen === "gm" && <GmScreen me={me} busy={busy} onGM={gm} onEnterDeck={goDeck} onRevive={revive} />}
         {effectiveScreen === "vault" && <VaultScreen me={me} api={api} onRefresh={refresh} previewCard={top ?? next} />}
         {effectiveScreen === "invite" && <InviteScreen me={me} />}

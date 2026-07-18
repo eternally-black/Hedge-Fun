@@ -10,7 +10,7 @@ import type { DeckCard, MeResponse } from "@/lib/api-types";
 export type Card = DeckCard;
 export type Me = MeResponse;
 
-export type Screen = "deck" | "football" | "feed" | "gm" | "vault" | "invite" | "you" | "notifications";
+export type Screen = "deck" | "football" | "feed" | "gm" | "vault" | "invite" | "you" | "notifications" | "hedge";
 
 // Price as Polymarket shows it: cents per share. bp/100 = cents (5150bp -> 51.5¢). Whole cents
 // when integer, one decimal otherwise. Sides need NOT sum to 100¢ (spread is real) — no rounding.
