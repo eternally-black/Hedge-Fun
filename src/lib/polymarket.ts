@@ -15,6 +15,8 @@ import {
   categoryOf,
   gameOf,
 } from "./deck-mix";
+import { evalMarketDepth } from "./depth";
+import { ClobUnavailableError } from "./clob";
 
 const BASE = process.env.POLYMARKET_API_BASE ?? "https://gamma-api.polymarket.com";
 
@@ -27,8 +29,24 @@ export interface MarketCache {
   // "Yes" / "No") so the card shows the actual sides, not a forced Yes/No.
   outcomeYesLabel: string; // index-0 outcome label (the YES side)
   outcomeNoLabel: string; // index-1 outcome label (the NO side)
-  yesPriceBp: number | null;
+  yesPriceBp: number | null; // Gamma MID — reference only, never a quote and never POLYMARKET display (D10); a TXODDS row's synthetic odds ARE authoritative
   noPriceBp: number | null;
+  // CLOB token ids (Gamma clobTokenIds[0/1]) — the handle every honest price comes from. A binary
+  // market missing either id is NOT quotable: deck/hedge-index fetches drop it like any other
+  // unusable row (mapMarket itself stays lenient so resolution detection never depends on them).
+  yesTokenId: string | null;
+  noTokenId: string | null;
+  // Gamma enableOrderBook top-of-book for the YES token. Cheap pre-filter: the VWAP of a buy can
+  // never beat the best ask, so a degenerate top-of-book proves gate-failure without a CLOB call.
+  bestAskBp: number | null;
+  // Depth-aware executable numbers (D10). Filled ONLY by fetches that run the depth gate
+  // (fetchBlitzDeck); null on rows from fetchers whose callers evaluate depth themselves
+  // (fetchMajorsMarkets / fetchSportsMarkets / fetchResolution).
+  yesEffPriceBp: number | null; // VWAP to BUY STAKE_CENTS of YES, from the book
+  noEffPriceBp: number | null;
+  yesMaxStakeCents: number | null; // maxStakeWithinSlippage on the YES asks at the eligibility cap
+  noMaxStakeCents: number | null;
+  bookTsAt: string | null; // ISO — when the book behind the four eff numbers was read
   startsAt: string | null; // ISO UTC (startDate); null if absent (crypto/Yes-No have none)
   resolutionDeadline: string; // ISO UTC (endDate)
   status: "OPEN" | "CLOSED" | "RESOLVED";
@@ -45,6 +63,10 @@ interface GammaMarket {
   startDate?: string; // ISO; present on sports/esports (match kickoff), absent on crypto/Yes-No
   outcomes?: string; // JSON string e.g. '["Yes","No"]'
   outcomePrices?: string; // JSON string e.g. '["0.42","0.58"]'
+  clobTokenIds?: string; // JSON string e.g. '["713210456792522125...", "521157195012..."]'
+  bestBid?: string | number; // present when enableOrderBook=true (YES-token top of book)
+  bestAsk?: string | number;
+  spread?: string | number;
   closed?: boolean;
   active?: boolean;
   umaResolutionStatus?: string;
@@ -100,6 +122,15 @@ export function mapMarket(m: GammaMarket): MarketCache | null {
     if (Number.isFinite(n)) noPriceBp = toBp(n);
   }
 
+  // CLOB token ids, same JSON-string idiom as outcomes/outcomePrices. Kept NULLABLE here on
+  // purpose: mapMarket also serves fetchResolution, and settlement must never fail just because a
+  // (closed) market lost its token ids. Quotable-or-not is enforced by the fetch callers.
+  const tokenIds = parseJsonArray(m.clobTokenIds);
+  const yesTokenId = tokenIds && tokenIds.length === 2 && tokenIds[0] ? tokenIds[0] : null;
+  const noTokenId = tokenIds && tokenIds.length === 2 && tokenIds[1] ? tokenIds[1] : null;
+  const bestAsk = num(m.bestAsk);
+  const bestAskBp = bestAsk !== null && Number.isFinite(bestAsk) ? toBp(bestAsk) : null;
+
   // Resolution: umaResolutionStatus === "resolved" AND a clean 1/0 price collapse. The WINNING
   // side is whichever index collapsed to 1 — YES if index 0, NO if index 1 (works for any
   // labels, since we settle by side index, not by the literal word).
@@ -129,6 +160,15 @@ export function mapMarket(m: GammaMarket): MarketCache | null {
     outcomeNoLabel: noLabel,
     yesPriceBp,
     noPriceBp,
+    yesTokenId,
+    noTokenId,
+    bestAskBp,
+    // Depth fields are filled by the depth-gating fetch (fetchBlitzDeck), never by the shape-map.
+    yesEffPriceBp: null,
+    noEffPriceBp: null,
+    yesMaxStakeCents: null,
+    noMaxStakeCents: null,
+    bookTsAt: null,
     startsAt: m.startDate ?? null, // pure shape-map; the not-started gate lives in fetchBlitzDeck + deck route
     resolutionDeadline: m.endDate,
     status,
@@ -158,7 +198,10 @@ const MAX_PAGES = 15; // backstop: never page forever (15 * 100 = 1500 markets s
 const PRICE_FLOOR_BP = 1500; // 15%
 const PRICE_CEIL_BP = 8500; // 85%
 // Exported for the S2 discovery FALLBACK (spec §2: "3 random open CONTESTED markets — reuse the
-// price-contested gate"). Same band the deck uses so a discovery card is never a dead 100%/0% swipe.
+// price-contested gate") and reused by the D10 depth gate + the deck/feed serve paths, so the band
+// lives in exactly ONE place. Since D10 it is applied to the EFFECTIVE (book-walked) price wherever
+// a book exists; the Gamma mid only passes through it as an ingest-time pre-filter (fetchBlitzDeck)
+// and as the TXODDS synthetic odds (authoritative there).
 export function priceIsContested(yesBp: number, noBp: number): boolean {
   return yesBp >= PRICE_FLOOR_BP && yesBp <= PRICE_CEIL_BP && noBp >= PRICE_FLOOR_BP && noBp <= PRICE_CEIL_BP;
 }
@@ -185,12 +228,47 @@ function shapeOf(m: MarketCache): Shape {
 //    category horizon (keeps crypto blitz-fresh while letting sparse sports/esports through),
 //    bucket by shape, then INTERLEAVE round-robin (named, over/under, crypto, ...) — the deck
 //    always carries teams/sports, not a monolith of crypto. Each bucket stays endDate-ascending.
-export async function fetchBlitzDeck(hours = DECK_FETCH_HORIZON_HOURS, want = 100): Promise<MarketCache[]> {
+//
+// D10 (depth gate): a contested MID is not a tradable BOOK (the bid-1¢/ask-98¢ husk reads 49.5¢
+// on the mid yet costs 98¢ to actually buy). So after the scan we OVER-FETCH (~2× want — the gate
+// drops ~17%, measured live 2026-07-26, landing mostly on the crypto bucket), walk both books of
+// every candidate, and gate on the EFFECTIVE price + fill BEFORE the interleave. Filtering after
+// the interleave instead would shrink the deck below `want` and skew the mix toward whichever
+// bucket's books survive best.
+// What one candidate's trip through the depth gate means for the PERSISTED row (1b):
+//  - "pass":   gate passed; the executable numbers are attached to the row (upserted verbatim).
+//  - "reject": the gate EVALUATED the market and found it UNTRADABLE — a real book read that cannot
+//              fill STAKE_CENTS within the cap, or Gamma's top-of-book proves the YES side unbuyable.
+//              refresh-deck persists an explicit rejection stamp (eff null, capacity 0, bookTsAt now)
+//              so an already-cached row stops serving within one tick instead of lingering on stale
+//              eff prices until the display-staleness bound.
+//  - "drop":   excluded from this run's deck but NEVER stamped. Three kinds, deliberately:
+//              (a) contested-band failures — a deck-product verdict other pipelines legitimately
+//                  disagree with (the hedge index serves wider bands off the SAME Market row;
+//                  stamping would null out eff prices the hedge surfaces validly serve, and the two
+//                  refreshes would fight over the row every tick). The serve-time band re-asserts
+//                  itself per request, so these rows never reach a card anyway;
+//              (b) CLOB outages — "can't PROVE tradability this run" is not untradability; stamping
+//                  on an outage would empty the whole deck exactly when the CLOB is down;
+//              (c) missing token ids — never evaluated at all.
+type GateVerdict = "pass" | "reject" | "drop";
+
+export interface BlitzDeckResult {
+  deck: MarketCache[]; // gate survivors, round-robin interleaved (unchanged semantics)
+  // polymarketIds the gate evaluated this run and found untradable ("reject" above). Only THESE get
+  // the rejection stamp — never "dropped" rows, and never markets the run simply didn't reach
+  // (fetchBlitzDeck breaks early once its buckets fill, so most valid in-window markets are never
+  // evaluated on a given run; inferring rejection from absence would wrongly clear them).
+  rejected: string[];
+}
+
+export async function fetchBlitzDeck(hours = DECK_FETCH_HORIZON_HOURS, want = 100): Promise<BlitzDeckResult> {
   const now = new Date();
   const nowMs = now.getTime();
   const max = new Date(now.getTime() + hours * 3_600_000);
   const maxMs = max.getTime();
   const buckets: Record<Shape, MarketCache[]> = { named: [], overunder: [], crypto: [] };
+  const overfetch = want * 2; // pre-gate candidate target (see header)
 
   for (let page = 0; page < MAX_PAGES; page++) {
     const qs = new URLSearchParams({
@@ -216,7 +294,7 @@ export async function fetchBlitzDeck(hours = DECK_FETCH_HORIZON_HOURS, want = 10
         m.noPriceBp !== null &&
         new Date(m.resolutionDeadline).getTime() <= maxMs && // re-assert outer window client-side
         withinCategoryHorizon(m, new Date(m.resolutionDeadline).getTime(), nowMs) && // per-category cap
-        priceIsContested(m.yesPriceBp, m.noPriceBp) && // drop decided/live matches (100%/0%)
+        priceIsContested(m.yesPriceBp, m.noPriceBp) && // cheap MID pre-filter; the AUTHORITATIVE band runs on the eff price below
         !isContextPoor(m) && // drop bare Over/Under totals with no match named ("Games Total: O/U 4.5")
         !isVagueEsports(m) // drop esports we can't name a game for (bare "Esports" badge)
       ) {
@@ -224,8 +302,27 @@ export async function fetchBlitzDeck(hours = DECK_FETCH_HORIZON_HOURS, want = 10
       }
     }
     if (raw.length < GAMMA_PAGE) break; // last page
-    // Stop early once we have plenty in every non-crypto bucket to interleave a full deck.
-    if (buckets.named.length + buckets.overunder.length >= want) break;
+    // Stop early once we have plenty in every non-crypto bucket AND enough total candidates to
+    // survive the depth gate at ~2× want (crypto volume is the wall, so total accrues fast).
+    const total = buckets.named.length + buckets.overunder.length + buckets.crypto.length;
+    if (buckets.named.length + buckets.overunder.length >= want && total >= overfetch) break;
+  }
+
+  // Depth-gate BEFORE the round-robin interleave (see header). A market passes only when BOTH sides
+  // quote, fill STAKE_CENTS within the eligibility cap, and the EFFECTIVE prices sit in the same
+  // 1500..8500 contested band the mid pre-filter used — the band lives in priceIsContested, once.
+  const candidates = [...buckets.named, ...buckets.overunder, ...buckets.crypto];
+  const kept = new Set<string>();
+  const rejected: string[] = [];
+  await Promise.all(
+    candidates.map(async (m) => {
+      const v = await depthGateOne(m);
+      if (v === "pass") kept.add(m.polymarketId);
+      else if (v === "reject") rejected.push(m.polymarketId);
+    }),
+  );
+  for (const s of Object.keys(buckets) as Shape[]) {
+    buckets[s] = buckets[s].filter((m) => kept.has(m.polymarketId));
   }
 
   // Round-robin interleave: named first each round so sports/esports lead, then OU, then crypto.
@@ -242,7 +339,47 @@ export async function fetchBlitzDeck(hours = DECK_FETCH_HORIZON_HOURS, want = 10
     }
     if (!added) break; // all buckets exhausted
   }
-  return out;
+  return { deck: out, rejected };
+}
+
+// One candidate through the D10 eligibility gate. On "pass", the executable numbers are ATTACHED to
+// the row (refresh-deck persists them verbatim). The contested band consumes the EFFECTIVE price,
+// not the mid — POLYMARKET rows never serve a mid anymore (see authoritativePrices). The verdict
+// drives refresh-deck's rejection stamping — see GateVerdict above for what may and may not stamp.
+async function depthGateOne(m: MarketCache): Promise<GateVerdict> {
+  // Not quotable without BOTH token ids — never evaluated, so never stamped.
+  if (!m.yesTokenId || !m.noTokenId) return "drop";
+  // Cheap top-of-book skip (Gamma's enableOrderBook bestAsk): a buy's VWAP can never beat the best
+  // ask, so an ask above the band ceiling guarantees the eff price fails the band, and an ask of 0
+  // guarantees nothing fills. Spares a CLOB round-trip on husks (bid 1¢/ask 98¢) and empty books.
+  // The two halves verdict differently: an EMPTY ask side is untradable for every pipeline (stamp
+  // it), while above-ceiling is only the deck's contested band talking (drop, never stamp).
+  if (m.bestAskBp !== null) {
+    if (m.bestAskBp <= 0) return "reject";
+    if (m.bestAskBp > PRICE_CEIL_BP) return "drop";
+  }
+  let d;
+  try {
+    d = await evalMarketDepth(m.yesTokenId, m.noTokenId);
+  } catch (e) {
+    // CLOB unreachable and no cached book: can't PROVE tradability this run -> drop the market
+    // (next poller tick retries), but do NOT stamp — an outage is not untradability, and stamping
+    // here would clear every row's eff prices exactly when the CLOB is down.
+    if (e instanceof ClobUnavailableError) return "drop";
+    throw e;
+  }
+  // Evaluated and untradable (one/both sides can't fill the stake within the cap) -> the rejection
+  // stamp. "Read and untradable" is now distinguishable from "never read" (bookTsAt set vs null).
+  if (!d.tradable || d.yesEffPriceBp === null || d.noEffPriceBp === null) return "reject";
+  // Tradable but outside the DECK's contested band -> drop WITHOUT stamping: the hedge index serves
+  // wider bands off the same Market row, and the serve-time band filter already keeps this off cards.
+  if (!priceIsContested(d.yesEffPriceBp, d.noEffPriceBp)) return "drop";
+  m.yesEffPriceBp = d.yesEffPriceBp;
+  m.noEffPriceBp = d.noEffPriceBp;
+  m.yesMaxStakeCents = d.yesMaxStakeCents;
+  m.noMaxStakeCents = d.noMaxStakeCents;
+  m.bookTsAt = d.bookTsAtMs !== null ? new Date(d.bookTsAtMs).toISOString() : null;
+  return "pass";
 }
 
 // Resolution lookup for one market by conditionId.

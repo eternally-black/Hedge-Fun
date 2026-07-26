@@ -56,6 +56,9 @@ async function main() {
   // Seed an OPEN, in-window, contested-band market so /deck serves it and /swipe can hit it. The
   // soon (but >now) deadline puts these first in the deck's resolutionDeadline-asc order so they
   // survive the take:500/DECK_SIZE cut.
+  // source: TXODDS keeps the seed on the SYNTHETIC price-lock path (D10): a POLYMARKET row now
+  // re-quotes the live CLOB book at swipe time, and a hermetic DB test has no book to quote. The
+  // POLYMARKET re-quote branch itself is covered DB-free by test-clob.ts / test-depth-gate.ts.
   // ponytail: the deck-membership asserts in (b) assume the test DB has few OTHER in-window OPEN
   // markets competing for the 50 deck slots — true for test:db:run, which runs `migrate deploy` on a
   // fresh Docker DB and every sibling test cleans up its own markets. If that stops holding, seed a
@@ -64,6 +67,7 @@ async function main() {
     prisma.market.create({
       data: {
         polymarketId: `${mktPrefix}-${label}`, question: `RG market ${label}?`, status: "OPEN",
+        source: "TXODDS",
         yesPriceBp: 5000, noPriceBp: 5000, resolutionDeadline: new Date(Date.now() + 600_000),
         outcomeYesLabel: "Yes", outcomeNoLabel: "No",
       },

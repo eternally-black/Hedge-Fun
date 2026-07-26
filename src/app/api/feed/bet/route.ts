@@ -3,7 +3,8 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 import { recordSwipe, InsufficientFundsError } from "@/lib/swipe";
-import { DECK_MIN_LEAD_MS } from "@/lib/config";
+import { DECK_MIN_LEAD_MS, STAKE_CENTS } from "@/lib/config";
+import { requoteSideForLock } from "@/lib/depth";
 import type { FeedBetRequest, FeedBetResponse } from "@/lib/api-types";
 
 // Feed bet = a paper bet on a FEED market (the post-cap "лента"). Same $10 stake/cash-hold as a
@@ -33,7 +34,26 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "market_expired" }, { status: 409 });
   }
 
-  const lockedPriceBp = body.side === "YES" ? market.yesPriceBp : market.noPriceBp;
+  // Lock the bought side's price (D10). TXODDS keeps its synthetic odds; POLYMARKET re-quotes the
+  // side LIVE against the CLOB book (never the Gamma mid). The feed is a second betting surface, so
+  // it gets the same treatment as the deck swipe.
+  let lockedPriceBp: number;
+  if (market.source === "TXODDS") {
+    lockedPriceBp = body.side === "YES" ? market.yesPriceBp : market.noPriceBp;
+  } else {
+    const tokenId = body.side === "YES" ? market.yesTokenId : market.noTokenId;
+    if (!tokenId) {
+      return NextResponse.json({ error: "market_untradable" }, { status: 409 });
+    }
+    const q = await requoteSideForLock(tokenId, STAKE_CENTS);
+    if (q.kind === "unavailable") {
+      return NextResponse.json({ error: "book_unavailable" }, { status: 502 });
+    }
+    if (q.kind !== "ok") {
+      return NextResponse.json({ error: "market_untradable" }, { status: 409 });
+    }
+    lockedPriceBp = q.effPriceBp;
+  }
 
   try {
     const { betId } = await recordSwipe({

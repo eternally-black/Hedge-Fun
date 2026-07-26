@@ -172,14 +172,18 @@ import {
 }
 
 // ─── id: deterministic, stable, content-sensitive ────────────────────────────────────────────────
+// The S1 id hashes address+market+kind+side+notional — NOT the proposed stake (D10/A8), so the id
+// stays stable when the sizer starts clamping to book capacity (a stake-moving book must not move
+// the id: GET→POST would 404, and re-accept would miss the idempotent fast path and 409 instead).
 {
-  const base = { address: "So1AddrXYZ", marketId: "m-up", kind: "S1_MAJOR", side: "NO", hedgedNotionalCents: 112_500, proposedStakeCents: 7875 };
+  const base = { address: "So1AddrXYZ", marketId: "m-up", kind: "S1_MAJOR", side: "NO", hedgedNotionalCents: 112_500 };
   const a = suggestionId(base);
   const b = suggestionId({ ...base });
   assert.strictEqual(a, b, "same inputs -> same id (re-derivable -> idempotent accept)");
   assert.strictEqual(a.length, 32, "32-hex id");
-  assert.notStrictEqual(a, suggestionId({ ...base, proposedStakeCents: 8000 }), "different sizing -> different id");
+  assert.notStrictEqual(a, suggestionId({ ...base, hedgedNotionalCents: 100_000 }), "different notional -> different id");
   assert.notStrictEqual(a, suggestionId({ ...base, side: "YES" }), "different side -> different id");
+  assert.notStrictEqual(a, suggestionId({ ...base, marketId: "m-down" }), "different market -> different id");
 }
 
 // ─── S2 normalize: lowercase, diacritics, punctuation, stopwords, Cyrillic survives ─────────────────

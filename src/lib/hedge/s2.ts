@@ -23,6 +23,7 @@ import {
 } from "./s2match";
 import { extractEntities } from "./nlu";
 import { priceIsContested } from "../polymarket";
+import { authoritativePrices } from "../depth";
 import type { BetSide, HedgeSuggestion, HedgePickersResponse } from "../api-types";
 import {
   DECK_MIN_LEAD_MS,
@@ -35,6 +36,8 @@ import {
 } from "../config";
 
 // One open, upcoming, S2-eligible market with the fields the matcher + suggestion builder need.
+// yesPriceBp/noPriceBp carry the AUTHORITATIVE price (see loadS2Candidates): the book-walked eff
+// VWAP for POLYMARKET rows, the synthetic mid for TXODDS — never a bookless mid.
 interface S2MarketRow {
   marketId: string;
   question: string;
@@ -52,7 +55,12 @@ interface S2MarketRow {
 // resolution to be a usable hedge (same lead the accept path enforces). BOTH side prices must be
 // within the S2 band [S2_SIDE_FLOOR_BP, S2_SIDE_CEIL_BP] — a read-time re-check (F2) so a live/decided
 // price collapse (~99.5/0.5) is dropped even between refresh runs (before the refresh clear-pass has
-// demoted s2Eligible). Churns as the refresh poller updates MarketMeta (spec risk 4).
+// demoted s2Eligible). The band consumes the AUTHORITATIVE price (D10): the persisted eff VWAP for
+// POLYMARKET rows — computed at STAKE_CENTS, which IS the fixed S2 stake, so the displayed payout is
+// the one the accept's live re-quote honours — and the synthetic mid for TXODDS. A POLYMARKET row
+// with no eff prices, or a book read older than the display-staleness bound, is dropped here even
+// while still flagged s2Eligible: the mid is never a stand-in. Churns as the refresh poller updates
+// MarketMeta (spec risk 4).
 async function loadS2Candidates(nowMs: number): Promise<S2MarketRow[]> {
   const rows = await prisma.marketMeta.findMany({
     where: {
@@ -60,8 +68,6 @@ async function loadS2Candidates(nowMs: number): Promise<S2MarketRow[]> {
       market: {
         is: {
           status: "OPEN",
-          yesPriceBp: { gte: S2_SIDE_FLOOR_BP, lte: S2_SIDE_CEIL_BP },
-          noPriceBp: { gte: S2_SIDE_FLOOR_BP, lte: S2_SIDE_CEIL_BP },
           resolutionDeadline: { gt: new Date(nowMs + DECK_MIN_LEAD_MS) },
         },
       },
@@ -78,6 +84,10 @@ async function loadS2Candidates(nowMs: number): Promise<S2MarketRow[]> {
           outcomeNoLabel: true,
           yesPriceBp: true,
           noPriceBp: true,
+          yesEffPriceBp: true,
+          noEffPriceBp: true,
+          bookTsAt: true,
+          source: true,
           resolutionDeadline: true,
         },
       },
@@ -87,7 +97,10 @@ async function loadS2Candidates(nowMs: number): Promise<S2MarketRow[]> {
   const out: S2MarketRow[] = [];
   for (const r of rows) {
     const m = r.market;
-    if (m.yesPriceBp == null || m.noPriceBp == null) continue;
+    const p = authoritativePrices(m, nowMs);
+    if (p.yes === null || p.no === null) continue; // no usable book read (POLYMARKET) -> not servable
+    if (p.yes < S2_SIDE_FLOOR_BP || p.yes > S2_SIDE_CEIL_BP) continue;
+    if (p.no < S2_SIDE_FLOOR_BP || p.no > S2_SIDE_CEIL_BP) continue;
     if (!isNamedEntityShape(m.outcomeYesLabel, m.outcomeNoLabel)) continue; // defensive: shape guard
     out.push({
       marketId: m.id,
@@ -95,8 +108,8 @@ async function loadS2Candidates(nowMs: number): Promise<S2MarketRow[]> {
       category: m.category,
       yesLabel: m.outcomeYesLabel,
       noLabel: m.outcomeNoLabel,
-      yesPriceBp: m.yesPriceBp,
-      noPriceBp: m.noPriceBp,
+      yesPriceBp: p.yes,
+      noPriceBp: p.no,
       deadline: m.resolutionDeadline,
       leagueSlug: r.leagueSlug,
       leagueLabel: r.leagueLabel,
@@ -300,6 +313,10 @@ export async function searchS2(query: string): Promise<S2SearchOutcome> {
 
 // The bounded contested pool the fallback draws from. Bounded + deterministically ordered so accept
 // re-derivation (which enumerates the whole pool) stays cheap and matches whatever 3 were shown.
+// Contested is judged on the AUTHORITATIVE price (D10): the persisted eff VWAP for POLYMARKET rows —
+// computed at STAKE_CENTS, the fallback's fixed stake, so the shown payout is the accept's — the
+// synthetic mid for TXODDS. A POLYMARKET row with no (fresh-enough) book read drops out here; the
+// mid is never a stand-in (a bid-1¢/ask-98¢ husk reads contested on the mid — exactly the leak).
 async function loadFallbackPool(nowMs: number) {
   const rows = await prisma.market.findMany({
     where: {
@@ -316,15 +333,40 @@ async function loadFallbackPool(nowMs: number) {
       outcomeNoLabel: true,
       yesPriceBp: true,
       noPriceBp: true,
+      yesEffPriceBp: true,
+      noEffPriceBp: true,
+      bookTsAt: true,
+      source: true,
       resolutionDeadline: true,
     },
     orderBy: { resolutionDeadline: "asc" },
     take: HEDGE_FALLBACK_POOL_MAX,
   });
-  return rows.filter(
-    (r): r is typeof r & { yesPriceBp: number; noPriceBp: number } =>
-      r.yesPriceBp != null && r.noPriceBp != null && priceIsContested(r.yesPriceBp, r.noPriceBp),
-  );
+  const out: {
+    id: string;
+    question: string;
+    category: string | null;
+    outcomeYesLabel: string;
+    outcomeNoLabel: string;
+    yesPriceBp: number;
+    noPriceBp: number;
+    resolutionDeadline: Date;
+  }[] = [];
+  for (const r of rows) {
+    const p = authoritativePrices(r, nowMs);
+    if (p.yes === null || p.no === null || !priceIsContested(p.yes, p.no)) continue;
+    out.push({
+      id: r.id,
+      question: r.question,
+      category: r.category,
+      outcomeYesLabel: r.outcomeYesLabel,
+      outcomeNoLabel: r.outcomeNoLabel,
+      yesPriceBp: p.yes,
+      noPriceBp: p.no,
+      resolutionDeadline: r.resolutionDeadline,
+    });
+  }
+  return out;
 }
 
 // Clock-seeded xorshift (no Math.random). Determinism doesn't matter for accept — any pool member

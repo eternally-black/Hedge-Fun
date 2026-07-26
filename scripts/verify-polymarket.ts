@@ -14,8 +14,8 @@ async function gammaGetForVerify(path: string): Promise<Array<{ conditionId?: st
 
 async function main() {
   console.log(`1. fetchBlitzDeck() [prod config: outer ${DECK_FETCH_HORIZON_HOURS}h, per-category horizon]...`);
-  const deck = await fetchBlitzDeck(DECK_FETCH_HORIZON_HOURS, 50);
-  console.log(`   got ${deck.length} blitz markets (per-category horizon, OPEN, both prices present)`);
+  const { deck, rejected } = await fetchBlitzDeck(DECK_FETCH_HORIZON_HOURS, 50);
+  console.log(`   got ${deck.length} blitz markets (per-category horizon, OPEN, both prices present), ${rejected.length} gate-rejected`);
 
   if (deck.length > 0) {
     const c = deck[0];
@@ -43,15 +43,22 @@ async function main() {
     console.log("   ✓ blitz invariants hold");
 
     // Contested-price gate: every returned card must be in the 15%..85% band — no decided/live
-    // matches (the ~100%/0% cards). This is the real fix; startDate can't tell live from future.
+    // matches (the ~100%/0% cards). Since D10 the gate consumes the EFFECTIVE (book-walked) price
+    // attached to each card — no mid fallback anywhere — so we assert on that directly. This is the
+    // real fix; startDate can't tell live from future, and a mid can't tell a husk from a book.
     for (const card of deck) {
+      // D10: the gate also attaches the executable numbers it priced off — they must be there.
+      assert.ok(card.yesEffPriceBp !== null && card.noEffPriceBp !== null, `eff prices attached for ${card.question.slice(0, 40)}`);
+      assert.ok(card.yesTokenId && card.noTokenId, `CLOB token ids attached for ${card.question.slice(0, 40)}`);
+      assert.ok((card.yesMaxStakeCents ?? 0) > 0, `max stake attached for ${card.question.slice(0, 40)}`);
+      const y = card.yesEffPriceBp!;
+      const n = card.noEffPriceBp!;
       assert.ok(
-        card.yesPriceBp! >= 1500 && card.yesPriceBp! <= 8500 &&
-          card.noPriceBp! >= 1500 && card.noPriceBp! <= 8500,
-        `price gate: ${card.question.slice(0, 40)} is ${card.yesPriceBp}/${card.noPriceBp}bp (decided/lopsided)`,
+        y >= 1500 && y <= 8500 && n >= 1500 && n <= 8500,
+        `price gate: ${card.question.slice(0, 40)} is ${y}/${n}bp eff (decided/lopsided/husk)`,
       );
     }
-    console.log("   ✓ every card is contested (15%..85% band, no 100%/0% cards)");
+    console.log("   ✓ every card is contested on the EFFECTIVE price (15%..85% band, no husks)");
 
     // Per-category horizon: every card resolves within ITS category window (crypto/OU <=24h,
     // sports/esports <=72h). Exercises the PRODUCTION fetchBlitzDeck default — closes the old blind
@@ -98,7 +105,7 @@ async function main() {
         "Re-run later; check a wider window below.",
     );
     // Fallback: prove the parser on a 7-day window so we still validate field mapping.
-    const wide = await fetchBlitzDeck(24 * 7, 20);
+    const { deck: wide } = await fetchBlitzDeck(24 * 7, 20);
     console.log(`   7-day window has ${wide.length} markets (sanity on parser)`);
     assert.ok(wide.length > 0, "parser yields markets on a wider window");
   }

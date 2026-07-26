@@ -178,8 +178,23 @@ model Market {
   outcomeNoLabel  String @default("No")
 
   // Snapshot pricing in basis points (0..10000). Per-bet price locked on Bet.
+  // yesPriceBp/noPriceBp are the Gamma MID (reference/display fallback) — NOT touched by D10.
   yesPriceBp Int?
   noPriceBp  Int?
+
+  // Depth-aware executable pricing (D10 Slice A). yesTokenId/noTokenId are the CLOB token ids
+  // (Gamma clobTokenIds[0/1]). The four eff/max numbers come from walking the live book: per side,
+  // the VWAP to BUY STAKE_CENTS of that token and the stake the book absorbs within the eligibility
+  // slippage cap (src/lib/depth.ts), anchored to bookTsAt = when the book behind them was read.
+  // NULL for TXODDS rows (no CLOB book — the synthetic odds path stays authoritative there) and for
+  // POLYMARKET rows whose book read failed. Additive only — nothing above is renamed or dropped.
+  yesTokenId       String?
+  noTokenId        String?
+  yesEffPriceBp    Int?
+  noEffPriceBp     Int?
+  yesMaxStakeCents Int?
+  noMaxStakeCents  Int?
+  bookTsAt         DateTime?
 
   startsAt           DateTime? // from startDate (sports/esports kickoff); null for crypto/Yes-No. Gates "not started yet" in the deck.
   resolutionDeadline DateTime // from endDate; powers <=24h blitz filter

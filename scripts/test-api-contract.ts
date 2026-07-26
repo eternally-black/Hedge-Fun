@@ -54,9 +54,12 @@ async function main() {
   const user = await prisma.user.findUniqueOrThrow({ where: { privyId: STUB_DID } });
 
   // Seed one OPEN, tradable, in-window market so /deck returns a card and /swipe can hit it.
+  // source: TXODDS keeps the seed on the SYNTHETIC price-lock path (D10) — a POLYMARKET row now
+  // re-quotes the live CLOB book at swipe time, and a hermetic DB test has no book to quote.
   const market = await prisma.market.create({
     data: {
       polymarketId: `apitest-${process.pid}-mkt`, question: "Contract test market?", status: "OPEN",
+      source: "TXODDS",
       yesPriceBp: 5000, noPriceBp: 5000, resolutionDeadline: new Date(Date.now() + 3_600_000),
       outcomeYesLabel: "Yes", outcomeNoLabel: "No",
     },

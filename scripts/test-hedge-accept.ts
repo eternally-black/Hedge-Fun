@@ -65,10 +65,15 @@ async function main() {
   const tag = `hedgeacc-${process.pid}-${Date.now() & 0xffffff}`;
 
   // A parsed SOL "above" market (UP): hedging a long -> NO side. OPEN, priced, resolves in 2h.
+  // source: TXODDS keeps the seed on the SYNTHETIC price-lock path (D10): accept now re-quotes the
+  // live CLOB book for POLYMARKET rows, and a hermetic DB test has no book to quote. The accept
+  // state machine (derive -> hold -> bet -> settle) is source-agnostic; the re-quote branch is
+  // covered DB-free by test-clob.ts / test-depth-gate.ts.
   const market = await prisma.market.create({
     data: {
       polymarketId: `${tag}-sol-above`,
       question: "Solana above 200 on some future date?",
+      source: "TXODDS",
       outcomeYesLabel: "Yes",
       outcomeNoLabel: "No",
       yesPriceBp: 4000,
@@ -226,6 +231,7 @@ async function main() {
     data: {
       polymarketId: `${tag}-sol-above-y`,
       question: "Solana above 300 on some future date?",
+      source: "TXODDS", // synthetic price-lock path (D10) — see the note on the first seed above
       outcomeYesLabel: "Yes",
       outcomeNoLabel: "No",
       yesPriceBp: 4000,

@@ -41,7 +41,11 @@ export interface DeckCard {
   category: string | null;
   outcomeYesLabel: string;
   outcomeNoLabel: string;
-  yesPriceBp: number; // basis points (5150 = 51.5¢). Sides need NOT sum to 10000 (real spread).
+  // Basis points (5150 = 51.5¢). The price this side COSTS: for a Polymarket market with a live
+  // book this is the book-walked VWAP for a $10 stake (D10), not the mid; for TXODDS football (or a
+  // Polymarket row whose book read failed) it is the reference mid/synthetic odds. Sides need NOT
+  // sum to 10000 (real spread). The bet-lock path re-quotes live — treat these as display prices.
+  yesPriceBp: number;
   noPriceBp: number;
   resolutionDeadline: string; // ISO-8601
 }
@@ -87,8 +91,11 @@ export interface FeedResponse {
 // ─── POST /api/feed/bet ────────────────────────────────────────────────────────────────────────
 // Auth: Bearer. Body: FeedBetRequest. Paper bet on a feed market — same $10 stake/cash-hold as a
 // swipe, but NO points and NO daily cap (shards still accrue on a win, uncapped). NOT gated by the
-// swipe cap (the feed is what you get AFTER the cap). Errors: 400 (bad body), 402 (insufficient Cash —
-// { error: "insufficient_funds" }), 409 (market not open / already bet / market_expired).
+// swipe cap (the feed is what you get AFTER the cap). Locks the side's EXECUTABLE price (live CLOB
+// re-quote for Polymarket; synthetic odds for TXODDS). Errors: 400 (bad body), 402 (insufficient
+// Cash — { error: "insufficient_funds" }), 409 (market not open / already bet / market_expired /
+// market_untradable — the book cannot fill the stake), 502 (book_unavailable — CLOB book missing
+// or older than the freshness policy; retry, never a mid fallback).
 export interface FeedBetRequest {
   marketId: string;
   side: BetSide;
@@ -112,9 +119,12 @@ export interface FootballMatchResponse {
 }
 
 // ─── POST /api/swipe ───────────────────────────────────────────────────────────────────────────
-// Auth: Bearer. Body: SwipeRequest. Paper bet Yes/No on a deck market; locks the bought side's price.
-// Errors: 400 (bad body), 409 (market not open / already swiped this market), 403 (daily cap reached),
-//         402 (insufficient Cash for stake — body { error: "insufficient_funds" }).
+// Auth: Bearer. Body: SwipeRequest. Paper bet Yes/No on a deck market; locks the bought side's
+// EXECUTABLE price (live CLOB re-quote for Polymarket; synthetic odds for TXODDS).
+// Errors: 400 (bad body), 409 (market not open / already swiped this market / market_expired /
+//         market_untradable — the book cannot fill the stake), 403 (daily cap reached),
+//         402 (insufficient Cash for stake — body { error: "insufficient_funds" }),
+//         502 (book_unavailable — CLOB book missing or older than the freshness policy).
 export interface SwipeRequest {
   marketId: string;
   side: BetSide;
@@ -407,10 +417,12 @@ export interface HedgeSearchResponse {
 // ─── POST /api/hedge/accept ──────────────────────────────────────────────────────────────────────
 // Auth: Bearer. Body: HedgeAcceptRequest. Re-derives the suggestion server-side from the id (never
 // trusts client market/side/stake), then creates a STANDARD paper Bet with the variable stake,
-// locking it against Cash exactly like a swipe (atomic guard). Idempotent: re-accepting the same
+// locking it against Cash exactly like a swipe (atomic guard). The locked price is the side's
+// EXECUTABLE price (live CLOB re-quote for Polymarket). Idempotent: re-accepting the same
 // suggestion returns the existing bet (alreadyAccepted:true). Errors: 400 (bad body), 402
 // (insufficient Cash — { error: "insufficient_funds" }), 404 (suggestion not found / stale — client
-// should refetch suggestions), 409 (market not open / already bet this market).
+// should refetch suggestions), 409 (market not open / already bet this market / market_untradable),
+// 502 (book_unavailable — CLOB book missing or too stale to lock against).
 export interface HedgeAcceptRequest {
   suggestionId: string;
 }

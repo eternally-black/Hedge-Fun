@@ -1,8 +1,15 @@
 // Stable, deterministic suggestion id. A suggestion is NOT persisted — it is re-derived on demand
 // from the (TTL-cached) snapshot + market index, so its id must be a pure function of its content.
 // This lets /api/hedge/accept re-derive the same suggestion and stay idempotent: the id is the hash
-// of address + market + kind + side + the sizing inputs/outputs. Sizing is snapshot-based (not live
-// price) so the id is stable across the GET-suggestions → POST-accept round-trip within one TTL.
+// of address + market + kind + side + hedged notional.
+//
+// The S1 id deliberately does NOT hash the proposed stake (D10/A8). Today the stake is a pure
+// function of the other inputs, so dropping it is a no-op; the moment the sizer clamps to BOOK
+// CAPACITY (depth-aware sizing) the stake — and therefore the id — would move every few seconds
+// with the book. That breaks the two things the id exists for: the GET-suggestions → POST-accept
+// round-trip would re-derive a different id and 404, and a re-accept would miss the findFirst
+// idempotency fast path, hit P2002, and throw a spurious "already bet this market" 409 instead of
+// returning idempotent success. The stake stays a DISPLAY field, never an identity input.
 
 import { createHash } from "node:crypto";
 
@@ -12,7 +19,6 @@ export function suggestionId(parts: {
   kind: string; // "S1_MAJOR" | "S1_PROXY"
   side: string; // "YES" | "NO"
   hedgedNotionalCents: number;
-  proposedStakeCents: number;
 }): string {
   const canonical = [
     parts.address,
@@ -20,7 +26,6 @@ export function suggestionId(parts: {
     parts.kind,
     parts.side,
     parts.hedgedNotionalCents,
-    parts.proposedStakeCents,
   ].join("|");
   return createHash("sha256").update(canonical).digest("hex").slice(0, 32);
 }

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { authUser } from "@/lib/privy";
 import { rateLimit } from "@/lib/ratelimit";
 import { InsufficientFundsError } from "@/lib/swipe";
-import { acceptSuggestion, SuggestionNotFoundError, HedgeMarketUnavailableError } from "@/lib/hedge/accept";
+import { acceptSuggestion, SuggestionNotFoundError, HedgeMarketUnavailableError, HedgeBookUnavailableError } from "@/lib/hedge/accept";
 import type { HedgeAcceptRequest, HedgeAcceptResponse } from "@/lib/api-types";
 
 // Accept a hedge suggestion -> a standard paper Bet with the variable stake (locked vs Cash, atomic).
@@ -29,6 +29,9 @@ export async function POST(req: Request) {
     }
     if (e instanceof HedgeMarketUnavailableError) {
       return NextResponse.json({ error: e.message }, { status: 409 });
+    }
+    if (e instanceof HedgeBookUnavailableError) {
+      return NextResponse.json({ error: "book_unavailable" }, { status: 502 });
     }
     if (e instanceof InsufficientFundsError) {
       return NextResponse.json({ error: "insufficient_funds" }, { status: 402 });

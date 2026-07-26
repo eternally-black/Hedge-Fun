@@ -97,3 +97,27 @@ export const S2_SIDE_CEIL_BP = 9800; // 98%
 // re-derivation cheap + deterministic (the shown 3 are a random subset of the same pool).
 export const HEDGE_FALLBACK_COUNT = 3;
 export const HEDGE_FALLBACK_POOL_MAX = 300; // cap the contested pool scanned for the fallback
+
+// ---- Depth-aware pricing (phase 2 — D10 Slice A) ----
+// Two DELIBERATELY different thresholds. QUOTE_TOLERANCE is a fairness guarantee on ONE bet: how far
+// the executed price may drift from the quote the user saw before the bet is rejected (seen-vs-
+// executed). DEPTH_SLIPPAGE_CAP is a TRADABILITY floor: whether a market's book is real enough for a
+// card to exist at all (deck/feed eligibility). Fairness per-bet is tight; the existence floor is
+// looser so a thin-but-honest book still gets a card. Different purposes, deliberately different
+// numbers — do not "unify" them.
+export const QUOTE_TOLERANCE_BP = 200; // 2% relative: seen-vs-executed fairness on ONE bet
+export const QUOTE_TOLERANCE_FLOOR_BP = 25; // absolute floor, so a cheap side doesn't 409 on one tick
+export const DEPTH_SLIPPAGE_CAP_BP = 500; // 5% relative: deck/feed TRADABILITY floor — deliberately looser
+export const DEPTH_SLIPPAGE_FLOOR_BP = 100; // absolute floor for the same (1¢ of wiggle on a cheap side)
+// CLOB book cache (src/lib/clob.ts). TTL is only a fetch-throttle — the cache NEVER decides what is
+// fresh enough to USE; that policy lives in the callers (BOOK_MAX_STALE_MS at bet-lock time).
+export const BOOK_CACHE_TTL_MS = 3_000;
+export const BOOK_MAX_STALE_MS = 30_000; // pre-Privy: refuse to LOCK a bet against a book older than this
+// Two deliberately different freshness bounds on the same bookTsAt. LOCKING is strict (30s, above):
+// the price a bet books at must come from a just-read book. DISPLAYING is looser (10min): a card may
+// show a slightly-stale but REAL book price — the poller refreshes the deck every 60s and the hedge
+// index every ~5min, so this only binds when refresh is wedged — but never an unbounded one, or a
+// dead poller would serve days-old prices as if live. Swapping the two would be wrong both ways:
+// locking at the display bound books bets off walked books; displaying at the lock bound empties the
+// deck on any transient CLOB wobble.
+export const BOOK_MAX_DISPLAY_STALE_MS = 10 * 60_000; // drop a POLYMARKET card whose book read is older than this

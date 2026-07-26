@@ -17,3 +17,6 @@ hedgefun_ci.pub
 
 # Claude Code harness artifacts
 .claude/scheduled_tasks.lock
+
+# Local scratchpad (review packets, advisor transcripts)
+.scratch/

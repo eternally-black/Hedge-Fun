@@ -8,6 +8,8 @@ import type { HedgeSuggestionsResponse } from "@/lib/api-types";
 
 // Deterministic S1 hedge suggestions for the caller's linked wallet(s). Reads the cached snapshot
 // (rebuilds it only if the TTL lapsed); each card carries a stable suggestionId for /accept.
+// quoteDisplay: every POLYMARKET card is priced live off the CLOB at its OWN proposed stake (the
+// price the accept will honour), never at the Gamma mid; unquotable cards are dropped, not approximated.
 export async function GET(req: Request) {
   const user = await authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
@@ -16,7 +18,7 @@ export async function GET(req: Request) {
   }
 
   try {
-    const { items, walletLinked } = await deriveForUser(user.id);
+    const { items, walletLinked } = await deriveForUser(user.id, { quoteDisplay: true });
     const res: HedgeSuggestionsResponse = {
       suggestions: items.map((i) => i.suggestion),
       walletLinked,

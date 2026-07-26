@@ -4,7 +4,8 @@ import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 import { recordSwipe, isOverCap, SwipeCapReachedError, InsufficientFundsError } from "@/lib/swipe";
 import { maybeQualifyReferralOnSwipe } from "@/lib/referral";
-import { DECK_MIN_LEAD_MS } from "@/lib/config";
+import { DECK_MIN_LEAD_MS, STAKE_CENTS } from "@/lib/config";
+import { requoteSideForLock } from "@/lib/depth";
 import { isDevUser } from "@/lib/dev";
 import type { SwipeRequest, SwipeResponse } from "@/lib/api-types";
 
@@ -40,9 +41,30 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "market_expired" }, { status: 409 });
   }
 
-  // Lock the price of the side the user actually bought (Polymarket yes+no don't sum to
-  // exactly 1, so the NO price is its own number, not 10000-yes).
-  const lockedPriceBp = body.side === "YES" ? market.yesPriceBp : market.noPriceBp;
+  // Lock the price of the side the user actually bought (D10).
+  let lockedPriceBp: number;
+  if (market.source === "TXODDS") {
+    // TXODDS football: no CLOB book exists — lock the synthetic odds exactly as before.
+    lockedPriceBp = body.side === "YES" ? market.yesPriceBp : market.noPriceBp;
+  } else {
+    // POLYMARKET: re-quote the bought side LIVE against the CLOB book and lock the VWAP the book
+    // can actually deliver — never the Gamma mid (that is the 2x lie D10 exists to kill). A market
+    // without token ids is not quotable. No client quote echo in this slice: a request without a
+    // displayed quote locks the fresh effective price silently — strictly better than today's mid,
+    // and it keeps old RN builds working.
+    const tokenId = body.side === "YES" ? market.yesTokenId : market.noTokenId;
+    if (!tokenId) {
+      return NextResponse.json({ error: "market_untradable" }, { status: 409 });
+    }
+    const q = await requoteSideForLock(tokenId, STAKE_CENTS);
+    if (q.kind === "unavailable") {
+      return NextResponse.json({ error: "book_unavailable" }, { status: 502 });
+    }
+    if (q.kind !== "ok") {
+      return NextResponse.json({ error: "market_untradable" }, { status: 409 });
+    }
+    lockedPriceBp = q.effPriceBp;
+  }
 
   try {
     const result = await recordSwipe({

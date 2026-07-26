@@ -6,10 +6,24 @@
 // (parsed vs skipped) per asset so we can measure. Run: npm run refresh-hedge-index
 //
 // Follows scripts/refresh-deck.ts: pure fetch/parse lives in src/lib, this script owns the upserts.
+//
+// D10: persisted markets must also pass the DEPTH gate — both sides fill STAKE_CENTS within the
+// eligibility slippage cap (src/lib/depth.ts) — and we persist the executable numbers (eff VWAP,
+// max stake, book timestamp) alongside the Gamma mid. The gate here is depth ONLY, deliberately
+// NOT the deck's contested band: the hedge engine has its own side bands downstream (matchS1's
+// 1–99%, the S2 band below, and the accept-time band on the effective price), and a cheap tail
+// market (5¢) is a legitimate hedge even though it would never make a swipe card.
+//
+// D10 follow-up (1b, item 4): a market the gate EVALUATED and found UNTRADABLE gets the same
+// rejection stamp as refresh-deck (eff null, capacity 0, bookTsAt = now) — otherwise an already-
+// cached row would keep serving stale eff prices on the shared Market row (deck/feed/fallback pool)
+// until the display-staleness bound. Unevaluated rows (missing token ids, CLOB outage) are left
+// untouched: unproven is not untradable.
 import { PrismaClient } from "@prisma/client";
 import { fetchMajorsMarkets, fetchSportsMarkets } from "../src/lib/polymarket";
 import { parseStrikeMarket, type HedgeAsset } from "../src/lib/hedge/parse";
 import { S2_SIDE_FLOOR_BP, S2_SIDE_CEIL_BP } from "../src/lib/config";
+import { evalMarketDepthBatch, type MarketDepth } from "../src/lib/depth";
 
 const prisma = new PrismaClient();
 
@@ -25,11 +39,28 @@ function slugify(label: string): string {
   return label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 }
 
+// The D10 columns persisted on every gated-in Market row: the CLOB token ids off the cache row plus
+// the executable numbers from the depth eval. (Both refresh passes share this so the columns can't
+// drift between create/update or S1/S2.)
+function depthColumns(m: { yesTokenId: string | null; noTokenId: string | null }, d: MarketDepth) {
+  return {
+    yesTokenId: m.yesTokenId,
+    noTokenId: m.noTokenId,
+    yesEffPriceBp: d.yesEffPriceBp,
+    noEffPriceBp: d.noEffPriceBp,
+    yesMaxStakeCents: d.yesMaxStakeCents,
+    noMaxStakeCents: d.noMaxStakeCents,
+    bookTsAt: d.bookTsAtMs !== null ? new Date(d.bookTsAtMs) : null,
+  };
+}
+
 export interface HedgeIndexStats {
   discovered: number;
   upserted: number;
   parsed: number; // strike+date+direction all machine-parsed (S1-eligible)
   skipped: number; // discovered but not parseable (e.g. Up/Down dailies with no strike)
+  depthDropped: number; // parsed/band-passing but NOT tradable (thin/absent book) — dropped by D10
+  depthStamped: number; // of those, already-cached rows stamped "read and untradable" (1b)
   byAsset: Record<string, { discovered: number; parsed: number; skipped: number }>;
   // S2 sports/esports index (life-event hedge).
   sports: {
@@ -46,13 +77,23 @@ export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
     upserted: 0,
     parsed: 0,
     skipped: 0,
+    depthDropped: 0,
+    depthStamped: 0,
     byAsset: {},
     sports: { discovered: 0, eligible: 0, clearedStale: 0, byLeague: {} },
   };
+  // polymarketIds the depth gate EVALUATED this run and found untradable (both passes share it;
+  // stamped once at the end). Null depth (missing token ids, CLOB outage) is NOT a rejection.
+  const rejectedIds: string[] = [];
 
   for (const tag of MAJOR_TAGS) {
     const rows = await fetchMajorsMarkets(tag.tagId);
     const a = (stats.byAsset[tag.asset] ??= { discovered: 0, parsed: 0, skipped: 0 });
+    // Depth-evaluate the whole tag batch up front — the micro-batch cache in clob.ts coalesces the
+    // per-market book reads into a handful of union /books calls. Null = unquotable this run.
+    const depths = await evalMarketDepthBatch(
+      rows.map((r) => ({ key: r.cache.polymarketId, yesTokenId: r.cache.yesTokenId, noTokenId: r.cache.noTokenId })),
+    );
 
     for (const row of rows) {
       stats.discovered++;
@@ -69,6 +110,17 @@ export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
         continue;
       }
 
+      // D10 depth gate: both sides must fill STAKE_CENTS within the eligibility cap. A parsed
+      // market whose book is a husk/thin shell is not a hedgeable instrument — drop it (counted
+      // separately so parse coverage stays a pure parse metric). An EVALUATED untradable row is
+      // also rejection-stamped below; an unevaluated one (null depth) is not.
+      const depth = depths.get(m.polymarketId) ?? null;
+      if (!depth || !depth.tradable) {
+        stats.depthDropped++;
+        if (depth) rejectedIds.push(m.polymarketId);
+        continue;
+      }
+
       // Upsert the base Market cache row (mirrors refresh-deck) so the poller can settle it.
       const market = await prisma.market.upsert({
         where: { polymarketId: m.polymarketId },
@@ -80,6 +132,7 @@ export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
           outcomeNoLabel: m.outcomeNoLabel,
           yesPriceBp: m.yesPriceBp,
           noPriceBp: m.noPriceBp,
+          ...depthColumns(m, depth),
           startsAt: m.startsAt ? new Date(m.startsAt) : null,
           resolutionDeadline: new Date(m.resolutionDeadline),
           status: m.status,
@@ -90,6 +143,7 @@ export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
           outcomeNoLabel: m.outcomeNoLabel,
           yesPriceBp: m.yesPriceBp,
           noPriceBp: m.noPriceBp,
+          ...depthColumns(m, depth),
           startsAt: m.startsAt ? new Date(m.startsAt) : null,
           resolutionDeadline: new Date(m.resolutionDeadline),
           status: m.status,
@@ -130,6 +184,9 @@ export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
   // pickers + free-text matcher can turn them into AGAINST hedges. Same upsert idiom as the crypto pass.
   const sports = await fetchSportsMarkets();
   stats.sports.discovered = sports.length;
+  const sportsDepths = await evalMarketDepthBatch(
+    sports.map((s) => ({ key: s.cache.polymarketId, yesTokenId: s.cache.yesTokenId, noTokenId: s.cache.noTokenId })),
+  );
   // Every market that PASSES the band this run stays/becomes s2Eligible; anything previously eligible
   // but NOT re-affirmed here (dropped from the Gamma fetch, or fell out of the price band because the
   // match started/decided) is demoted below (F2) so it can never surface in a picker/search/accept.
@@ -139,6 +196,14 @@ export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
     if (m.yesPriceBp == null || m.noPriceBp == null) continue;
     if (m.yesPriceBp < S2_SIDE_FLOOR_BP || m.yesPriceBp > S2_SIDE_CEIL_BP) continue;
     if (m.noPriceBp < S2_SIDE_FLOOR_BP || m.noPriceBp > S2_SIDE_CEIL_BP) continue;
+
+    // D10 depth gate (same as the S1 pass): an S2 card's AGAINST side must be actually buyable.
+    const depth = sportsDepths.get(m.polymarketId) ?? null;
+    if (!depth || !depth.tradable) {
+      stats.depthDropped++;
+      if (depth) rejectedIds.push(m.polymarketId);
+      continue;
+    }
 
     const leagueLabel = s.league;
     const leagueSlug = leagueLabel ? slugify(leagueLabel) : null;
@@ -153,6 +218,7 @@ export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
         outcomeNoLabel: m.outcomeNoLabel,
         yesPriceBp: m.yesPriceBp,
         noPriceBp: m.noPriceBp,
+        ...depthColumns(m, depth),
         startsAt: m.startsAt ? new Date(m.startsAt) : null,
         resolutionDeadline: new Date(m.resolutionDeadline),
         status: m.status,
@@ -163,6 +229,7 @@ export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
         outcomeNoLabel: m.outcomeNoLabel,
         yesPriceBp: m.yesPriceBp,
         noPriceBp: m.noPriceBp,
+        ...depthColumns(m, depth),
         startsAt: m.startsAt ? new Date(m.startsAt) : null,
         resolutionDeadline: new Date(m.resolutionDeadline),
         status: m.status,
@@ -195,6 +262,24 @@ export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
     stats.sports.byLeague[key] = (stats.sports.byLeague[key] ?? 0) + 1;
   }
 
+  // 1b rejection stamp (both passes): rows the gate EVALUATED and found untradable get eff null /
+  // capacity 0 / bookTsAt now, so every eff-consuming surface (deck/feed routes, the S2 candidates
+  // and fallback pool reads, all via authoritativePrices) drops them THIS run instead of after the
+  // display-staleness bound. updateMany on purpose: absent rows have no stale state to clear.
+  if (rejectedIds.length > 0) {
+    const stamped = await prisma.market.updateMany({
+      where: { polymarketId: { in: rejectedIds } },
+      data: {
+        yesEffPriceBp: null,
+        noEffPriceBp: null,
+        yesMaxStakeCents: 0,
+        noMaxStakeCents: 0,
+        bookTsAt: new Date(),
+      },
+    });
+    stats.depthStamped = stamped.count;
+  }
+
   // Demote every row that was s2Eligible but did NOT pass this run: a match that started/decided
   // (price collapsed out of band) or a market Gamma stopped returning. Clearing the flag is what
   // pulls it out of loadS2Candidates (pickers/search) AND deriveS2ForAccept — so a stale sports
@@ -214,7 +299,7 @@ if (process.argv[1] && process.argv[1].endsWith("refresh-hedge-index.ts")) {
   refreshHedgeIndex()
     .then((s) => {
       const pct = s.discovered ? ((s.parsed / s.discovered) * 100).toFixed(1) : "0.0";
-      console.log(`refresh-hedge-index [S1 crypto]: discovered=${s.discovered} upserted=${s.upserted} parsed=${s.parsed} skipped=${s.skipped} (coverage ${pct}%)`);
+      console.log(`refresh-hedge-index [S1 crypto]: discovered=${s.discovered} upserted=${s.upserted} parsed=${s.parsed} skipped=${s.skipped} depthDropped=${s.depthDropped} depthStamped=${s.depthStamped} (coverage ${pct}%)`);
       for (const [asset, a] of Object.entries(s.byAsset)) {
         const apct = a.discovered ? ((a.parsed / a.discovered) * 100).toFixed(1) : "0.0";
         console.log(`  ${asset}: discovered=${a.discovered} parsed=${a.parsed} skipped=${a.skipped} (coverage ${apct}%)`);

@@ -31,6 +31,10 @@ async function makeUser(tag: string, balanceCents: number) {
 }
 
 // Seed one OPEN, contested, NAMED sports market + its S2-eligible MarketMeta enrichment.
+// source: TXODDS keeps the seed on the SYNTHETIC price-lock path (D10): accept now re-quotes the
+// live CLOB book for POLYMARKET rows, and a hermetic DB test has no book to quote. The S2 derive/
+// accept pipeline is source-agnostic (eligibility lives on MarketMeta); the re-quote branch is
+// covered DB-free by test-clob.ts / test-depth-gate.ts.
 async function seedS2Market(opts: {
   tag: string;
   yesLabel: string;
@@ -46,6 +50,7 @@ async function seedS2Market(opts: {
     data: {
       polymarketId: opts.tag,
       question: `${opts.yesLabel} vs ${opts.noLabel}`,
+      source: "TXODDS",
       outcomeYesLabel: opts.yesLabel,
       outcomeNoLabel: opts.noLabel,
       yesPriceBp: opts.yesBp,

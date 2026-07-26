@@ -1,8 +1,9 @@
 // Accept a hedge suggestion -> a STANDARD paper Bet (D6). Re-derives the suggestion server-side from
-// its id (never trusts client-sent market/side/stake), locks the live price of the chosen side, and
-// holds the VARIABLE stake against Cash with the SAME atomic model as a swipe (D8). Idempotent: a
-// re-accept returns the existing bet. The bet is source=HEDGE (no points, no daily cap) but otherwise
-// an ordinary Bet row, so the existing settlement poller settles it unchanged.
+// its id (never trusts client-sent market/side/stake), locks the EXECUTABLE price of the chosen side
+// (D10: a live CLOB re-quote for POLYMARKET rows, never the Gamma mid; TXODDS keeps its synthetic
+// odds), and holds the VARIABLE stake against Cash with the SAME atomic model as a swipe (D8).
+// Idempotent: a re-accept returns the existing bet. The bet is source=HEDGE (no points, no daily
+// cap) but otherwise an ordinary Bet row, so the existing settlement poller settles it unchanged.
 
 import { Prisma } from "@prisma/client";
 import { prisma } from "../prisma";
@@ -15,6 +16,7 @@ import {
   HEDGE_ACCEPT_SIDE_FLOOR_BP,
   HEDGE_ACCEPT_SIDE_CEIL_BP,
 } from "../config";
+import { requoteSideForLock } from "../depth";
 import { resolveDerivedSuggestion } from "./s2";
 
 // The final accept-time price-sanity gate (F1). True when the side we're about to LOCK is priced
@@ -42,6 +44,16 @@ export class HedgeMarketUnavailableError extends Error {
   }
 }
 
+// The CLOB book behind the target market can't be quoted right now (upstream down, or past the
+// freshness policy). Route -> 502 (book_unavailable) — an outage, NOT an untradable market, so the
+// client may retry rather than drop the suggestion.
+export class HedgeBookUnavailableError extends Error {
+  constructor() {
+    super("book_unavailable");
+    this.name = "HedgeBookUnavailableError";
+  }
+}
+
 export interface AcceptResult {
   betId: string;
   stakeCents: number;
@@ -62,7 +74,10 @@ export async function acceptSuggestion(userId: string, sid: string): Promise<Acc
   const s = item.suggestion;
   const marketId = s.id;
 
-  // 3) Validate the market is still tradable and lock the CURRENT price of the hedge side.
+  // 3) Validate the market is still tradable and lock the CURRENT price of the hedge side (D10:
+  // the EXECUTABLE price for POLYMARKET — re-quoted live off the CLOB book; TXODDS keeps its
+  // synthetic odds). The band check below consumes that same authoritative price, so a decided/
+  // collapsed book (eff ≥99%) fails F1 even when the cached mid still reads sane.
   const market = await prisma.market.findUnique({ where: { id: marketId } });
   if (!market || market.status !== "OPEN" || market.yesPriceBp == null || market.noPriceBp == null) {
     throw new HedgeMarketUnavailableError("market not open");
@@ -70,8 +85,21 @@ export async function acceptSuggestion(userId: string, sid: string): Promise<Acc
   if (market.resolutionDeadline.getTime() <= Date.now() + DECK_MIN_LEAD_MS) {
     throw new HedgeMarketUnavailableError("market_expired");
   }
-  const lockedPriceBp = s.side === "YES" ? market.yesPriceBp : market.noPriceBp;
-  // Final price-sanity gate on the FRESHLY-read market (F1): a decided/collapsed side price that a
+  let lockedPriceBp: number;
+  if (market.source === "TXODDS") {
+    lockedPriceBp = s.side === "YES" ? market.yesPriceBp : market.noPriceBp;
+  } else {
+    const tokenId = s.side === "YES" ? market.yesTokenId : market.noTokenId;
+    if (!tokenId) throw new HedgeMarketUnavailableError("market_untradable"); // no book handle -> not quotable
+    // Quote at the PROPOSED stake: a book that fills it also fills any Cash-clamped smaller stake,
+    // and VWAP is monotonic in stake, so a clamped accept locks a price no better than its own walk
+    // would get — the conservative direction (we never over-promise the payout).
+    const q = await requoteSideForLock(tokenId, s.proposedStakeCents);
+    if (q.kind === "unavailable") throw new HedgeBookUnavailableError();
+    if (q.kind !== "ok") throw new HedgeMarketUnavailableError("market_untradable"); // filled===false: the book won't absorb the stake
+    lockedPriceBp = q.effPriceBp;
+  }
+  // Final price-sanity gate on the FRESHLY-read price (F1): a decided/collapsed side price that a
   // poller refresh landed after re-derivation -> 409, so a stale-cache snipe can't lock it.
   if (!sideWithinAcceptBand(lockedPriceBp)) {
     throw new HedgeMarketUnavailableError("price_out_of_band");
