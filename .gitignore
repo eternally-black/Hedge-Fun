@@ -14,3 +14,6 @@ CLAUDE.md.fablize-bak.*
 # CI deploy SSH keypair — generated locally, must never be committed
 hedgefun_ci
 hedgefun_ci.pub
+
+# Claude Code harness artifacts
+.claude/scheduled_tasks.lock
