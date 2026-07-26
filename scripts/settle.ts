@@ -3,12 +3,24 @@ import { awardShard } from "../src/lib/shards";
 
 // ---------------------------------------------------------------------------
 // Balance model (Cash/Locked): the stake is HELD at swipe time (lockedCents += stake on
-// virtual_balances), never decremented from balanceCents. Settlement releases the hold and credits
-// the full payout (Cash = balanceCents − lockedCents):
-//   - win  -> balanceCents += payoutCents, lockedCents −= stake (Cash net change = payout − stake = pnl)
-//   - loss -> payoutCents = 0, lockedCents −= stake (stake consumed; only the hold is released)
+// virtual_balances), never decremented from balanceCents. Settlement releases the hold and applies
+// the bet's P&L to the balance (Cash = balanceCents − lockedCents):
+//   - win  -> balanceCents += payout − stake, lockedCents −= stake  (Cash net change = +pnl)
+//   - loss -> balanceCents −= stake,          lockedCents −= stake  (Cash net change = −stake)
 //   - void -> lockedCents −= stake, NO balance change — releasing the hold IS the refund
-// balanceCents thus only ever increments, by payouts (here) and top-ups (src/lib/topup.ts).
+//
+// The stake term is load-bearing on BOTH settled branches, because releasing the hold hands the
+// stake back to Cash. Crediting the GROSS payout on a win would therefore pay the user their own
+// stake twice, and a loss that only released the hold would cost nothing at all — which is what this
+// code used to do. The consequence was not a rounding error: with payout = stake/price and price =
+// the market's own probability, the two cancel, so EVERY swipe carried an expected value of +stake
+// no matter which side or price was picked, and no swipe could ever lose money. The odds were
+// decorative and the whole top-up/artifact bail-out economy (src/lib/topup.ts, gated on Cash < $30 /
+// $50) was unreachable — the surest sign this was a bug, not a design.
+//
+// Non-negativity: the swipe gate only holds a stake while Cash >= stake, so lockedCents <= balance
+// always; subtracting the same stake from both on settlement preserves that, and balance can never
+// go below zero (asserted in scripts/test-cash-locked.ts).
 //
 // Paper P&L (share math). User "buys" $stake of the YES or NO share at the locked
 // price p (fraction). A winning share pays $1, a losing share pays $0.
@@ -124,14 +136,16 @@ export async function settleMarket(
           },
         });
 
-        // Release the hold (lockedCents −= stake) and credit the FULL payout (balanceCents +=
-        // payout). Cash net change = payout − stake = pnl. A loss has payoutCents = 0 → only the
-        // hold is released. The create branch is a safety net — balance is provisioned at signup,
-        // so it should never fire; if it does, seed ONLY the payout (no $200 base re-grant) with no hold.
+        // Release the hold (lockedCents −= stake) and apply the P&L to the balance. pnlCents is
+        // exactly payout − stake (computePnl), which is the right delta on BOTH branches: on a win
+        // it credits the profit on top of the stake the hold release returns, and on a loss it is
+        // −stake, which cancels that release so the bet actually costs the user their stake.
+        // The create branch is a safety net — balance is provisioned at signup, so it should never
+        // fire; if it does, seed only a positive P&L (never a negative balance) with no hold.
         await tx.virtualBalance.upsert({
           where: { userId: bet.userId },
-          create: { userId: bet.userId, balanceCents: payoutCents, lockedCents: 0 },
-          update: { balanceCents: { increment: payoutCents }, lockedCents: { decrement: bet.stakeCents } },
+          create: { userId: bet.userId, balanceCents: Math.max(0, pnlCents), lockedCents: 0 },
+          update: { balanceCents: { increment: pnlCents }, lockedCents: { decrement: bet.stakeCents } },
         });
 
         if (won) {
