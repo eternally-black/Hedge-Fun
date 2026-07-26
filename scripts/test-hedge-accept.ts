@@ -267,9 +267,10 @@ async function main() {
   assert.strictEqual(betF.result, "LOSS", "NO bet loses when the market resolves YES");
   const vbF = await prisma.virtualBalance.findUniqueOrThrow({ where: { userId: userF.id } });
   assert.strictEqual(vbF.lockedCents, 0, "hold released on LOSS");
-  // Phase-1 Cash/Locked semantics (test-cash-locked.ts): a LOSS credits nothing and only releases
-  // the hold — balanceCents is untouched. The clamped hedge bet must follow the same model.
-  assert.strictEqual(vbF.balanceCents, lowCashF, "LOSS credited nothing; balance untouched (established model)");
+  // Cash/Locked semantics (test-cash-locked.ts): a LOSS releases the hold AND debits the stake, so
+  // the bet actually costs what was staked. F staked their entire Cash, so a loss lands them exactly
+  // on zero — which also exercises the non-negativity floor on the hedge path.
+  assert.strictEqual(vbF.balanceCents, 0, "LOSS debits the staked amount — a fully-staked loss lands on zero");
 
   // ── Settlement: the hedge bet rides the EXISTING poller. Resolve NO -> the NO bets WIN. ───────────
   // Runs LAST (after B/C derived): settling flips the market to RESOLVED, which correctly removes

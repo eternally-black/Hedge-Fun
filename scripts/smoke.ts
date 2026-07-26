@@ -147,9 +147,11 @@ async function main() {
   const settledBet = (await prisma.bet.findUnique({ where: { id: firstYesBet!.id } }))!;
   assert.strictEqual(settledBet.result, "WIN", "YES bet on YES = win");
   assert.strictEqual(settledBet.pnlCents, expected.pnlCents, "bet pnl matches formula");
-  // Cash/Locked model: settle credits the FULL PAYOUT (stake was locked at swipe, not debited).
-  // Exactly one bet settled here, so the balance delta IS that bet's payout — assert unconditionally.
-  assert.strictEqual(bal1 - bal0, expected.payoutCents, "balance += payout on settle");
+  // Cash/Locked model: settle applies the bet's P&L to the balance. The stake was HELD at swipe
+  // (not debited), so releasing the hold already returns it to Cash — the balance therefore moves by
+  // the PROFIT, not the gross payout. Crediting gross would pay the user their own stake twice.
+  // Exactly one bet settled here, so the balance delta IS that bet's pnl — assert unconditionally.
+  assert.strictEqual(bal1 - bal0, expected.pnlCents, "balance += pnl on settle (not the gross payout)");
   const coll = (await prisma.collectibleBalance.findUnique({ where: { userId: user.id } }))!;
   assert.ok(coll.shards >= 1 || coll.artifacts >= 1, "win awarded a shard");
   console.log("   balance", bal0, "->", bal1, "(pnl", settledBet.pnlCents + ")", "shards", coll.shards);
