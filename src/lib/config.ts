@@ -121,3 +121,11 @@ export const BOOK_MAX_STALE_MS = 30_000; // pre-Privy: refuse to LOCK a bet agai
 // locking at the display bound books bets off walked books; displaying at the lock bound empties the
 // deck on any transient CLOB wobble.
 export const BOOK_MAX_DISPLAY_STALE_MS = 10 * 60_000; // drop a POLYMARKET card whose book read is older than this
+
+// ---- Live card quotes (phase 2 — D10 Slice B) ----
+// The client polls ONLY the card(s) it can see — in practice the top one. Next-up cards are cold-
+// rendered from the stored book price and get a live quote the moment they reach the top: their
+// price is irrelevant until then, so polling them is spend without a scenario.
+export const QUOTE_POLL_MS = 3_000; // top-card cadence; books churn ~every 5s, so this tracks them
+export const QUOTES_MAX_IDS = 4; // per request — the visible card plus headroom, not a bulk feed
+export const QUOTES_RATE_PER_MIN = 60; // 3s polling = 20/min; the rest is headroom for other surfaces

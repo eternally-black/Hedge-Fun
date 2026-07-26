@@ -6,7 +6,15 @@
 // TXODDS football rows have NO CLOB book (synthetic odds path, source = TXODDS): the depth gate
 // must never touch them — every branch keys off `source` via depthGateApplies.
 
-import { STAKE_CENTS, DEPTH_SLIPPAGE_CAP_BP, DEPTH_SLIPPAGE_FLOOR_BP, BOOK_MAX_STALE_MS, BOOK_MAX_DISPLAY_STALE_MS } from "./config";
+import {
+  STAKE_CENTS,
+  DEPTH_SLIPPAGE_CAP_BP,
+  DEPTH_SLIPPAGE_FLOOR_BP,
+  BOOK_MAX_STALE_MS,
+  BOOK_MAX_DISPLAY_STALE_MS,
+  QUOTE_TOLERANCE_BP,
+  QUOTE_TOLERANCE_FLOOR_BP,
+} from "./config";
 import { getBook, getBooks, ClobUnavailableError } from "./clob";
 import { quoteBuy, maxStakeWithinSlippage, normalizeAsks, type BookLevel } from "./quote";
 
@@ -172,6 +180,65 @@ export function authoritativePrices(c: {
 // older than BOOK_MAX_DISPLAY_STALE_MS, or the stake won't fill) — the caller drops the card rather
 // than show a mid. NO slippage cap and NO band: this is display honesty, not eligibility — a $500
 // hedge that walks the book is shown at its real walked VWAP, which is exactly what /accept locks.
+// Both sides of one market, for the LIVE card poll (/api/quotes, D10 Slice B). Same book + VWAP path
+// as quoteSideForDisplay, but returns the pair plus an honest `asOfMs` so the client can tell a
+// just-read quote from one served out of the stale cache during a CLOB wobble. asOfMs is the OLDER
+// of the two book reads — a pair is only as fresh as its stalest half.
+export interface DisplayQuote {
+  yesPriceBp: number | null;
+  noPriceBp: number | null;
+  asOfMs: number | null; // null when neither side had a usable book
+}
+
+export async function quoteMarketForDisplay(
+  yesTokenId: string,
+  noTokenId: string,
+  stakeCents: number,
+): Promise<DisplayQuote> {
+  let books;
+  try {
+    books = await getBooks([yesTokenId, noTokenId]);
+  } catch (e) {
+    if (e instanceof ClobUnavailableError) return { yesPriceBp: null, noPriceBp: null, asOfMs: null };
+    throw e;
+  }
+  const now = Date.now();
+  const side = (tokenId: string): { priceBp: number | null; at: number | null } => {
+    const b = books.get(tokenId);
+    if (!b || now - b.fetchedAtMs > BOOK_MAX_DISPLAY_STALE_MS) return { priceBp: null, at: null };
+    const q = quoteBuy(b.asks, stakeCents);
+    return { priceBp: q && q.filled ? q.effPriceBp : null, at: b.fetchedAtMs };
+  };
+  const y = side(yesTokenId);
+  const n = side(noTokenId);
+  const stamps = [y.at, n.at].filter((t): t is number => t !== null);
+  return {
+    yesPriceBp: y.priceBp,
+    noPriceBp: n.priceBp,
+    asOfMs: stamps.length ? Math.min(...stamps) : null,
+  };
+}
+
+// Did the price move AGAINST the user beyond what we promised? PURE, so the fairness rule is
+// testable in isolation and identical on every bet surface.
+//
+// Asymmetric on purpose: a price that moved in the user's FAVOUR is executed silently (consistent
+// with the round-UP, under-promise philosophy — nobody wants a 409 telling them they got a better
+// deal). Only a move against them can reject.
+//
+// The threshold is relative WITH an absolute floor. Relative alone is unusable on a cheap side: 2%
+// of a 5¢ price is 10bp, i.e. one tick, so a 3¢ card would 409 on every ordinary book wiggle. The
+// floor converts that into "a tick or two of absolute room" without loosening the guarantee where it
+// matters (a 2% drift on a 90¢ side is still 2%).
+export function quoteMovedAgainstUser(seenPriceBp: number, freshPriceBp: number): boolean {
+  if (!(seenPriceBp > 0)) return false; // no honest quote to compare against -> never reject
+  const allowed = Math.max(
+    Math.round((seenPriceBp * QUOTE_TOLERANCE_BP) / 10_000),
+    QUOTE_TOLERANCE_FLOOR_BP,
+  );
+  return freshPriceBp - seenPriceBp > allowed;
+}
+
 export async function quoteSideForDisplay(tokenId: string, stakeCents: number): Promise<number | null> {
   let book;
   try {

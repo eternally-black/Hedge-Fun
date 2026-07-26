@@ -4,7 +4,15 @@
 // the work. The display-quote cases stub global fetch (same idiom as test-clob.ts); timers are real.
 // Run: npx tsx scripts/test-depth-gate.ts
 import assert from "node:assert";
-import { evalSideAsks, slippageCapBpFor, depthGateApplies, authoritativePrices, quoteSideForDisplay } from "../src/lib/depth";
+import {
+  evalSideAsks,
+  slippageCapBpFor,
+  depthGateApplies,
+  authoritativePrices,
+  quoteSideForDisplay,
+  quoteMovedAgainstUser,
+} from "../src/lib/depth";
+import { QUOTE_TOLERANCE_BP, QUOTE_TOLERANCE_FLOOR_BP } from "../src/lib/config";
 import { priceIsContested } from "../src/lib/polymarket";
 import { DEPTH_SLIPPAGE_CAP_BP, BOOK_MAX_DISPLAY_STALE_MS, BOOK_CACHE_TTL_MS } from "../src/lib/config";
 import type { BookLevel } from "../src/lib/quote";
@@ -231,6 +239,30 @@ async function main() {
   console.log("✓ depth gate: husk/empty/thin/slippy books dropped, healthy book kept, TXODDS untouched");
   console.log("✓ servability: no mid fallback (1a), rejection stamp (1b), display staleness bound (1c)");
   console.log("✓ display-quote: stake-dependent VWAP, dead/down/stale books -> dropped, never a mid");
+  // ─── seen-vs-executed fairness rule (D10 Slice B) ───────────────────────────────────────────────
+  // Asymmetric by design, and relative-with-an-absolute-floor. These cases are the whole contract.
+  {
+    // A 50¢ side: 2% of 5000bp = 100bp of allowed drift, which clears the 25bp floor.
+    assert.strictEqual(quoteMovedAgainstUser(5000, 5000), false, "unchanged price never rejects");
+    assert.strictEqual(quoteMovedAgainstUser(5000, 5100), false, "drift exactly at tolerance is accepted");
+    assert.strictEqual(quoteMovedAgainstUser(5000, 5101), true, "one bp past tolerance rejects");
+
+    // Moves in the user's FAVOUR always execute — nobody wants a 409 telling them they got a
+    // better deal, and it matches the round-UP/under-promise philosophy of the quote core.
+    assert.strictEqual(quoteMovedAgainstUser(5000, 4000), false, "a much cheaper price still executes");
+    assert.strictEqual(quoteMovedAgainstUser(9800, 100), false, "a collapse in the user's favour executes");
+
+    // The absolute floor is what keeps cheap sides usable: 2% of a 3¢ side is 6bp — well under one
+    // 10bp tick — so without the floor an ordinary book wiggle would 409 every time.
+    const cheapAllowed = Math.max(Math.round((300 * QUOTE_TOLERANCE_BP) / 10_000), QUOTE_TOLERANCE_FLOOR_BP);
+    assert.strictEqual(cheapAllowed, QUOTE_TOLERANCE_FLOOR_BP, "on a 3¢ side the FLOOR is what binds");
+    assert.strictEqual(quoteMovedAgainstUser(300, 310), false, "one tick on a 3¢ side is tolerated");
+    assert.strictEqual(quoteMovedAgainstUser(300, 400), true, "3¢ -> 4¢ is a real move and rejects");
+
+    // No honest quote to compare against -> never reject (old clients send nothing; see api-types).
+    assert.strictEqual(quoteMovedAgainstUser(0, 9800), false, "absent quote never rejects");
+  }
+  console.log("✓ seen-vs-executed: asymmetric tolerance, relative band with an absolute floor");
 }
 
 main().catch((e) => {

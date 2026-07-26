@@ -5,7 +5,7 @@ import { authUser } from "@/lib/privy";
 import { recordSwipe, isOverCap, SwipeCapReachedError, InsufficientFundsError } from "@/lib/swipe";
 import { maybeQualifyReferralOnSwipe } from "@/lib/referral";
 import { DECK_MIN_LEAD_MS, STAKE_CENTS } from "@/lib/config";
-import { requoteSideForLock } from "@/lib/depth";
+import { requoteSideForLock, quoteMovedAgainstUser } from "@/lib/depth";
 import { isDevUser } from "@/lib/dev";
 import type { SwipeRequest, SwipeResponse } from "@/lib/api-types";
 
@@ -62,6 +62,14 @@ export async function POST(req: Request) {
     }
     if (q.kind !== "ok") {
       return NextResponse.json({ error: "market_untradable" }, { status: 409 });
+    }
+    // Seen-vs-executed guard (D10 Slice B). The client polls the top card every few seconds, so the
+    // usual case is that this re-quote hits the very book the user was looking at and nothing fires.
+    // When the book HAS moved against them beyond tolerance, refuse rather than book a worse price
+    // silently — and hand back the fresh price so the card re-renders honestly and waits for a
+    // deliberate re-swipe. A move in the user's favour executes without comment.
+    if (typeof body.quotedPriceBp === "number" && quoteMovedAgainstUser(body.quotedPriceBp, q.effPriceBp)) {
+      return NextResponse.json({ error: "price_moved", freshPriceBp: q.effPriceBp }, { status: 409 });
     }
     lockedPriceBp = q.effPriceBp;
   }

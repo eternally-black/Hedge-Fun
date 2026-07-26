@@ -3,11 +3,11 @@
 // advance, preload-ahead refills, live freshness pruning, the 402 → top-up path, and the daily-cap
 // hard stop. The economy stays server-owned — the client renders /api/me and never re-derives it.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View } from "react-native";
-import type { DeckCard as DeckCardT, DeckResponse, MeResponse } from "../../lib/api-types";
-import { statusOf, type Api } from "../api";
+import { ActivityIndicator, AppState, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import type { DeckCard as DeckCardT, DeckResponse, MeResponse, QuotesResponse } from "../../lib/api-types";
+import { priceMovedBp, statusOf, type Api } from "../api";
 import { colors } from "../theme";
-import { DECK_MIN_LEAD_MS } from "../../lib/config";
+import { DECK_MIN_LEAD_MS, QUOTE_POLL_MS } from "../../lib/config";
 import { CardPreview, DeckCard, isFresh, type SwipeDir } from "../components/DeckCard";
 
 const REFILL_AT = 8; // preload-ahead threshold (same as web) — refill well before the deck runs dry
@@ -74,6 +74,49 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup }: {
     return () => clearInterval(id);
   }, [topUpIfLow]);
 
+  // Live quote on the TOP card (D10 Slice B). A CLOB book churns roughly every 5s, so the price a
+  // card was dealt with goes stale while the user deliberates — which is exactly the moment that
+  // matters. Only the card they can act on is polled: a next-up card's price is irrelevant until it
+  // surfaces, and it gets a live quote the moment it does (this effect re-arms on topId). Paused
+  // while the app is backgrounded — no radio spend on a deck nobody is looking at — and re-polled
+  // immediately on return, so a resumed session re-syncs before any swipe can land.
+  const topId = deck?.[0]?.id;
+  useEffect(() => {
+    if (!topId) return;
+    let alive = true;
+    const poll = async () => {
+      if (AppState.currentState !== "active") return;
+      // Cap spent -> the deck is hard-stopped and nothing is swipeable. Read from meRef so this
+      // effect doesn't re-arm on every /api/me refresh and restart the cadence mid-deliberation.
+      const m = meRef.current;
+      if (m && !m.dev && m.swipes.used >= m.swipes.cap) return;
+      try {
+        const r = (await api(`/api/quotes?ids=${encodeURIComponent(topId)}`)) as QuotesResponse;
+        const q = r.quotes.find((x) => x.marketId === topId);
+        if (!alive || !q || q.yesPriceBp == null || q.noPriceBp == null) return;
+        // Patch in place — never reorder or drop, or the card would move under the thumb.
+        setDeck((d) =>
+          (d ?? []).map((c) =>
+            c.id === topId && (c.yesPriceBp !== q.yesPriceBp || c.noPriceBp !== q.noPriceBp)
+              ? { ...c, yesPriceBp: q.yesPriceBp!, noPriceBp: q.noPriceBp! }
+              : c,
+          ),
+        );
+      } catch {
+        // A failed poll is a no-op: keep the last real price. The swipe re-quotes server-side and
+        // the seen-vs-executed guard catches anything that drifted while we were blind.
+      }
+    };
+    void poll();
+    const id = setInterval(() => void poll(), QUOTE_POLL_MS);
+    const sub = AppState.addEventListener("change", (s) => { if (s === "active") void poll(); });
+    return () => {
+      alive = false;
+      clearInterval(id);
+      sub.remove();
+    };
+  }, [topId, api]);
+
   // Act on a card: YES/NO post a bet, SKIP posts to /api/skip (always free + unlimited). The
   // advance is OPTIMISTIC — the card flies out and the next rises in sync; the network call runs
   // behind. A 409 (already bet) is silent: the card was already gone, nothing to do.
@@ -96,9 +139,18 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup }: {
         return;
       }
       advance();
+      // Echo the price the user was LOOKING AT for the side they picked, so the server can refuse
+      // rather than silently book a worse one if the live book moved against them (D10 Slice B).
       const req = dir === "SKIP"
         ? api("/api/skip", { method: "POST" })
-        : api("/api/swipe", { method: "POST", body: JSON.stringify({ marketId: card.id, side: dir }) });
+        : api("/api/swipe", {
+            method: "POST",
+            body: JSON.stringify({
+              marketId: card.id,
+              side: dir,
+              quotedPriceBp: dir === "YES" ? card.yesPriceBp : card.noPriceBp,
+            }),
+          });
       req
         .then(() => {
           void onRefreshMe(); // stats only (points/shards/balance/skip counter); never the deck
@@ -111,7 +163,25 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup }: {
           // 402 = no free cash (we pre-gate, so this is a race). The swipe rolled back server-side,
           // so the market re-enters a future deck — the card isn't lost. Skips never 402.
           else if (status === 402) { onToast("No free cash left"); onTopup(); void onRefreshMe(); }
-          else if (status !== 409) console.error(e);
+          else if (status === 409) {
+            // price_moved = the book moved against the user between the quote they saw and the lock.
+            // Nothing was stored, so UNDO the optimistic advance: restore the card on top at the
+            // FRESH price and let them decide again honestly. Any other 409 (already bet / expired /
+            // untradable) is terminal and the card stays gone, exactly as before.
+            const fresh = priceMovedBp(e);
+            if (fresh !== undefined) {
+              setDeck((d) => {
+                const cur = d ?? [];
+                if (cur.some((c) => c.id === card.id)) return d; // already restored (double-tap race)
+                const restored: DeckCardT = dir === "YES"
+                  ? { ...card, yesPriceBp: fresh }
+                  : { ...card, noPriceBp: fresh };
+                return [restored, ...cur];
+              });
+              onToast("Price moved — swipe again to confirm");
+            }
+          }
+          else console.error(e);
         });
     },
     [api, onRefreshMe, onToast, onTopup, topUpIfLow],

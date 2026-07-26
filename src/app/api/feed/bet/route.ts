@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 import { recordSwipe, InsufficientFundsError } from "@/lib/swipe";
 import { DECK_MIN_LEAD_MS, STAKE_CENTS } from "@/lib/config";
-import { requoteSideForLock } from "@/lib/depth";
+import { requoteSideForLock, quoteMovedAgainstUser } from "@/lib/depth";
 import type { FeedBetRequest, FeedBetResponse } from "@/lib/api-types";
 
 // Feed bet = a paper bet on a FEED market (the post-cap "лента"). Same $10 stake/cash-hold as a
@@ -51,6 +51,10 @@ export async function POST(req: Request) {
     }
     if (q.kind !== "ok") {
       return NextResponse.json({ error: "market_untradable" }, { status: 409 });
+    }
+    // Seen-vs-executed guard — same rule as /api/swipe (see quoteMovedAgainstUser).
+    if (typeof body.quotedPriceBp === "number" && quoteMovedAgainstUser(body.quotedPriceBp, q.effPriceBp)) {
+      return NextResponse.json({ error: "price_moved", freshPriceBp: q.effPriceBp }, { status: 409 });
     }
     lockedPriceBp = q.effPriceBp;
   }

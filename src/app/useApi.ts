@@ -20,8 +20,15 @@ export function useApi() {
         },
       });
       if (!res.ok) {
-        const err = new Error(`${path} -> ${res.status}`) as Error & { status?: number };
+        const err = new Error(`${path} -> ${res.status}`) as Error & {
+          status?: number;
+          body?: unknown;
+        };
         err.status = res.status; // let callers branch on it (e.g. swipe 409 = already bet)
+        // Typed errors carry a payload the caller needs to act on — 409 price_moved ships the fresh
+        // executable price so the deck can re-render the card honestly instead of just dropping it.
+        // Parsing must never mask the original failure, so a non-JSON body just leaves `body` undefined.
+        err.body = await res.json().catch(() => undefined);
         throw err;
       }
       return res.json();

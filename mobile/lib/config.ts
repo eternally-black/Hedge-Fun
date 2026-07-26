@@ -17,3 +17,8 @@ export const SHARE_BASE_URL = process.env.EXPO_PUBLIC_SHARE_BASE_URL ?? "https:/
 // Deck freshness: a card with less time than this left before resolution never reaches the top
 // (mirrors src/lib/config.ts DECK_MIN_LEAD_MS — the server enforces the same gate).
 export const DECK_MIN_LEAD_MS = 5 * 60_000;
+
+// How often the TOP card re-quotes its live executable price (mirrors src/lib/config.ts
+// QUOTE_POLL_MS). Books churn every ~5s, so this keeps the payout the user is staring at honest
+// while they deliberate. Only the top card polls; next-up cards are cold-rendered until they surface.
+export const QUOTE_POLL_MS = 3_000;

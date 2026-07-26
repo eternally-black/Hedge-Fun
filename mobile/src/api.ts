@@ -9,11 +9,23 @@ import { API_BASE } from "../lib/config";
 // `err.status` convention.
 export class ApiError extends Error {
   status: number;
-  constructor(path: string, status: number) {
+  // Typed errors carry a payload the caller must act on — 409 price_moved ships the fresh executable
+  // price so the deck can restore the card at the honest number instead of just losing it.
+  body: unknown;
+  constructor(path: string, status: number, body?: unknown) {
     super(`${path} -> ${status}`);
     this.status = status;
+    this.body = body;
   }
 }
+
+// The body of a 409 price_moved, when that is what came back. Narrow accessor so screens don't
+// hand-cast `unknown` at every call site.
+export const priceMovedBp = (e: unknown): number | undefined => {
+  if (!(e instanceof ApiError) || e.status !== 409) return undefined;
+  const b = e.body as { error?: string; freshPriceBp?: number } | undefined;
+  return b?.error === "price_moved" && typeof b.freshPriceBp === "number" ? b.freshPriceBp : undefined;
+};
 
 export type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
@@ -43,7 +55,8 @@ export function useApi(): Api {
             ...(token ? { authorization: `Bearer ${token}` } : {}),
           },
         });
-        if (!res.ok) throw new ApiError(path, res.status);
+        // Parse the error body before throwing, but never let a non-JSON body mask the real failure.
+        if (!res.ok) throw new ApiError(path, res.status, await res.json().catch(() => undefined));
         return await res.json();
       } finally {
         clearTimeout(timeout);
