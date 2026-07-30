@@ -3,6 +3,7 @@
 import assert from "node:assert";
 import { fetchBlitzDeck, fetchResolution, mapMarket } from "../src/lib/polymarket";
 import { categoryOf, withinCategoryHorizon, DECK_FETCH_HORIZON_HOURS } from "../src/lib/deck-mix";
+import { DECK_MIN_LEAD_MS, DECK_MIN_SERVABLE } from "../src/lib/config";
 
 // Minimal Gamma GET for the verify-only positive check (gammaGet isn't exported from the lib).
 const VERIFY_BASE = process.env.POLYMARKET_API_BASE ?? "https://gamma-api.polymarket.com";
@@ -59,6 +60,32 @@ async function main() {
       );
     }
     console.log("   ✓ every card is contested on the EFFECTIVE price (15%..85% band, no husks)");
+
+    // INVENTORY, not just validity. This is the assertion this canary was missing, and its absence
+    // let prod run for weeks with an empty-looking deck: every card it returned was perfectly valid,
+    // there were just almost none that survived the serve buffer. Polymarket's near queue is
+    // saturated with minutes-long markets, so a deck sampled only from the front is stale on arrival.
+    // Two independent guards, because either failing alone is a real outage:
+    //   1. enough cards outlive DECK_MIN_LEAD_MS to actually deal
+    //   2. the deck SPANS horizons — an all-blitz deck is empty again five minutes later
+    const nowMs2 = Date.now();
+    const servable = deck.filter(
+      (c) => new Date(c.resolutionDeadline).getTime() > nowMs2 + DECK_MIN_LEAD_MS,
+    ).length;
+    assert.ok(
+      servable >= DECK_MIN_SERVABLE,
+      `deck inventory: only ${servable}/${deck.length} cards outlive the ${DECK_MIN_LEAD_MS / 60000}min serve buffer (floor ${DECK_MIN_SERVABLE}) — the deck is starving`,
+    );
+    const beyondAnHour = deck.filter(
+      (c) => new Date(c.resolutionDeadline).getTime() > nowMs2 + 3_600_000,
+    ).length;
+    assert.ok(
+      beyondAnHour >= Math.floor(deck.length * 0.2),
+      `deck horizon spread: only ${beyondAnHour}/${deck.length} cards resolve beyond 1h — the near queue is crowding out longer markets (HORIZON_BANDS regression)`,
+    );
+    console.log(
+      `   ✓ inventory: ${servable}/${deck.length} outlive the serve buffer, ${beyondAnHour} resolve beyond 1h`,
+    );
 
     // Per-category horizon: every card resolves within ITS category window (crypto/OU <=24h,
     // sports/esports <=72h). Exercises the PRODUCTION fetchBlitzDeck default — closes the old blind

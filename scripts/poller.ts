@@ -10,9 +10,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fetchResolution } from "../src/lib/polymarket";
 import { DECK_FETCH_HORIZON_HOURS } from "../src/lib/deck-mix";
+import { DECK_MIN_SERVABLE } from "../src/lib/config";
 import { settleMarket, type Resolution } from "./settle";
 import { evaluateStreak } from "../src/lib/streak";
 import { refreshDeck } from "./refresh-deck";
+import { pruneMarkets } from "./prune-markets";
 import { refreshFootball } from "./refresh-football";
 import { resolveFootball } from "./settle-football";
 import { refreshHedgeIndex } from "./refresh-hedge-index";
@@ -29,6 +31,11 @@ const CONCURRENCY = 4;
 // (the F1 stale-cache snipe) is re-priced/closed within one window, cheap enough not to hammer Gamma.
 // The accept-time price-band gate (src/lib/hedge/accept.ts) closes the intra-window remainder.
 const HEDGE_INDEX_EVERY_N_TICKS = 5;
+// Market cache GC cadence. Every 5th tick ≈ every 5 minutes: fast enough to drain a large backlog
+// in a few hours (PRUNE_MAX_ROWS per run), slow enough that the anti-join scan is not a per-minute
+// cost in the steady state, where it finds nothing. Deliberately OFFSET from the hedge index above
+// (see the tick body) so the two heavy passes don't land on the same tick.
+const PRUNE_EVERY_N_TICKS = 5;
 let tickCount = 0;
 
 // Liveness signal: touched at the end of every successful tick. The compose healthcheck
@@ -93,13 +100,24 @@ export async function mapLimit<T>(items: T[], limit: number, fn: (t: T) => Promi
 }
 
 async function tick() {
+  tickCount++;
   // Keep the deck cache warm so swipes lock fresh prices and expired markets drop (M4).
   // Pull the OUTER window (max per-category horizon) to match the deck route — otherwise the
   // longer-horizon sports/esports half never gets price refreshes and shows stale (often 50/50)
   // odds. fetchBlitzDeck still drops each market past its own category horizon.
   try {
-    const n = await refreshDeck(DECK_FETCH_HORIZON_HOURS, 100);
-    console.log(`[deck] refreshed ${n} markets`);
+    const r = await refreshDeck(DECK_FETCH_HORIZON_HOURS, 100);
+    // Log the SERVABLE count next to the upserted one. Reporting only "refreshed N" is what hid a
+    // multi-week outage: N stayed at 100 the whole time the deck was empty, because every one of
+    // those 100 expired within minutes. The alarm below is deliberately loud and greppable —
+    // starving inventory is an upstream/product condition, not a crash, so nothing else surfaces it.
+    if (r.servable < DECK_MIN_SERVABLE) {
+      console.error(
+        `[deck] ALARM: only ${r.servable} servable markets (floor ${DECK_MIN_SERVABLE}) of ${r.upserted} refreshed — the deck is starving`,
+      );
+    } else {
+      console.log(`[deck] refreshed ${r.upserted} markets (${r.servable} servable)`);
+    }
   } catch (e) {
     console.warn("[deck] refresh error:", (e as Error).message);
   }
@@ -117,7 +135,6 @@ async function tick() {
   // poller populates it promptly and it stays warm thereafter. Freshness kills the F1 snipe window
   // (a market resolved-early on Polymarket gets re-priced/closed here); F2's clear-pass drops rows
   // that fell out of the fetch/band. A refresh failure is transient — log and keep the tick alive.
-  tickCount++;
   if ((tickCount - 1) % HEDGE_INDEX_EVERY_N_TICKS === 0) {
     try {
       const hs = await refreshHedgeIndex();
@@ -126,6 +143,19 @@ async function tick() {
       );
     } catch (e) {
       console.warn("[hedge-index] refresh error:", (e as Error).message);
+    }
+  }
+
+  // Market cache GC. The cache is append-only otherwise: settlement only touches markets that have
+  // bets, so everything nobody bet on accumulates forever. Bounded per run, so a backlog drains over
+  // a few hours instead of one long table lock. OFFSET by 2 ticks from the hedge index above so the
+  // two heavy passes never land on the same minute as each other (or on the boot tick).
+  if ((tickCount - 1) % PRUNE_EVERY_N_TICKS === 2) {
+    try {
+      const p = await pruneMarkets();
+      if (p.deleted > 0) console.log(`[prune] deleted ${p.deleted} dead markets${p.more ? " (more queued)" : ""}`);
+    } catch (e) {
+      console.warn("[prune] error:", (e as Error).message);
     }
   }
 
