@@ -14,6 +14,7 @@ import { DECK_MIN_SERVABLE } from "../src/lib/config";
 import { settleMarket, type Resolution } from "./settle";
 import { evaluateStreak } from "../src/lib/streak";
 import { refreshDeck } from "./refresh-deck";
+import { pruneMarkets } from "./prune-markets";
 import { refreshFootball } from "./refresh-football";
 import { resolveFootball } from "./settle-football";
 
@@ -21,6 +22,12 @@ const prisma = new PrismaClient();
 
 const POLL_INTERVAL_MS = 60_000;
 const CONCURRENCY = 4;
+
+// Market cache GC cadence. Every 5th tick ≈ every 5 minutes: fast enough to drain a large backlog
+// in a few hours (PRUNE_MAX_ROWS per run), slow enough that the anti-join scan is not a per-minute
+// cost in the steady state, where it finds nothing.
+const PRUNE_EVERY_N_TICKS = 5;
+let tickCount = 0;
 
 // Liveness signal: touched at the end of every successful tick. The compose healthcheck
 // fails the container when this file is stale (mtime older than ~3x the interval) so a
@@ -84,6 +91,7 @@ export async function mapLimit<T>(items: T[], limit: number, fn: (t: T) => Promi
 }
 
 async function tick() {
+  tickCount++;
   // Keep the deck cache warm so swipes lock fresh prices and expired markets drop (M4).
   // Pull the OUTER window (max per-category horizon) to match the deck route — otherwise the
   // longer-horizon sports/esports half never gets price refreshes and shows stale (often 50/50)
@@ -111,6 +119,18 @@ async function tick() {
     console.log(`[football] refreshed ${fn} World Cup markets`);
   } catch (e) {
     console.warn("[football] refresh error:", (e as Error).message);
+  }
+
+  // Market cache GC (every Nth tick — see PRUNE_EVERY_N_TICKS). The cache is append-only otherwise:
+  // settlement only touches markets that have bets, so everything nobody bet on accumulates forever.
+  // Bounded per run, so the backlog drains over a few hours instead of one long table lock.
+  if ((tickCount - 1) % PRUNE_EVERY_N_TICKS === 0) {
+    try {
+      const p = await pruneMarkets();
+      if (p.deleted > 0) console.log(`[prune] deleted ${p.deleted} dead markets${p.more ? " (more queued)" : ""}`);
+    } catch (e) {
+      console.warn("[prune] error:", (e as Error).message);
+    }
   }
 
   // Markets that still have unsettled bets.
