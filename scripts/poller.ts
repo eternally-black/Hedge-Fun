@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fetchResolution } from "../src/lib/polymarket";
 import { DECK_FETCH_HORIZON_HOURS } from "../src/lib/deck-mix";
+import { DECK_MIN_SERVABLE } from "../src/lib/config";
 import { settleMarket, type Resolution } from "./settle";
 import { evaluateStreak } from "../src/lib/streak";
 import { refreshDeck } from "./refresh-deck";
@@ -88,8 +89,18 @@ async function tick() {
   // longer-horizon sports/esports half never gets price refreshes and shows stale (often 50/50)
   // odds. fetchBlitzDeck still drops each market past its own category horizon.
   try {
-    const n = await refreshDeck(DECK_FETCH_HORIZON_HOURS, 100);
-    console.log(`[deck] refreshed ${n} markets`);
+    const r = await refreshDeck(DECK_FETCH_HORIZON_HOURS, 100);
+    // Log the SERVABLE count next to the upserted one. Reporting only "refreshed N" is what hid a
+    // multi-week outage: N stayed at 100 the whole time the deck was empty, because every one of
+    // those 100 expired within minutes. The alarm below is deliberately loud and greppable —
+    // starving inventory is an upstream/product condition, not a crash, so nothing else surfaces it.
+    if (r.servable < DECK_MIN_SERVABLE) {
+      console.error(
+        `[deck] ALARM: only ${r.servable} servable markets (floor ${DECK_MIN_SERVABLE}) of ${r.upserted} refreshed — the deck is starving`,
+      );
+    } else {
+      console.log(`[deck] refreshed ${r.upserted} markets (${r.servable} servable)`);
+    }
   } catch (e) {
     console.warn("[deck] refresh error:", (e as Error).message);
   }

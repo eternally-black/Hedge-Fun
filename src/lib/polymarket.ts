@@ -159,56 +159,88 @@ function shapeOf(m: MarketCache): Shape {
 // Blitz deck: active, not-closed binary markets, each kept only within ITS category's horizon
 // (crypto/OU <=24h, sports/esports <=72h — see DECK_HORIZON_HOURS), balanced by shape.
 //
-// What this has to handle (verified live 2026-06-24, wide window: 707 Up/Down, 455 Yes/No,
-// 338 NAMED team/player/OU markets):
+// What this has to handle:
 //  - Gamma ignores limit>100, so we PAGINATE by offset.
-//  - Sorted by endDate, the nearest markets are a WALL of short-horizon crypto Up/Down; the
-//    sports & esports (teams, players, Over/Under) resolve further out and get crowded out of
-//    a pure endDate-ordered top-N. So we scan the OUTER window, drop each market past its own
-//    category horizon (keeps crypto blitz-fresh while letting sparse sports/esports through),
-//    bucket by shape, then INTERLEAVE round-robin (named, over/under, crypto, ...) — the deck
-//    always carries teams/sports, not a monolith of crypto. Each bucket stays endDate-ascending.
+//  - The near queue is saturated with minutes-long markets, so a single endDate-ascending scan
+//    never reaches anything longer-dated — see HORIZON_BANDS below for the incident this caused.
+//    We therefore sample each band with its own query and quota.
+//  - Within a band, sorted by endDate, crypto Up/Down still dominates; sports & esports are sparse.
+//    So we drop each market past its own category horizon (keeps crypto blitz-fresh while letting
+//    sparse sports/esports through), bucket by shape, then INTERLEAVE round-robin (named,
+//    over/under, crypto, ...) — the deck always carries teams/sports, not a monolith of crypto.
+//    Buckets fill band by band, so each one already spans horizons before the interleave runs.
+// ─── Horizon bands ────────────────────────────────────────────────────────────────────────────────
+// The deck is sampled from SEVERAL time windows with per-band quotas, not from the front of one
+// endDate-ascending scan.
+//
+// Why (diagnosed on prod 2026-07-30, deck effectively empty): Polymarket's near queue is SATURATED
+// with minutes-long markets — 15-minute crypto Up/Down across ~8 assets plus in-play football
+// totals. Ordered by endDate from `now`, the first 1500 rows (our MAX_PAGES ceiling) were ALL
+// resolving inside the hour, so the scan never reached anything longer-dated. Every refresh
+// therefore cached 100 markets that expired within minutes, and after the DECK_MIN_LEAD_MS serve
+// buffer the deck held ~26 cards out of a 157k-row cache. The shape interleave below could not
+// help: it balances what the scan brought back, and the scan kept bringing back the same short
+// slice. This degraded gradually as Polymarket added live markets — nothing "broke".
+//
+// Quotas fix it structurally: each band is its own query, so a saturated near band can never crowd
+// out the far ones. The near band keeps the blitz feel; the far bands guarantee the deck still has
+// playable cards several minutes from now.
+const HORIZON_BANDS: { fromH: number; toH: number; share: number }[] = [
+  { fromH: 0, toH: 1, share: 0.3 }, // blitz: crypto Up/Down, in-play totals
+  { fromH: 1, toH: 6, share: 0.25 },
+  { fromH: 6, toH: 24, share: 0.25 }, // crypto/OU category horizon ends at 24h
+  { fromH: 24, toH: 72, share: 0.2 }, // sports/esports only (their horizon runs to 72h)
+];
+
 export async function fetchBlitzDeck(hours = DECK_FETCH_HORIZON_HOURS, want = 100): Promise<MarketCache[]> {
   const now = new Date();
   const nowMs = now.getTime();
-  const max = new Date(now.getTime() + hours * 3_600_000);
-  const maxMs = max.getTime();
+  const maxMs = nowMs + hours * 3_600_000;
   const buckets: Record<Shape, MarketCache[]> = { named: [], overunder: [], crypto: [] };
 
-  for (let page = 0; page < MAX_PAGES; page++) {
-    const qs = new URLSearchParams({
-      active: "true",
-      closed: "false",
-      enableOrderBook: "true",
-      end_date_min: now.toISOString(),
-      end_date_max: max.toISOString(),
-      order: "endDate",
-      ascending: "true",
-      limit: String(GAMMA_PAGE),
-      offset: String(page * GAMMA_PAGE),
-    });
-    const raw = await gammaGet(`/markets?${qs.toString()}`);
-    if (raw.length === 0) break;
+  for (const band of HORIZON_BANDS) {
+    const bandFromMs = nowMs + band.fromH * 3_600_000;
+    const bandToMs = Math.min(nowMs + band.toH * 3_600_000, maxMs);
+    if (bandFromMs >= bandToMs) continue; // band lies outside a caller-narrowed `hours`
+    const quota = Math.max(1, Math.round(want * band.share));
+    let kept = 0;
 
-    for (const r of raw) {
-      const m = mapMarket(r);
-      if (
-        m &&
-        m.status === "OPEN" &&
-        m.yesPriceBp !== null &&
-        m.noPriceBp !== null &&
-        new Date(m.resolutionDeadline).getTime() <= maxMs && // re-assert outer window client-side
-        withinCategoryHorizon(m, new Date(m.resolutionDeadline).getTime(), nowMs) && // per-category cap
-        priceIsContested(m.yesPriceBp, m.noPriceBp) && // drop decided/live matches (100%/0%)
-        !isContextPoor(m) && // drop bare Over/Under totals with no match named ("Games Total: O/U 4.5")
-        !isVagueEsports(m) // drop esports we can't name a game for (bare "Esports" badge)
-      ) {
-        buckets[shapeOf(m)].push(m);
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const qs = new URLSearchParams({
+        active: "true",
+        closed: "false",
+        enableOrderBook: "true",
+        end_date_min: new Date(bandFromMs).toISOString(),
+        end_date_max: new Date(bandToMs).toISOString(),
+        order: "endDate",
+        ascending: "true",
+        limit: String(GAMMA_PAGE),
+        offset: String(page * GAMMA_PAGE),
+      });
+      const raw = await gammaGet(`/markets?${qs.toString()}`);
+      if (raw.length === 0) break;
+
+      for (const r of raw) {
+        if (kept >= quota) break; // band quota filled — stop mid-page, don't overshoot by a page
+        const m = mapMarket(r);
+        if (
+          m &&
+          m.status === "OPEN" &&
+          m.yesPriceBp !== null &&
+          m.noPriceBp !== null &&
+          new Date(m.resolutionDeadline).getTime() <= maxMs && // re-assert outer window client-side
+          withinCategoryHorizon(m, new Date(m.resolutionDeadline).getTime(), nowMs) && // per-category cap
+          priceIsContested(m.yesPriceBp, m.noPriceBp) && // drop decided/live matches (100%/0%)
+          !isContextPoor(m) && // drop bare Over/Under totals with no match named ("Games Total: O/U 4.5")
+          !isVagueEsports(m) // drop esports we can't name a game for (bare "Esports" badge)
+        ) {
+          buckets[shapeOf(m)].push(m);
+          kept++;
+        }
       }
+      if (raw.length < GAMMA_PAGE) break; // last page of this band
+      if (kept >= quota) break; // this band has contributed its share
     }
-    if (raw.length < GAMMA_PAGE) break; // last page
-    // Stop early once we have plenty in every non-crypto bucket to interleave a full deck.
-    if (buckets.named.length + buckets.overunder.length >= want) break;
   }
 
   // Round-robin interleave: named first each round so sports/esports lead, then OU, then crypto.

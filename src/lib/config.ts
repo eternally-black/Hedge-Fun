@@ -19,6 +19,13 @@ export const ARTIFACT_TOPUP_CASH_GATE_CENTS = 5_000; // artifact top-up only ena
 // Stops a card from resolving (⏱ -> 0:00) before the user reaches/swipes it.
 export const DECK_MIN_LEAD_MS = 5 * 60_000; // 5 minutes
 
+// Inventory floor. Below this many SERVABLE markets per refresh, the deck is visibly starving and
+// the poller alarms (and the daily canary fails). Sized against the loop it has to feed: a user gets
+// SWIPE_CAP swipes a day and the client refills at 8 cards remaining, so a pool under ~25 means the
+// very first user of the tick can drain it. Existed because prod ran for weeks on ~26 servable
+// markets while the poller logged a healthy-looking "refreshed 100" every minute (2026-07-30).
+export const DECK_MIN_SERVABLE = 25;
+
 // ---- Daily caps (DECIDED) ----
 export const SWIPE_CAP = 10; // point-earning swipes/day (over-cap allowed, 0 pts)
 export const SHARD_DAILY_CAP = 10; // 1 win = 1 shard, max 10/day (DECK only — feed shards are UNCAPPED)
