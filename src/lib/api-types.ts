@@ -433,7 +433,7 @@ export interface HedgePickersResponse {
 
 // ─── POST /api/hedge/search ──────────────────────────────────────────────────────────────────────
 // Auth: Bearer. Body: HedgeSearchRequest. The SECONDARY S2 UX: free text ("я болею за Реал", "иду на
-// фильм X") -> deterministic alias/FTS match -> (below threshold + ANTHROPIC_API_KEY set) ONE NLU
+// фильм X") -> deterministic alias/FTS match -> (below threshold + NLU_API_KEY set) ONE NLU
 // call -> re-run -> still nothing => discovery fallback. A team you SUPPORT yields an AGAINST
 // suggestion on its nearest upcoming market. `isDiscovery` is true ONLY on the fallback (3 random
 // contested markets, honestly flagged as discovery, never a hedge). Errors: 400 (empty / too-long text).

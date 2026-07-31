@@ -119,7 +119,7 @@ Workstream B consumes copies.
   proposed stake, event (impression / accept / dismiss), created_at. **Without this we learn
   nothing** (advisor consensus).
 - Bets from hedge cards: standard `Bet` rows + `stakeCents` (D8) + suggestion back-reference.
-- Env: `HELIUS_API_KEY`, `BIRDEYE_API_KEY`, `ANTHROPIC_API_KEY` (NLU edge only), all in
+- Env: `HELIUS_API_KEY`, `BIRDEYE_API_KEY`, `NLU_API_KEY` (NLU edge only, any OpenAI-compatible provider), all in
   `.env.example` with comments. Jupiter price API needs no key at our volumes.
 
 ## 6. Real-money gates (all external; tracked, not built)

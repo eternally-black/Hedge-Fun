@@ -1,9 +1,13 @@
 // NLU edge (D2) — the ONE thin LLM touch in the whole engine, and only below the deterministic
 // confidence threshold. A single constrained small-model call maps free text -> { category, entities,
 // keywords }; the caller then RE-RUNS the deterministic matcher with those entities. The LLM NEVER
-// picks a side, size, or market (D1 invariant). No ANTHROPIC_API_KEY, a non-2xx, a timeout, or an
+// picks a side, size, or market (D1 invariant). No NLU_API_KEY, a non-2xx, a timeout, or an
 // unparseable body all resolve to null -> the caller falls straight to the discovery fallback. One
-// call, 5s timeout, no retries, raw fetch against api.anthropic.com (no SDK dependency).
+// call, 5s timeout, no retries, raw fetch (no SDK dependency).
+//
+// PROVIDER-AGNOSTIC via the OpenAI-compatible /chat/completions shape — OpenRouter, DeepSeek, Kimi,
+// MiniMax, GLM and OpenAI itself all speak it, so one request shape covers every candidate. Point
+// NLU_API_BASE/NLU_API_KEY/NLU_MODEL wherever you want; nothing else in the engine knows or cares.
 
 import { createHash } from "node:crypto";
 
@@ -13,9 +17,11 @@ export interface NluResult {
   keywords: string[]; // other salient terms
 }
 
-const NLU_MODEL = "claude-haiku-4-5-20251001";
 const NLU_TIMEOUT_MS = 5_000;
-const ANTHROPIC_BASE = process.env.ANTHROPIC_API_BASE ?? "https://api.anthropic.com";
+// No default base/model on purpose: an unset key already disables the edge, and guessing a provider
+// would silently point at someone's billing.
+const NLU_BASE = process.env.NLU_API_BASE ?? "https://openrouter.ai/api/v1";
+const NLU_MODEL = process.env.NLU_MODEL ?? "deepseek/deepseek-v4";
 
 const SYSTEM_PROMPT =
   "You are a strict NLU extractor for a prediction-market hedge app. Given a short user message " +
@@ -56,14 +62,10 @@ export function parseNluResponse(raw: string): NluResult | null {
   return { category, entities, keywords };
 }
 
-// Extract the concatenated text from an Anthropic Messages API response body.
-function extractText(data: unknown): string {
-  const content = (data as { content?: unknown })?.content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .filter((b): b is { type: string; text: string } => typeof (b as { text?: unknown })?.text === "string")
-    .map((b) => b.text)
-    .join("");
+// Extract the assistant text from an OpenAI-compatible /chat/completions body.
+export function extractText(data: unknown): string {
+  const c = (data as { choices?: { message?: { content?: unknown } }[] })?.choices?.[0]?.message?.content;
+  return typeof c === "string" ? c : "";
 }
 
 export interface NluOutcome {
@@ -83,27 +85,26 @@ function inputFingerprint(text: string): string {
 // (the common case, incl. the test env). Logs a hash of the input + the parsed output + latency for
 // replayability (D2); the RAW input text is logged ONLY when HEDGE_NLU_LOG_RAW=1 (debug, off in prod).
 export async function extractEntities(text: string): Promise<NluOutcome> {
-  const key = process.env.ANTHROPIC_API_KEY;
+  const key = process.env.NLU_API_KEY;
   if (!key) return { result: null, usedNlu: false, latencyMs: 0 };
 
   const started = Date.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), NLU_TIMEOUT_MS);
   try {
-    const res = await fetch(`${ANTHROPIC_BASE}/v1/messages`, {
+    const res = await fetch(`${NLU_BASE}/chat/completions`, {
       method: "POST",
       signal: controller.signal,
       cache: "no-store",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": key,
-        "anthropic-version": "2023-06-01",
-      },
+      headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
       body: JSON.stringify({
         model: NLU_MODEL,
         max_tokens: 256,
-        system: SYSTEM_PROMPT,
-        messages: [{ role: "user", content: buildUserPrompt(text) }],
+        temperature: 0, // extraction, not generation — same text must map to the same entities
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: buildUserPrompt(text) },
+        ],
       }),
     });
     const latencyMs = Date.now() - started;

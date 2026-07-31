@@ -6,7 +6,7 @@
 //     the EXISTING settlement poller unchanged
 //   - a no-match query falls to the discovery fallback (is_discovery=true), and a fallback card accepts
 //   - impression/dismiss telemetry is idempotent for an S2 id
-// NLU is NOT exercised here (no ANTHROPIC_API_KEY in the test env -> deterministic path only).
+// NLU is NOT exercised here (no NLU_API_KEY in the test env -> deterministic path only).
 // Needs DATABASE_URL (Docker DB). Run: npx tsx scripts/test-hedge-s2.ts
 import assert from "node:assert";
 import { prisma } from "../src/lib/prisma";

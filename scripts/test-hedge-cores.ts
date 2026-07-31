@@ -13,7 +13,7 @@ import {
   isNamedEntityShape,
   type S2Candidate,
 } from "../src/lib/hedge/s2match";
-import { parseNluResponse } from "../src/lib/hedge/nlu";
+import { parseNluResponse, extractText } from "../src/lib/hedge/nlu";
 import { sideWithinAcceptBand } from "../src/lib/hedge/accept";
 import { HEDGE_ACCEPT_SIDE_FLOOR_BP, HEDGE_ACCEPT_SIDE_CEIL_BP } from "../src/lib/config";
 import {
@@ -267,6 +267,13 @@ import {
   assert.strictEqual(parseNluResponse("not json at all"), null, "no JSON -> null");
   assert.strictEqual(parseNluResponse('{"category":null,"entities":[],"keywords":[]}'), null, "empty signal -> null");
   assert.strictEqual(parseNluResponse("{ broken"), null, "malformed JSON -> null");
+
+  // Response-shape accessor. Reading the wrong path fails SILENTLY — "" -> null -> discovery
+  // fallback — so the provider swap would look like "the LLM never helps" rather than a bug.
+  const body = { choices: [{ message: { role: "assistant", content: '{"entities":["Arsenal"]}' } }] };
+  assert.strictEqual(extractText(body), '{"entities":["Arsenal"]}', "OpenAI-shape content is read");
+  assert.strictEqual(extractText({ content: [{ type: "text", text: "x" }] }), "", "Anthropic shape no longer parses");
+  assert.strictEqual(extractText({}), "", "garbage body -> empty, never throws");
 }
 
 // ── accept-time price band (F1 TOCTOU gate) ────────────────────────────────────────────────────────
