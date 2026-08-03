@@ -199,9 +199,12 @@ export interface ResultRow {
   shards: number; // shards granted for this bet (0 or 1)
   settledAt: string; // ISO-8601
   seen: boolean; // seenAt != null
-  // Verifiable settlement: true when the bet settled on Solana-anchored data (TxLINE World Cup —
-  // scores are committed to a Solana Merkle root). Absent/false for Polymarket. onchainRef = Solscan
-  // link. Optional (additive field) so stale clients / older RN builds stay forward-compatible.
+  // DEPRECATED (2026-08-03). Marked a settlement made on Solana-anchored data — only ever true for
+  // the TxOdds World Cup integration, which is gone. The server now always sends false/null and no
+  // client renders anything for them, so the badge has already disappeared everywhere, including
+  // Android builds already in the wild. Kept in the shape because removing a field in place is a
+  // breaking change (see RULES at the top) and mobile does not deploy with the server. Retire them
+  // in a v2, or reuse them if a verifiable source ever returns.
   verified?: boolean;
   onchainRef?: string | null;
 }

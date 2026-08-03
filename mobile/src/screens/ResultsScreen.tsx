@@ -3,7 +3,7 @@
 // the screen marks every settled result seen — POST /api/results/seen is fire-and-forget (the
 // badge was already cleared locally via onSeen; a failed mark just re-syncs from the next /api/me).
 import { memo, useEffect, useState } from "react";
-import { ActivityIndicator, FlatList, Linking, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { ActivityIndicator, FlatList, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import type { HistoryResponse, HistoryRow, ResultsResponse, ResultRow } from "../../lib/api-types";
 import { type Api } from "../api";
 import { colors } from "../theme";
@@ -160,14 +160,6 @@ const SettledRow = memo(function SettledRow({ row }: { row: ResultRow }) {
         <Text style={styles.rowMeta}>
           Your call <Text style={{ color: sideColor, fontWeight: "700" }}>{row.side}</Text> · {row.outcome}
         </Text>
-        {row.verified ? (
-          <TouchableOpacity
-            disabled={!row.onchainRef}
-            onPress={() => row.onchainRef && void Linking.openURL(row.onchainRef)}
-          >
-            <Text style={styles.verified}>⛓ Solana-anchored score</Text>
-          </TouchableOpacity>
-        ) : null}
       </View>
       <View style={styles.rowRight}>
         <Text style={[styles.rowPayout, { color: m.accent }]}>{deltaStr(row.status, row.deltaCents)}</Text>
@@ -209,6 +201,5 @@ const styles = StyleSheet.create({
   rowStatus: { fontSize: 10, letterSpacing: 0.6, textTransform: "uppercase", fontWeight: "700", marginTop: 2 },
   rowDelta: { fontFamily: "monospace", fontSize: 12, marginTop: 2 },
   rowPayout: { fontFamily: "monospace", fontWeight: "700", fontSize: 14 },
-  verified: { color: colors.yes, fontSize: 10, fontWeight: "700", marginTop: 5 },
   shardDrop: { color: colors.gold, fontSize: 10, marginTop: 2 },
 });

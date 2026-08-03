@@ -63,16 +63,6 @@ function InboxRow({ row }: { row: ResultRow }) {
         <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 3 }}>
           Your call <span style={{ color: sideColor, fontWeight: 700 }}>{row.side}</span> · {row.outcome}
         </div>
-        {row.verified ? (
-          <a
-            href={row.onchainRef ?? undefined}
-            target="_blank"
-            rel="noopener noreferrer"
-            style={{ display: "inline-flex", alignItems: "center", gap: 4, marginTop: 5, fontSize: 10, fontWeight: 700, color: "var(--yes)", textDecoration: "none" }}
-          >
-            ⛓ Solana-anchored score
-          </a>
-        ) : null}
       </div>
       <div style={{ textAlign: "right", flexShrink: 0 }}>
         <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 14, color: m.accent }}>{deltaStr(row.status, row.deltaCents)}</div>
