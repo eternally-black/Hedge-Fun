@@ -21,7 +21,9 @@ const CRYPTO = /\b(bitcoin|btc|ethereum|eth|solana|sol|xrp|bnb|dogecoin|doge|hyp
 // Sports: leagues + the "type" words that head named-binary sports markets (spread, handicap,
 // innings, sets, totals, moneyline, who wins). The label-vs-label "Team A / Team B" shape lands
 // here via these heads even when the question names no league.
-const SPORTS = /\b(nba|nfl|mlb|nhl|soccer|football|baseball|basketball|hockey|tennis|atp|wta|ufc|mma|boxing|cricket|f1|formula|golf|nascar|premier league|la liga|serie a|bundesliga|ligue 1|champions league|world cup|grand prix|spread|handicap|innings?|moneyline|to win|set \d|game \d|\bvs\.?\b|\bv\.\b| at )\b/i;
+// "exact score" earns its place: "Exact Score: A 3 - 0 B?" names no league and has no "vs", so it
+// used to fall through to "other" — a match market on a 48h horizon wearing a generic badge.
+const SPORTS = /\b(nba|nfl|mlb|nhl|soccer|football|baseball|basketball|hockey|tennis|atp|wta|ufc|mma|boxing|cricket|f1|formula|golf|nascar|premier league|la liga|serie a|bundesliga|ligue 1|champions league|world cup|grand prix|spread|handicap|innings?|moneyline|to win|exact score|set \d|game \d|\bvs\.?\b|\bv\.\b| at )\b/i;
 // Politics / macro.
 const POLITICS = /\b(election|president|senate|congress|fed\b|fomc|rate (cut|hike)|nominee|impeach|prime minister|parliament|referendum|vote|poll)\b/i;
 // Weather.
@@ -101,10 +103,32 @@ const SPORT_GAMES: [RegExp, string][] = [
   [/\bboxing\b/i, "Boxing"],
   [/\b(f1|formula\s*1|grand prix|nascar)\b/i, "F1"],
   [/\b(tennis|atp|wta|grand slam|wimbledon|us open|roland garros|australian open)\b/i, "Tennis"],
-  [/\bcricket\b/i, "Cricket"],
+  // T20/ODI/wickets are here so cricket is claimed BEFORE the soccer row can grab it on the word
+  // "premier league": "Kuwait Kerala Premier League T20" is cricket, and used to badge as Soccer.
+  [/\b(cricket|t20|odi|test match|wickets?|ipl)\b/i, "Cricket"],
   [/\b(golf|pga|masters)\b/i, "Golf"],
   // Soccer last among sports — its league names are many; the generic word catches the rest.
-  [/\b(soccer|football|premier league|la liga|serie a|bundesliga|ligue 1|champions league|world cup|epl|ucl)\b/i, "Soccer"],
+  //
+  // Real Polymarket soccer names NO league: the question is "FSK Bukovyna Chernivtsi vs. FK LNZ
+  // Cherkasy: O/U 9.5 Total Corners" and the league lives only in the slug (ukr1-…), which the
+  // Market cache does not carry. Measured live 2026-08-03: the league words alone matched 0 of 600
+  // soccer markets resolving inside the deck's 72h window, so soccer cards were badging as a
+  // generic "Sports" and never got the pitch art (see ui.isFootball -> skins.tsx).
+  //
+  // So we also match the bet VOCABULARY, which is soccer-exclusive (corners, both teams to score,
+  // clean sheet, own goal, draws — no other sport here has a draw), plus the match-shape words.
+  // Being the LAST row is what makes that safe: anything reaching here already failed NBA / NFL /
+  // MLB / NHL / UFC / Boxing / F1 / Tennis / Cricket / Golf.
+  //
+  // A bare "O/U N" carries no sport at all, so it is admitted only at a plausible GOAL line. The
+  // bound is load-bearing, not decoration: NFL totals sit at 32.5+ and matched here before it
+  // existed (measured: 6 of 11 NFL rows badged Soccer). <=4.5 keeps 96% of real soccer goal totals
+  // (they run 0.5-5.5, 88% at or under 2.5) while staying clear of the 5.5/6.5 band where NHL goal
+  // totals live — the one collision class this rule cannot see, since a hockey total names no sport
+  // either. Measured with the bound: 90% of soccer claimed, 0 false positives across NBA/NFL/MLB/NHL.
+  // ponytail: line bound is a calibration knob, not a truth. Re-measure it if a league shifts its
+  // totals, and tighten toward 2.5 if hockey ever starts showing a pitch.
+  [/\b(soccer|football|premier league|la liga|serie a|bundesliga|ligue 1|champions league|world cup|epl|ucl|corners?|both teams to score|btts|clean sheet|own goal|to score first|draw|exact score|half.?time)\b|\bo\/u\s*[0-4]\.5\b/i, "Soccer"],
 ];
 const ESPORT_GAMES: [RegExp, string][] = [
   [/\b(dota\s*2?|dota)\b/i, "Dota 2"],

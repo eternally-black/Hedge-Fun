@@ -47,6 +47,36 @@ assert.strictEqual(gameOf(mk("NBA: Lakers @ Celtics", "Lakers", "Celtics")), "NB
 assert.strictEqual(gameOf(mk("UFC 300: Jones vs Aspinall", "Jones", "Aspinall")), "UFC");
 assert.strictEqual(gameOf(mk("Soccer: Bosnia vs. Qatar", "Bosnia", "Qatar")), "Soccer", "soccer word -> Soccer");
 assert.strictEqual(gameOf(mk("Premier League: Arsenal vs Spurs", "Arsenal", "Spurs")), "Soccer", "league name -> Soccer");
+
+// Real Polymarket soccer names no league at all — the league is only in the slug, which we never see.
+// These are verbatim live questions (2026-08-03); before the bet-vocabulary rule every one of them
+// badged as a generic "Sports" and lost the pitch art. Keep them REAL: a paraphrase would pass while
+// the actual feed still failed.
+const soccer = (q: string, y = "Over", n = "Under") =>
+  assert.strictEqual(gameOf(mk(q, y, n)), "Soccer", `live soccer shape -> Soccer: ${q}`);
+soccer("FSK Bukovyna Chernivtsi vs. FK LNZ Cherkasy: O/U 9.5 Total Corners");
+soccer("Celtic FC vs. Dundee FC: Dundee FC O/U 3.5 Corners");
+soccer("FK Auda Riga vs. Ogre United: Both Teams to Score in First Half", "Yes", "No");
+soccer("FK Kudrivka vs. FK Shakhtar Donetsk: Second half draw?", "Yes", "No");
+soccer("Will FK Auda Riga vs. Ogre United end in a draw?", "Yes", "No");
+soccer("Exact Score: FK Shakhtar Donetsk 3 - 0 FK Kudrivka?", "Yes", "No");
+soccer("FK Panevezys vs. Dziugas: Dziugas 1st Half O/U 0.5");
+soccer("Seinajoen JK vs. HJK Helsinki: HJK Helsinki O/U 2.5"); // bare goal total, inside the bound
+
+// The reverse bug this fixes: cricket used to be claimed by the soccer row's "premier league" token.
+assert.strictEqual(
+  gameOf(mk("Kuwait Kerala Premier League T20: Palakad Patriots vs Blasters Cochin", "Palakad Patriots", "Blasters Cochin")),
+  "Cricket",
+  "T20 is cricket, even though the name contains 'Premier League'",
+);
+
+// The bare-O/U line bound is load-bearing: NFL/NBA/MLB totals name no sport either, and without the
+// bound they matched the soccer row. Any of these regressing means the deck badges other sports as
+// football and paints them with a pitch.
+assert.strictEqual(gameOf(mk("Panthers vs. Cardinals: O/U 32.5", "Over", "Under")), null, "NFL total is not soccer");
+assert.strictEqual(gameOf(mk("Lakers @ Celtics: Total Points O/U 210.5", "Over", "Under")), null, "NBA total is not soccer");
+assert.strictEqual(gameOf(mk("Yankees vs. Red Sox: O/U 8.5", "Over", "Under")), null, "MLB total is not soccer");
+assert.strictEqual(gameOf(mk("Rangers vs. Bruins: O/U 5.5", "Over", "Under")), null, "NHL goal total sits above the bound");
 // recognized sport but no specific league word -> null (caller shows generic "Sports")
 assert.strictEqual(gameOf(mk("Spread: Team A (-1.5)", "Team A", "Team B")), null, "bare spread, no league -> null");
 assert.strictEqual(gameOf(mk("Bosnia vs. Qatar match", "Bosnia", "Qatar")), null, "bare match, no league word -> null (falls back to Sports)");
