@@ -99,6 +99,12 @@ export function sideLabels(card: Pick<Card, "question" | "outcomeYesLabel" | "ou
 // the same reason: "outscore", "clean sheet", "handicap", bare "corners" (say corner kicks), and
 // "this team" where the question names the team. scripts/test-side-labels.ts asserts against them.
 
+// Proof that a market is football, not merely shaped like one. Only soccer-EXCLUSIVE vocabulary
+// counts: a bare "A vs. B: O/U 2.5" names no sport at all, and reading it as goals put "4 or more
+// goals" on a tennis card and a football pitch on chess. Missing a hint is invisible; a confident
+// wrong one is not.
+const SOCCER_PROOF = /\b(soccer|football|premier league|la liga|serie a|bundesliga|ligue 1|champions league|world cup|epl|ucl|corners?|both teams to score|btts|clean sheet|own goal)\b/i;
+
 interface SoccerOu {
   scope: "" | "first half" | "second half";
   subject: string | null; // one of the two teams, or null for a match total
@@ -123,7 +129,9 @@ function parseSoccerOu(question: string): SoccerOu | null {
   // (88% at or under 2.5); NFL sits at 32.5+, MLB at 7.5+, and NHL owns the 5.5/6.5 band. The 4%
   // of soccer above the bound just fall back to the generic line — quiet beats confidently wrong.
   // ponytail: calibration knob, not a truth. Re-measure if a league moves its totals.
-  if (metric === "goals" && line > 4.5) return null;
+  // Corners are proof in themselves. Goals are not: only claim them when the question says
+  // somewhere that this is football, otherwise stay quiet and let the generic line handle it.
+  if (metric === "goals" && (!SOCCER_PROOF.test(question) || line > 4.5)) return null;
   let rest = (prefix ?? "").trim();
   let scope: SoccerOu["scope"] = "";
   const half = rest.match(/\b(1st|2nd|First|Second)\s+Half\b/i);
@@ -140,9 +148,11 @@ function parseSoccerOu(question: string): SoccerOu | null {
   return { scope, subject, metric, line };
 }
 
-// A .5 line is really "n+1 or more" — that is how a person says it. Whole lines have no such reading
-// (a push is possible), so they keep "more than n".
-const atLeast = (n: number) => (Number.isInteger(n) ? null : Math.ceil(n));
+// A .5 line is really "n+1 or more" — that is how a person says it. ONLY a .5 line: a whole line can
+// push, and a quarter line (2.25) half-pushes at exactly 2, so "3 or more" would be a lie about the
+// payout. Both fall back to "more than n". The feed only produces .5 today; this is the guard for
+// the day it doesn't.
+const atLeast = (n: number) => (n % 1 === 0.5 ? Math.ceil(n) : null);
 
 function soccerOuHint(o: SoccerOu): string {
   const where = o.scope ? ` in the ${o.scope}` : " in the match";
@@ -166,16 +176,18 @@ const SOCCER_HINTS: [RegExp, (m: RegExpMatchArray) => string][] = [
   [/^Will\s+.+?\s+vs\.?\s+.+?\s+end in a draw\?$/i, () => "Will the match finish with neither team winning?"],
   [/Total Corners Odd or Even\?$/i, () => "Will the total number of corner kicks be an odd or an even number?"],
   [/Team to Take First Corner$/i, () => "Which team takes the first corner kick of the match?"],
-  [/Neither team to score first\?$/i, () => "Will the match finish 0-0, with no goals at all?"],
-  [/^(.+?)\s+to score first vs\.?\s+.+?\?$/i, (m) => `Will ${m[1]} score the first goal of the match?`],
+  [/Neither team to score first\?$/i, () => "Will the match end with neither team scoring?"],
+  // Below here the SHAPE is not soccer-exclusive — NFL and NBA generate the same slugs — so the
+  // wording carries no units. "win by 2 or more goals" on a baseball spread was a real bug.
+  [/^(.+?)\s+to score first vs\.?\s+.+?\?$/i, (m) => `Will ${m[1]} score first?`],
   [/^(.+?)\s+leading at halftime\?$/i, (m) => `Will ${m[1]} be ahead at half-time?`],
-  [/^(.+?)\s+to win the second half\?$/i, (m) => `Will ${m[1]} score more goals than their opponent in the second half?`],
+  [/^(.+?)\s+to win the second half\?$/i, (m) => `Will ${m[1]} score more than their opponent in the second half?`],
   [/^Exact Score:\s*(.+?)\s+(\d+)\s*-\s*(\d+)\s+.+?\?$/i, (m) => `Will the match finish exactly ${m[2]}-${m[3]} to ${m[1]}?`],
   [/^Exact Score:\s*Any Other Score\?$/i, () => "Will the final score be none of the ones listed?"],
   // A handicap, spelled out. The user never sees the word.
   [/^Spread:\s*(.+?)\s*\(-([\d.]+)\)$/i, (m) => {
     const k = atLeast(parseFloat(m[2]!));
-    return k !== null ? `Will ${m[1]} win by ${k} or more goals?` : `Will ${m[1]} win by more than ${m[2]} goals?`;
+    return k !== null ? `Will ${m[1]} win by ${k} or more?` : `Will ${m[1]} win by more than ${m[2]}?`;
   }],
 ];
 

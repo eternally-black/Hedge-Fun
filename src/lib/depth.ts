@@ -16,6 +16,13 @@
 // VWAP. That is churn across the most safety-critical assertions in the repo for no product gain.
 // ponytail: ~6 small branches kept for test fixtures. Delete them when those suites move to a
 // stubbed book — the seam already exists, it just wasn't worth spending on today.
+//
+// WARNING for whoever adds a THIRD market source. These sites are keyed on the BOOK-BACKED pole
+// (`source === "POLYMARKET"`), so a new source silently inherits the BOOKLESS treatment: its stored
+// mid served as authoritative, no live re-quote at bet time, no depth gate, no staleness bound,
+// `live:false`. That is the dangerous direction to fail in. Add a `sourceHasClobBook(source)`
+// predicate here and route all six sites through it, so a new source forces one explicit decision
+// instead of six silent ones.
 
 import {
   STAKE_CENTS,

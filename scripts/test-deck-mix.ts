@@ -57,11 +57,8 @@ const soccer = (q: string, y = "Over", n = "Under") =>
 soccer("FSK Bukovyna Chernivtsi vs. FK LNZ Cherkasy: O/U 9.5 Total Corners");
 soccer("Celtic FC vs. Dundee FC: Dundee FC O/U 3.5 Corners");
 soccer("FK Auda Riga vs. Ogre United: Both Teams to Score in First Half", "Yes", "No");
-soccer("FK Kudrivka vs. FK Shakhtar Donetsk: Second half draw?", "Yes", "No");
 soccer("Will FK Auda Riga vs. Ogre United end in a draw?", "Yes", "No");
 soccer("Exact Score: FK Shakhtar Donetsk 3 - 0 FK Kudrivka?", "Yes", "No");
-soccer("FK Panevezys vs. Dziugas: Dziugas 1st Half O/U 0.5");
-soccer("Seinajoen JK vs. HJK Helsinki: HJK Helsinki O/U 2.5"); // bare goal total, inside the bound
 
 // The reverse bug this fixes: cricket used to be claimed by the soccer row's "premier league" token.
 assert.strictEqual(
@@ -70,13 +67,26 @@ assert.strictEqual(
   "T20 is cricket, even though the name contains 'Premier League'",
 );
 
-// The bare-O/U line bound is load-bearing: NFL/NBA/MLB totals name no sport either, and without the
-// bound they matched the soccer row. Any of these regressing means the deck badges other sports as
-// football and paints them with a pitch.
-assert.strictEqual(gameOf(mk("Panthers vs. Cardinals: O/U 32.5", "Over", "Under")), null, "NFL total is not soccer");
-assert.strictEqual(gameOf(mk("Lakers @ Celtics: Total Points O/U 210.5", "Over", "Under")), null, "NBA total is not soccer");
-assert.strictEqual(gameOf(mk("Yankees vs. Red Sox: O/U 8.5", "Over", "Under")), null, "MLB total is not soccer");
-assert.strictEqual(gameOf(mk("Rangers vs. Bruins: O/U 5.5", "Over", "Under")), null, "NHL goal total sits above the bound");
+// ---- what the soccer row must NOT claim ----
+// A bare "A vs. B: O/U n" names no sport. It was briefly admitted at a "plausible goal line" (<=4.5),
+// which bought recall and badged everything missing from SPORT_GAMES: tennis, esports, chess. Being
+// the last row means unlisted disciplines land here, so only soccer-EXCLUSIVE vocabulary may match.
+// A missing badge is invisible; a football pitch on a tennis card is a visible lie.
+const notSoccer = (q: string, y = "Over", n = "Under") =>
+  assert.strictEqual(gameOf(mk(q, y, n)), null, `must not be claimed as soccer: ${q}`);
+notSoccer("Alcaraz vs. Sinner: O/U 3.5"); // tennis sets — no sport word anywhere
+notSoccer("NAVI vs. FaZe: O/U 2.5"); // esports without a game token
+notSoccer("Panthers vs. Cardinals: O/U 32.5"); // NFL
+notSoccer("Lakers @ Celtics: Total Points O/U 210.5"); // NBA
+notSoccer("Yankees vs. Red Sox: O/U 8.5"); // MLB
+notSoccer("Rangers vs. Bruins: O/U 5.5"); // NHL
+notSoccer("Carlsen vs. Nepo: Draw?", "Yes", "No"); // chess: a bare "draw" is not football
+notSoccer("Boston Celtics leading at halftime?", "Yes", "No"); // NBA has halves too
+notSoccer("Kansas City Chiefs to score first vs. Buffalo Bills?", "Yes", "No"); // so does the NFL
+// The cost of that strictness, stated so nobody "fixes" it back: real soccer whose question carries
+// no exclusive word loses the badge. This is the deliberate trade, not an oversight.
+notSoccer("FK Kudrivka vs. FK Shakhtar Donetsk: Second half draw?", "Yes", "No");
+notSoccer("Seinajoen JK vs. HJK Helsinki: HJK Helsinki O/U 2.5");
 // recognized sport but no specific league word -> null (caller shows generic "Sports")
 assert.strictEqual(gameOf(mk("Spread: Team A (-1.5)", "Team A", "Team B")), null, "bare spread, no league -> null");
 assert.strictEqual(gameOf(mk("Bosnia vs. Qatar match", "Bosnia", "Qatar")), null, "bare match, no league word -> null (falls back to Sports)");

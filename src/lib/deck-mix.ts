@@ -120,15 +120,16 @@ const SPORT_GAMES: [RegExp, string][] = [
   // Being the LAST row is what makes that safe: anything reaching here already failed NBA / NFL /
   // MLB / NHL / UFC / Boxing / F1 / Tennis / Cricket / Golf.
   //
-  // A bare "O/U N" carries no sport at all, so it is admitted only at a plausible GOAL line. The
-  // bound is load-bearing, not decoration: NFL totals sit at 32.5+ and matched here before it
-  // existed (measured: 6 of 11 NFL rows badged Soccer). <=4.5 keeps 96% of real soccer goal totals
-  // (they run 0.5-5.5, 88% at or under 2.5) while staying clear of the 5.5/6.5 band where NHL goal
-  // totals live — the one collision class this rule cannot see, since a hockey total names no sport
-  // either. Measured with the bound: 90% of soccer claimed, 0 false positives across NBA/NFL/MLB/NHL.
-  // ponytail: line bound is a calibration knob, not a truth. Re-measure it if a league shifts its
-  // totals, and tighten toward 2.5 if hockey ever starts showing a pitch.
-  [/\b(soccer|football|premier league|la liga|serie a|bundesliga|ligue 1|champions league|world cup|epl|ucl|corners?|both teams to score|btts|clean sheet|own goal|to score first|draw|exact score|half.?time)\b|\bo\/u\s*[0-4]\.5\b/i, "Soccer"],
+  // A bare "A vs. B: O/U 2.5" is deliberately NOT claimed. It was, briefly, at a "plausible goal
+  // line" (<=4.5) — which bought ~40 points of recall and quietly badged tennis, esports and any
+  // other discipline missing from this table: "Alcaraz vs. Sinner: O/U 3.5" got a football pitch.
+  // A bare total names no sport, and no line bound can invent one; the earlier NBA/NFL/MLB/NHL
+  // measurement simply didn't cover the disciplines that aren't in this table at all. Missing a
+  // badge is invisible; a pitch on a tennis card is a visible lie. So: only vocabulary that is
+  // soccer-exclusive counts.
+  // ponytail: costs recall (~90% -> ~50% of soccer named). The honest way to win it back is a
+  // league signal in the data — Gamma's slug carries it (ukr1-…) but Market doesn't store it.
+  [/\b(soccer|football|premier league|la liga|serie a|bundesliga|ligue 1|champions league|world cup|epl|ucl|corners?|both teams to score|btts|clean sheet|own goal|end in a draw|exact score)\b/i, "Soccer"],
 ];
 const ESPORT_GAMES: [RegExp, string][] = [
   [/\b(dota\s*2?|dota)\b/i, "Dota 2"],

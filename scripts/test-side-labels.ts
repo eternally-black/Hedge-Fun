@@ -52,10 +52,16 @@ assert.strictEqual(hint("FK Shakhtar Donetsk vs. FK Kudrivka: O/U 9.5 Total Corn
   "Will there be 10 or more corner kicks in the match?", "match corner total");
 assert.strictEqual(hint("FK Auda Riga vs. Ogre United: 2nd Half O/U 4.5 Total Corners"),
   "Will there be 5 or more corner kicks in the second half?", "second-half corner total");
+// Goals are only claimed when the question PROVES it is football. A bare "A vs. B: O/U 3.5" does
+// not: read as goals it produced "4 or more goals" on a tennis card. It now falls back to the
+// generic line — vague, but never wrong.
 assert.strictEqual(hint("FK Auda Riga vs. Ogre United: O/U 3.5"),
-  "Will there be 4 or more goals in the match?", "match goal total");
+  "Will the total be over or under 3.5?", "bare total proves nothing -> generic line");
 assert.strictEqual(hint("Seinajoen JK vs. HJK Helsinki: HJK Helsinki 2nd Half O/U 1.5"),
-  "Will HJK Helsinki score 2 or more goals in the second half?", "team goal total, second half");
+  "Will the total be over or under 1.5?", "bare team total proves nothing either");
+// With proof present (a corners sibling names the sport), goals are safe to name.
+assert.strictEqual(hint("Arsenal vs. Spurs (Premier League): O/U 3.5"),
+  "Will there be 4 or more goals in the match?", "league word proves football -> goals named");
 assert.strictEqual(hint("Seinajoen JK vs. HJK Helsinki: Seinajoen JK O/U 3.5 Corners"),
   "Will Seinajoen JK take 4 or more corner kicks in the match?", "team corner total");
 // A subject that matches neither team is not a shape we understand -> stay quiet rather than guess.
@@ -72,24 +78,37 @@ assert.strictEqual(yn("FK Auda Riga vs. Ogre United: Both Teams to Score in Firs
 // scored as its own match, so 2-1 at the break finishing 3-2 is a 1-1 second half.
 assert.strictEqual(yn("FK Kudrivka vs. FK Shakhtar Donetsk: Second half draw?"),
   "Will both teams score the same number of goals in the second half?");
+// Cross-sport SHAPES carry no units: NFL and NBA generate the same slugs, and "win by 2 or more
+// goals" on a baseball spread was a real bug found in audit.
+assert.strictEqual(marketHint(card("Spread: Boston Red Sox (-1.5)", "Boston Red Sox", "Colorado Rockies")),
+  "Will Boston Red Sox win by 2 or more?", "spread wording is unit-free");
+assert.strictEqual(yn("Kansas City Chiefs to score first vs. Buffalo Bills?"),
+  "Will Kansas City Chiefs score first?", "score-first wording is unit-free");
+assert.strictEqual(yn("Boston Celtics to win the second half?"),
+  "Will Boston Celtics score more than their opponent in the second half?", "second-half wording is unit-free");
+// And a bare total on a non-soccer card must never be read as goals.
+assert.strictEqual(hint("Alcaraz vs. Sinner: O/U 3.5"),
+  "Will the total be over or under 3.5?", "tennis total is not given a goals sentence");
+assert.strictEqual(hint("NAVI vs. FaZe: O/U 2.5"),
+  "Will the total be over or under 2.5?", "esports total is not given a goals sentence");
 assert.strictEqual(yn("FK Kudrivka vs. FK Shakhtar Donetsk: Draw at halftime?"),
   "Will the score be equal at half-time?");
 assert.strictEqual(yn("Will FK Auda Riga vs. Ogre United end in a draw?"),
   "Will the match finish with neither team winning?");
 assert.strictEqual(yn("FK Auda Riga vs. Ogre United: Neither team to score first?"),
-  "Will the match finish 0-0, with no goals at all?");
+  "Will the match end with neither team scoring?");
 assert.strictEqual(yn("FK Shakhtar Donetsk to score first vs. FK Kudrivka?"),
-  "Will FK Shakhtar Donetsk score the first goal of the match?");
+  "Will FK Shakhtar Donetsk score first?");
 assert.strictEqual(yn("FK Auda Riga leading at halftime?"),
   "Will FK Auda Riga be ahead at half-time?");
 assert.strictEqual(yn("Ogre United to win the second half?"),
-  "Will Ogre United score more goals than their opponent in the second half?");
+  "Will Ogre United score more than their opponent in the second half?");
 assert.strictEqual(yn("Exact Score: FK Shakhtar Donetsk 3 - 0 FK Kudrivka?"),
   "Will the match finish exactly 3-0 to FK Shakhtar Donetsk?");
 assert.strictEqual(yn("Exact Score: Any Other Score?"),
   "Will the final score be none of the ones listed?");
 assert.strictEqual(marketHint(card("Spread: FK Shakhtar Donetsk (-1.5)", "FK Shakhtar Donetsk", "FK Kudrivka")),
-  "Will FK Shakhtar Donetsk win by 2 or more goals?", "handicap spelled out, the word never shown");
+  "Will FK Shakhtar Donetsk win by 2 or more?", "handicap spelled out, the word never shown");
 assert.strictEqual(marketHint(card("FK Auda Riga vs. Ogre United: Total Corners Odd or Even?", "Odd", "Even")),
   "Will the total number of corner kicks be an odd or an even number?");
 
@@ -145,6 +164,13 @@ assert.strictEqual(marketHint(card("Panthers vs. Cardinals: O/U 32.5", "Over", "
     "FK Auda Riga vs. Ogre United: Total Corners Odd or Even?",
     "Map 1 Total Rounds: Over/Under 21.5",
     "Bosnia vs. Qatar",
+    "Alcaraz vs. Sinner: O/U 3.5",
+    "NAVI vs. FaZe: O/U 2.5",
+    "Boston Celtics leading at halftime?",
+    "Kansas City Chiefs to score first vs. Buffalo Bills?",
+    "Arsenal vs. Spurs (Premier League): O/U 3.5",
+    "A vs. B: O/U 2.25",
+    "A vs. B: O/U 3",
   ];
   for (const q of cases) {
     assert.strictEqual(mobileSoccerHint(q), soccerHint(q), `web/mobile soccer hint drift on: ${q}`);

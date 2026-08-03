@@ -70,6 +70,12 @@ export function sideLabels(card: Pick<DeckCard, "question" | "outcomeYesLabel" |
 // The bar is READABLE BY SOMEONE WHO DOES NOT FOLLOW FOOTBALL — no "level", "outscore", "clean
 // sheet", "handicap", no bare "corners", and never "this team" where the question names the team.
 
+// Proof that a market is football, not merely shaped like one. Only soccer-EXCLUSIVE vocabulary
+// counts: a bare "A vs. B: O/U 2.5" names no sport at all, and reading it as goals put "4 or more
+// goals" on a tennis card and a football pitch on chess. Missing a hint is invisible; a confident
+// wrong one is not.
+const SOCCER_PROOF = /\b(soccer|football|premier league|la liga|serie a|bundesliga|ligue 1|champions league|world cup|epl|ucl|corners?|both teams to score|btts|clean sheet|own goal)\b/i;
+
 interface SoccerOu {
   scope: "" | "first half" | "second half";
   subject: string | null;
@@ -89,7 +95,9 @@ function parseSoccerOu(question: string): SoccerOu | null {
   // "A vs. B: O/U n" names no sport, so a bare total is only read as GOALS at a plausible goal line
   // — same bound as deck-mix's Soccer row on web. Without it "Panthers vs. Cardinals: O/U 32.5"
   // reads out as "33 or more goals". Soccer totals run 0.5-5.5; NFL 32.5+, MLB 7.5+, NHL 5.5/6.5.
-  if (metric === "goals" && line > 4.5) return null;
+  // Corners are proof in themselves. Goals are not: only claim them when the question says
+  // somewhere that this is football, otherwise stay quiet and let the generic line handle it.
+  if (metric === "goals" && (!SOCCER_PROOF.test(question) || line > 4.5)) return null;
   let rest = (prefix ?? "").trim();
   let scope: SoccerOu["scope"] = "";
   const half = rest.match(/\b(1st|2nd|First|Second)\s+Half\b/i);
@@ -106,8 +114,9 @@ function parseSoccerOu(question: string): SoccerOu | null {
   return { scope, subject, metric, line };
 }
 
-// A .5 line is really "n+1 or more"; whole lines keep "more than n" (a push is possible there).
-const atLeast = (n: number) => (Number.isInteger(n) ? null : Math.ceil(n));
+// A .5 line is really "n+1 or more". ONLY .5: a whole line can push and a quarter line (2.25)
+// half-pushes at exactly 2, so "3 or more" would misstate the payout. Both fall back to "more than n".
+const atLeast = (n: number) => (n % 1 === 0.5 ? Math.ceil(n) : null);
 
 function soccerOuHint(o: SoccerOu): string {
   const where = o.scope ? ` in the ${o.scope}` : " in the match";
@@ -130,15 +139,17 @@ const SOCCER_HINTS: [RegExp, (m: RegExpMatchArray) => string][] = [
   [/^Will\s+.+?\s+vs\.?\s+.+?\s+end in a draw\?$/i, () => "Will the match finish with neither team winning?"],
   [/Total Corners Odd or Even\?$/i, () => "Will the total number of corner kicks be an odd or an even number?"],
   [/Team to Take First Corner$/i, () => "Which team takes the first corner kick of the match?"],
-  [/Neither team to score first\?$/i, () => "Will the match finish 0-0, with no goals at all?"],
-  [/^(.+?)\s+to score first vs\.?\s+.+?\?$/i, (m) => `Will ${m[1]} score the first goal of the match?`],
+  [/Neither team to score first\?$/i, () => "Will the match end with neither team scoring?"],
+  // Below here the SHAPE is not soccer-exclusive — NFL and NBA generate the same slugs — so the
+  // wording carries no units. "win by 2 or more goals" on a baseball spread was a real bug.
+  [/^(.+?)\s+to score first vs\.?\s+.+?\?$/i, (m) => `Will ${m[1]} score first?`],
   [/^(.+?)\s+leading at halftime\?$/i, (m) => `Will ${m[1]} be ahead at half-time?`],
-  [/^(.+?)\s+to win the second half\?$/i, (m) => `Will ${m[1]} score more goals than their opponent in the second half?`],
+  [/^(.+?)\s+to win the second half\?$/i, (m) => `Will ${m[1]} score more than their opponent in the second half?`],
   [/^Exact Score:\s*(.+?)\s+(\d+)\s*-\s*(\d+)\s+.+?\?$/i, (m) => `Will the match finish exactly ${m[2]}-${m[3]} to ${m[1]}?`],
   [/^Exact Score:\s*Any Other Score\?$/i, () => "Will the final score be none of the ones listed?"],
   [/^Spread:\s*(.+?)\s*\(-([\d.]+)\)$/i, (m) => {
     const k = atLeast(parseFloat(m[2]!));
-    return k !== null ? `Will ${m[1]} win by ${k} or more goals?` : `Will ${m[1]} win by more than ${m[2]} goals?`;
+    return k !== null ? `Will ${m[1]} win by ${k} or more?` : `Will ${m[1]} win by more than ${m[2]}?`;
   }],
 ];
 
