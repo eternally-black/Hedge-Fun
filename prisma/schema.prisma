@@ -42,7 +42,11 @@ enum MarketOutcome {
 
 enum MarketSource {
   POLYMARKET // cached from Polymarket Gamma; polymarketId = conditionId; settled via fetchResolution
-  TXODDS // TxOdds TxLINE football (World Cup); polymarketId = "txline:{fixtureId}:{kind}"; settled from scores
+  // DEAD as a live source: the TxOdds TxLINE World Cup integration was removed 2026-08-03 (see
+  // docs/archive/). Kept because dropping an enum value means recreating the type in Postgres for no
+  // gain, the historical rows below still reference it, and four DB test suites seed it as their
+  // "no CLOB book" fixture. Nothing writes new TXODDS rows.
+  TXODDS
 }
 
 enum SettlementStatus {
@@ -158,16 +162,18 @@ model User {
 
 model Market {
   id           String       @id @default(cuid())
-  // External market id + unique upsert key. POLYMARKET: the Gamma conditionId. TXODDS: a synthetic
-  // "txline:{fixtureId}:{kind}" (kind = OU15|OU25|OU35) — reusing this key avoids a nullable migration.
+  // External market id + unique upsert key. POLYMARKET: the Gamma conditionId. Historical TXODDS
+  // rows carry a synthetic "txline:{fixtureId}:{kind}" here (see the enum note above).
   polymarketId String       @unique
   source       MarketSource @default(POLYMARKET)
   question     String
   category     String? // usually null on Gamma; derived/optional
   imageUrl     String?
 
-  // Verifiable settlement (TXODDS): the score the bet settled on is anchored to a Solana Merkle root
-  // (TxLINE daily_scores_roots). Drives the "⛓ Solana-anchored" badge on settled football results.
+  // Verifiable settlement. Was set by the TxOdds integration (scores anchored to a Solana Merkle
+  // root) and drove a "⛓ Solana-anchored" badge. Nothing writes these anymore and no client reads
+  // them; kept so the 7 historical settled rows stay truthful and a future verifiable source needs
+  // no migration. /api/results still emits the keys as false/null — see src/lib/api-types.ts.
   verifiedOnChain Boolean @default(false)
   onchainRef      String? // Solscan-able link/ref to the on-chain anchor (TxLINE program / daily root)
 
@@ -186,7 +192,7 @@ model Market {
   // (Gamma clobTokenIds[0/1]). The four eff/max numbers come from walking the live book: per side,
   // the VWAP to BUY STAKE_CENTS of that token and the stake the book absorbs within the eligibility
   // slippage cap (src/lib/depth.ts), anchored to bookTsAt = when the book behind them was read.
-  // NULL for TXODDS rows (no CLOB book — the synthetic odds path stays authoritative there) and for
+  // NULL for bookless-source rows (no CLOB book — their stored odds stay authoritative) and for
   // POLYMARKET rows whose book read failed. Additive only — nothing above is renamed or dropped.
   yesTokenId       String?
   noTokenId        String?
@@ -212,7 +218,7 @@ model Market {
 
   @@index([status, resolutionDeadline]) // deck assembly
   @@index([status, resolvedAt]) // settlement scan
-  @@index([source, status, resolutionDeadline]) // football-only deck filter (?sport=football)
+  @@index([source, status, resolutionDeadline]) // per-source scans (the ?sport= filter it was added for is gone)
   @@map("markets")
 }
 

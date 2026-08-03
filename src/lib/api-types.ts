@@ -42,8 +42,8 @@ export interface DeckCard {
   outcomeNoLabel: string;
   // Basis points (5150 = 51.5¢). The price this side COSTS: for a Polymarket market the book-walked
   // VWAP for a $10 stake (D10) — NEVER the Gamma mid; a Polymarket row with no fresh-enough book
-  // read is simply not served. For TXODDS football the synthetic odds (authoritative there, not a
-  // fallback). Sides need NOT sum to 10000 (real spread). The bet-lock path re-quotes live — treat
+  // read is simply not served. A bookless-source row serves its stored odds instead (authoritative
+  // there, not a fallback). Sides need NOT sum to 10000 (real spread). The bet-lock path re-quotes live — treat
   // these as display prices.
   yesPriceBp: number;
   noPriceBp: number;
@@ -68,35 +68,13 @@ export interface QuoteRow {
   yesPriceBp: number | null;
   noPriceBp: number | null;
   asOfMs: number | null; // when the book behind the pair was read (older of the two sides)
-  live: boolean; // false = TXODDS synthetic odds (no CLOB book exists; not a degraded read)
+  // false = the row has no CLOB book at all and answered from its stored odds — NOT a degraded or
+  // stale read. Kept in the contract (both clients bind to it) even though every live market is now
+  // book-backed; deprecate it on its own, not folded into an unrelated change.
+  live: boolean;
 }
 export interface QuotesResponse {
   quotes: QuoteRow[];
-}
-
-// ─── GET /api/football/ticker ──────────────────────────────────────────────────────────────────
-// Auth: Bearer. Live World Cup ticker rows from TxLine (server-cached, read-only display). Ordered
-// live first, then upcoming (nearest kickoff), then recently ended. homeGoals/awayGoals null pre-match;
-// over25Pct = demarginalized Over-2.5-goals probability % (null if not offered / quarter line);
-// homeWinPct/awayWinPct = demarginalized 1X2 win probability % (null if not offered); phase:
-// "1H" | "HT" | "2H" | "FT" | "" (upcoming).
-export interface TickerRow {
-  fixtureId: string;
-  competition: string;
-  home: string;
-  away: string;
-  homeGoals: number | null;
-  awayGoals: number | null;
-  live: boolean;
-  ended: boolean;
-  phase: string;
-  kickoff: string; // ISO-8601
-  over25Pct: number | null;
-  homeWinPct: number | null;
-  awayWinPct: number | null;
-}
-export interface TickerResponse {
-  rows: TickerRow[];
 }
 
 // ─── GET /api/feed ─────────────────────────────────────────────────────────────────────────────
@@ -113,7 +91,7 @@ export interface FeedResponse {
 // Auth: Bearer. Body: FeedBetRequest. Paper bet on a feed market — same $10 stake/cash-hold as a
 // swipe, but NO points and NO daily cap (shards still accrue on a win, uncapped). NOT gated by the
 // swipe cap (the feed is what you get AFTER the cap). Locks the side's EXECUTABLE price (live CLOB
-// re-quote for Polymarket; synthetic odds for TXODDS). Errors: 400 (bad body), 402 (insufficient
+// re-quote; a bookless source keeps its stored odds). Errors: 400 (bad body), 402 (insufficient
 // Cash — { error: "insufficient_funds" }), 409 (market not open / already bet / market_expired /
 // market_untradable — the book cannot fill the stake), 502 (book_unavailable — CLOB book missing
 // or older than the freshness policy; retry, never a mid fallback).
@@ -126,23 +104,9 @@ export interface FeedBetResponse {
   betId: string;
 }
 
-// ─── GET /api/football/match ─────────────────────────────────────────────────────────────────────
-// Auth: Bearer. Query ?fixtureId=<id>. The relevant binary markets for ONE World Cup fixture —
-// "{team} to win?" (from 1X2) + Over/Under total goals (1.5/2.5/3.5) — read from the cached TXODDS
-// Market rows (the same store the deck/feed read; NOT band-filtered, so favorites show too). Cards
-// reuse DeckCard; placedSide = the side the user already bet on that market (null if none), so the
-// detail view shows it locked. Bet via POST /api/feed/bet (these are ordinary Market rows). Empty
-// cards = no odds offered for this fixture yet (O/U coverage is bursty). 400 if fixtureId is missing.
-export interface FootballMarketCard extends DeckCard {
-  placedSide?: BetSide | null;
-}
-export interface FootballMatchResponse {
-  cards: FootballMarketCard[];
-}
-
 // ─── POST /api/swipe ───────────────────────────────────────────────────────────────────────────
 // Auth: Bearer. Body: SwipeRequest. Paper bet Yes/No on a deck market; locks the bought side's
-// EXECUTABLE price (live CLOB re-quote for Polymarket; synthetic odds for TXODDS).
+// EXECUTABLE price (live CLOB re-quote; a bookless source keeps its stored odds).
 // Errors: 400 (bad body), 409 (market not open / already swiped this market / market_expired /
 //         market_untradable — the book cannot fill the stake / price_moved — the live book moved
 //         against the quote the client displayed; body carries { freshPriceBp } so the card can

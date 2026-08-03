@@ -9,8 +9,7 @@
 // bookTsAt = now) so an already-cached row stops serving within this tick instead of lingering on
 // stale eff prices until the display-staleness bound — and "read and untradable" (bookTsAt set, eff
 // null) is distinguishable from "never read" (both null). Rows never evaluated are left untouched
-// (fetchBlitzDeck breaks early once its buckets fill). TXODDS football rows are untouched here
-// (they are owned by refresh-football.ts and have no CLOB book — their new columns stay NULL).
+// (fetchBlitzDeck breaks early once its buckets fill).
 import { PrismaClient } from "@prisma/client";
 import { fetchBlitzDeck } from "../src/lib/polymarket";
 import { DECK_FETCH_HORIZON_HOURS } from "../src/lib/deck-mix";

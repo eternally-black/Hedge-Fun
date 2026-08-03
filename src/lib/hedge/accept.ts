@@ -1,6 +1,6 @@
 // Accept a hedge suggestion -> a STANDARD paper Bet (D6). Re-derives the suggestion server-side from
 // its id (never trusts client-sent market/side/stake), locks the EXECUTABLE price of the chosen side
-// (D10: a live CLOB re-quote for POLYMARKET rows, never the Gamma mid; TXODDS keeps its synthetic
+// (D10: a live CLOB re-quote for POLYMARKET rows, never the Gamma mid; a bookless source keeps its stored
 // odds), and holds the VARIABLE stake against Cash with the SAME atomic model as a swipe (D8).
 // Idempotent: a re-accept returns the existing bet. The bet is source=HEDGE (no points, no daily
 // cap) but otherwise an ordinary Bet row, so the existing settlement poller settles it unchanged.
@@ -75,7 +75,7 @@ export async function acceptSuggestion(userId: string, sid: string): Promise<Acc
   const marketId = s.id;
 
   // 3) Validate the market is still tradable and lock the CURRENT price of the hedge side (D10:
-  // the EXECUTABLE price for POLYMARKET — re-quoted live off the CLOB book; TXODDS keeps its
+  // the EXECUTABLE price for POLYMARKET — re-quoted live off the CLOB book; a bookless source keeps its
   // synthetic odds). The band check below consumes that same authoritative price, so a decided/
   // collapsed book (eff ≥99%) fails F1 even when the cached mid still reads sane.
   const market = await prisma.market.findUnique({ where: { id: marketId } });
@@ -86,7 +86,7 @@ export async function acceptSuggestion(userId: string, sid: string): Promise<Acc
     throw new HedgeMarketUnavailableError("market_expired");
   }
   let lockedPriceBp: number;
-  if (market.source === "TXODDS") {
+  if (market.source !== "POLYMARKET") {
     lockedPriceBp = s.side === "YES" ? market.yesPriceBp : market.noPriceBp;
   } else {
     const tokenId = s.side === "YES" ? market.yesTokenId : market.noTokenId;

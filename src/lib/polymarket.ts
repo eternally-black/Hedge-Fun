@@ -29,7 +29,7 @@ export interface MarketCache {
   // "Yes" / "No") so the card shows the actual sides, not a forced Yes/No.
   outcomeYesLabel: string; // index-0 outcome label (the YES side)
   outcomeNoLabel: string; // index-1 outcome label (the NO side)
-  yesPriceBp: number | null; // Gamma MID — reference only, never a quote and never POLYMARKET display (D10); a TXODDS row's synthetic odds ARE authoritative
+  yesPriceBp: number | null; // Gamma MID — reference only, never a quote and never POLYMARKET display (D10); a bookless source's stored odds ARE authoritative
   noPriceBp: number | null;
   // CLOB token ids (Gamma clobTokenIds[0/1]) — the handle every honest price comes from. A binary
   // market missing either id is NOT quotable: deck/hedge-index fetches drop it like any other
@@ -201,7 +201,7 @@ const PRICE_CEIL_BP = 8500; // 85%
 // price-contested gate") and reused by the D10 depth gate + the deck/feed serve paths, so the band
 // lives in exactly ONE place. Since D10 it is applied to the EFFECTIVE (book-walked) price wherever
 // a book exists; the Gamma mid only passes through it as an ingest-time pre-filter (fetchBlitzDeck)
-// and as the TXODDS synthetic odds (authoritative there).
+// and as a bookless source's stored odds (authoritative there).
 export function priceIsContested(yesBp: number, noBp: number): boolean {
   return yesBp >= PRICE_FLOOR_BP && yesBp <= PRICE_CEIL_BP && noBp >= PRICE_FLOOR_BP && noBp <= PRICE_CEIL_BP;
 }

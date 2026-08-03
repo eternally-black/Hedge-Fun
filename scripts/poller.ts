@@ -15,8 +15,6 @@ import { settleMarket, type Resolution } from "./settle";
 import { evaluateStreak } from "../src/lib/streak";
 import { refreshDeck } from "./refresh-deck";
 import { pruneMarkets } from "./prune-markets";
-import { refreshFootball } from "./refresh-football";
-import { resolveFootball } from "./settle-football";
 import { refreshHedgeIndex } from "./refresh-hedge-index";
 
 const prisma = new PrismaClient();
@@ -57,23 +55,10 @@ export function toResolution(m: Awaited<ReturnType<typeof fetchResolution>>): Re
 }
 
 async function settleOne(market: { id: string; polymarketId: string; source: string; resolutionDeadline: Date }) {
-  // Resolution source branches on the market: Polymarket via Gamma, TXODDS football via TxLINE scores.
-  let resolution: Resolution;
-  let onchainRef: string | null = null;
-  if (market.source === "TXODDS") {
-    const r = await resolveFootball(market.polymarketId, market.resolutionDeadline.getTime()); // may throw -> transient
-    resolution = r.resolution;
-    onchainRef = r.onchainRef;
-  } else {
-    resolution = toResolution(await fetchResolution(market.polymarketId)); // may throw -> transient
-  }
+  const resolution: Resolution = toResolution(await fetchResolution(market.polymarketId)); // may throw -> transient
   if (resolution.kind === "open") return;
   const r = await settleMarket(prisma, market.id, resolution);
-  await prisma.market.update({
-    where: { id: market.id },
-    // TXODDS: stamp the Solana-anchored proof on the now-settled market (drives the ⛓ badge).
-    data: { lastPolledAt: new Date(), ...(market.source === "TXODDS" ? { verifiedOnChain: true, onchainRef } : {}) },
-  });
+  await prisma.market.update({ where: { id: market.id }, data: { lastPolledAt: new Date() } });
   if (r.settled + r.voided > 0) {
     console.log(
       `[settle] ${market.source} ${market.polymarketId.slice(0, 16)}… settled=${r.settled} void=${r.voided} shards=${r.shardsAwarded}`,
@@ -120,14 +105,6 @@ async function tick() {
     }
   } catch (e) {
     console.warn("[deck] refresh error:", (e as Error).message);
-  }
-
-  // World Cup football O/U markets (TxLINE) — same cache table, mixed into the deck by the mixer.
-  try {
-    const fn = await refreshFootball();
-    console.log(`[football] refreshed ${fn} World Cup markets`);
-  } catch (e) {
-    console.warn("[football] refresh error:", (e as Error).message);
   }
 
   // Hedge market index (S1 crypto majors + S2 sports/esports) — SLOWER sibling cadence (every Nth

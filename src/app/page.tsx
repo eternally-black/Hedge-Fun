@@ -6,8 +6,6 @@ import { usePrivy } from "@privy-io/react-auth";
 import { useApi } from "./useApi";
 import { DeckCard, CardPreview, type SwipeAction } from "./DeckCard";
 import { Hud } from "./screens/Hud";
-import { Ticker } from "./screens/Ticker";
-import { FootballScreen } from "./screens/FootballScreen";
 import { BottomNav } from "./screens/BottomNav";
 import { Onboarding } from "./screens/Onboarding";
 import { GmScreen } from "./screens/GmScreen";
@@ -21,7 +19,7 @@ import { HedgeScreen } from "./screens/HedgeScreen";
 import { RevealOverlay } from "./screens/RevealOverlay";
 import { type Card, type Me, type Screen } from "./ui";
 import { DECK_MIN_LEAD_MS, QUOTE_POLL_MS } from "@/lib/config";
-import type { QuotesResponse, ResultRow, ResultsResponse, SwipeResponse, TickerRow } from "@/lib/api-types";
+import type { QuotesResponse, ResultRow, ResultsResponse, SwipeResponse } from "@/lib/api-types";
 
 const PRIVY_ON = !!process.env.NEXT_PUBLIC_PRIVY_APP_ID;
 
@@ -73,13 +71,6 @@ function App() {
   const [me, setMe] = useState<Me | null>(null);
   const [deck, setDeck] = useState<Card[]>([]);
   const [screen, setScreen] = useState<Screen>("deck");
-  // Which football match is open (its markets), lifted here so the global ticker can open one
-  // directly. null = the match list. Cleared on bottom-nav so tapping "World Cup" shows the list.
-  const [footballMatch, setFootballMatch] = useState<TickerRow | null>(null);
-  // Where a ticker-opened match should go "Back" to. null = opened from the Football list (button
-  // reads "All matches"); a Screen = jumped in via the global ticker from elsewhere (button "Back").
-  const [matchBackTo, setMatchBackTo] = useState<Screen | null>(null);
-  const screenRef = useRef<Screen>("deck"); // mirrors effectiveScreen so the stable openMatch can read the origin
   // One-shot: true only for the moment the user JUST spent their last swipe this session. Gates the
   // "Deck's done → Feed" hand-off panel so it shows exactly once; every other time the deck is locked
   // (relogin, post-reveal, tapping a disabled Deck tab) we route straight to the feed, no panel.
@@ -414,24 +405,7 @@ function App() {
   const goNotifs = useCallback(() => setScreen("notifications"), []);
   // Nav from the bottom bar: consume the one-shot hand-off, so after the first time the deck is
   // locked every further navigation lands on the feed (never the panel again).
-  const navTo = useCallback((s: Screen) => { setJustExhausted(false); setFootballMatch(null); setMatchBackTo(null); setScreen(s); }, []);
-  // Ticker section tap: jump straight to that match's markets (screen + selection in one go). Remember
-  // the origin so MatchDetail can offer "Back". But if you're already in the football context (list or
-  // a ticker-opened match) keep the existing origin: a click from the list stays "All matches" (prev
-  // null), and hopping ticker→ticker preserves the first origin instead of pinning it to "football".
-  const openMatch = useCallback((row: TickerRow) => {
-    setMatchBackTo((prev) => (screenRef.current === "football" ? prev : screenRef.current));
-    setFootballMatch(row);
-    setScreen("football");
-  }, []);
-  // Football list tap: open the match with no back-origin → the button reads "All matches".
-  const selectMatch = useCallback((row: TickerRow | null) => { setMatchBackTo(null); setFootballMatch(row); }, []);
-  // MatchDetail back: clear the selection, and if we jumped in via the ticker, return to that screen.
-  const backFromMatch = useCallback(() => { setFootballMatch(null); setMatchBackTo(null); if (matchBackTo) setScreen(matchBackTo); }, [matchBackTo]);
-  // Mirror the current screen into a ref (in an effect, not during render) so the stable openMatch can
-  // read the ticker-tap origin without taking `screen` as a dep — keeps it identity-stable for the
-  // memoized ticker items. Raw `screen` (not effectiveScreen) so Back re-derives the deck/feed view.
-  useEffect(() => { screenRef.current = screen; }, [screen]);
+  const navTo = useCallback((s: Screen) => { setJustExhausted(false); setScreen(s); }, []);
   // The hand-off panel's CTA: into the feed, one-shot consumed.
   const enterFeedFromCap = useCallback(() => { setJustExhausted(false); setScreen("feed"); }, []);
 
@@ -520,7 +494,6 @@ function App() {
       {historyOpen && <HistorySheet api={api} onClose={closeHistory} />}
       {balanceOpen && <BalanceSheet me={me} api={api} onClose={closeBalance} onTopupDone={refreshMe} onToast={flashToast} />}
       <Hud me={me} pop={pop} onShards={goVault} onGM={goGmScreen} onBalance={openBalance} onBell={goNotifs} />
-      <Ticker api={api} onOpenMatch={openMatch} />
 
       <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
         {effectiveScreen === "deck" && (
@@ -572,7 +545,6 @@ function App() {
           </div>
         )}
 
-        {effectiveScreen === "football" && <FootballScreen api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openBalance} selected={footballMatch} onSelect={selectMatch} backTo={matchBackTo} onBack={backFromMatch} />}
         {effectiveScreen === "feed" && <FeedScreen api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openBalance} />}
         {effectiveScreen === "hedge" && <HedgeScreen api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openBalance} />}
         {effectiveScreen === "gm" && <GmScreen me={me} busy={busy} onGM={gm} onEnterDeck={goDeck} onRevive={revive} />}

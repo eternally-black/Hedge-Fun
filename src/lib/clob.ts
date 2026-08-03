@@ -13,7 +13,7 @@
 //    with both sides empty. Both spell "dead book" — toTokenBook/flush treat both as authoritative
 //    null and negative-cache them.
 //
-// Caching is a MICRO-BATCH FLUSH (coalescing spirit of src/lib/txodds.ts getTickerSnapshot and
+// Caching is a MICRO-BATCH FLUSH (coalescing spirit of
 // src/lib/birdeye.ts getWalletAvgCost): misses collect for ~15ms, ONE /books call fetches the union,
 // every waiter resolves from the asset_id-matched response. The TTL only throttles fetches — the
 // cache NEVER decides what is fresh enough to USE. Freshness policy (BOOK_MAX_STALE_MS at bet-lock

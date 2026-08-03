@@ -43,8 +43,8 @@ export async function POST(req: Request) {
 
   // Lock the price of the side the user actually bought (D10).
   let lockedPriceBp: number;
-  if (market.source === "TXODDS") {
-    // TXODDS football: no CLOB book exists — lock the synthetic odds exactly as before.
+  if (market.source !== "POLYMARKET") {
+    // Bookless source: no CLOB book exists, so its stored odds ARE the price (see src/lib/depth.ts).
     lockedPriceBp = body.side === "YES" ? market.yesPriceBp : market.noPriceBp;
   } else {
     // POLYMARKET: re-quote the bought side LIVE against the CLOB book and lock the VWAP the book

@@ -28,17 +28,17 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "market not open" }, { status: 409 });
   }
   // Freshness guard: reject a bet within DECK_MIN_LEAD_MS of resolution (stale, near-decided call).
-  // EXEMPT TXODDS football: its resolutionDeadline is a synthetic kickoff+150min settle mark, not a
+  // EXEMPT a bookless source: its resolutionDeadline is a synthetic settle mark, not a
   // real close, so live in-play betting must stay open while the market is OPEN (status enforces that).
-  if (market.source !== "TXODDS" && market.resolutionDeadline.getTime() <= Date.now() + DECK_MIN_LEAD_MS) {
+  if (market.source === "POLYMARKET" && market.resolutionDeadline.getTime() <= Date.now() + DECK_MIN_LEAD_MS) {
     return NextResponse.json({ error: "market_expired" }, { status: 409 });
   }
 
-  // Lock the bought side's price (D10). TXODDS keeps its synthetic odds; POLYMARKET re-quotes the
+  // Lock the bought side's price (D10). A bookless source keeps its stored odds; POLYMARKET re-quotes the
   // side LIVE against the CLOB book (never the Gamma mid). The feed is a second betting surface, so
   // it gets the same treatment as the deck swipe.
   let lockedPriceBp: number;
-  if (market.source === "TXODDS") {
+  if (market.source !== "POLYMARKET") {
     lockedPriceBp = body.side === "YES" ? market.yesPriceBp : market.noPriceBp;
   } else {
     const tokenId = body.side === "YES" ? market.yesTokenId : market.noTokenId;

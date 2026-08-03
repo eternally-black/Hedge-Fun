@@ -37,7 +37,7 @@ import {
 
 // One open, upcoming, S2-eligible market with the fields the matcher + suggestion builder need.
 // yesPriceBp/noPriceBp carry the AUTHORITATIVE price (see loadS2Candidates): the book-walked eff
-// VWAP for POLYMARKET rows, the synthetic mid for TXODDS — never a bookless mid.
+// VWAP for POLYMARKET rows, the stored odds for a bookless source — never a bookless mid.
 interface S2MarketRow {
   marketId: string;
   question: string;
@@ -57,7 +57,7 @@ interface S2MarketRow {
 // price collapse (~99.5/0.5) is dropped even between refresh runs (before the refresh clear-pass has
 // demoted s2Eligible). The band consumes the AUTHORITATIVE price (D10): the persisted eff VWAP for
 // POLYMARKET rows — computed at STAKE_CENTS, which IS the fixed S2 stake, so the displayed payout is
-// the one the accept's live re-quote honours — and the synthetic mid for TXODDS. A POLYMARKET row
+// the one the accept's live re-quote honours — and the stored odds for a bookless source. A POLYMARKET row
 // with no eff prices, or a book read older than the display-staleness bound, is dropped here even
 // while still flagged s2Eligible: the mid is never a stand-in. Churns as the refresh poller updates
 // MarketMeta (spec risk 4).
@@ -315,7 +315,7 @@ export async function searchS2(query: string): Promise<S2SearchOutcome> {
 // re-derivation (which enumerates the whole pool) stays cheap and matches whatever 3 were shown.
 // Contested is judged on the AUTHORITATIVE price (D10): the persisted eff VWAP for POLYMARKET rows —
 // computed at STAKE_CENTS, the fallback's fixed stake, so the shown payout is the accept's — the
-// synthetic mid for TXODDS. A POLYMARKET row with no (fresh-enough) book read drops out here; the
+// stored odds for a bookless source. A POLYMARKET row with no (fresh-enough) book read drops out here; the
 // mid is never a stand-in (a bid-1¢/ask-98¢ husk reads contested on the mid — exactly the leak).
 async function loadFallbackPool(nowMs: number) {
   const rows = await prisma.market.findMany({

@@ -3,8 +3,19 @@
 // absorbs within the eligibility cap) plus the tradability verdict a card needs to exist at all.
 // Pure math lives in src/lib/quote.ts (tested off fixtures); transport/caching in src/lib/clob.ts.
 //
-// TXODDS football rows have NO CLOB book (synthetic odds path, source = TXODDS): the depth gate
-// must never touch them — every branch keys off `source` via depthGateApplies.
+// ─── the bookless-source path (`source !== "POLYMARKET"`) ────────────────────────────────────────
+// A row from a source with NO CLOB book at all serves its stored odds, and the depth gate must never
+// drop it for a null book. TxOdds football was the only such source and it is gone; today the path
+// is exercised only by the DB test suites (test-api-contract, test-route-guards, test-hedge-accept,
+// test-hedge-s2), which seed `source: "TXODDS"` rows precisely because they have no book to quote.
+//
+// It survives the removal as a judgement call, not an oversight. The alternative — delete it and
+// re-seed those four suites against a stubbed CLOB book — is possible (postBooks reads
+// globalThis.fetch at call time, and test-clob/test-depth-gate already stub it that way), but it
+// means rewriting every locked-price and P&L assertion in them from a 5000bp mid to a book-walked
+// VWAP. That is churn across the most safety-critical assertions in the repo for no product gain.
+// ponytail: ~6 small branches kept for test fixtures. Delete them when those suites move to a
+// stubbed book — the seam already exists, it just wasn't worth spending on today.
 
 import {
   STAKE_CENTS,
@@ -111,12 +122,6 @@ export async function evalMarketDepthBatch(
   return out;
 }
 
-// Which rows the depth gate applies to. TXODDS football markets have no CLOB book at all — their
-// synthetic odds path is authoritative and they must NEVER be filtered out for a null book.
-export function depthGateApplies(source: string): boolean {
-  return source !== "TXODDS";
-}
-
 // ─── bet-lock re-quote (D10 Slice A, step 6 server half) ─────────────────────────────────────────
 // Shared by /api/swipe, /api/feed/bet and the hedge accept: quote the BOUGHT side live against the
 // CLOB book and lock the VWAP the book can actually deliver. NEVER the Gamma mid — a mid lock
@@ -156,8 +161,8 @@ export async function requoteSideForLock(tokenId: string, stakeCents: number): P
 // persisted eff prices, so a CLOB outage degrades to slightly-stale but REAL book prices, never to a
 // mid; rows never evaluated simply wait for the poller. Staleness is still bounded: a POLYMARKET row
 // whose book read is older than BOOK_MAX_DISPLAY_STALE_MS is dropped rather than shown at a price
-// from a dead book (looser than the 30s LOCK bound on purpose — see config.ts). TXODDS keeps its
-// mid: the synthetic odds are authoritative there, not a fallback. Null pair = not servable.
+// from a dead book (looser than the 30s LOCK bound on purpose — see config.ts). A bookless source
+// keeps its stored odds: authoritative there, not a fallback (see the header). Null pair = not servable.
 export function authoritativePrices(c: {
   source: string;
   yesPriceBp: number | null;
@@ -166,7 +171,7 @@ export function authoritativePrices(c: {
   noEffPriceBp: number | null;
   bookTsAt: Date | null;
 }, nowMs: number): { yes: number | null; no: number | null } {
-  if (c.source === "TXODDS") return { yes: c.yesPriceBp, no: c.noPriceBp };
+  if (c.source !== "POLYMARKET") return { yes: c.yesPriceBp, no: c.noPriceBp }; // bookless source
   if (c.bookTsAt === null || nowMs - c.bookTsAt.getTime() > BOOK_MAX_DISPLAY_STALE_MS) {
     return { yes: null, no: null };
   }

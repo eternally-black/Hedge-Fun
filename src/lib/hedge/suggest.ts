@@ -97,7 +97,7 @@ function avgCostNarrative(snapshot: SnapshotData, hedgedAsset: string, isProxy: 
 //    is priced live off the CLOB at its OWN proposedStakeCents (D10 follow-up — a $1..$500 stake
 //    walks the book very differently than the $10 deck VWAP, and the accept locks exactly this
 //    quote, so the displayed payout is the honoured one). A side that won't quote -> the card is
-//    dropped, never shown at a mid. TXODDS rows keep their synthetic odds (authoritative there).
+//    dropped, never shown at a mid. A bookless-source row keeps its stored odds (authoritative there).
 //  - FALSE (accept/telemetry re-derivation): no CLOB calls — those paths only need the suggestionId
 //    (a hash of address/market/kind/side/notional — NOT of price or stake), and accept re-quotes
 //    the lock itself. Quoting there would tax a fire-and-forget telemetry path for nothing.
@@ -138,7 +138,7 @@ export async function deriveSuggestions(
 
     let yesPriceBp = m.yesPriceBp;
     let noPriceBp = m.noPriceBp;
-    if (opts.quoteDisplay && m.source !== "TXODDS") {
+    if (opts.quoteDisplay && m.source === "POLYMARKET") {
       // Price BOTH sides at the card's own stake: the hedge side drives the displayed payout (and
       // must match the accept's lock); the other side keeps the DeckCard contract ("the price this
       // side COSTS") honest at the same stake. If either won't quote, there is no honest card.

@@ -32,7 +32,7 @@ export async function GET(req: Request) {
   //
   // The contested band is NOT a SQL filter anymore: it must consume the AUTHORITATIVE price per row
   // (the eff VWAP for POLYMARKET — null when no fresh book read exists, i.e. "not servable"; the
-  // synthetic mid for TXODDS) — not expressible as one column predicate. It runs in JS below
+  // stored odds for a bookless source) — not expressible as one column predicate. It runs in JS below
   // alongside the other serve-time quality filters (the take:500 pool leaves ample headroom).
   const candidates = await prisma.market.findMany({
     where: {

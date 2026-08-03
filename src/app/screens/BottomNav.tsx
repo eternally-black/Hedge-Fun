@@ -5,7 +5,6 @@ import { type Screen } from "../ui";
 
 const ITEMS: { key: Screen; glyph: string; label: string }[] = [
   { key: "deck", glyph: "⚡", label: "Deck" },
-  { key: "football", glyph: "⚽", label: "Cup" }, // World Cup hub (live scoreboard)
   { key: "hedge", glyph: "🛡", label: "Hedge" }, // S1 wallet hedge (phase 2)
   { key: "feed", glyph: "≋", label: "Feed" }, // DEV-ONLY (testing). Real users reach the feed via the post-cap Deck tab.
   { key: "vault", glyph: "◆", label: "Vault" },

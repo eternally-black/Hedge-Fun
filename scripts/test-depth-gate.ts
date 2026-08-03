@@ -7,7 +7,6 @@ import assert from "node:assert";
 import {
   evalSideAsks,
   slippageCapBpFor,
-  depthGateApplies,
   authoritativePrices,
   quoteSideForDisplay,
   quoteMovedAgainstUser,
@@ -79,12 +78,6 @@ const lvl = (priceCents: number, size: number): BookLevel => ({ priceBp: priceCe
   );
 }
 
-// ─── TXODDS rows are never touched by the depth gate ───────────────────────────────────────────────
-{
-  assert.strictEqual(depthGateApplies("TXODDS"), false, "TXODDS football has no CLOB book — never gated");
-  assert.strictEqual(depthGateApplies("POLYMARKET"), true, "POLYMARKET rows gate on their books");
-}
-
 // ─── authoritativePrices: serve-time servability (1a no mid fallback, 1b rejection stamp, 1c bound) ─
 const NOW = Date.now();
 const FRESH_BOOK = new Date(NOW - 60_000); // 1 min old — far inside the display bound
@@ -114,11 +107,12 @@ const FRESH_BOOK = new Date(NOW - 60_000); // 1 min old — far inside the displ
     "rejection-stamped row (fresh bookTsAt, null eff) -> NOT servable",
   );
 
-  // TXODDS: the mid IS the authoritative synthetic price — null eff must NOT drop the row.
+  // A bookless source (no CLOB book at all): its stored odds ARE the price, so a null eff must not
+  // drop the row. Only the DB suites produce such rows today — see the note in src/lib/depth.ts.
   assert.deepStrictEqual(
     authoritativePrices({ source: "TXODDS", ...row, yesEffPriceBp: null, noEffPriceBp: null, bookTsAt: null }, NOW),
     { yes: 4950, no: 5050 },
-    "TXODDS with null eff IS servable on its mid (authoritative there, not a fallback)",
+    "bookless source with null eff IS servable on its stored odds (authoritative, not a fallback)",
   );
 
   // 1c: eff prices present but the book behind them is older than the DISPLAY bound -> dropped,
@@ -236,7 +230,7 @@ async function main() {
     }
   }
 
-  console.log("✓ depth gate: husk/empty/thin/slippy books dropped, healthy book kept, TXODDS untouched");
+  console.log("✓ depth gate: husk/empty/thin/slippy books dropped, healthy book kept");
   console.log("✓ servability: no mid fallback (1a), rejection stamp (1b), display staleness bound (1c)");
   console.log("✓ display-quote: stake-dependent VWAP, dead/down/stale books -> dropped, never a mid");
   // ─── seen-vs-executed fairness rule (D10 Slice B) ───────────────────────────────────────────────

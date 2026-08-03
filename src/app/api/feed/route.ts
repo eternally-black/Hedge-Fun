@@ -84,7 +84,7 @@ export async function GET(req: Request) {
   // Same quality drops as the deck (context-poor O/U, vague esports, drifted-past-horizon rows),
   // then the near-50% band on BOTH sides — the feed's editorial filter (coin-flips, fair shard
   // odds). The band moved out of SQL (D10): it must consume the AUTHORITATIVE price per row — the
-  // book-walked eff price for POLYMARKET, the synthetic odds for TXODDS — which is not one column.
+  // book-walked eff price for POLYMARKET, the stored odds for a bookless source — not one column.
   const nowMs = now.getTime();
   const usable = candidates
     .filter(

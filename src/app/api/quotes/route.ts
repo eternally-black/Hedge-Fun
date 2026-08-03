@@ -56,9 +56,9 @@ export async function GET(req: Request) {
 
   const quotes: QuoteRow[] = await Promise.all(
     markets.map(async (m): Promise<QuoteRow> => {
-      // TXODDS football has no CLOB book at all — its synthetic odds are authoritative, not a
+      // A bookless source has no CLOB book at all — its stored odds are authoritative, not a
       // degraded read. Echo them back with live:false so the client knows there is nothing to poll.
-      if (m.source === "TXODDS" || !m.yesTokenId || !m.noTokenId) {
+      if (m.source !== "POLYMARKET" || !m.yesTokenId || !m.noTokenId) {
         return {
           marketId: m.id,
           yesPriceBp: m.yesPriceBp,
