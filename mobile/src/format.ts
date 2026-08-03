@@ -63,8 +63,101 @@ export function sideLabels(card: Pick<DeckCard, "question" | "outcomeYesLabel" |
   return { yes: card.outcomeYesLabel, no: card.outcomeNoLabel };
 }
 
-// One-line plain-language explainer under the question. Only Over/Under markets need it.
+// ─── soccer: turn the betting-slip jargon into a sentence ──────────────────────────────────────
+// PORT of the same block in src/app/ui.ts — keep the two in sync, or the clients disagree on what a
+// card means. Polymarket generates soccer questions from slugs, so the jargon is a FIXED, small
+// grammar: 72% of soccer cards are one Over/Under grammar, the rest a short list of Yes/No families.
+// The bar is READABLE BY SOMEONE WHO DOES NOT FOLLOW FOOTBALL — no "level", "outscore", "clean
+// sheet", "handicap", no bare "corners", and never "this team" where the question names the team.
+
+interface SoccerOu {
+  scope: "" | "first half" | "second half";
+  subject: string | null;
+  metric: "goals" | "corner kicks";
+  line: number;
+}
+
+function parseSoccerOu(question: string): SoccerOu | null {
+  const m = question.match(/^(.+?)\s+vs\.?\s+(.+?):\s*(.*?)\bO\/U\s*([\d.]+)(.*)$/i);
+  if (!m) return null;
+  const [, home, away, prefix, num, suffix] = m;
+  const line = parseFloat(num!);
+  if (!Number.isFinite(line)) return null;
+  const tail = (suffix ?? "").trim();
+  const metric = /corners?/i.test(tail) ? "corner kicks" : "goals";
+  if (tail && metric === "goals") return null; // unknown suffix -> don't invent a hint
+  // "A vs. B: O/U n" names no sport, so a bare total is only read as GOALS at a plausible goal line
+  // — same bound as deck-mix's Soccer row on web. Without it "Panthers vs. Cardinals: O/U 32.5"
+  // reads out as "33 or more goals". Soccer totals run 0.5-5.5; NFL 32.5+, MLB 7.5+, NHL 5.5/6.5.
+  if (metric === "goals" && line > 4.5) return null;
+  let rest = (prefix ?? "").trim();
+  let scope: SoccerOu["scope"] = "";
+  const half = rest.match(/\b(1st|2nd|First|Second)\s+Half\b/i);
+  if (half) {
+    scope = /1st|first/i.test(half[1]!) ? "first half" : "second half";
+    rest = rest.replace(half[0]!, "").trim();
+  }
+  let subject: string | null = null;
+  if (rest) {
+    if (rest === home!.trim()) subject = home!.trim();
+    else if (rest === away!.trim()) subject = away!.trim();
+    else return null;
+  }
+  return { scope, subject, metric, line };
+}
+
+// A .5 line is really "n+1 or more"; whole lines keep "more than n" (a push is possible there).
+const atLeast = (n: number) => (Number.isInteger(n) ? null : Math.ceil(n));
+
+function soccerOuHint(o: SoccerOu): string {
+  const where = o.scope ? ` in the ${o.scope}` : " in the match";
+  const k = atLeast(o.line);
+  const amount = k !== null ? `${k} or more` : `more than ${o.line}`;
+  if (!o.subject) return `Will there be ${amount} ${o.metric}${where}?`;
+  return o.metric === "goals"
+    ? `Will ${o.subject} score ${amount} goals${where}?`
+    : `Will ${o.subject} take ${amount} corner kicks${where}?`;
+}
+
+// "Second half draw?" scores the second half as its OWN match: 2-1 at the break finishing 3-2 makes
+// the second half a 1-1 draw. The hint says that rather than restating the term.
+const SOCCER_HINTS: [RegExp, (m: RegExpMatchArray) => string][] = [
+  [/Both Teams to Score in First Half$/i, () => "Will both teams score in the first half?"],
+  [/Both Teams to Score in Second Half$/i, () => "Will both teams score in the second half?"],
+  [/Both Teams to Score$/i, () => "Will both teams score at least one goal?"],
+  [/Second half draw\?$/i, () => "Will both teams score the same number of goals in the second half?"],
+  [/Draw at halftime\?$/i, () => "Will the score be equal at half-time?"],
+  [/^Will\s+.+?\s+vs\.?\s+.+?\s+end in a draw\?$/i, () => "Will the match finish with neither team winning?"],
+  [/Total Corners Odd or Even\?$/i, () => "Will the total number of corner kicks be an odd or an even number?"],
+  [/Team to Take First Corner$/i, () => "Which team takes the first corner kick of the match?"],
+  [/Neither team to score first\?$/i, () => "Will the match finish 0-0, with no goals at all?"],
+  [/^(.+?)\s+to score first vs\.?\s+.+?\?$/i, (m) => `Will ${m[1]} score the first goal of the match?`],
+  [/^(.+?)\s+leading at halftime\?$/i, (m) => `Will ${m[1]} be ahead at half-time?`],
+  [/^(.+?)\s+to win the second half\?$/i, (m) => `Will ${m[1]} score more goals than their opponent in the second half?`],
+  [/^Exact Score:\s*(.+?)\s+(\d+)\s*-\s*(\d+)\s+.+?\?$/i, (m) => `Will the match finish exactly ${m[2]}-${m[3]} to ${m[1]}?`],
+  [/^Exact Score:\s*Any Other Score\?$/i, () => "Will the final score be none of the ones listed?"],
+  [/^Spread:\s*(.+?)\s*\(-([\d.]+)\)$/i, (m) => {
+    const k = atLeast(parseFloat(m[2]!));
+    return k !== null ? `Will ${m[1]} win by ${k} or more goals?` : `Will ${m[1]} win by more than ${m[2]} goals?`;
+  }],
+];
+
+export function soccerHint(question: string): string | null {
+  const ou = parseSoccerOu(question);
+  if (ou) return soccerOuHint(ou);
+  for (const [re, say] of SOCCER_HINTS) {
+    const m = question.match(re);
+    if (m) return say(m);
+  }
+  return null;
+}
+
+// One-line plain-language explainer under the question. Soccer gets a real sentence; other
+// Over/Under markets get the generic line (nothing in the question says over/under WHAT).
 export function marketHint(card: Pick<DeckCard, "question" | "outcomeYesLabel" | "outcomeNoLabel">): string | null {
+  // Soccer first: its O/U cards also carry Over/Under labels and would otherwise get the vague line.
+  const soccer = soccerHint(card.question);
+  if (soccer) return soccer;
   if (ouLabels(card.outcomeYesLabel) && ouLabels(card.outcomeNoLabel)) {
     const line = ouLine(card.question);
     return line ? `Will the total be over or under ${line}?` : "Will the total go over or under the line?";

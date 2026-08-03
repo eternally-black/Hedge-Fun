@@ -2,7 +2,10 @@
 // Polymarket hands "Over"/"Under" with the line buried in the question; we fold it in.
 // Run: npx tsx scripts/test-side-labels.ts
 import assert from "node:assert";
-import { sideLabels, marketHint, isUpDown, displayQuestion } from "../src/app/ui";
+import { sideLabels, marketHint, isUpDown, displayQuestion, soccerHint } from "../src/app/ui";
+// The RN port, imported to prove the two clients agree (see the drift check at the bottom). Its only
+// import is `import type`, so pulling it in here needs nothing from mobile/node_modules.
+import { soccerHint as mobileSoccerHint } from "../mobile/src/format";
 
 const card = (question: string, yes: string, no: string) => ({ question, outcomeYesLabel: yes, outcomeNoLabel: no });
 
@@ -38,5 +41,114 @@ assert.strictEqual(displayQuestion(card("Ethereum Up or Down - July 1, 3PM ET", 
 assert.strictEqual(displayQuestion(card("Dogecoin Up or Down 11:30AM", "Up", "Down")), "Dogecoin Up or Down", "bare trailing clock stripped");
 assert.strictEqual(displayQuestion(card("Bitcoin Up or Down", "Up", "Down")), "Bitcoin Up or Down", "no time -> unchanged");
 assert.strictEqual(displayQuestion(card("Bosnia vs. Qatar at 9:05AM", "Bosnia", "Qatar")), "Bosnia vs. Qatar at 9:05AM", "non-Up/Down untouched (no strip)");
+
+// ---- soccer: the fixed slug-generated jargon becomes a sentence ----
+// Questions are verbatim from live Gamma (2026-08-03). Paraphrasing them would let the test pass
+// while the real feed still produced jargon.
+const hint = (q: string, y = "Over", n = "Under") => marketHint(card(q, y, n));
+
+// The Over/Under grammar: scope (match | 1st | 2nd) x subject (total | a team) x metric (goals | corners).
+assert.strictEqual(hint("FK Shakhtar Donetsk vs. FK Kudrivka: O/U 9.5 Total Corners"),
+  "Will there be 10 or more corner kicks in the match?", "match corner total");
+assert.strictEqual(hint("FK Auda Riga vs. Ogre United: 2nd Half O/U 4.5 Total Corners"),
+  "Will there be 5 or more corner kicks in the second half?", "second-half corner total");
+assert.strictEqual(hint("FK Auda Riga vs. Ogre United: O/U 3.5"),
+  "Will there be 4 or more goals in the match?", "match goal total");
+assert.strictEqual(hint("Seinajoen JK vs. HJK Helsinki: HJK Helsinki 2nd Half O/U 1.5"),
+  "Will HJK Helsinki score 2 or more goals in the second half?", "team goal total, second half");
+assert.strictEqual(hint("Seinajoen JK vs. HJK Helsinki: Seinajoen JK O/U 3.5 Corners"),
+  "Will Seinajoen JK take 4 or more corner kicks in the match?", "team corner total");
+// A subject that matches neither team is not a shape we understand -> stay quiet rather than guess.
+assert.strictEqual(hint("A vs. B: Someone Else 1st Half O/U 1.5"),
+  "Will the total be over or under 1.5?", "unrecognised subject falls back to the generic line");
+
+// The Yes/No families.
+const yn = (q: string) => marketHint(card(q, "Yes", "No"));
+assert.strictEqual(yn("FK Shakhtar Donetsk vs. FK Kudrivka: Both Teams to Score"),
+  "Will both teams score at least one goal?");
+assert.strictEqual(yn("FK Auda Riga vs. Ogre United: Both Teams to Score in First Half"),
+  "Will both teams score in the first half?");
+// The one that reads wrong if you translate the term instead of the meaning: the second half is
+// scored as its own match, so 2-1 at the break finishing 3-2 is a 1-1 second half.
+assert.strictEqual(yn("FK Kudrivka vs. FK Shakhtar Donetsk: Second half draw?"),
+  "Will both teams score the same number of goals in the second half?");
+assert.strictEqual(yn("FK Kudrivka vs. FK Shakhtar Donetsk: Draw at halftime?"),
+  "Will the score be equal at half-time?");
+assert.strictEqual(yn("Will FK Auda Riga vs. Ogre United end in a draw?"),
+  "Will the match finish with neither team winning?");
+assert.strictEqual(yn("FK Auda Riga vs. Ogre United: Neither team to score first?"),
+  "Will the match finish 0-0, with no goals at all?");
+assert.strictEqual(yn("FK Shakhtar Donetsk to score first vs. FK Kudrivka?"),
+  "Will FK Shakhtar Donetsk score the first goal of the match?");
+assert.strictEqual(yn("FK Auda Riga leading at halftime?"),
+  "Will FK Auda Riga be ahead at half-time?");
+assert.strictEqual(yn("Ogre United to win the second half?"),
+  "Will Ogre United score more goals than their opponent in the second half?");
+assert.strictEqual(yn("Exact Score: FK Shakhtar Donetsk 3 - 0 FK Kudrivka?"),
+  "Will the match finish exactly 3-0 to FK Shakhtar Donetsk?");
+assert.strictEqual(yn("Exact Score: Any Other Score?"),
+  "Will the final score be none of the ones listed?");
+assert.strictEqual(marketHint(card("Spread: FK Shakhtar Donetsk (-1.5)", "FK Shakhtar Donetsk", "FK Kudrivka")),
+  "Will FK Shakhtar Donetsk win by 2 or more goals?", "handicap spelled out, the word never shown");
+assert.strictEqual(marketHint(card("FK Auda Riga vs. Ogre United: Total Corners Odd or Even?", "Odd", "Even")),
+  "Will the total number of corner kicks be an odd or an even number?");
+
+// ---- the bar: no jargon may come back in ----
+// Replacing football jargon with commentary-box idiom is not a fix. This is the guard that fails if
+// someone "tidies" a hint back into the dialect it was written out of.
+const BANNED = /\b(level|outscore|clean sheet|handicap|btts|this team)\b/i;
+for (const q of [
+  "FK Shakhtar Donetsk vs. FK Kudrivka: O/U 9.5 Total Corners",
+  "FK Kudrivka vs. FK Shakhtar Donetsk: Second half draw?",
+  "FK Kudrivka vs. FK Shakhtar Donetsk: Draw at halftime?",
+  "Ogre United to win the second half?",
+  "FK Auda Riga leading at halftime?",
+  "Spread: FK Shakhtar Donetsk (-1.5)",
+]) {
+  const h = marketHint(card(q, "Yes", "No"));
+  assert.ok(h, `soccer question must produce a hint: ${q}`);
+  assert.ok(!BANNED.test(h!), `hint must avoid insider jargon, got: ${h}`);
+}
+
+// Non-soccer markets are untouched by all of the above.
+assert.strictEqual(marketHint(card("Map 1 Total Rounds: Over/Under 21.5", "Over", "Under")),
+  "Will the total be over or under 21.5?", "esports total keeps the generic hint");
+assert.strictEqual(marketHint(card("Panthers vs. Cardinals: O/U 32.5", "Over", "Under")),
+  "Will the total be over or under 32.5?", "NFL total is not given a soccer sentence");
+
+// ---- web and mobile must read a card the same way ----
+// mobile/src/format.ts is a hand-kept port (it deliberately can't import deck-mix), so the soccer
+// grammar exists twice. Types are caught by tsc; LOGIC drift is silent, and a card that says
+// different things on the two clients is a support ticket nobody can reproduce. Compare outputs
+// over the whole corpus instead of trusting the two files to look alike.
+{
+  const cases = [
+    "FK Shakhtar Donetsk vs. FK Kudrivka: O/U 9.5 Total Corners",
+    "FK Auda Riga vs. Ogre United: 2nd Half O/U 4.5 Total Corners",
+    "FK Auda Riga vs. Ogre United: O/U 3.5",
+    "Seinajoen JK vs. HJK Helsinki: HJK Helsinki 2nd Half O/U 1.5",
+    "Seinajoen JK vs. HJK Helsinki: Seinajoen JK O/U 3.5 Corners",
+    "A vs. B: Someone Else 1st Half O/U 1.5",
+    "Panthers vs. Cardinals: O/U 32.5",
+    "FK Shakhtar Donetsk vs. FK Kudrivka: Both Teams to Score",
+    "FK Auda Riga vs. Ogre United: Both Teams to Score in First Half",
+    "FK Kudrivka vs. FK Shakhtar Donetsk: Second half draw?",
+    "FK Kudrivka vs. FK Shakhtar Donetsk: Draw at halftime?",
+    "Will FK Auda Riga vs. Ogre United end in a draw?",
+    "FK Auda Riga vs. Ogre United: Neither team to score first?",
+    "FK Shakhtar Donetsk to score first vs. FK Kudrivka?",
+    "FK Auda Riga leading at halftime?",
+    "Ogre United to win the second half?",
+    "Exact Score: FK Shakhtar Donetsk 3 - 0 FK Kudrivka?",
+    "Exact Score: Any Other Score?",
+    "Spread: FK Shakhtar Donetsk (-1.5)",
+    "FK Auda Riga vs. Ogre United: Total Corners Odd or Even?",
+    "Map 1 Total Rounds: Over/Under 21.5",
+    "Bosnia vs. Qatar",
+  ];
+  for (const q of cases) {
+    assert.strictEqual(mobileSoccerHint(q), soccerHint(q), `web/mobile soccer hint drift on: ${q}`);
+  }
+}
 
 console.log("test-side-labels: OK");
