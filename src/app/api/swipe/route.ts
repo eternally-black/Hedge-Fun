@@ -5,7 +5,7 @@ import { authUser } from "@/lib/privy";
 import { recordSwipe, isOverCap, SwipeCapReachedError, InsufficientFundsError } from "@/lib/swipe";
 import { maybeQualifyReferralOnSwipe } from "@/lib/referral";
 import { DECK_MIN_LEAD_MS, STAKE_CENTS } from "@/lib/config";
-import { requoteSideForLock, quoteMovedAgainstUser } from "@/lib/depth";
+import { requoteSideForLock, quoteMovedAgainstUser, sourceHasClobBook } from "@/lib/depth";
 import { isDevUser } from "@/lib/dev";
 import type { SwipeRequest, SwipeResponse } from "@/lib/api-types";
 
@@ -43,7 +43,7 @@ export async function POST(req: Request) {
 
   // Lock the price of the side the user actually bought (D10).
   let lockedPriceBp: number;
-  if (market.source !== "POLYMARKET") {
+  if (!sourceHasClobBook(market.source)) {
     // Bookless source: no CLOB book exists, so its stored odds ARE the price (see src/lib/depth.ts).
     lockedPriceBp = body.side === "YES" ? market.yesPriceBp : market.noPriceBp;
   } else {

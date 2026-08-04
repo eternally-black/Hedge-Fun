@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
-import { isContextPoor, isVagueEsports, withinCategoryHorizon, DECK_FETCH_HORIZON_HOURS } from "@/lib/deck-mix";
+import { categoryOf, gameOf, isContextPoor, isVagueEsports, withinCategoryHorizon, DECK_FETCH_HORIZON_HOURS } from "@/lib/deck-mix";
 import { DECK_MIN_LEAD_MS, FEED_BAND_BP, FEED_PAGE_SIZE } from "@/lib/config";
 import { authoritativePrices } from "@/lib/depth";
 import type { FeedResponse } from "@/lib/api-types";
@@ -39,6 +39,16 @@ function inFeedBand(yesBp: number, noBp: number): boolean {
   return (
     yesBp >= FEED_BAND_BP.min && yesBp <= FEED_BAND_BP.max && noBp >= FEED_BAND_BP.min && noBp <= FEED_BAND_BP.max
   );
+}
+
+// The badge the card should carry, classified once and sent to BOTH clients. Web re-derives this
+// locally (it imports deck-mix directly); RN cannot and binds to these two fields.
+function catFields(m: { question: string; outcomeYesLabel: string; outcomeNoLabel: string }): {
+  category: string;
+  league: string | null;
+} {
+  const cat = categoryOf(m);
+  return { category: cat, league: gameOf(m, cat) };
 }
 
 export async function GET(req: Request) {
@@ -114,7 +124,9 @@ export async function GET(req: Request) {
       // price — what the side costs, band-filtered above so both are non-null.
       id: c.id,
       question: c.question,
-      category: c.category,
+      // DERIVED, not Gamma's own `category` — that field is null on every live market, which left
+      // the RN client (no local classifier) painting a grey "Market" chip on every single card.
+      ...catFields(c),
       outcomeYesLabel: c.outcomeYesLabel,
       outcomeNoLabel: c.outcomeNoLabel,
       yesPriceBp: p.yes!,

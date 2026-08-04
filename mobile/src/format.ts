@@ -20,8 +20,10 @@ export const winPayout = (bp: number, stakeCents: number) => {
   return Math.round(stakeCents / 100 / p);
 };
 
-// Category accent + label. On web this is keyed off the deck-mix classifier; here we key off the
-// API's own `category` string (same value set: crypto/esports/sports/overunder/politics/weather/other).
+// Category accent + label. Web classifies locally (it imports deck-mix); this client deliberately
+// does not port the classifier and binds to what the server sends instead. Both fields are now
+// SERVER-DERIVED: Gamma's own `category` is null on every market, so before that every card here
+// rendered the grey "Market" fallback. `league` names the specific competition when known.
 const CAT_COLORS: Record<string, { color: string; label: string; icon: string }> = {
   crypto: { color: "#ff8a3d", label: "Crypto", icon: "₿" },
   sports: { color: "#3d7bff", label: "Sports", icon: "🏆" },
@@ -34,8 +36,11 @@ const CAT_COLORS: Record<string, { color: string; label: string; icon: string }>
 
 const FALLBACK_CAT = CAT_COLORS.other!;
 
-export function catOf(card: Pick<DeckCard, "category">): { color: string; label: string; icon: string } {
-  return (card.category && CAT_COLORS[card.category]) || FALLBACK_CAT;
+export function catOf(card: Pick<DeckCard, "category" | "league">): { color: string; label: string; icon: string } {
+  const base = (card.category && CAT_COLORS[card.category]) || FALLBACK_CAT;
+  // A named league replaces only the LABEL — the colour and icon still say which category it is,
+  // exactly as web's catOf does.
+  return card.league ? { ...base, label: card.league } : base;
 }
 
 // Polymarket hands us raw "Over"/"Under" side labels with the threshold buried in the question.

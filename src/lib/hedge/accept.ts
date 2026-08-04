@@ -16,7 +16,7 @@ import {
   HEDGE_ACCEPT_SIDE_FLOOR_BP,
   HEDGE_ACCEPT_SIDE_CEIL_BP,
 } from "../config";
-import { requoteSideForLock } from "../depth";
+import { requoteSideForLock, sourceHasClobBook } from "../depth";
 import { resolveDerivedSuggestion } from "./s2";
 
 // The final accept-time price-sanity gate (F1). True when the side we're about to LOCK is priced
@@ -86,7 +86,7 @@ export async function acceptSuggestion(userId: string, sid: string): Promise<Acc
     throw new HedgeMarketUnavailableError("market_expired");
   }
   let lockedPriceBp: number;
-  if (market.source !== "POLYMARKET") {
+  if (!sourceHasClobBook(market.source)) {
     lockedPriceBp = s.side === "YES" ? market.yesPriceBp : market.noPriceBp;
   } else {
     const tokenId = s.side === "YES" ? market.yesTokenId : market.noTokenId;

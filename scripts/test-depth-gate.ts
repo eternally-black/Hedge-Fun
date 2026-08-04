@@ -7,6 +7,7 @@ import assert from "node:assert";
 import {
   evalSideAsks,
   slippageCapBpFor,
+  sourceHasClobBook,
   authoritativePrices,
   quoteSideForDisplay,
   quoteMovedAgainstUser,
@@ -75,6 +76,20 @@ const lvl = (priceCents: number, size: number): BookLevel => ({ priceBp: priceCe
   assert.ok(
     priceIsContested(yes.effPriceBp!, no.effPriceBp!),
     "eff prices inside the band -> the card exists",
+  );
+}
+
+// ─── sourceHasClobBook: the allow-list every money path keys off ───────────────────────────────────
+// Written as an ALLOW-list on purpose. The natural inline form is `!== "POLYMARKET"`, and under that
+// a third source would silently inherit the bookless treatment — stored mid served as authoritative,
+// no re-quote before a bet locks, no depth gate, no staleness bound. This asserts the safe default.
+{
+  assert.strictEqual(sourceHasClobBook("POLYMARKET"), true, "Polymarket rows are book-backed");
+  assert.strictEqual(sourceHasClobBook("TXODDS"), false, "the historical bookless source stays bookless");
+  assert.strictEqual(
+    sourceHasClobBook("KALSHI"),
+    false,
+    "an UNKNOWN source must not be assumed book-backed — adding one is an explicit edit here",
   );
 }
 

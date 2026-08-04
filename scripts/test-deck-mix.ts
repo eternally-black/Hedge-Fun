@@ -94,6 +94,27 @@ assert.strictEqual(gameOf(mk("Bosnia vs. Qatar match", "Bosnia", "Qatar")), null
 assert.strictEqual(gameOf(mk("Bitcoin Up or Down", "Up", "Down")), null, "crypto -> null");
 assert.strictEqual(gameOf(mk("Will the Fed cut rates?", "Yes", "No")), null, "politics -> null");
 
+// ---- a quoted phrase is what someone SAYS, not what the market is about ----
+// Polymarket's "mention" markets put a topic word in quotes. Read as a signal it makes an earnings
+// call a football match, pitch art and all.
+assert.strictEqual(
+  categoryOf(mk('Will Spotify say "World Cup" during the earnings call?', "Yes", "No")),
+  "other",
+  "quoted phrase is not a topic signal",
+);
+assert.strictEqual(gameOf(mk('Will Trump post "World Cup" on Truth Social this week?', "Yes", "No")), null, "…and names no league");
+assert.strictEqual(
+  categoryOf(mk('Will the Fed chair say "Bitcoin" at the press conference?', "Yes", "No")),
+  "politics",
+  "quoted ticker does not make it a crypto market; the real subject still wins",
+);
+// The quote rule must not eat a real signal that happens to sit next to one.
+assert.strictEqual(
+  categoryOf(mk('Premier League: Arsenal vs Spurs — will anyone say "hello"?', "Yes", "No")),
+  "sports",
+  "unquoted league word outside the quote still counts",
+);
+
 // helper: longest run of equal categories in a sequence
 function longestRun(cats: string[]): number {
   let best = 0, run = 0, last: string | null = null;

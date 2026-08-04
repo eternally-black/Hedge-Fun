@@ -37,7 +37,15 @@ export interface ErrorResponse {
 export interface DeckCard {
   id: string;
   question: string;
+  // SERVER-DERIVED (deck-mix categoryOf), not Gamma's own field. Gamma leaves `category` null on
+  // every live market — measured 0 of 1600 on 2026-08-03 — so passing it through meant the RN
+  // client, which has no classifier and keys its badge off this string, rendered a grey "Market"
+  // chip on literally every card. One of: crypto|esports|sports|overunder|politics|weather|other.
   category: string | null;
+  // The specific league or game when one is recognised ("NBA", "Soccer", "CS2"), else null. Same
+  // source as `category`. Additive and optional: web derives it locally, RN cannot (it deliberately
+  // does not port the classifier) and shows the generic category label when this is absent.
+  league?: string | null;
   outcomeYesLabel: string;
   outcomeNoLabel: string;
   // Basis points (5150 = 51.5¢). The price this side COSTS: for a Polymarket market the book-walked
@@ -188,7 +196,8 @@ export interface HistoryResponse {
 export interface ResultRow {
   id: string;
   question: string;
-  category: string | null;
+  category: string | null; // server-derived, see DeckCard.category
+  league?: string | null; // server-derived, see DeckCard.league
   side: BetSide;
   sideLabel: string; // label of the side the user bet (team / Over / Up / Yes)
   status: "WIN" | "LOSS" | "PUSH";

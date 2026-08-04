@@ -29,6 +29,21 @@ const POLITICS = /\b(election|president|senate|congress|fed\b|fomc|rate (cut|hik
 // Weather.
 const WEATHER = /\b(temperature|°f|°c|degrees|rain|snow|hurricane|storm|weather|high of|inches of)\b/i;
 
+// The text every rule below reads: question + both side labels (a named binary carries the signal in
+// its labels, not its question).
+//
+// Quoted spans are dropped first. Polymarket runs a whole genre of "mention" markets — `Will X say
+// "World Cup" during the earnings call?` — where the quote is the phrase somebody utters, not the
+// subject of the bet. Left in, it is indistinguishable from a topic signal: that example classifies
+// sports and earns a football pitch. Same trap for `"Bitcoin"` in a quote landing on crypto.
+// Measured 2026-08-03: ZERO markets inside either live window (deck 72h, hedge index 240h) contain a
+// quoted span at all, so this changes nothing today. It is the guard, not the fix — those markets
+// exist further out and drift into range on their own.
+function signalText(m: { question: string; outcomeYesLabel: string; outcomeNoLabel: string }): string {
+  const q = m.question.replace(/["“][^"”]*["”]/g, " ");
+  return `${q} ${m.outcomeYesLabel} ${m.outcomeNoLabel}`;
+}
+
 export function categoryOf(m: {
   question: string;
   category?: string | null;
@@ -37,8 +52,7 @@ export function categoryOf(m: {
 }): Category {
   const y = m.outcomeYesLabel.toLowerCase();
   const n = m.outcomeNoLabel.toLowerCase();
-  // The full text signal: question + both side labels (named-binary carries the signal in labels).
-  const text = `${m.question} ${m.outcomeYesLabel} ${m.outcomeNoLabel}`;
+  const text = signalText(m);
 
   // 1) Up/Down is an unambiguous crypto shape — keep it first.
   if (y === "up" && n === "down") return "crypto"; // Up/Down markets are ~always crypto minutes
@@ -152,7 +166,7 @@ export function gameOf(
   cat: Category = categoryOf(m),
 ): string | null {
   if (cat !== "sports" && cat !== "esports") return null;
-  const text = `${m.question} ${m.outcomeYesLabel} ${m.outcomeNoLabel}`;
+  const text = signalText(m); // same quoted-span rule as categoryOf — see signalText
   const table = cat === "esports" ? ESPORT_GAMES : SPORT_GAMES;
   for (const [re, name] of table) if (re.test(text)) return name;
   return null;

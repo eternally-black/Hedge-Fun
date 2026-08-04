@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 import { rateLimit } from "@/lib/ratelimit";
-import { quoteMarketForDisplay } from "@/lib/depth";
+import { quoteMarketForDisplay, sourceHasClobBook } from "@/lib/depth";
 import {
   STAKE_CENTS,
   HEDGE_MIN_STAKE_CENTS,
@@ -58,7 +58,7 @@ export async function GET(req: Request) {
     markets.map(async (m): Promise<QuoteRow> => {
       // A bookless source has no CLOB book at all — its stored odds are authoritative, not a
       // degraded read. Echo them back with live:false so the client knows there is nothing to poll.
-      if (m.source !== "POLYMARKET" || !m.yesTokenId || !m.noTokenId) {
+      if (!sourceHasClobBook(m.source) || !m.yesTokenId || !m.noTokenId) {
         return {
           marketId: m.id,
           yesPriceBp: m.yesPriceBp,

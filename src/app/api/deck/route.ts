@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 
-import { categoryOf, shuffleNoRun, isContextPoor, isVagueEsports, withinCategoryHorizon, DECK_FETCH_HORIZON_HOURS } from "@/lib/deck-mix";
+import { categoryOf, gameOf, shuffleNoRun, isContextPoor, isVagueEsports, withinCategoryHorizon, DECK_FETCH_HORIZON_HOURS } from "@/lib/deck-mix";
 import { DECK_MIN_LEAD_MS } from "@/lib/config";
 import { priceIsContested } from "@/lib/polymarket";
 import { authoritativePrices } from "@/lib/depth";
@@ -14,6 +14,16 @@ import type { DeckResponse } from "@/lib/api-types";
 // narrows per category. Reads the Market cache (refresh-deck/poller).
 const DECK_WINDOW_HOURS = DECK_FETCH_HORIZON_HOURS; // outer bound; per-category cap applied below
 const DECK_SIZE = 50;
+
+// The badge the card should carry, classified once and sent to BOTH clients. Web re-derives this
+// locally (it imports deck-mix directly); RN cannot and binds to these two fields.
+function catFields(m: { question: string; outcomeYesLabel: string; outcomeNoLabel: string }): {
+  category: string;
+  league: string | null;
+} {
+  const cat = categoryOf(m);
+  return { category: cat, league: gameOf(m, cat) };
+}
 
 export async function GET(req: Request) {
   const user = await authUser(req);
@@ -90,7 +100,9 @@ export async function GET(req: Request) {
       // so both are non-null here. resolutionDeadline is a Date → ISO string for the JSON contract.
       id: c.id,
       question: c.question,
-      category: c.category,
+      // DERIVED, not Gamma's own `category` — that field is null on every live market, which left
+      // the RN client (no local classifier) painting a grey "Market" chip on every single card.
+      ...catFields(c),
       outcomeYesLabel: c.outcomeYesLabel,
       outcomeNoLabel: c.outcomeNoLabel,
       yesPriceBp: p.yes!,

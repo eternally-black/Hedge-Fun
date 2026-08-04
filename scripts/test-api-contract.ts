@@ -98,7 +98,7 @@ async function main() {
   assert.ok(Array.isArray(deckBody.cards), "/deck cards is an array");
   if (deckBody.cards.length) {
     assert.deepStrictEqual(Object.keys(deckBody.cards[0]).sort(),
-      ["category","id","noPriceBp","outcomeNoLabel","outcomeYesLabel","question","resolutionDeadline","yesPriceBp"],
+      ["category","id","league","noPriceBp","outcomeNoLabel","outcomeYesLabel","question","resolutionDeadline","yesPriceBp"],
       "/deck card keys");
   }
 
@@ -176,7 +176,7 @@ async function main() {
   assert.strictEqual(resBody.rows.length, 1, "/results one settled bet -> one row");
   assert.strictEqual(resBody.unreadCount, 1, "/results unread before seen = 1");
   assert.deepStrictEqual(Object.keys(resBody.rows[0]).sort(),
-    ["category","deltaCents","id","onchainRef","outcome","pnlCents","question","seen","settledAt","shards","side","sideLabel","status","verified"],
+    ["category","deltaCents","id","league","onchainRef","outcome","pnlCents","question","seen","settledAt","shards","side","sideLabel","status","verified"],
     "/results row keys");
   assert.strictEqual(resBody.rows[0].verified, false, "/results Polymarket row verified=false");
   assert.strictEqual(resBody.rows[0].onchainRef, null, "/results Polymarket row onchainRef=null");

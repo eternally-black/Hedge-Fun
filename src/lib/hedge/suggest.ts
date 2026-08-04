@@ -10,7 +10,7 @@ import { suggestionId } from "./id";
 import { WSOL_MINT } from "./exposure";
 import type { HedgeAsset, ParsedDirection } from "./parse";
 import { getSnapshot, getCachedSnapshot, type SnapshotData } from "./snapshot";
-import { quoteSideForDisplay } from "../depth";
+import { quoteSideForDisplay, sourceHasClobBook } from "../depth";
 import type { HedgeSuggestion, HedgeSuggestionKind } from "../api-types";
 
 // The Prisma HedgeSuggestionKind values (mirrored so this module stays @prisma/client-free at the
@@ -138,7 +138,7 @@ export async function deriveSuggestions(
 
     let yesPriceBp = m.yesPriceBp;
     let noPriceBp = m.noPriceBp;
-    if (opts.quoteDisplay && m.source === "POLYMARKET") {
+    if (opts.quoteDisplay && sourceHasClobBook(m.source)) {
       // Price BOTH sides at the card's own stake: the hedge side drives the displayed payout (and
       // must match the accept's lock); the other side keeps the DeckCard contract ("the price this
       // side COSTS") honest at the same stake. If either won't quote, there is no honest card.

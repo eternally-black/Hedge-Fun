@@ -3,7 +3,7 @@
 // absorbs within the eligibility cap) plus the tradability verdict a card needs to exist at all.
 // Pure math lives in src/lib/quote.ts (tested off fixtures); transport/caching in src/lib/clob.ts.
 //
-// ─── the bookless-source path (`source !== "POLYMARKET"`) ────────────────────────────────────────
+// ─── the bookless-source path (see sourceHasClobBook) ────────────────────────────────────────────
 // A row from a source with NO CLOB book at all serves its stored odds, and the depth gate must never
 // drop it for a null book. TxOdds football was the only such source and it is gone; today the path
 // is exercised only by the DB test suites (test-api-contract, test-route-guards, test-hedge-accept,
@@ -17,12 +17,8 @@
 // ponytail: ~6 small branches kept for test fixtures. Delete them when those suites move to a
 // stubbed book — the seam already exists, it just wasn't worth spending on today.
 //
-// WARNING for whoever adds a THIRD market source. These sites are keyed on the BOOK-BACKED pole
-// (`source === "POLYMARKET"`), so a new source silently inherits the BOOKLESS treatment: its stored
-// mid served as authoritative, no live re-quote at bet time, no depth gate, no staleness bound,
-// `live:false`. That is the dangerous direction to fail in. Add a `sourceHasClobBook(source)`
-// predicate here and route all six sites through it, so a new source forces one explicit decision
-// instead of six silent ones.
+// Every site that cares goes through sourceHasClobBook() below — see the note there for why that
+// matters more than it looks.
 
 import {
   STAKE_CENTS,
@@ -170,6 +166,18 @@ export async function requoteSideForLock(tokenId: string, stakeCents: number): P
 // whose book read is older than BOOK_MAX_DISPLAY_STALE_MS is dropped rather than shown at a price
 // from a dead book (looser than the 30s LOCK bound on purpose — see config.ts). A bookless source
 // keeps its stored odds: authoritative there, not a fallback (see the header). Null pair = not servable.
+// Does this market source have a real CLOB book behind it? Everything price-related keys off this:
+// the depth gate, the live re-quote at bet time, the display staleness bound, and QuoteRow.live.
+//
+// It exists as one predicate rather than six inline comparisons for one reason. The natural way to
+// write those comparisons is against the BOOKLESS pole (`!== "POLYMARKET"`), and then a third source
+// added later inherits the bookless treatment SILENTLY: its stored mid served as authoritative, no
+// re-quote before a bet locks, no depth gate, no staleness bound. That is a money path failing open.
+// Adding a source now means editing this one allow-list and making the decision on purpose.
+export function sourceHasClobBook(source: string): boolean {
+  return source === "POLYMARKET";
+}
+
 export function authoritativePrices(c: {
   source: string;
   yesPriceBp: number | null;
@@ -178,7 +186,7 @@ export function authoritativePrices(c: {
   noEffPriceBp: number | null;
   bookTsAt: Date | null;
 }, nowMs: number): { yes: number | null; no: number | null } {
-  if (c.source !== "POLYMARKET") return { yes: c.yesPriceBp, no: c.noPriceBp }; // bookless source
+  if (!sourceHasClobBook(c.source)) return { yes: c.yesPriceBp, no: c.noPriceBp };
   if (c.bookTsAt === null || nowMs - c.bookTsAt.getTime() > BOOK_MAX_DISPLAY_STALE_MS) {
     return { yes: null, no: null };
   }
