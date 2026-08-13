@@ -1,0 +1,101 @@
+# Self-hosted GlitchTip error tracking + Telegram alert bridge, deployed to /opt/glitchtip
+# on the VPS. install.sh provisions this stack and creates the `glitchtip-shared` external
+# network; the app stack's caddy joins that network to reverse-proxy glitchtip-web:8000.
+# No host port is published here on purpose (a 127.0.0.1 bind would be unreachable from
+# the caddy container). Inside GlitchTip, set the alert webhook URL to exactly:
+#   http://tg-bridge:8080
+
+x-environment: &default-environment
+  DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
+  VALKEY_URL: redis://valkey:6379
+  SECRET_KEY: ${SECRET_KEY}
+  EMAIL_URL: consolemail://
+  GLITCHTIP_DOMAIN: ${GLITCHTIP_DOMAIN}
+  DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL}
+  GLITCHTIP_MAX_EVENT_LIFE_DAYS: "30"
+  ENABLE_ADMIN: "False"
+  ENABLE_OPENAPI: "False"
+
+services:
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pg-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+
+  valkey:
+    image: valkey/valkey:9
+    # Unbounded by default — this 48mb cap is mandatory.
+    command: ["valkey-server", "--maxmemory", "48mb", "--maxmemory-policy", "allkeys-lru"]
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 64m
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+
+  web:
+    image: glitchtip/glitchtip:6
+    environment:
+      <<: *default-environment
+      SERVER_ROLE: all_in_one
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_started
+    volumes:
+      - uploads:/code/uploads
+    networks:
+      default: {}
+      glitchtip-shared:
+        aliases:
+          - glitchtip-web
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+
+  tg-bridge:
+    image: node:22-alpine
+    command: ["node", "/srv/tg-bridge.mjs"]
+    volumes:
+      - ./tg-bridge.mjs:/srv/tg-bridge.mjs:ro
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+    networks:
+      - default
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 64m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+
+volumes:
+  pg-data:
+  uploads:
+
+networks:
+  glitchtip-shared:
+    external: true

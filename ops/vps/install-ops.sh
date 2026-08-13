@@ -75,6 +75,13 @@ timedatectl set-ntp true 2>/dev/null || true
 mkdir -p /var/lib/hedgefun "$HEDGEFUN_DIR/backups"
 chmod 700 "$HEDGEFUN_DIR/backups"
 
+# --- shared docker network (app caddy <-> glitchtip web) ---------------------
+# The app compose declares it external, so it must exist BEFORE `compose up` — even if
+# the GlitchTip stack itself is installed later.
+if command -v docker >/dev/null 2>&1; then
+  docker network inspect glitchtip-shared >/dev/null 2>&1 || docker network create glitchtip-shared >/dev/null
+fi
+
 # --- systemd units -----------------------------------------------------------
 changed=0
 for unit in "$UNIT_SRC"/*.service "$UNIT_SRC"/*.timer; do

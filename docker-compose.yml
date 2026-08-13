@@ -14,6 +14,13 @@ services:
       - pgdata:/var/lib/postgresql/data
     networks:
       - internal
+    # Bounded logs on EVERY service (not only daemon.json defaults): daemon defaults apply
+    # only to newly-created containers, and db is almost never recreated.
+    logging: &bounded-logs
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # No ports: — never published to the host.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
@@ -37,6 +44,7 @@ services:
         condition: service_healthy
     networks:
       - internal
+    logging: *bounded-logs
     restart: "no"
 
   app:
@@ -61,6 +69,7 @@ services:
         condition: service_completed_successfully
     networks:
       - internal
+    logging: *bounded-logs
     # No host port — Caddy reaches app:3000 over the internal network.
     healthcheck:
       # /api/me returns 401 without a token; 401 (or 200) proves the server is alive.
@@ -88,14 +97,16 @@ services:
         condition: service_completed_successfully
     networks:
       - internal
+    logging: *bounded-logs
     # Liveness: the poller touches a heartbeat file at the end of each successful tick.
-    # Fail (and let restart: unless-stopped fire) if it's missing or stale — older than 3x
-    # the 60s poll interval. Resolves the path the same way the poller does (env override or
-    # os.tmpdir() default) so they can't drift.
+    # Fail if it's missing or stale — older than 3x the 60s poll interval. NOTE: plain
+    # Docker does NOT restart a container on a failing healthcheck (that is Swarm-only) —
+    # the unhealthy status is acted on by ops/vps/hedgefun-watchdog.sh (`docker restart`).
+    # A negative age (file mtime in the future after a clock jump) is also unhealthy.
     healthcheck:
       test:
         - "CMD-SHELL"
-        - "node -e 'const f=process.env.POLLER_HEARTBEAT_FILE||require(\"path\").join(require(\"os\").tmpdir(),\"poller-heartbeat\");process.exit(Date.now()-require(\"fs\").statSync(f).mtimeMs<180000?0:1)'"
+        - "node -e 'const f=process.env.POLLER_HEARTBEAT_FILE||require(\"path\").join(require(\"os\").tmpdir(),\"poller-heartbeat\");const a=Date.now()-require(\"fs\").statSync(f).mtimeMs;process.exit(a>=0&&a<180000?0:1)'"
       interval: 30s
       timeout: 5s
       retries: 3
@@ -119,6 +130,21 @@ services:
       - app
     networks:
       - internal
+      # Shared with the GlitchTip compose project so Caddy can reverse-proxy
+      # glitchtip-web:8000. Created by install-ops.sh / ops/glitchtip/install.sh.
+      - glitchtip-shared
+    logging: *bounded-logs
+    # Admin API answering with a loaded config proves the process is alive AND serving.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 128m
 
 volumes:
   pgdata:
@@ -128,3 +154,5 @@ volumes:
 networks:
   internal:
     driver: bridge
+  glitchtip-shared:
+    external: true
