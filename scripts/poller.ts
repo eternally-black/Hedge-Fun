@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { fetchResolution } from "../src/lib/polymarket";
 import { DECK_FETCH_HORIZON_HOURS } from "../src/lib/deck-mix";
 import { DECK_MIN_SERVABLE } from "../src/lib/config";
+import { captureToGlitchTip, sendOpsTelegram } from "../src/lib/glitchtip";
 import { settleMarket, type Resolution } from "./settle";
 import { evaluateStreak } from "../src/lib/streak";
 import { refreshDeck } from "./refresh-deck";
@@ -35,6 +36,27 @@ const HEDGE_INDEX_EVERY_N_TICKS = 5;
 // (see the tick body) so the two heavy passes don't land on the same tick.
 const PRUNE_EVERY_N_TICKS = 5;
 let tickCount = 0;
+
+// Silent-failure watch: subsystem errors are swallowed by design (a failed deck refresh
+// must not kill settlement), so count consecutive failures and alert at 3. Reset on the
+// first success; a recovery after an alert sends one OK message.
+const FAIL_ALERT_AT = 3;
+const failStreaks: Record<string, number> = {};
+function subsystemFailed(name: string, e: unknown): void {
+  failStreaks[name] = (failStreaks[name] ?? 0) + 1;
+  void captureToGlitchTip(e, { subsystem: name });
+  if (failStreaks[name] === FAIL_ALERT_AT) {
+    void sendOpsTelegram(`🚨 poller: ${name} failed ${FAIL_ALERT_AT} consecutive times: ${(e as Error).message ?? String(e)}`);
+  }
+}
+function subsystemOk(name: string): void {
+  if ((failStreaks[name] ?? 0) >= FAIL_ALERT_AT) {
+    void sendOpsTelegram(`✅ poller: ${name} recovered`);
+  }
+  failStreaks[name] = 0;
+}
+// Settlement-backlog alert throttle: one Telegram send per hour max while overdue persists.
+let backlogLastAlertAt = 0;
 
 // Liveness signal: touched at the end of every successful tick. The compose healthcheck
 // fails the container when this file is stale (mtime older than ~3x the interval) so a
@@ -69,7 +91,7 @@ async function settleOne(market: { id: string; polymarketId: string; source: str
 // Process an array with a bounded concurrency, isolating per-item errors.
 // Exported so scripts/test-poller-maplimit.ts can unit-test the error-isolation + bounded
 // concurrency in isolation (importing this module does NOT start loop() — see runAsDaemon guard).
-export async function mapLimit<T>(items: T[], limit: number, fn: (t: T) => Promise<void>) {
+export async function mapLimit<T>(items: T[], limit: number, fn: (t: T) => Promise<void>, onError?: (e: unknown) => void) {
   const queue = [...items];
   const workers = Array.from({ length: Math.min(limit, queue.length) }, async () => {
     while (queue.length) {
@@ -78,6 +100,7 @@ export async function mapLimit<T>(items: T[], limit: number, fn: (t: T) => Promi
         await fn(item);
       } catch (e) {
         console.warn("[poll] item error (will retry next tick):", (e as Error).message);
+        onError?.(e);
       }
     }
   });
@@ -103,8 +126,10 @@ async function tick() {
     } else {
       console.log(`[deck] refreshed ${r.upserted} markets (${r.servable} servable)`);
     }
+    subsystemOk("deck");
   } catch (e) {
     console.warn("[deck] refresh error:", (e as Error).message);
+    subsystemFailed("deck", e);
   }
 
   // Hedge market index (S1 crypto majors + S2 sports/esports) — SLOWER sibling cadence (every Nth
@@ -118,8 +143,10 @@ async function tick() {
       console.log(
         `[hedge-index] S1 parsed=${hs.parsed}/${hs.discovered} | S2 eligible=${hs.sports.eligible}/${hs.sports.discovered} cleared=${hs.sports.clearedStale}`,
       );
+      subsystemOk("hedge-index");
     } catch (e) {
       console.warn("[hedge-index] refresh error:", (e as Error).message);
+      subsystemFailed("hedge-index", e);
     }
   }
 
@@ -131,8 +158,10 @@ async function tick() {
     try {
       const p = await pruneMarkets();
       if (p.deleted > 0) console.log(`[prune] deleted ${p.deleted} dead markets${p.more ? " (more queued)" : ""}`);
+      subsystemOk("prune");
     } catch (e) {
       console.warn("[prune] error:", (e as Error).message);
+      subsystemFailed("prune", e);
     }
   }
 
@@ -145,7 +174,10 @@ async function tick() {
   const markets = pending.map((p) => p.market);
   if (markets.length) {
     console.log(`[poll] ${markets.length} market(s) with pending bets`);
-    await mapLimit(markets, CONCURRENCY, settleOne);
+    let settleErrors = 0;
+    await mapLimit(markets, CONCURRENCY, settleOne, () => { settleErrors++; });
+    if (settleErrors > 0) subsystemFailed("settle", new Error(`${settleErrors} settle item error(s) this tick`));
+    else subsystemOk("settle");
   }
 
   // Streak sweep — only streaks that can actually transition (M1): ACTIVE that missed a
@@ -161,12 +193,36 @@ async function tick() {
     },
     select: { userId: true },
   });
+  let streakErrors = 0;
   for (const s of due) {
     try {
       await evaluateStreak(s.userId);
     } catch (e) {
       console.warn("[streak] sweep error:", (e as Error).message);
+      streakErrors++;
     }
+  }
+  if (streakErrors > 0) subsystemFailed("streak", new Error(`${streakErrors} streak sweep error(s)`));
+  else subsystemOk("streak");
+
+  // Backlog: a PENDING bet >6h past its market's resolutionDeadline means settlement is
+  // not keeping up (or resolution fetch is broken) — the heartbeat alone would stay green.
+  const overdue = await prisma.bet.findFirst({
+    where: {
+      settlementStatus: "PENDING",
+      market: { resolutionDeadline: { lt: new Date(Date.now() - 6 * 3_600_000) } },
+    },
+    orderBy: { market: { resolutionDeadline: "asc" } },
+    select: { market: { select: { resolutionDeadline: true, polymarketId: true } } },
+  });
+  if (overdue && Date.now() - backlogLastAlertAt > 3_600_000) {
+    backlogLastAlertAt = Date.now();
+    void sendOpsTelegram(
+      `🚨 poller: settlement backlog — oldest pending bet past deadline ${overdue.market.resolutionDeadline.toISOString()} (market ${overdue.market.polymarketId.slice(0, 16)})`,
+    );
+  } else if (!overdue && backlogLastAlertAt !== 0) {
+    backlogLastAlertAt = 0;
+    void sendOpsTelegram("✅ poller: settlement backlog cleared");
   }
 }
 
@@ -179,8 +235,12 @@ async function loop() {
       // Heartbeat only on a clean tick — a failed tick should let the file go stale so the
       // healthcheck eventually restarts us rather than masking a persistent failure.
       writeFileSync(HEARTBEAT_FILE, new Date().toISOString());
+      // Dead-man ping: external uptime check; no-op without POLLER_HC_URL.
+      const hc = process.env.POLLER_HC_URL;
+      if (hc) fetch(hc, { signal: AbortSignal.timeout(5000) }).catch(() => {});
     } catch (e) {
       console.error("[poll] tick failed:", (e as Error).message);
+      void captureToGlitchTip(e, { subsystem: "tick" });
     }
     const elapsed = Date.now() - start;
     await new Promise((r) => setTimeout(r, Math.max(0, POLL_INTERVAL_MS - elapsed)));
@@ -199,11 +259,14 @@ if (runAsDaemon) {
   // `restart: unless-stopped` actually fires.
   process.on("unhandledRejection", (reason) => {
     console.error("[poll] unhandledRejection:", reason);
-    process.exit(1);
+    // Capture the fault before exiting; the 3s timer is the ceiling, the capture's finally the floor.
+    (setTimeout(() => process.exit(1), 3000) as unknown as { unref?: () => void }).unref?.(); // Node returns a Timeout; DOM typings say number
+    void captureToGlitchTip(reason, { subsystem: "fatal" }).finally(() => process.exit(1));
   });
   process.on("uncaughtException", (err) => {
     console.error("[poll] uncaughtException:", err);
-    process.exit(1);
+    (setTimeout(() => process.exit(1), 3000) as unknown as { unref?: () => void }).unref?.(); // Node returns a Timeout; DOM typings say number
+    void captureToGlitchTip(err, { subsystem: "fatal" }).finally(() => process.exit(1));
   });
 
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
