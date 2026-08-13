@@ -120,6 +120,54 @@ enum ReferralEventType {
   INVITER_ACCRUAL
 }
 
+// ------------------------------------------------------------ real-money enums (plan §2.2)
+
+enum BetMode {
+  PAPER
+  REAL
+}
+
+enum OrderDir {
+  ENTRY // BUY into a position
+  EXIT // SELL out of it
+}
+
+enum OrderAttemptState {
+  ISSUED // intent created, server-approved params returned for signing
+  SIGNED // signed order received and validated against the intent
+  SUBMITTING // claimed for posting; external call may be in flight (crash fence)
+  POSTED // exchange accepted; awaiting fill resolution
+  FILLED // fully matched
+  PARTIAL // matched below requested size, FAK cancelled the remainder
+  KILLED // zero fill — no position, the market slot frees for a retry
+  FAILED // rejected or errored before/at post
+}
+
+enum WalletOpKind {
+  DEPLOY
+  APPROVALS
+  WRAP
+}
+
+enum WalletWorkflowState {
+  PENDING_SIGNATURE
+  SUBMITTING
+  DONE
+  FAILED
+}
+
+enum RelayerTxStatus {
+  SUBMITTING
+  CONFIRMED
+  FAILED
+}
+
+enum FundingState {
+  AWAITING // declared, nothing on chain yet
+  DETECTED // USDC.e delta seen — wrap needed
+  FUNDED // pUSD delta seen — spendable collateral
+}
+
 // ============================================================ USER
 
 model User {
@@ -139,6 +187,11 @@ model User {
   // REFERRAL_HASH_SECRET stay null, and the guard skips a user whose signup device is unknown.
   signupIpHash          Bytes?
   signupUaHash          Bytes?
+  // Real-money (plan §2.2/§2.3): the user's Polymarket Deposit Wallet (deterministic from the
+  // embedded signer; persisted because reading beats re-deriving) and the explicit opt-in moment.
+  // The env allowlist is the outer gate; this is the durable per-user consent.
+  depositWalletAddress  String?      @unique
+  realConsentAt         DateTime?
 
   bets                  Bet[]
   pointsLedger          PointsLedger[]
@@ -153,6 +206,11 @@ model User {
   referralReceived      Referral?              @relation("Invitee")
   hedgeWallets          HedgeWallet[]
   hedgeSuggestionEvents HedgeSuggestionEvent[]
+  orderAttempts         OrderAttempt[]
+  walletWorkflows       WalletWorkflow[]
+  fundingAttempts       FundingAttempt[]
+  relayerTxs            RelayerTx[]
+  clobCredential        ClobCredential?
 
   @@index([createdAt])
   @@map("users")
@@ -212,9 +270,10 @@ model Market {
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
-  bets        Bet[]
-  meta        MarketMeta?
-  hedgeEvents HedgeSuggestionEvent[]
+  bets          Bet[]
+  meta          MarketMeta?
+  hedgeEvents   HedgeSuggestionEvent[]
+  orderAttempts OrderAttempt[]
 
   @@index([status, resolutionDeadline]) // deck assembly
   @@index([status, resolvedAt]) // settlement scan
@@ -252,15 +311,32 @@ model Bet {
   pnlCents         Int?
   resolvedYes      Boolean?
 
+  // PAPER = virtual-dollar game (everything above). REAL = a Polymarket position aggregate: the row
+  // is created ON FILL (never at swipe), stakeCents keeps the swiped all-in intent, and the fields
+  // below carry actuals from Fill rows in exchange atomic units (micro-USD / micro-shares, BigInt —
+  // aggregate cents discard fill precision). Paper settlement/holds/points paths MUST filter on
+  // mode; real P&L derives from these, never from stakeCents/lockedPriceBp.
+  mode              BetMode @default(PAPER)
+  filledSharesMicro BigInt?
+  spendMicro        BigInt?
+  feeMicro          BigInt?
+  vwapBp            Int?
+  closedSharesMicro BigInt?
+  proceedsMicro     BigInt?
+  closeFeeMicro     BigInt?
+  realizedPnlMicro  BigInt?
+
   createdAt DateTime  @default(now())
   settledAt DateTime?
   seenAt    DateTime? // null = result not yet revealed to the user (inbox/reveal). Drives unread count.
 
-  shardGrant ShardGrant?
+  shardGrant    ShardGrant?
+  orderAttempts OrderAttempt[]
 
-  // One bet per market per user (C1): a card is swiped once. Kills the
-  // "farm the daily cap against a single market" exploit.
-  @@unique([userId, marketId])
+  // One bet per market per user PER MODE (C1): a card is swiped once. Kills the
+  // "farm the daily cap against a single market" exploit; the mode split keeps a
+  // paper bet from blocking a real position on the same market (and vice versa).
+  @@unique([userId, marketId, mode])
   @@index([settlementStatus])
   @@index([marketId, settlementStatus])
   @@index([userId, utcDay])
@@ -561,4 +637,156 @@ model HedgeSuggestionEvent {
   @@index([suggestionId])
   @@index([userId, createdAt])
   @@map("hedge_suggestion_events")
+}
+
+// ============================================================ REAL MONEY (plan §2.2)
+// Append-only execution ledger under the Bet aggregate. Durable intent BEFORE every external call;
+// idempotency by unique constraints, never app logic (house rule above).
+
+// One order attempt = one two-phase intent (ISSUED with server-approved params → client signs →
+// SUBMITTING fence → posted → resolved from fills). A retry NEVER reuses a non-terminal attempt.
+model OrderAttempt {
+  id       String  @id @default(cuid())
+  userId   String
+  user     User    @relation(fields: [userId], references: [id])
+  marketId String
+  market   Market  @relation(fields: [marketId], references: [id])
+  betId    String? // set when fills materialize/update the position row
+  bet      Bet?    @relation(fields: [betId], references: [id], onDelete: Restrict) // never silently detach the ledger from its position
+
+  dir            OrderDir
+  side           BetSide
+  tokenId        String
+  idempotencyKey String   @unique // server-issued at intent time; the client echoes it back
+  approvedParams Json // the exact params the client must sign; submit validates the signed order against THIS
+  allInCapMicro  BigInt // the user's all-in debit cap (maxSpend), micro-USD
+  maxPriceBp     Int // marginal-ask bound, tick-rounded (up for BUY, down for SELL)
+
+  state           OrderAttemptState @default(ISSUED)
+  signedOrderHash String?           @unique // replay guard
+  externalOrderId String?           @unique
+  postResponse    Json? // authoritative receipt, persisted verbatim at post time
+  error           String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  fills     Fill[]
+
+  // Single in-flight per (user, market) is a PARTIAL unique index over non-terminal states —
+  // Prisma can't express it, so it lives as raw SQL in the migration:
+  //   CREATE UNIQUE INDEX "order_attempts_one_inflight" ON "order_attempts"("userId","marketId")
+  //   WHERE "state" IN ('ISSUED','SIGNED','SUBMITTING','POSTED');
+  @@index([userId, marketId, state])
+  @@index([state, updatedAt]) // poller: reconcile stuck SUBMITTING/POSTED
+  @@map("order_attempts")
+}
+
+// One exchange fill. Source of truth for real position math — exchange atomic units only.
+model Fill {
+  id             String       @id @default(cuid())
+  attemptId      String
+  attempt        OrderAttempt @relation(fields: [attemptId], references: [id])
+  externalFillId String       @unique
+  sharesMicro    BigInt
+  amountMicro    BigInt // spend (ENTRY) or proceeds (EXIT)
+  feeMicro       BigInt
+  priceBp        Int
+  ts             DateTime
+  createdAt      DateTime     @default(now())
+
+  @@index([attemptId])
+  @@map("fills")
+}
+
+// Durable state machine for relayer-driven gasless workflows (approvals, wrap): the generator is
+// rebuilt from `inputs` per request, replayed, and each regenerated yield must byte-match
+// pendingRequestHash. ONE row per (user, kind) IS the single-flight guard — the row is reused as a
+// state machine across runs (wrap runs once per deposit); submission history lives in RelayerTx.
+// Ambiguous submissions converge from CHAIN state (allowance/pUSD present), never blind resubmit.
+model WalletWorkflow {
+  id     String              @id @default(cuid())
+  userId String
+  user   User                @relation(fields: [userId], references: [id])
+  kind   WalletOpKind
+  state  WalletWorkflowState @default(PENDING_SIGNATURE)
+
+  stepIndex          Int     @default(0)
+  inputs             Json // immutable inputs the generator is rebuilt from
+  answers            Json    @default("[]") // ordered accepted answers [{requestHash, signature}] — the replay transcript
+  pendingRequest     Json? // the yielded signature request awaiting the device
+  pendingRequestHash String?
+  txHash             String?
+  error              String?
+
+  expiresAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@unique([userId, kind])
+  @@map("wallet_workflows")
+}
+
+// One declared deposit. Balance-DELTA detection (never nonzero-balance — residuals lie): baselines
+// snapshot at declare time; the poller's watcher advances state and NEVER gives up on user money
+// (below-floor deposits park indefinitely and release on top-up — spec §6.2). Bridge /status is
+// a hint at most, nowhere in this state machine.
+model FundingAttempt {
+  id     String       @id @default(cuid())
+  userId String
+  user   User         @relation(fields: [userId], references: [id])
+  state  FundingState @default(AWAITING)
+
+  baselineUsdceMicro BigInt @default(0)
+  baselinePusdMicro  BigInt @default(0)
+  latestUsdceMicro   BigInt @default(0)
+  latestPusdMicro    BigInt @default(0)
+
+  declaredAt    DateTime  @default(now())
+  lastCheckedAt DateTime?
+  fundedAt      DateTime?
+  alertedAt     DateTime? // parked-deposit ops alert sent once, never repeated
+
+  // One ACTIVE attempt per user is a PARTIAL unique (raw SQL in the migration):
+  //   CREATE UNIQUE INDEX "funding_attempts_one_active" ON "funding_attempts"("userId")
+  //   WHERE "state" <> 'FUNDED';
+  @@index([state, lastCheckedAt]) // watcher due-scan
+  @@index([userId, declaredAt])
+  @@map("funding_attempts")
+}
+
+// Every relayer OPERATION, written (SUBMITTING) BEFORE the external call — closes the
+// crash-between-call-and-record window and is the 100/day Unverified-tier budget ledger.
+// workflowKey is deterministic per operation so a retry storm collapses into one row per op;
+// `attempts` increments per SUBMISSION, so retry spend stays countable (onboarding spend =
+// rows, retry spend = Σ(attempts−1)) without giving retries their own rows.
+model RelayerTx {
+  id          String          @id @default(cuid())
+  userId      String
+  user        User            @relation(fields: [userId], references: [id])
+  kind        WalletOpKind
+  workflowKey String
+  txHash      String?
+  status      RelayerTxStatus @default(SUBMITTING)
+  attempts    Int             @default(1)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  @@unique([userId, kind, workflowKey])
+  @@index([createdAt]) // daily budget counter + onboarding-vs-retry split
+  @@map("relayer_txs")
+}
+
+// Derived L2 CLOB API creds (read/cancel only — NOT signing keys; D5 intact), encrypted at rest
+// (AES-256-GCM). The encryption key lives in env, outside DB backups. Owner decision Q4 2026-08-13.
+model ClobCredential {
+  userId     String    @id
+  user       User      @relation(fields: [userId], references: [id])
+  ciphertext Bytes
+  nonce      Bytes
+  keyVersion Int       @default(1)
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@map("clob_credentials")
 }

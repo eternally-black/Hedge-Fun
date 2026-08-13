@@ -103,7 +103,7 @@ export async function POST(req: Request) {
     if (e instanceof InsufficientFundsError) {
       return NextResponse.json({ error: "insufficient_funds" }, { status: 402 });
     }
-    // P2002 on [userId, marketId] = already bet this market (one bet per card).
+    // P2002 on [userId, marketId, mode] = already bet this market (one bet per card per mode).
     if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
       return NextResponse.json({ error: "already swiped this market" }, { status: 409 });
     }

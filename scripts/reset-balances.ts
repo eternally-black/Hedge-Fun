@@ -13,9 +13,10 @@ import { START_BALANCE_CENTS } from "../src/lib/config";
 (async () => {
   const now = new Date();
 
-  // 1. Void all still-open bets so no stake stays locked across the reset.
+  // 1. Void all still-open PAPER bets so no stake stays locked across the reset.
+  // NEVER touches real positions — a dev reset must not "void" money on an exchange.
   const voided = await prisma.bet.updateMany({
-    where: { settlementStatus: "PENDING" },
+    where: { settlementStatus: "PENDING", mode: "PAPER" },
     data: {
       settlementStatus: "VOID",
       result: "PUSH",

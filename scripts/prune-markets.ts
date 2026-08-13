@@ -17,6 +17,9 @@
 //                           so it cannot grow into the backlog this GC exists to clear.
 //   MarketMeta           -> DELETE it alongside. Pure derived cache (strike/direction/league parse),
 //                           rebuilt from Gamma by refresh-hedge-index; nothing is lost.
+//   OrderAttempt         -> EXCLUDE the market. Real-money execution ledger (append-only, audit);
+//                           a zero-fill attempt leaves NO Bet row, so without this anti-join the
+//                           delete would P2003 on order_attempts_marketId_fkey every tick.
 //
 // Run: npm run prune-markets   (also called by the poller on a slow cadence)
 import { PrismaClient } from "@prisma/client";
@@ -45,7 +48,7 @@ export async function pruneMarkets(opts: { olderThanDays?: number; maxRows?: num
   // `none: {}` is an anti-join (NOT EXISTS) — one query, riding the existing indexes instead of
   // pulling every bet/event id into an IN-list.
   const doomed = await prisma.market.findMany({
-    where: { resolutionDeadline: { lt: cutoff }, bets: { none: {} }, hedgeEvents: { none: {} } },
+    where: { resolutionDeadline: { lt: cutoff }, bets: { none: {} }, hedgeEvents: { none: {} }, orderAttempts: { none: {} } },
     select: { id: true },
     take: maxRows,
   });
@@ -61,7 +64,7 @@ export async function pruneMarkets(opts: { olderThanDays?: number; maxRows?: num
     // statements. Without the re-check the delete would fail on the foreign key — or, on a
     // cascade, silently take their bet or telemetry with it.
     const r = await prisma.market.deleteMany({
-      where: { id: { in: chunk }, bets: { none: {} }, hedgeEvents: { none: {} } },
+      where: { id: { in: chunk }, bets: { none: {} }, hedgeEvents: { none: {} }, orderAttempts: { none: {} } },
     });
     deleted += r.count;
   }

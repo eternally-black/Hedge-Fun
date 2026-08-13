@@ -165,9 +165,9 @@ async function tick() {
     }
   }
 
-  // Markets that still have unsettled bets.
+  // Markets that still have unsettled PAPER bets (real positions never enter paper settlement).
   const pending = await prisma.bet.findMany({
-    where: { settlementStatus: "PENDING" },
+    where: { settlementStatus: "PENDING", mode: "PAPER" },
     distinct: ["marketId"],
     select: { market: { select: { id: true, polymarketId: true, source: true, resolutionDeadline: true } } },
   });
@@ -210,6 +210,7 @@ async function tick() {
   const overdue = await prisma.bet.findFirst({
     where: {
       settlementStatus: "PENDING",
+      mode: "PAPER",
       market: { resolutionDeadline: { lt: new Date(Date.now() - 6 * 3_600_000) } },
     },
     orderBy: { market: { resolutionDeadline: "asc" } },

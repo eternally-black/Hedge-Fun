@@ -105,7 +105,7 @@ async function main() {
     capStopped = (e as Error).name === "SwipeCapReachedError";
   }
   assert.ok(capStopped, "over-cap swipe is hard-stopped (throws SwipeCapReachedError)");
-  const overCapBet = await prisma.bet.findUnique({ where: { userId_marketId: { userId: user.id, marketId: overCapMkt.id } } });
+  const overCapBet = await prisma.bet.findUnique({ where: { userId_marketId_mode: { userId: user.id, marketId: overCapMkt.id, mode: "PAPER" } } });
   assert.strictEqual(overCapBet, null, "no bet stored for the hard-stopped over-cap swipe");
   // (Dev capBypass exemption is asserted in test-swipe-cap.ts in isolation, so it doesn't
   //  perturb this user's counters/P&L below.)

@@ -110,7 +110,7 @@ async function main() {
     assert.strictEqual(betsAfter, betsBefore, "(a) over-cap attempt created NO extra Bet row (pre-write reject)");
     // And specifically the over-cap market has no bet for this user.
     const overBet = await prisma.bet.findUnique({
-      where: { userId_marketId: { userId: capUser.id, marketId: capMarkets[SWIPE_CAP].id } },
+      where: { userId_marketId_mode: { userId: capUser.id, marketId: capMarkets[SWIPE_CAP].id, mode: "PAPER" } },
     });
     assert.strictEqual(overBet, null, "(a) no Bet row for the over-cap market");
 

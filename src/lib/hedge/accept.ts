@@ -148,11 +148,11 @@ export async function acceptSuggestion(userId: string, sid: string): Promise<Acc
       return { betId: bet.id, stakeCents: stake, alreadyAccepted: false };
     });
   } catch (e) {
-    // [userId, marketId] unique: a concurrent accept of THIS suggestion, or a prior bet on the same
-    // market from another path. If it's the same suggestion -> idempotent success; else 409.
+    // [userId, marketId, mode] unique: a concurrent accept of THIS suggestion, or a prior paper bet
+    // on the same market from another path. If it's the same suggestion -> idempotent success; else 409.
     if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
       const other = await prisma.bet.findUnique({
-        where: { userId_marketId: { userId, marketId } },
+        where: { userId_marketId_mode: { userId, marketId, mode: "PAPER" } },
         select: { id: true, stakeCents: true, hedgeSuggestionId: true },
       });
       if (other?.hedgeSuggestionId === sid) {

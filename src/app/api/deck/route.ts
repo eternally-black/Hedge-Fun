@@ -36,9 +36,10 @@ export async function GET(req: Request) {
   // endDate-order would be a wall of crypto (resolves in minutes), so we shuffle below.
   // Exclude already-swiped markets with a `bets: { none }` anti-join (Postgres NOT EXISTS) instead
   // of fetching every swiped id and passing `id NOT IN (...)`: ONE query instead of two, and it
-  // rides the Bet @@unique([userId, marketId]) index instead of an IN-list that grows unbounded
-  // with the user's lifetime bets. Bet has one row per (user, market), so `none` == "not swiped"
-  // (re-serving one would P2002 -> 409 on the next swipe anyway).
+  // rides the Bet @@unique([userId, marketId, mode]) index (left-prefix) instead of an IN-list that
+  // grows unbounded with the user's lifetime bets. DELIBERATELY mode-agnostic: a card is swiped
+  // once per user EVER — a REAL position on X consumes the card exactly like a paper bet would
+  // (the mode split on the unique exists for the hedge path, not to re-deal swiped cards).
   //
   // The contested band is NOT a SQL filter anymore: it must consume the AUTHORITATIVE price per row
   // (the eff VWAP for POLYMARKET — null when no fresh book read exists, i.e. "not servable"; the

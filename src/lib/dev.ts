@@ -16,10 +16,12 @@ export function isDevUser(email: string | null | undefined): boolean {
 // Does NOT touch points/shards/streak balances — just re-deals the deck. Returns counts.
 export async function resetUserDeck(userId: string): Promise<{ bets: number }> {
   return prisma.$transaction(async (tx) => {
-    const betIds = (await tx.bet.findMany({ where: { userId }, select: { id: true } })).map((b) => b.id);
+    // PAPER only: deleting a REAL row would silently drop the position aggregate while the
+    // exchange position lives on (OrderAttempt.betId goes SET NULL — no error, lost tracking).
+    const betIds = (await tx.bet.findMany({ where: { userId, mode: "PAPER" }, select: { id: true } })).map((b) => b.id);
     await tx.shardGrant.deleteMany({ where: { betId: { in: betIds } } });
     await tx.pointsLedger.deleteMany({ where: { betId: { in: betIds } } });
-    const del = await tx.bet.deleteMany({ where: { userId } });
+    const del = await tx.bet.deleteMany({ where: { userId, mode: "PAPER" } });
     // Reset today's per-day counters so swipe/skip caps don't carry into the next test run.
     await tx.dailyCounter.updateMany({
       where: { userId },

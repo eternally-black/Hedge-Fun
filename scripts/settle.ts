@@ -70,8 +70,10 @@ export async function settleMarket(
 
   return prisma.$transaction(
     async (tx) => {
+      // mode: PAPER — this whole path is virtual-dollar math. A REAL bet here would be credited
+      // virtual winnings for a real position; real bets settle from chain/fills (plan §2.2).
       const bets = await tx.bet.findMany({
-        where: { marketId, settlementStatus: "PENDING" },
+        where: { marketId, settlementStatus: "PENDING", mode: "PAPER" },
       });
 
       // Update the cached market status at first resolution only. PENDING bets exist only on the
