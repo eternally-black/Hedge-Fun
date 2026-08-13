@@ -5,6 +5,7 @@ import { authUser } from "@/lib/privy";
 import { recordSwipe, InsufficientFundsError } from "@/lib/swipe";
 import { DECK_MIN_LEAD_MS, STAKE_CENTS } from "@/lib/config";
 import { requoteSideForLock, quoteMovedAgainstUser, sourceHasClobBook } from "@/lib/depth";
+import { captureToGlitchTip } from "@/lib/glitchtip";
 import type { FeedBetRequest, FeedBetResponse } from "@/lib/api-types";
 
 // Feed bet = a paper bet on a FEED market (the post-cap "лента"). Same $10 stake/cash-hold as a
@@ -47,6 +48,7 @@ export async function POST(req: Request) {
     }
     const q = await requoteSideForLock(tokenId, STAKE_CENTS);
     if (q.kind === "unavailable") {
+      void captureToGlitchTip(new Error("clob book unavailable"), { route: "feed-bet" });
       return NextResponse.json({ error: "book_unavailable" }, { status: 502 });
     }
     if (q.kind !== "ok") {

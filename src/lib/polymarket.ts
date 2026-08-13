@@ -180,6 +180,7 @@ async function gammaGet(path: string): Promise<GammaMarket[]> {
   const res = await fetch(`${BASE}${path}`, {
     cache: "no-store",
     headers: { accept: "application/json" },
+    signal: AbortSignal.timeout(15_000), // an upstream hang must not stall a poller tick into its 180 s heartbeat kill
   });
   if (!res.ok) throw new Error(`Gamma ${res.status} for ${path}`);
   return (await res.json()) as GammaMarket[];

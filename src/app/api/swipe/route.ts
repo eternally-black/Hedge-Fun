@@ -7,6 +7,7 @@ import { maybeQualifyReferralOnSwipe } from "@/lib/referral";
 import { DECK_MIN_LEAD_MS, STAKE_CENTS } from "@/lib/config";
 import { requoteSideForLock, quoteMovedAgainstUser, sourceHasClobBook } from "@/lib/depth";
 import { isDevUser } from "@/lib/dev";
+import { captureToGlitchTip } from "@/lib/glitchtip";
 import type { SwipeRequest, SwipeResponse } from "@/lib/api-types";
 
 // Swipe = paper bet Yes/No on a deck market. Locks the BOUGHT side's price for P&L.
@@ -58,6 +59,7 @@ export async function POST(req: Request) {
     }
     const q = await requoteSideForLock(tokenId, STAKE_CENTS);
     if (q.kind === "unavailable") {
+      void captureToGlitchTip(new Error("clob book unavailable"), { route: "swipe" });
       return NextResponse.json({ error: "book_unavailable" }, { status: 502 });
     }
     if (q.kind !== "ok") {
@@ -86,9 +88,10 @@ export async function POST(req: Request) {
     // inviter's 20%. Counts lifetime bets itself — result.swipeCountToday is per-DAY, not the
     // gate. Called here (not in swipe.ts) to avoid a swipe<->referral circular import. Best-
     // effort: a failure here must not fail the swipe the user already made, so swallow + log.
-    await maybeQualifyReferralOnSwipe(user.id).catch((e) =>
-      console.error("referral qualify/accrue failed", e),
-    );
+    await maybeQualifyReferralOnSwipe(user.id).catch((e) => {
+      console.error("referral qualify/accrue failed", e);
+      void captureToGlitchTip(e, { route: "swipe", subsystem: "referral" });
+    });
     const res: SwipeResponse = result;
     return NextResponse.json(res);
   } catch (e) {

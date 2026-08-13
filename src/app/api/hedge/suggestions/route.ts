@@ -4,6 +4,7 @@ import { rateLimit } from "@/lib/ratelimit";
 import { deriveForUser } from "@/lib/hedge/suggest";
 import { HeliusUnavailableError } from "@/lib/helius";
 import { JupiterUnavailableError } from "@/lib/prices";
+import { captureToGlitchTip } from "@/lib/glitchtip";
 import type { HedgeSuggestionsResponse } from "@/lib/api-types";
 
 // Deterministic S1 hedge suggestions for the caller's linked wallet(s). Reads the cached snapshot
@@ -28,6 +29,7 @@ export async function GET(req: Request) {
     // A stale snapshot rebuild needs Helius (balances) AND Jupiter (prices); if either is down we
     // can't derive exposure -> the same typed 502 (F4). The prior snapshot row survives untouched.
     if (e instanceof HeliusUnavailableError || e instanceof JupiterUnavailableError) {
+      void captureToGlitchTip(e, { route: "hedge-suggestions" });
       return NextResponse.json({ error: "exposure_unavailable" }, { status: 502 });
     }
     throw e;
