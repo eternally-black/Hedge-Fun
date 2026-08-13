@@ -15,7 +15,7 @@
     "db:studio": "prisma studio",
     "postinstall": "prisma generate",
     "poll": "tsx scripts/poller.ts",
-    "build:poller": "esbuild scripts/poller.ts --bundle --platform=node --target=node22 --format=cjs --external:@prisma/client --external:.prisma --outfile=dist/poller.cjs",
+    "build:poller": "esbuild scripts/poller.ts --bundle --platform=node --target=node24 --format=cjs --external:@prisma/client --external:.prisma --outfile=dist/poller.cjs",
     "refresh-deck": "tsx scripts/refresh-deck.ts",
     "refresh-hedge-index": "tsx scripts/refresh-hedge-index.ts",
     "verify:polymarket": "tsx scripts/verify-polymarket.ts",

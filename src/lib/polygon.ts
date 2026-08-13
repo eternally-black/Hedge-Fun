@@ -11,22 +11,30 @@ export const USDCE_ADDRESS = "0x2791bca1f2de4661ed88a30c99a7a9449aa84174";
 
 export type BalanceReader = (token: string, holder: string) => Promise<bigint>;
 
-// ERC-20 balanceOf(address) — selector 0x70a08231, holder left-padded to 32 bytes.
-export const erc20BalanceOf: BalanceReader = async (token, holder) => {
-  const data = "0x70a08231" + holder.toLowerCase().replace(/^0x/, "").padStart(64, "0");
+async function ethCall(to: string, data: string): Promise<string> {
   const res = await fetch(RPC, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "eth_call",
-      params: [{ to: token, data }, "finalized"],
-    }),
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_call", params: [{ to, data }, "finalized"] }),
     signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) throw new Error(`polygon rpc ${res.status}`);
   const body = (await res.json()) as { result?: string; error?: { message?: string } };
   if (body.error || !body.result) throw new Error(`polygon rpc: ${body.error?.message ?? "empty result"}`);
-  return BigInt(body.result);
+  return body.result;
+}
+
+// owner() — selector 0x8da5cb5b. The Deposit Wallet beacon proxy exposes its signer EOA here;
+// verified empirically against the spike's deployed pair (owner(0x0b699a09…) == 0xb24380b2…).
+// This is the signer↔wallet binding check: one eth_call, no SDK derivation, no extra signature.
+export async function contractOwner(wallet: string): Promise<string> {
+  const result = await ethCall(wallet, "0x8da5cb5b");
+  if (result.length < 66) throw new Error(`owner(): unexpected result ${result}`);
+  return ("0x" + result.slice(-40)).toLowerCase();
+}
+
+// ERC-20 balanceOf(address) — selector 0x70a08231, holder left-padded to 32 bytes.
+export const erc20BalanceOf: BalanceReader = async (token, holder) => {
+  const data = "0x70a08231" + holder.toLowerCase().replace(/^0x/, "").padStart(64, "0");
+  return BigInt(await ethCall(token, data));
 };

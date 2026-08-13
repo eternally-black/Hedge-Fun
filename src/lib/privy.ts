@@ -137,14 +137,15 @@ export const isEvmAddress = (s: string | null | undefined): s is string => !!s &
 // null when Privy has none yet. Throws P2002 through to the caller if the address is already on
 // another account (manual-merge situation, like twitter_taken).
 export async function syncEmbeddedWallet(user: User): Promise<string | null> {
-  if (isEvmAddress(user.embeddedWalletAddress)) {
-    // Looks right already; refresh only when Privy disagrees is a live-call per use — skip it.
-    return user.embeddedWalletAddress;
-  }
+  // ALWAYS live-fetch — address shape is not provenance: a lowercase external MetaMask address
+  // stored by the pre-fix extraction would pass an isEvmAddress shortcut and never get corrected
+  // (Sol, step-2 review). This runs only on rare money routes, so the extra Privy call is fine.
   const pu = await getPrivyUser(user.privyId);
   const wallet = embeddedEvmWallet(pu);
   if (!wallet) return null; // no embedded EVM wallet on the Privy account yet
-  await prisma.user.update({ where: { id: user.id }, data: { embeddedWalletAddress: wallet } });
+  if (wallet !== user.embeddedWalletAddress) {
+    await prisma.user.update({ where: { id: user.id }, data: { embeddedWalletAddress: wallet } });
+  }
   return wallet;
 }
 
