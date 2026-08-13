@@ -19,3 +19,14 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run verify:polymarket
+      - run: npm run verify:clob
+      - name: canary dead-man ping
+        if: success()
+        run: |
+          if [ -n "${{ secrets.CANARY_HC_URL }}" ]; then curl -fsS --max-time 10 -o /dev/null "${{ secrets.CANARY_HC_URL }}"; fi
+      - name: canary failure alert
+        if: failure()
+        run: |
+          curl -sS --max-time 10 -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            --data-urlencode "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            --data-urlencode "text=🚨 canary: Polymarket integration drifted — check before next deploy"

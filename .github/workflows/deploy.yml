@@ -116,3 +116,20 @@ jobs:
           # Pull + up only now (no build on the box) — 10m is plenty.
           command_timeout: 10m
           script: cd /opt/hedgefun && bash deploy.sh
+
+  # ---------------------------------------------------------------------------
+  # Failure alert. A failed upstream job SKIPS dependent jobs, so an in-job failure
+  # step would never run — this separate `always()` job is the only shape that
+  # reports whichever of the three gates actually failed. Also covers test/build
+  # failures on a feature-branch workflow_dispatch (deploy is skipped there, not failed).
+  # ---------------------------------------------------------------------------
+  notify:
+    needs: [test, build, deploy]
+    if: always() && (needs.test.result == 'failure' || needs.build.result == 'failure' || needs.deploy.result == 'failure')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Telegram alert on pipeline failure
+        run: |
+          curl -sS --max-time 10 -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            --data-urlencode "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            --data-urlencode "text=🚨 CI: deploy pipeline failed (test=${{ needs.test.result }} build=${{ needs.build.result }} deploy=${{ needs.deploy.result }}) — ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
