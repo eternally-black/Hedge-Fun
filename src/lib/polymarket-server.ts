@@ -1,0 +1,46 @@
+// Server-side SecureClient assembly for relayer-driven workflows (wrap, approvals). D5 holds:
+// the Signer stub CANNOT sign — every signature request must surface through the workflow relay
+// and be answered by the device. The client authenticates with the CLIENT's builder API creds
+// (server env, never shipped to a browser) plus the user's stored L2 CLOB creds (read/cancel
+// auth — createSecureClient skips signature-based derivation when credentials are supplied;
+// verified against SecureClientOptions in 0.6.0, Gate-0 exercises it live).
+import { createSecureClient } from "@polymarket/client";
+import { builderApiKey } from "@polymarket/client/node";
+import type { PrismaClient, User } from "@prisma/client";
+import { loadClobCreds } from "./clob-creds";
+
+type ServerClient = Awaited<ReturnType<typeof createSecureClient>>;
+
+function relaySigner(address: string) {
+  const refuse = () => {
+    throw new Error("device-signature required: this server holds no keys (D5) — drive it through the workflow relay");
+  };
+  return {
+    getAddress: async () => address as never,
+    signTypedData: async () => refuse() as never,
+    signMessage: async () => refuse() as never,
+    sendTransaction: async () => refuse() as never,
+  };
+}
+
+// null = not configured yet (missing builder env, user creds, or wallet) — callers 503, never throw.
+export async function serverSecureClient(prisma: PrismaClient, user: User): Promise<ServerClient | null> {
+  const key = process.env.POLYMARKET_BUILDER_API_KEY;
+  const secret = process.env.POLYMARKET_BUILDER_SECRET;
+  const passphrase = process.env.POLYMARKET_BUILDER_PASSPHRASE;
+  if (!key || !secret || !passphrase) return null;
+  if (!user.embeddedWalletAddress || !user.depositWalletAddress) return null;
+  const credentials = await loadClobCreds(prisma, user.id);
+  if (!credentials) return null;
+
+  try {
+    return await createSecureClient({
+      signer: relaySigner(user.embeddedWalletAddress),
+      wallet: user.depositWalletAddress,
+      credentials: credentials as never,
+      apiKey: builderApiKey({ key, secret, passphrase }),
+    } as never);
+  } catch {
+    return null; // assembly failure = not configured / upstream down; workflow routes 503
+  }
+}
