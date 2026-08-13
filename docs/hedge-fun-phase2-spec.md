@@ -122,18 +122,119 @@ Workstream B consumes copies.
 - Env: `HELIUS_API_KEY`, `BIRDEYE_API_KEY`, `NLU_API_KEY` (NLU edge only, any OpenAI-compatible provider), all in
   `.env.example` with comments. Jupiter price API needs no key at our volumes.
 
-## 6. Real-money gates (all external; tracked, not built)
+## 6. Real-money gates
 
-1. **Polymarket devs, in writing**: per-user deposit wallets + `POLY_1271` signature path for
-   embedded wallets; builder attribution applies to our integration (fees ≤1% taker / 0.5% maker,
-   revocable — never budgeted as guaranteed).
-2. **Privy**: silent EIP-712 signing from React Native verified on a spike.
-3. **Google Play**: real-money prediction-market policy for the target countries (gambling
-   certification). Unresolved — nobody has dug this; it can reshape distribution.
-4. **Geofencing**: enforced on the original user IP at onboarding *and* order time.
+Updated **2026-08-12**. Gate 1 is no longer a question to ask Polymarket: the whole architecture
+was proven against **production** in a throwaway spike (`poly-spike/`, outside the repo). A Deposit
+Wallet was deployed for a fresh signer from builder API credentials alone, $2 was bridged in from
+Solana, trading approvals were set, and a live CLOB order signed by that wallet with `POLY_1271` and
+our builder code was accepted and then cancelled.
 
-Spike script (outside repo, throwaway): funded Polygon test wallet → L2 CLOB creds → $1 order
-place / part-fill / cancel / redeem → Solana USDC → pUSD deposit dry-run.
+| # | Gate | Status |
+|---|---|---|
+| 1 | Per-user Deposit Wallets, `POLY_1271`, builder attribution | **Cleared, end to end.** `walletType` and `signatureType` are both `3`. `builder` is a *signed* field of the order struct — the ERC-7739 contents descriptor ends in `bytes32 builder` — so attribution cannot be stripped or reassigned in transit. Fees stay ≤1% taker / 0.5% maker and revocable; never budget them as guaranteed. |
+| 2 | Builder tier | **Open — sequencing, not permission.** Unverified is self-serve and instant but caps the Relayer at **100 transactions/day**. Verified (10 000/day) is an application to `builder@polymarket.com` that expects existing order flow, so: build → pilot on Unverified → apply. The builder profile must belong to the **client**, not a dev: fees land in the wallet attached to the profile, and its jurisdiction is what geo-gating hangs off. |
+| 3 | Privy silent EIP-712 signing from React Native | **Open.** Lower risk than it looks: the SDK takes Privy as a first-class signer adapter, so what is unproven is the modal-free on-device UX (D5, D9), not the signing path itself. |
+| 4 | Geofencing | **Open, and required of builders.** `GET polymarket.com/api/geoblock`, enforced on the original user IP at onboarding *and* at order time. See §6.3 — the endpoint has a trap that makes a server-side check silently meaningless. |
+| 5 | App-store real-money policy | **Off the critical path** (owner, 2026-08-04). First distribution is the Solana Seeker dApp Store, where prediction-market policy does not bite. Google Play only matters if wider Android reach is added later. |
+
+**Attribution on a real trade was proven 2026-08-13**: `fill.mjs --send` crossed the spread
+(FAK, 5 sh @ 0.52), `status: matched`, and `listBuilderTrades` returned the trade for our builder
+code while a control code returned zero. Every link in the chain now holds. Bonus finding from the
+same fill: the platform charges a taker fee `rate × (p(1−p))^exp` that no price estimate includes —
+see `real-money-plan.md` §0.
+
+**None of this is in the repo yet.** What has to be built, in dependency order, with the traps and
+the one architectural question that gates it all, is written up in
+[`real-money-handoff.md`](./real-money-handoff.md).
+
+### 6.1 Funding is two steps, and the second one is ours to build
+
+**The Solana bridge delivers USDC.e, not pUSD.** The docs claim it auto-wraps; it did not — the
+bridge's own status record named USDC.e as the destination token, and pUSD stayed at `0` until
+polymarket.com's frontend wrapped it. Unwrapped USDC.e is **not collateral**: the CLOB reported
+`balance: 0` on a wallet visibly holding $2, and an order would have been rejected.
+
+There is no Polymarket web UI in our flow, so a HedgeFun user who funds from Solana lands on money
+the exchange refuses to count — "my deposit vanished" — unless we wrap it. **SDK 0.5.0 has no wrap
+function.** The recipe was recovered off-chain from the frontend's own transaction and is two calls
+batched atomically through the Deposit Wallet's execute path (`prepareGaslessTransaction`, gasless
+via the Relayer):
+
+1. `USDC.e.approve(CollateralOnramp, amount)` — the exact amount, leaving no standing allowance
+2. `CollateralOnramp.wrap(USDC.e, depositWallet, amount)` at `0x93070a847efEf7F70739046A929D47a521F5B8ee`
+
+**This ran against production on 2026-08-12 and the Relayer accepted it** (`poly-spike/wrap.mjs
+--send`, tx `0x248841f0…c38a1`, `status 0x1`, pUSD 4.000000, CLOB counts it). Our transaction and
+polymarket.com's are indistinguishable in shape: same contract, same selector `0x0a3c4405`, same
+1028-byte payload. So the ts-sdk #136 caveat about the wallet execution layer does not bite us.
+`wrap.mjs --check` re-verifies the calldata offline, with no keys, if the ABI is ever in doubt.
+
+**Onboarding must treat a deposit as pending until the wrap lands**, and every relay transaction it
+costs counts against the tier cap in gate 2.
+
+### 6.2 Funding from Solana is free and needs no vendor — but the minimum is a trap
+
+Measured twice on 2026-08-12: 2 USDC in → `2.000000` out, 5 USDC in → `5.000000` out. **1:1, no
+spread, no fee.** And it needs no integration: `bridge.polymarket.com/deposit` returns the per-chain
+deposit addresses keyed on the Deposit Wallet, with **no API key and no auth**. Our users' wallets
+are ordinary Polymarket Deposit Wallets, so they get the same terms any polymarket.com user gets.
+
+Three things to design around, all observed rather than assumed:
+
+- **Below the minimum, a deposit does not fail — it parks, silently and indefinitely.** $2 sent
+  against a $3 floor sat `DEPOSIT_DETECTED` for over two hours with the funds visibly untouched on
+  the bridge's own Solana account; topping the same address up by $3 released all $5 at once. There
+  is no error and no notification, and to the user it looks exactly like theft. The floor also
+  **moved within a single day** ($2 cleared at 14:22, an identical $2 parked at 15:48) and
+  `/supported-assets` still advertises `minCheckoutUsd: 2` while the product enforces `3`. So:
+  enforce a hard client-side minimum **with margin — $5, not $3** — and never treat the advertised
+  number as authoritative.
+- **Do not trust the bridge's `/status`.** Its pending record disappeared from the response twice
+  and came back. Poll on-chain balances; show status as a hint at most.
+- **Auto-wrap happens sometimes.** The two deposits settled through different pipelines: the first
+  arrived as **USDC.e** by plain transfer from the bridge's hot wallet, the second as **pUSD** minted
+  inside an ERC-4337 UserOp that did the CollateralOnramp wrap inline. Same wallet, same day. Treat
+  a deposit as pending until pUSD appears, and run §6.1's wrap whenever the balance shows USDC.e.
+
+For completeness: polymarket.com's own "Transfer Crypto" modal is **fun.xyz (the "funkit" SDK)**,
+keyed on the *signer EOA* rather than the Deposit Wallet — which is why the two services hand out
+different deposit addresses for the same account. It authenticates with `X-Api-Key`, not a Polymarket
+session, so that route is reproducible too, but it needs our own fun.xyz key and its published fee
+policy is that **the end user pays** (market-maker, liquidity-provider and gas fees). Given the
+open route already delivers 1:1, fun.xyz is a fallback, not a prerequisite.
+
+The third prerequisite is `setupTradingApprovals` — without it the exchanges have no allowance over
+the wallet's collateral and orders are rejected even when the pUSD is there. It grants **unlimited**
+approval to two of the three spenders; `updateBalanceAllowance` is the way back.
+
+### 6.3 Geo-gating: call the endpoint, and call it from the user's browser
+
+Do not hardcode a country list. It rots, and it cannot express Polymarket's `close-only` tier.
+`GET https://polymarket.com/api/geoblock` answers live, sends `access-control-allow-origin: *` and
+`cache-control: no-store`, so the browser calls it directly:
+
+```
+{"blocked":false,"ip":"146.0.80.98","country":"UA","region":"32"}
+```
+
+**The trap: the endpoint only ever describes whoever connected to it.** Verified 2026-08-13 —
+`?ip=8.8.8.8` is echoed back in the response but the `country` stays that of the caller, an
+`X-Forwarded-For` header is ignored, and spoofing `CF-Connecting-IP` gets a **403 from Cloudflare**.
+So a server-side check returns *our datacentre's* geo and silently passes every user. The §6 gate
+"enforced on the original user IP" therefore means: **the call runs client-side**. The server must
+not treat that verdict as trustworthy — the real barrier is Polymarket rejecting orders from blocked
+IPs — but checking and not routing known-blocked flow is the builder's obligation.
+
+Scope, for planning rather than for code: 39 jurisdictions fully blocked, including the US, UK,
+France, Germany, Netherlands, Belgium, Italy, Ireland, Poland, Malta, Slovakia, Japan, Australia,
+Singapore, Taiwan, Thailand, Brazil and Russia, plus OFAC-sanctioned states. Sub-national: four
+Canadian provinces (AB, BC, ON, QC) and three Ukrainian regions (Crimea 43, Donetsk 14, Luhansk 09).
+**Ukraine itself is not blocked** — measured, `country UA, blocked false`.
+
+A separate **close-only** tier (Singapore, Poland, Thailand, Taiwan) lets users exit positions but
+not open new ones. Product consequence: a geo-restricted user must still be able to **close**. Never
+gate the whole app, or someone ends up locked in with an open position.
 
 ## 7. Risks (top, from advisor review)
 

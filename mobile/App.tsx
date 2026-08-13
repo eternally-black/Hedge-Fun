@@ -6,8 +6,9 @@ import Root from "./src/Root";
 
 export default function App() {
   // Without credentials Privy can't init — show the config notice instead of crashing
-  // (same pattern as the web client's NEXT_PUBLIC_PRIVY_APP_ID guard).
-  if (!PRIVY_APP_ID) return <ConfigNotice />;
+  // (same pattern as the web client's NEXT_PUBLIC_PRIVY_APP_ID guard). The Expo SDK needs BOTH
+  // ids, so a half-filled mobile/.env must hit the notice too, not an opaque Privy runtime error.
+  if (!PRIVY_APP_ID || !PRIVY_CLIENT_ID) return <ConfigNotice />;
   return (
     <PrivyProvider appId={PRIVY_APP_ID} clientId={PRIVY_CLIENT_ID}>
       <Root />
