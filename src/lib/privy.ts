@@ -23,6 +23,21 @@ export function bearer(req: Request): string | null {
   return h.startsWith("Bearer ") ? h.slice(7) : null;
 }
 
+// The EMBEDDED EVM wallet — the real-money signer. NOT "any linked wallet": the client also links
+// external Solana wallets (Phantom etc.) for hedge reading, and both `pu.wallet` and the first
+// `type === "wallet"` linked account can be one of those. Predicate per Privy server-auth types:
+// chainType "ethereum" + walletClientType "privy" (= embedded). Lowercased before persist — the
+// TEXT unique on users.embeddedWalletAddress is case-sensitive and EVM addresses arrive checksummed.
+export function embeddedEvmWallet(pu: PrivyUser): string | null {
+  const candidates: Array<{ address: string; chainType?: string; walletClientType?: string }> = [];
+  if (pu.wallet) candidates.push(pu.wallet);
+  for (const acct of pu.linkedAccounts ?? []) {
+    if (acct.type === "wallet") candidates.push(acct);
+  }
+  const embedded = candidates.find((w) => w.chainType === "ethereum" && w.walletClientType === "privy");
+  return embedded ? embedded.address.toLowerCase() : null;
+}
+
 // Read identity fields from the Privy user's linked accounts.
 export function extractIdentity(pu: PrivyUser): {
   authProvider: "EMAIL" | "TWITTER";
@@ -32,19 +47,17 @@ export function extractIdentity(pu: PrivyUser): {
 } {
   let email: string | null = pu.email?.address ?? null;
   let twitterHandle: string | null = pu.twitter?.username ?? null;
-  let wallet: string | null = pu.wallet?.address ?? null;
 
   for (const acct of pu.linkedAccounts ?? []) {
     if (acct.type === "email" && !email) email = acct.address;
     if (acct.type === "twitter_oauth" && !twitterHandle) twitterHandle = acct.username ?? null;
-    if (acct.type === "wallet" && !wallet) wallet = acct.address;
   }
 
   return {
     authProvider: twitterHandle && !email ? "TWITTER" : "EMAIL",
     email,
     twitterHandle,
-    wallet,
+    wallet: embeddedEvmWallet(pu),
   };
 }
 
@@ -113,6 +126,26 @@ export async function ensureUser(privyId: string, device?: DeviceFingerprint | n
 // usePrivy().unlinkTwitter — this server SDK version has no unlink method.)
 export async function getPrivyUser(privyId: string): Promise<PrivyUser> {
   return privy.getUser(privyId);
+}
+
+const EVM_ADDR = /^0x[0-9a-f]{40}$/;
+export const isEvmAddress = (s: string | null | undefined): s is string => !!s && EVM_ADDR.test(s);
+
+// Backfill/refresh the embedded EVM wallet for users created before the wallet existed — or whose
+// row carries a pre-fix value (the old extractIdentity could capture an external Solana address).
+// Same pattern as /api/link/sync for twitterHandle. Returns the current embedded EVM address, or
+// null when Privy has none yet. Throws P2002 through to the caller if the address is already on
+// another account (manual-merge situation, like twitter_taken).
+export async function syncEmbeddedWallet(user: User): Promise<string | null> {
+  if (isEvmAddress(user.embeddedWalletAddress)) {
+    // Looks right already; refresh only when Privy disagrees is a live-call per use — skip it.
+    return user.embeddedWalletAddress;
+  }
+  const pu = await getPrivyUser(user.privyId);
+  const wallet = embeddedEvmWallet(pu);
+  if (!wallet) return null; // no embedded EVM wallet on the Privy account yet
+  await prisma.user.update({ where: { id: user.id }, data: { embeddedWalletAddress: wallet } });
+  return wallet;
 }
 
 // Convenience for API routes: verify the request and return the app user, or null.
