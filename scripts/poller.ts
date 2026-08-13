@@ -13,6 +13,7 @@ import { DECK_FETCH_HORIZON_HOURS } from "../src/lib/deck-mix";
 import { DECK_MIN_SERVABLE } from "../src/lib/config";
 import { captureToGlitchTip, sendOpsTelegram } from "../src/lib/glitchtip";
 import { settleMarket, type Resolution } from "./settle";
+import { watchFunding } from "../src/lib/funding";
 import { evaluateStreak } from "../src/lib/streak";
 import { refreshDeck } from "./refresh-deck";
 import { pruneMarkets } from "./prune-markets";
@@ -178,6 +179,21 @@ async function tick() {
     await mapLimit(markets, CONCURRENCY, settleOne, () => { settleErrors++; });
     if (settleErrors > 0) subsystemFailed("settle", new Error(`${settleErrors} settle item error(s) this tick`));
     else subsystemOk("settle");
+  }
+
+  // Deposit watcher (plan §2.5): delta-based funding detection every tick; the lib applies the
+  // tiered per-attempt cadence itself, so calling it each tick is cheap. RPC errors surface as a
+  // subsystem failure only when NOTHING could be checked — per-attempt errors are counted inside.
+  try {
+    const f = await watchFunding(prisma);
+    if (f.checked + f.errors > 0) {
+      console.log(`[funding] checked ${f.checked}, detected ${f.detected}, funded ${f.funded}, errors ${f.errors}`);
+    }
+    if (f.errors > 0 && f.checked === 0) subsystemFailed("funding", new Error(`${f.errors} watcher error(s), 0 checked`));
+    else subsystemOk("funding");
+  } catch (e) {
+    console.warn("[funding] watcher error:", (e as Error).message);
+    subsystemFailed("funding", e);
   }
 
   // Streak sweep — only streaks that can actually transition (M1): ACTIVE that missed a

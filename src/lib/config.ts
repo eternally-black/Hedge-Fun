@@ -4,6 +4,10 @@
 // ---- Currency / stake (DECIDED) ----
 export const START_BALANCE_CENTS = 20_000; // $200.00
 export const STAKE_CENTS = 1_000; // $10.00 fixed per swipe
+// Real-money funding floor (§6.2): the bridge's floor is ~$3 and MOVED within a single day; below
+// it a deposit parks silently and indefinitely. Hard client minimum with margin — never trust the
+// advertised number.
+export const MIN_DEPOSIT_USD = 5;
 
 // ---- Top-up (DECIDED) ----
 // Cash/Locked model: a swipe locks STAKE_CENTS (Locked = Σ pending stakes); balance is never
