@@ -38,3 +38,17 @@ export const erc20BalanceOf: BalanceReader = async (token, holder) => {
   const data = "0x70a08231" + holder.toLowerCase().replace(/^0x/, "").padStart(64, "0");
   return BigInt(await ethCall(token, data));
 };
+
+const padAddr = (a: string) => a.toLowerCase().replace(/^0x/, "").padStart(64, "0");
+
+// ERC-20 allowance(owner, spender) — 0xdd62ed3e. Chain truth for approvals convergence (§2.4):
+// the CLOB's own balance-allowance endpoint is a cached server-side view (trap list).
+export async function erc20Allowance(token: string, owner: string, spender: string): Promise<bigint> {
+  return BigInt(await ethCall(token, "0xdd62ed3e" + padAddr(owner) + padAddr(spender)));
+}
+
+// ERC-1155 isApprovedForAll(owner, operator) — 0xe985e9c5. The SELL-side approval a close needs.
+export async function erc1155IsApprovedForAll(token: string, owner: string, operator: string): Promise<boolean> {
+  const r = await ethCall(token, "0xe985e9c5" + padAddr(owner) + padAddr(operator));
+  return BigInt(r) === 1n;
+}

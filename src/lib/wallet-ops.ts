@@ -22,3 +22,27 @@ export function buildWrapCalls(wallet: string, amountMicro: bigint): WalletCall[
     { to: COLLATERAL_ONRAMP, data: "0x62355638" + addr(USDCE_ADDRESS) + addr(wallet) + uint(amountMicro) },
   ];
 }
+
+// ---------------------------------------------------------------------------- trading approvals
+// The EXPLICIT alpha approval set — exactly the spike-verified end state of setupTradingApprovals
+// (poly-spike HANDOFF wallet-state table), nothing more: the SDK's generic prepareTradingApprovals
+// grants MAX_UINT/approval-for-all to neg-risk adapters, routers and perps contracts too (S4
+// review, Sol #6/K3 H2) — a blast radius the alpha never uses. Unlimited ERC-20 allowance to the
+// two EXCHANGES is the documented deliberate exception to the exact-amount rule (plan §2.2; the
+// exact-amount rule is for the wrap onramp).
+import { PUSD_ADDRESS } from "./polygon";
+
+export const CTF_EXCHANGE = "0xe111180000d2663c0091e4f400237545b87b996b"; // V2 CTF Exchange
+export const NEGRISK_CTF_EXCHANGE = "0xe2222d279d744050d28e00520010520000310f59"; // NegRisk CTF Exchange
+export const CONDITIONAL_TOKENS = "0x4d97dcd97ec945f40cf65f87097ace5ea0476045";
+const MAX_UINT256 = "f".repeat(64);
+
+// approve(spender, MAX)   0x095ea7b3   |   setApprovalForAll(operator, true)   0xa22cb465
+export function buildApprovalCalls(): WalletCall[] {
+  const approvePusd = (spender: string) => ({ to: PUSD_ADDRESS, data: "0x095ea7b3" + addr(spender) + MAX_UINT256 });
+  const approveCtf = (operator: string) => ({
+    to: CONDITIONAL_TOKENS,
+    data: "0xa22cb465" + addr(operator) + "1".padStart(64, "0"),
+  });
+  return [approvePusd(CTF_EXCHANGE), approvePusd(NEGRISK_CTF_EXCHANGE), approveCtf(CTF_EXCHANGE), approveCtf(NEGRISK_CTF_EXCHANGE)];
+}

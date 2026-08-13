@@ -23,6 +23,13 @@ function relaySigner(address: string) {
   };
 }
 
+// Construction does HTTP (credential validation; possibly a wallet-deployment check — and the SDK
+// WOULD auto-deploy an undeployed wallet, which S2 owns, so this is only ever called with a
+// persisted depositWalletAddress that S2 verified deployed). Cache per user for a few minutes so
+// status polls don't pay 2 HTTP calls each (S4 review M1/M5).
+const CLIENT_TTL_MS = 5 * 60 * 1000;
+const clientCache = new Map<string, { at: number; client: ServerClient }>();
+
 // null = not configured yet (missing builder env, user creds, or wallet) — callers 503, never throw.
 export async function serverSecureClient(prisma: PrismaClient, user: User): Promise<ServerClient | null> {
   const key = process.env.POLYMARKET_BUILDER_API_KEY;
@@ -30,16 +37,22 @@ export async function serverSecureClient(prisma: PrismaClient, user: User): Prom
   const passphrase = process.env.POLYMARKET_BUILDER_PASSPHRASE;
   if (!key || !secret || !passphrase) return null;
   if (!user.embeddedWalletAddress || !user.depositWalletAddress) return null;
+
+  const cached = clientCache.get(user.id);
+  if (cached && Date.now() - cached.at < CLIENT_TTL_MS) return cached.client;
+
   const credentials = await loadClobCreds(prisma, user.id);
   if (!credentials) return null;
 
   try {
-    return await createSecureClient({
+    const client = await createSecureClient({
       signer: relaySigner(user.embeddedWalletAddress),
       wallet: user.depositWalletAddress,
       credentials: credentials as never,
       apiKey: builderApiKey({ key, secret, passphrase }),
     } as never);
+    clientCache.set(user.id, { at: Date.now(), client });
+    return client;
   } catch {
     return null; // assembly failure = not configured / upstream down; workflow routes 503
   }

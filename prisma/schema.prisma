@@ -710,12 +710,17 @@ model WalletWorkflow {
   kind   WalletOpKind
   state  WalletWorkflowState @default(PENDING_SIGNATURE)
 
+  // v2 (S4 rework): the generator lives IN MEMORY per run (the SDK generator is non-deterministic
+  // — fresh nonce+deadline per build — so cross-request rebuild-and-replay cannot work). runId
+  // keys the live session and the per-run RelayerTx budget row; the DB row is the single-flight
+  // slot + submit fence + observability.
+  runId              String?
   stepIndex          Int     @default(0)
-  inputs             Json // immutable inputs the generator is rebuilt from
-  answers            Json    @default("[]") // ordered accepted answers [{requestHash, signature}] — the replay transcript
+  inputs             Json // immutable inputs of the CURRENT run (observability + convergence params)
+  answers            Json    @default("[]") // ordered accepted answers [{requestHash, signature}] — audit transcript
   pendingRequest     Json? // the yielded signature request awaiting the device
   pendingRequestHash String?
-  txHash             String?
+  txHash             String? // relayer transactionId (NOT a chain hash)
   error              String?
 
   expiresAt DateTime?

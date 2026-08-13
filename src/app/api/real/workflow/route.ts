@@ -1,21 +1,25 @@
-// POST /api/real/workflow — the device-facing end of the durable signature relay (plan §2.4).
-// Body: { kind: "APPROVALS" | "WRAP", answer?: { requestHash, signature } }.
-// No answer → start-or-resume: returns the pending signature request (same payload on retry).
-// With answer → advance. SUBMITTING rows converge from chain state here, never re-drive.
-// GET — current workflow states for the funding screen.
+// POST /api/real/workflow — the device-facing end of the durable signature relay (plan §2.4 v2).
+// Body: { kind: "APPROVALS" | "WRAP", answer?: { runId, requestHash, signature } }.
+// No answer → start-or-status (re-serves the live pending request; restarts a lost run).
+// With answer → advance the LIVE generator. status "stale" → the client re-POSTs start.
+// Convergence is CHAIN state read through our own RPC helper — never the CLOB's cached view
+// (S4 review: fetchBalanceAllowance is a server-side cache AND its shape was misread; approvals
+// use our EXPLICIT alpha call set instead of the SDK's generic MAX_UINT-to-everything setup).
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 import { isRealMoneyEligible, hasRealConsent } from "@/lib/real";
 import { captureToGlitchTip } from "@/lib/glitchtip";
 import { serverSecureClient } from "@/lib/polymarket-server";
-import { buildWrapCalls } from "@/lib/wallet-ops";
-import { driveWorkflow, completeWorkflow, type WorkflowGen, type StepRequest } from "@/lib/workflow";
-import { erc20BalanceOf, USDCE_ADDRESS } from "@/lib/polygon";
-import { prepareGaslessTransaction, prepareTradingApprovals, fetchBalanceAllowance } from "@polymarket/client/actions";
+import { buildWrapCalls, buildApprovalCalls, CTF_EXCHANGE, NEGRISK_CTF_EXCHANGE, CONDITIONAL_TOKENS } from "@/lib/wallet-ops";
+import { startWorkflow, answerWorkflow, type WorkflowGen, type WorkflowSpec, type StepRequest } from "@/lib/workflow";
+import { erc20BalanceOf, erc20Allowance, erc1155IsApprovedForAll, USDCE_ADDRESS, PUSD_ADDRESS } from "@/lib/polygon";
+import { prepareGaslessTransaction } from "@polymarket/client/actions";
 
 const KINDS = ["APPROVALS", "WRAP"] as const;
 type Kind = (typeof KINDS)[number];
+
+const EVM_SIG = /^0x[0-9a-fA-F]{130}$/; // validate BEFORE the fence — the SDK throws on garbage inside it
 
 export async function POST(req: Request) {
   const user = await authUser(req);
@@ -27,16 +31,20 @@ export async function POST(req: Request) {
   if (!wallet || !signerAddress) return NextResponse.json({ error: "no_deposit_wallet" }, { status: 409 });
 
   let kind: Kind;
-  let answer: { requestHash: string; signature: string } | undefined;
+  let answer: { runId: string; requestHash: string; signature: string } | undefined;
   try {
     const body = await req.json();
     if (!KINDS.includes(body?.kind)) return NextResponse.json({ error: "bad_kind" }, { status: 400 });
     kind = body.kind;
     if (body.answer) {
-      if (typeof body.answer.requestHash !== "string" || typeof body.answer.signature !== "string") {
+      const a = body.answer;
+      if (typeof a.runId !== "string" || typeof a.requestHash !== "string" || typeof a.signature !== "string") {
         return NextResponse.json({ error: "bad_answer" }, { status: 400 });
       }
-      answer = { requestHash: body.answer.requestHash, signature: body.answer.signature };
+      // requestAddress answers are addresses, everything else is a 65-byte signature. The engine
+      // auto-answers addresses server-side, so a device answer must be signature-shaped.
+      if (!EVM_SIG.test(a.signature)) return NextResponse.json({ error: "bad_signature_shape" }, { status: 400 });
+      answer = { runId: a.runId, requestHash: a.requestHash, signature: a.signature };
     }
   } catch {
     return NextResponse.json({ error: "bad_json" }, { status: 400 });
@@ -45,78 +53,105 @@ export async function POST(req: Request) {
   const client = await serverSecureClient(prisma, user);
   if (!client) return NextResponse.json({ error: "real_not_configured" }, { status: 503 });
 
-  // Deterministic immutable inputs per run (the generator is rebuilt from these on every call).
-  let inputs: Record<string, string>;
-  let factory: () => Promise<WorkflowGen>;
+  let spec: WorkflowSpec;
   if (kind === "WRAP") {
-    // Amount pins to the watcher-observed FINALIZED balance of the active DETECTED attempt —
-    // stable across rebuilds, exact-approval rule (§6.1), nothing to wrap without one.
+    // The run binds to a specific funding attempt; amount pins to the watcher-observed FINALIZED
+    // balance. SUBMITTING/DONE handling never re-reads the current attempt (S4 review B2) — the
+    // engine converges against the RUN's own inputs via the closures below.
     const attempt = await prisma.fundingAttempt.findFirst({
       where: { userId: user.id, state: "DETECTED" },
       orderBy: { declaredAt: "desc" },
     });
-    if (!attempt || attempt.latestUsdceMicro <= 0n) {
-      return NextResponse.json({ error: "nothing_to_wrap" }, { status: 409 });
-    }
-    const amountMicro = attempt.latestUsdceMicro;
-    inputs = { wallet, amountMicro: amountMicro.toString() };
-    factory = () =>
-      prepareGaslessTransaction(client, {
-        calls: buildWrapCalls(wallet, amountMicro).map((c) => ({ to: c.to, data: c.data as `0x${string}` })),
-        metadata: "HedgeFun wrap USDC.e -> pUSD",
-      }) as Promise<WorkflowGen>;
+    const row = await prisma.walletWorkflow.findUnique({ where: { userId_kind: { userId: user.id, kind: "WRAP" } } });
+    const active = row && (row.state === "PENDING_SIGNATURE" || row.state === "SUBMITTING");
+    // A fresh start needs a DETECTED attempt; an ACTIVE run must be drivable regardless of what
+    // the watcher did to the attempt since (FUNDED included).
+    const runInputs = active
+      ? (row.inputs as { attemptId: string; wallet: string; amountMicro: string })
+      : attempt && attempt.latestUsdceMicro > 0n
+        ? { attemptId: attempt.id, wallet, amountMicro: attempt.latestUsdceMicro.toString() }
+        : null;
+    if (!runInputs) return NextResponse.json({ error: "nothing_to_wrap" }, { status: 409 });
+    const amount = BigInt(runInputs.amountMicro);
+    spec = {
+      userId: user.id,
+      kind,
+      inputs: runInputs,
+      factory: () =>
+        prepareGaslessTransaction(client, {
+          calls: buildWrapCalls(runInputs.wallet, amount).map((c) => ({ to: c.to, data: c.data as `0x${string}` })),
+          metadata: "HedgeFun wrap USDC.e -> pUSD",
+        }) as Promise<WorkflowGen>,
+      autoAnswer: (r: StepRequest) => (r.kind === "requestAddress" ? signerAddress : null),
+      // Wrap converts amount USDC.e → amount pUSD 1:1: verified when the RUN's attempt shows a
+      // finalized pUSD delta covering the amount (the §6.2 rule — pUSD is the only spendable signal).
+      verify: async () => {
+        const a = await prisma.fundingAttempt.findUnique({ where: { id: runInputs.attemptId } });
+        if (!a) return false;
+        const pusd = await erc20BalanceOf(PUSD_ADDRESS, runInputs.wallet);
+        return pusd - a.baselinePusdMicro >= amount;
+      },
+      // Safe to reset only when verifiably nothing happened: USDC.e still sits unconverted.
+      definitelyNotDone: async () => {
+        const [usdce, pusd] = await Promise.all([
+          erc20BalanceOf(USDCE_ADDRESS, runInputs.wallet),
+          erc20BalanceOf(PUSD_ADDRESS, runInputs.wallet),
+        ]);
+        const a = await prisma.fundingAttempt.findUnique({ where: { id: runInputs.attemptId } });
+        return usdce >= amount && (a ? pusd - a.baselinePusdMicro < amount : false);
+      },
+    };
   } else {
-    inputs = { wallet };
-    factory = () => prepareTradingApprovals(client) as Promise<WorkflowGen>;
+    spec = {
+      userId: user.id,
+      kind,
+      inputs: { wallet },
+      factory: () =>
+        prepareGaslessTransaction(client, {
+          calls: buildApprovalCalls().map((c) => ({ to: c.to, data: c.data as `0x${string}` })),
+          metadata: "HedgeFun trading approvals",
+        }) as Promise<WorkflowGen>,
+      autoAnswer: (r: StepRequest) => (r.kind === "requestAddress" ? signerAddress : null),
+      // On-chain truth for the EXACT alpha set: pUSD allowance on both exchanges AND the ERC-1155
+      // operator approval a SELL needs on both (S4 review B1/H2) — approvals are idempotent, so
+      // definitelyNotDone can safely allow a reset even when partially landed.
+      verify: async () => {
+        const [a1, a2, o1, o2] = await Promise.all([
+          erc20Allowance(PUSD_ADDRESS, wallet, CTF_EXCHANGE),
+          erc20Allowance(PUSD_ADDRESS, wallet, NEGRISK_CTF_EXCHANGE),
+          erc1155IsApprovedForAll(CONDITIONAL_TOKENS, wallet, CTF_EXCHANGE),
+          erc1155IsApprovedForAll(CONDITIONAL_TOKENS, wallet, NEGRISK_CTF_EXCHANGE),
+        ]);
+        return a1 > 0n && a2 > 0n && o1 && o2;
+      },
+      definitelyNotDone: async () => true,
+    };
   }
 
-  const result = await driveWorkflow(prisma, {
-    userId: user.id,
-    kind,
-    inputs,
-    factory,
-    // requestAddress is answerable server-side (an address, not a signature) — deterministic.
-    autoAnswer: (r: StepRequest) => (r.kind === "requestAddress" ? signerAddress : null),
-    answer,
-  });
-
-  // SUBMITTING → chain-state convergence (never blind resubmit).
-  if (result.status === "submitting") {
-    try {
-      if (kind === "WRAP") {
-        const usdce = await erc20BalanceOf(USDCE_ADDRESS, wallet);
-        if (usdce < BigInt(inputs.amountMicro)) {
-          await completeWorkflow(prisma, user.id, kind, { ok: true });
-          // Nudge the watcher so the funding attempt confirms FUNDED off the pUSD delta ASAP.
-          await prisma.fundingAttempt.updateMany({
-            where: { userId: user.id, state: { not: "FUNDED" } },
-            data: { lastCheckedAt: null },
-          });
-          return NextResponse.json({ status: "done" });
-        }
-      } else {
-        const allowance = await fetchBalanceAllowance(client, { assetType: "COLLATERAL" } as never);
-        const value = (allowance as { allowance?: bigint })?.allowance ?? 0n;
-        if (value > 0n) {
-          await completeWorkflow(prisma, user.id, kind, { ok: true });
-          return NextResponse.json({ status: "done" });
-        }
-      }
-    } catch (e) {
-      await captureToGlitchTip(e, { route: "real/workflow", stage: "converge", kind });
+  try {
+    const result = answer ? await answerWorkflow(prisma, spec, answer) : await startWorkflow(prisma, spec);
+    if (result.status === "done" && kind === "WRAP") {
+      // Nudge the watcher so the funding attempt confirms FUNDED off the pUSD delta ASAP.
+      await prisma.fundingAttempt.updateMany({
+        where: { userId: user.id, state: { not: "FUNDED" } },
+        data: { lastCheckedAt: null },
+      });
     }
+    return NextResponse.json(result);
+  } catch (e) {
+    await captureToGlitchTip(e, { route: "real/workflow", kind });
+    throw e;
   }
-
-  return NextResponse.json(result);
 }
 
 export async function GET(req: Request) {
   const user = await authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   if (!isRealMoneyEligible(user)) return NextResponse.json({ error: "real_disabled" }, { status: 403 });
+  if (!hasRealConsent(user)) return NextResponse.json({ error: "consent_required" }, { status: 403 });
   const rows = await prisma.walletWorkflow.findMany({
     where: { userId: user.id },
-    select: { kind: true, state: true, stepIndex: true, pendingRequestHash: true, error: true, updatedAt: true },
+    select: { kind: true, state: true, runId: true, stepIndex: true, pendingRequestHash: true, error: true, updatedAt: true },
   });
   return NextResponse.json({ workflows: rows.map((r) => ({ ...r, updatedAt: r.updatedAt.toISOString() })) });
 }

@@ -18,6 +18,7 @@ export async function saveClobCreds(prisma: PrismaClient, userId: string, creds:
   if (!key) return false;
   const nonce = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", key, nonce);
+  cipher.setAAD(Buffer.from(userId, "utf8")); // bind ciphertext to the user — a row swap must not decrypt
   const ciphertext = Buffer.concat([cipher.update(JSON.stringify(creds), "utf8"), cipher.final(), cipher.getAuthTag()]);
   await prisma.clobCredential.upsert({
     where: { userId },
@@ -37,6 +38,7 @@ export async function loadClobCreds(prisma: PrismaClient, userId: string): Promi
     const tag = buf.subarray(buf.length - 16);
     const body = buf.subarray(0, buf.length - 16);
     const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(row.nonce));
+    decipher.setAAD(Buffer.from(userId, "utf8"));
     decipher.setAuthTag(tag);
     const plain = Buffer.concat([decipher.update(body), decipher.final()]).toString("utf8");
     return JSON.parse(plain) as ClobCreds;

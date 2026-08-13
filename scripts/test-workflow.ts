@@ -1,163 +1,187 @@
-// scripts/test-workflow.ts — the durable signature-relay engine (plan §2.4) against fake
-// generators: park/replay/byte-match, crash fence, single-flight reuse, non-determinism guards,
-// plus the encrypted CLOB-creds roundtrip. Run: npx tsx scripts/test-workflow.ts
+// scripts/test-workflow.ts — the live-session signature-relay engine v2 (plan §2.4 rework):
+// park/re-serve, lost-session restart, CAS fencing, per-run RelayerTx, convergence-driven DONE,
+// expiry reset, plus the encrypted CLOB-creds roundtrip (with AAD). Run: npx tsx scripts/test-workflow.ts
 import assert from "node:assert";
 import { prisma } from "../src/lib/prisma";
-import { driveWorkflow, completeWorkflow, type WorkflowGen } from "../src/lib/workflow";
+import { startWorkflow, answerWorkflow, _dropLiveSessions, type WorkflowGen, type WorkflowSpec } from "../src/lib/workflow";
 import { saveClobCreds, loadClobCreds } from "../src/lib/clob-creds";
 import { randomCode } from "../src/lib/refcode";
 
+// Deterministic within one live session; markers make cross-run envelopes differ like real
+// nonce/deadline drift would.
 const makeFactory =
   (marker: string, log?: string[]) =>
   (): WorkflowGen =>
     (async function* (): AsyncGenerator<{ kind: string; payload?: unknown }, { transactionId: string }, string> {
-      log?.push("built");
-      const a1 = yield { kind: "requestAddress" };
-      const a2 = yield { kind: "signGaslessTypedData", payload: { m: marker, step: 1 } };
-      const a3 = yield { kind: "signGaslessMessage", payload: { m: marker, step: 2 } };
-      void a1;
-      void a2;
-      void a3;
+      log?.push(`built-${marker}`);
+      yield { kind: "requestAddress" };
+      yield { kind: "signGaslessTypedData", payload: { m: marker, step: 1 } };
+      yield { kind: "signGaslessMessage", payload: { m: marker, step: 2 } };
       return { transactionId: `tx-${marker}` };
     })() as unknown as WorkflowGen;
-
-const autoAnswer = (r: { kind: string; payload?: unknown }) => (r.kind === "requestAddress" ? "0xsigner" : null);
 
 async function main() {
   const tag = `wf-${process.pid}-${Date.now() & 0xffffff}`;
   const user = await prisma.user.create({
-    data: {
-      privyId: `did:privy:${tag}`,
-      authProvider: "EMAIL",
-      referralCode: randomCode(),
-    },
+    data: { privyId: `did:privy:${tag}`, authProvider: "EMAIL", referralCode: randomCode() },
+  });
+  const verified = { value: false }; // controllable chain-truth stub
+
+  const spec = (marker: string, log?: string[], over: Partial<WorkflowSpec> = {}): WorkflowSpec => ({
+    userId: user.id,
+    kind: "WRAP",
+    inputs: { attemptId: "att-1", amountMicro: "1000000" },
+    factory: makeFactory(marker, log),
+    autoAnswer: (r) => (r.kind === "requestAddress" ? "0xsigner" : null),
+    verify: async () => verified.value,
+    definitelyNotDone: async () => !verified.value,
+    ...over,
   });
 
   try {
-    const inputsA = { amount: "1000000", token: "USDC.e" };
-    const drive = (over: Partial<Parameters<typeof driveWorkflow>[1]> = {}) =>
-      driveWorkflow(prisma, {
-        userId: user.id,
-        kind: "WRAP",
-        inputs: inputsA,
-        factory: makeFactory("a"),
-        autoAnswer,
-        ...over,
-      });
-
-    // 1. Start: requestAddress auto-answered+stored, parks on the typed-data request (step 1).
-    const buildLog: string[] = [];
-    const r1 = await drive({ factory: makeFactory("a", buildLog) });
+    // 1. Start: requestAddress auto-answered (fenced advance), parks on the typed-data request.
+    const log: string[] = [];
+    const r1 = await startWorkflow(prisma, spec("a", log));
     assert.strictEqual(r1.status, "pending_signature");
     if (r1.status !== "pending_signature") throw new Error("unreachable");
-    assert.strictEqual(r1.stepIndex, 1);
-    const H1 = r1.requestHash;
-    assert.strictEqual(H1.length, 64, "sha256 hex");
+    const { runId, requestHash: H1 } = r1;
+    assert.ok(runId.length > 10, "runId assigned");
     let row = await prisma.walletWorkflow.findUniqueOrThrow({ where: { userId_kind: { userId: user.id, kind: "WRAP" } } });
     assert.strictEqual(row.state, "PENDING_SIGNATURE");
-    assert.strictEqual(row.stepIndex, 1);
+    assert.strictEqual(row.runId, runId);
 
-    // 2. Same call again: SAME hash re-served, no drift.
-    const r2 = await drive();
+    // 2. Start again while live: SAME run and hash re-served, generator NOT rebuilt.
+    const r2 = await startWorkflow(prisma, spec("a", log));
     assert.strictEqual(r2.status, "pending_signature");
     if (r2.status !== "pending_signature") throw new Error("unreachable");
+    assert.strictEqual(r2.runId, runId);
     assert.strictEqual(r2.requestHash, H1);
+    assert.strictEqual(log.length, 1, "no rebuild while the session is live");
 
-    // 3. Wrong-hash answer is ignored — parks again on H1, state intact.
-    const r3 = await drive({ answer: { requestHash: "0".repeat(64), signature: "wrong" } });
-    assert.strictEqual(r3.status, "pending_signature");
-    if (r3.status !== "pending_signature") throw new Error("unreachable");
-    assert.strictEqual(r3.requestHash, H1);
+    // 3. Wrong-hash / wrong-run answers are stale, state untouched.
+    const bad1 = await answerWorkflow(prisma, spec("a", log), { runId, requestHash: "0".repeat(64), signature: "sig" });
+    assert.strictEqual(bad1.status, "stale");
+    const bad2 = await answerWorkflow(prisma, spec("a", log), { runId: "nope", requestHash: H1, signature: "sig" });
+    assert.strictEqual(bad2.status, "stale");
 
-    // 4. Correct answer advances to the second request.
-    const r4 = await drive({ answer: { requestHash: H1, signature: "sig1" } });
+    // 4. Correct answer advances to the second device request (same run).
+    const r4 = await answerWorkflow(prisma, spec("a", log), { runId, requestHash: H1, signature: "sig1" });
     assert.strictEqual(r4.status, "pending_signature");
     if (r4.status !== "pending_signature") throw new Error("unreachable");
-    assert.strictEqual(r4.stepIndex, 2);
+    assert.strictEqual(r4.runId, runId);
     const H2 = r4.requestHash;
     assert.notStrictEqual(H2, H1);
 
-    // 5. Final answer: crash fence + relayer intent land, generator returns → SUBMITTING.
-    const r5 = await drive({ answer: { requestHash: H2, signature: "sig2" } });
+    // 5. Final answer: generator returns → SUBMITTING with per-run RelayerTx; verify=false keeps it.
+    const r5 = await answerWorkflow(prisma, spec("a", log), { runId, requestHash: H2, signature: "sig2" });
     assert.strictEqual(r5.status, "submitting");
     if (r5.status !== "submitting") throw new Error("unreachable");
     assert.strictEqual(r5.transactionId, "tx-a");
     row = await prisma.walletWorkflow.findUniqueOrThrow({ where: { userId_kind: { userId: user.id, kind: "WRAP" } } });
     assert.strictEqual(row.state, "SUBMITTING");
     const relayer = await prisma.relayerTx.findUniqueOrThrow({
-      where: { userId_kind_workflowKey: { userId: user.id, kind: "WRAP", workflowKey: row.id } },
+      where: { userId_kind_workflowKey: { userId: user.id, kind: "WRAP", workflowKey: runId } },
     });
     assert.strictEqual(relayer.status, "SUBMITTING");
-    assert.ok(relayer.attempts >= 1);
 
-    // 6. SUBMITTING is never re-driven.
-    const before6 = buildLog.length;
-    const r6 = await drive({ factory: makeFactory("a", buildLog) });
-    assert.strictEqual(r6.status, "submitting");
-    assert.strictEqual(buildLog.length, before6, "no rebuild while SUBMITTING");
+    // 6. Duplicate answer after the fence: stale (single consumer), no second submission.
+    const r6 = await answerWorkflow(prisma, spec("a", log), { runId, requestHash: H2, signature: "sig2" });
+    assert.strictEqual(r6.status, "stale");
+    assert.strictEqual(log.length, 1, "no new generator");
 
-    // 7. Chain-state convergence closes the run.
-    await completeWorkflow(prisma, user.id, "WRAP", { ok: true, txHash: "0xabc" });
+    // 7. Convergence: chain truth flips → start converges to DONE, RelayerTx CONFIRMED.
+    verified.value = true;
+    const r7 = await startWorkflow(prisma, spec("a", log));
+    assert.strictEqual(r7.status, "done");
     row = await prisma.walletWorkflow.findUniqueOrThrow({ where: { userId_kind: { userId: user.id, kind: "WRAP" } } });
     assert.strictEqual(row.state, "DONE");
-    assert.strictEqual(row.txHash, "0xabc");
     const relayer7 = await prisma.relayerTx.findUniqueOrThrow({
-      where: { userId_kind_workflowKey: { userId: user.id, kind: "WRAP", workflowKey: row.id } },
+      where: { userId_kind_workflowKey: { userId: user.id, kind: "WRAP", workflowKey: runId } },
     });
     assert.strictEqual(relayer7.status, "CONFIRMED");
 
-    // 8. Same inputs on a DONE row: idempotent done, no rebuild.
-    const before8 = buildLog.length;
-    const r8 = await drive({ factory: makeFactory("a", buildLog) });
+    // 8. DONE + verify still true = idempotent done (no new run even with different inputs).
+    const r8 = await startWorkflow(prisma, spec("b", log, { inputs: { attemptId: "att-2", amountMicro: "999" } }));
     assert.strictEqual(r8.status, "done");
-    assert.strictEqual(buildLog.length, before8);
+    assert.strictEqual(log.length, 1);
 
-    // 9. NEW inputs reset the single-flight slot (one wrap per deposit).
-    const r9 = await drive({ inputs: { amount: "2000000", token: "USDC.e" }, factory: makeFactory("b") });
+    // 9. DONE + verify false (new deposit epoch) = fresh run with a NEW runId and envelope.
+    verified.value = false;
+    const r9 = await startWorkflow(prisma, spec("b", log));
     assert.strictEqual(r9.status, "pending_signature");
     if (r9.status !== "pending_signature") throw new Error("unreachable");
-    assert.strictEqual(r9.stepIndex, 1);
+    assert.notStrictEqual(r9.runId, runId, "new run id");
+    assert.strictEqual(log.length, 2, "fresh generator built");
+    const run2 = r9.runId;
 
-    // 10. Non-determinism guard: a rebuild whose PENDING request changed fails closed.
-    const r10a = await driveWorkflow(prisma, {
-      userId: user.id,
-      kind: "APPROVALS",
-      inputs: { token: "USDC.e" },
-      factory: makeFactory("x"),
-      autoAnswer,
-    });
-    assert.strictEqual(r10a.status, "pending_signature");
-    if (r10a.status !== "pending_signature") throw new Error("unreachable");
-    const r10b = await driveWorkflow(prisma, {
-      userId: user.id,
-      kind: "APPROVALS",
-      inputs: { token: "USDC.e" },
-      factory: makeFactory("y"), // different payloads on rebuild
-      autoAnswer,
-      answer: { requestHash: r10a.requestHash, signature: "sig10" },
-    });
-    assert.strictEqual(r10b.status, "failed");
-    if (r10b.status !== "failed") throw new Error("unreachable");
-    assert.ok(r10b.error.includes("non-deterministic"), `unexpected error: ${r10b.error}`);
-    const row10 = await prisma.walletWorkflow.findUniqueOrThrow({
-      where: { userId_kind: { userId: user.id, kind: "APPROVALS" } },
-    });
-    assert.strictEqual(row10.state, "FAILED");
+    // 10. Lost live session (restart/TTL) mid-signature: the run RESTARTS with a fresh envelope —
+    // the stored one is unusable by construction (real nonce/deadline would have drifted).
+    _dropLiveSessions();
+    const r10 = await startWorkflow(prisma, spec("c", log));
+    assert.strictEqual(r10.status, "pending_signature");
+    if (r10.status !== "pending_signature") throw new Error("unreachable");
+    assert.notStrictEqual(r10.runId, run2, "restarted run");
+    assert.strictEqual(log.length, 3);
+    // ...and an answer carrying the OLD run's hash is stale, not corrupting.
+    const r10b = await answerWorkflow(prisma, spec("c", log), { runId: run2, requestHash: H2, signature: "s" });
+    assert.strictEqual(r10b.status, "stale");
 
-    // 11. Encrypted CLOB-creds roundtrip.
+    // 11. Expired SUBMITTING + definitelyNotDone → slot releases into a fresh run (B3).
+    const rowNow = await prisma.walletWorkflow.findUniqueOrThrow({ where: { userId_kind: { userId: user.id, kind: "WRAP" } } });
+    await prisma.walletWorkflow.update({
+      where: { userId_kind: { userId: user.id, kind: "WRAP" } },
+      data: { state: "SUBMITTING", expiresAt: new Date(Date.now() - 1000) },
+    });
+    const r11 = await startWorkflow(prisma, spec("d", log));
+    assert.strictEqual(r11.status, "pending_signature");
+    if (r11.status !== "pending_signature") throw new Error("unreachable");
+    assert.notStrictEqual(r11.runId, rowNow.runId, "released and restarted");
+    const oldRelayer = await prisma.relayerTx.findUnique({
+      where: { userId_kind_workflowKey: { userId: user.id, kind: "WRAP", workflowKey: rowNow.runId! } },
+    });
+    if (oldRelayer) assert.strictEqual(oldRelayer.status, "FAILED", "expired run's ledger row failed");
+
+    // 12. Factory throw → FAILED, and a retry with the SAME inputs starts a new run (K3 H1).
+    const rFail = await startWorkflow(
+      prisma,
+      spec("e", log, {
+        kind: "APPROVALS",
+        inputs: { wallet: "0xw" },
+        factory: () => {
+          throw new Error("rpc down");
+        },
+      }),
+    );
+    assert.strictEqual(rFail.status, "failed");
+    const rRetry = await startWorkflow(prisma, spec("f", log, { kind: "APPROVALS", inputs: { wallet: "0xw" } }));
+    assert.strictEqual(rRetry.status, "pending_signature", "same-inputs retry after FAILED works");
+
+    // 13. Encrypted CLOB-creds roundtrip with AAD binding.
     const originalKey = process.env.REAL_CREDS_KEY;
     process.env.REAL_CREDS_KEY = "ab".repeat(32);
     const creds = { key: "k1", secret: "s1", passphrase: "p1" };
     assert.strictEqual(await saveClobCreds(prisma, user.id, creds), true);
     assert.deepStrictEqual(await loadClobCreds(prisma, user.id), creds);
+    // AAD: serving user A's row under user B's id must fail closed. Simulate by re-keying the row.
+    const rowA = await prisma.clobCredential.findUniqueOrThrow({ where: { userId: user.id } });
+    const userB = await prisma.user.create({
+      data: { privyId: `did:privy:${tag}-b`, authProvider: "EMAIL", referralCode: randomCode() },
+    });
+    await prisma.clobCredential.create({
+      data: { userId: userB.id, ciphertext: rowA.ciphertext, nonce: rowA.nonce, keyVersion: rowA.keyVersion },
+    });
+    assert.strictEqual(await loadClobCreds(prisma, userB.id), null, "row swap fails AAD, not decrypts");
     process.env.REAL_CREDS_KEY = "cd".repeat(32);
-    assert.strictEqual(await loadClobCreds(prisma, user.id), null, "wrong key -> null, not throw");
+    assert.strictEqual(await loadClobCreds(prisma, user.id), null, "wrong key -> null");
     process.env.REAL_CREDS_KEY = "";
     assert.strictEqual(await saveClobCreds(prisma, user.id, creds), false, "no key -> presence-gated false");
     if (originalKey !== undefined) process.env.REAL_CREDS_KEY = originalKey;
 
-    console.log("OK: workflow engine — park/replay/byte-match, fence, single-flight, non-determinism, creds");
+    console.log("OK: workflow v2 — live sessions, CAS fence, per-run ledger, convergence, expiry, AAD creds");
     console.log("PASS: workflow");
+
+    await prisma.clobCredential.deleteMany({ where: { userId: userB.id } });
+    await prisma.user.deleteMany({ where: { id: userB.id } });
   } finally {
     await prisma.relayerTx.deleteMany({ where: { userId: user.id } });
     await prisma.walletWorkflow.deleteMany({ where: { userId: user.id } });

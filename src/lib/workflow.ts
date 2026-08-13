@@ -1,217 +1,302 @@
-// Durable signature-relay engine (plan §2.4). Next routes are stateless, so a gasless workflow
-// generator cannot live across requests: every request REBUILDS the generator from the row's
-// immutable inputs, REPLAYS the stored answers, and requires each regenerated yield to
-// byte-match the stored hash — a mismatch means a non-deterministic rebuild and the run fails
-// closed (Gate-0 §1.7 validates the SDK side of this assumption).
+// Durable signature-relay engine, v2 (plan §2.4, reworked after the S4 cross-review).
 //
-// Crash discipline: answers are persisted and the row enters SUBMITTING BEFORE the generator
-// advance that may reach the relayer. A row found in SUBMITTING is NEVER re-driven — ambiguous
-// submissions converge from CHAIN state via the caller's verify hook (completeWorkflow), never
-// by blind resubmit. RelayerTx is written intent-first in the same fence.
-import { createHash } from "node:crypto";
-import type { PrismaClient, WalletOpKind } from "@prisma/client";
+// WHY NOT rebuild-and-replay: the real SDK generator is non-deterministic BY CONSTRUCTION —
+// buildDepositWalletExecuteRequest refetches the wallet nonce and stamps deadline=Date.now()+600
+// on every build (verified in 0.6.0 source; Sol S4-critical). So the generator lives IN MEMORY
+// for the seconds-long signature roundtrip (one app container — compose topology), keyed by a
+// per-RUN id. The DB row is the single-flight slot, the SUBMIT fence, and observability:
+//   - lost live session BEFORE the fence (restart/TTL) → the run restarts cleanly with a fresh
+//     generator (new nonce/deadline, one extra device prompt) — the honest outcome;
+//   - after the fence (SUBMITTING) → NEVER re-driven; converge from chain state via the caller's
+//     verify hook, or expire into FAILED when the op verifiably never happened.
+// All transitions are CAS (updateMany qualified on prior state+runId): two devices can race, only
+// one advances (K3 B4). RelayerTx rows are PER RUN (workflowKey = runId) — the budget ledger
+// survives slot reuse (K3 H3).
+import { createHash, randomUUID } from "node:crypto";
+import type { PrismaClient, WalletOpKind, WalletWorkflow } from "@prisma/client";
 
 export type StepRequest = { kind: string; payload?: unknown };
 export type WorkflowGen = AsyncGenerator<StepRequest, unknown, string>;
 
-export type DriveResult =
-  | { status: "pending_signature"; stepIndex: number; requestHash: string; request: unknown }
-  | { status: "submitting"; transactionId: string | null }
+export type WorkflowResult =
+  | { status: "pending_signature"; runId: string; requestHash: string; request: unknown }
+  | { status: "submitting"; runId: string; transactionId: string | null; error: string | null }
   | { status: "done" }
-  | { status: "failed"; error: string };
+  | { status: "failed"; error: string }
+  | { status: "stale" }; // caller's runId/answer no longer matches — client re-POSTs start
 
-// Deterministic serialization that survives BigInt (typed-data payloads carry them). Used for
-// BOTH hashing and Json-column storage so the two can never diverge.
 export function safeJson(value: unknown): unknown {
   return JSON.parse(JSON.stringify(value, (_k, v) => (typeof v === "bigint" ? `${v.toString()}n` : v)));
 }
+function sortKeys(v: unknown): unknown {
+  return Array.isArray(v)
+    ? v.map(sortKeys)
+    : v && typeof v === "object"
+      ? Object.fromEntries(
+          Object.keys(v as Record<string, unknown>)
+            .sort()
+            .map((k) => [k, sortKeys((v as Record<string, unknown>)[k])]),
+        )
+      : v;
+}
 export function hashRequest(req: StepRequest): string {
-  return createHash("sha256").update(JSON.stringify(safeJson(req))).digest("hex");
+  return createHash("sha256").update(JSON.stringify(sortKeys(safeJson(req)))).digest("hex");
 }
 
-// Canonical (sorted-keys) stringify for comparing inputs against a Json column round-trip:
-// Postgres jsonb does NOT preserve key order (sorts by length, then bytes), so a plain
-// JSON.stringify comparison would false-mismatch and reset a DONE run.
-function canonicalJson(value: unknown): string {
-  const sort = (v: unknown): unknown =>
-    Array.isArray(v)
-      ? v.map(sort)
-      : v && typeof v === "object"
-        ? Object.fromEntries(
-            Object.keys(v as Record<string, unknown>)
-              .sort()
-              .map((k) => [k, sort((v as Record<string, unknown>)[k])]),
-          )
-        : v;
-  return JSON.stringify(sort(value));
+// ---------------------------------------------------------------- live generator sessions
+const LIVE_TTL_MS = 5 * 60 * 1000;
+const SUBMIT_EXPIRY_MS = 10 * 60 * 1000;
+type LiveSession = { gen: WorkflowGen; at: number };
+const live = new Map<string, LiveSession>(); // runId → session
+
+function sweepLive(now: number): void {
+  for (const [k, s] of live) if (now - s.at > LIVE_TTL_MS) live.delete(k);
+}
+// Test hook: simulate a process restart / TTL loss.
+export function _dropLiveSessions(): void {
+  live.clear();
 }
 
-type StoredAnswer = { requestHash: string; answer: string };
+export interface WorkflowSpec {
+  userId: string;
+  kind: WalletOpKind;
+  inputs: unknown; // immutable per run, persisted for observability + convergence params
+  factory: () => Promise<WorkflowGen> | WorkflowGen;
+  autoAnswer?: (req: StepRequest) => string | null;
+  // Chain-state truth: has the operation's EFFECT landed? Consulted for DONE idempotency and
+  // SUBMITTING convergence. Must read chain (or watcher-observed finalized state), never the op.
+  verify: () => Promise<boolean>;
+  // For an expired SUBMITTING row: did the operation verifiably NOT happen (safe to reset)?
+  // Approvals are idempotent on-chain, so `true` is safe there even when ambiguous.
+  definitelyNotDone: () => Promise<boolean>;
+}
 
-export async function driveWorkflow(
+const key = (userId: string, kind: WalletOpKind) => ({ userId_kind: { userId, kind } });
+
+async function park(
   prisma: PrismaClient,
-  args: {
-    userId: string;
-    kind: WalletOpKind;
-    inputs: unknown; // immutable per run; a DIFFERENT inputs value may reset a DONE/FAILED row
-    factory: () => Promise<WorkflowGen> | WorkflowGen;
-    // Steps the server may answer itself without a device roundtrip (e.g. requestAddress →
-    // the signer address). Must be deterministic — auto-answers are stored and replayed too.
-    autoAnswer?: (req: StepRequest) => string | null;
-    answer?: { requestHash: string; signature: string };
-  },
-): Promise<DriveResult> {
-  const inputsJson = safeJson(args.inputs);
-  const key = { userId_kind: { userId: args.userId, kind: args.kind } };
+  row: { userId: string; kind: WalletOpKind; runId: string | null },
+  fromState: "PENDING_SIGNATURE" | "SUBMITTING",
+  req: StepRequest,
+  stepIndex: number,
+): Promise<WorkflowResult> {
+  const h = hashRequest(req);
+  const res = await prisma.walletWorkflow.updateMany({
+    where: { userId: row.userId, kind: row.kind, runId: row.runId, state: fromState },
+    data: { state: "PENDING_SIGNATURE", stepIndex, pendingRequest: safeJson(req) as never, pendingRequestHash: h },
+  });
+  if (res.count === 0) return { status: "stale" };
+  return { status: "pending_signature", runId: row.runId ?? "", requestHash: h, request: safeJson(req) };
+}
 
-  let row = await prisma.walletWorkflow.findUnique({ where: key });
-  if (!row) {
-    row = await prisma.walletWorkflow.create({
-      data: { userId: args.userId, kind: args.kind, state: "PENDING_SIGNATURE", inputs: inputsJson as never, answers: [] },
-    });
-  } else if (row.state === "SUBMITTING") {
-    // Ambiguous or in-flight submission: never re-drive. The caller's verify hook converges
-    // from chain state and calls completeWorkflow.
-    return { status: "submitting", transactionId: row.txHash };
-  } else if (row.state === "DONE" || row.state === "FAILED") {
-    if (canonicalJson(row.inputs) === canonicalJson(inputsJson)) {
-      return row.state === "DONE" ? { status: "done" } : { status: "failed", error: row.error ?? "failed" };
-    }
-    // New run (the row is the single-flight slot, reused per kind — e.g. one wrap per deposit).
-    row = await prisma.walletWorkflow.update({
-      where: key,
-      data: {
-        state: "PENDING_SIGNATURE",
-        stepIndex: 0,
-        inputs: inputsJson as never,
-        answers: [],
-        pendingRequest: null as never,
-        pendingRequestHash: null,
-        txHash: null,
-        error: null,
-      },
-    });
-  }
-
-  const answers = (row.answers as StoredAnswer[] | null) ?? [];
-  const fail = async (error: string): Promise<DriveResult> => {
-    await prisma.walletWorkflow.update({ where: key, data: { state: "FAILED", error } });
-    return { status: "failed", error };
-  };
-
-  // Rebuild + replay.
-  let gen: WorkflowGen;
+// Advance a LIVE generator from `state` until it parks on a device signature, finishes, or throws.
+async function run(
+  prisma: PrismaClient,
+  spec: WorkflowSpec,
+  row: WalletWorkflow,
+  gen: WorkflowGen,
+  firstAnswer?: string,
+): Promise<WorkflowResult> {
   let step: IteratorResult<StepRequest, unknown>;
+  let stepIndex = row.stepIndex;
+  let feeding = firstAnswer;
   try {
-    gen = await args.factory();
-    step = await gen.next();
-    for (const stored of answers) {
-      if (step.done) return fail("generator finished before replaying all stored answers");
-      const h = hashRequest(step.value);
-      if (h !== stored.requestHash) {
-        return fail(`non-deterministic rebuild: step hash ${h.slice(0, 12)} != stored ${stored.requestHash.slice(0, 12)}`);
+    while (true) {
+      // The fence: EVERY advance may reach the relayer (the SDK submits internally, with its own
+      // retries), so the row is SUBMITTING + a per-run RelayerTx exists BEFORE gen.next().
+      if (feeding !== undefined) {
+        const fence = await prisma.$transaction(async (tx) => {
+          const claimed = await tx.walletWorkflow.updateMany({
+            where: { userId: spec.userId, kind: spec.kind, runId: row.runId, state: { in: ["PENDING_SIGNATURE", "SUBMITTING"] } },
+            data: { state: "SUBMITTING", expiresAt: new Date(Date.now() + SUBMIT_EXPIRY_MS) },
+          });
+          if (claimed.count === 0) return false;
+          await tx.relayerTx.upsert({
+            where: { userId_kind_workflowKey: { userId: spec.userId, kind: spec.kind, workflowKey: row.runId! } },
+            create: { userId: spec.userId, kind: spec.kind, workflowKey: row.runId!, status: "SUBMITTING" },
+            update: { attempts: { increment: 1 }, status: "SUBMITTING" },
+          });
+          return true;
+        });
+        if (!fence) return { status: "stale" };
+        step = await gen.next(feeding);
+        stepIndex++;
+        feeding = undefined;
+      } else {
+        step = await gen.next();
       }
-      step = await gen.next(stored.answer);
+
+      if (step.done) break;
+      const req = step.value;
+      const auto = spec.autoAnswer?.(req) ?? null;
+      if (auto !== null) {
+        feeding = auto;
+        continue;
+      }
+      live.set(row.runId!, { gen, at: Date.now() });
+      return park(prisma, row, "SUBMITTING", req, stepIndex);
     }
   } catch (e) {
-    return fail(`workflow error during replay: ${(e as Error).message}`);
-  }
-
-  // Drive forward.
-  while (!step.done) {
-    const req = step.value;
-    const h = hashRequest(req);
-    const auto = args.autoAnswer?.(req) ?? null;
-    let ans: string | null = auto;
-    if (!ans && args.answer && args.answer.requestHash === h) ans = args.answer.signature;
-    if (!ans) {
-      // Byte-match the UNANSWERED pending request too: if this park lands on the same step as the
-      // stored pending but the regenerated request differs, the rebuild diverged — the device may
-      // hold a signature over a payload that no longer exists. Fail closed (§2.4).
-      if (row.pendingRequestHash && answers.length === row.stepIndex && row.pendingRequestHash !== h) {
-        return fail(
-          `non-deterministic rebuild: pending request changed (${h.slice(0, 12)} != stored ${row.pendingRequestHash.slice(0, 12)})`,
-        );
-      }
-      // Park: persist the pending request; the device signs it and the next call resumes here.
-      // Re-serving the SAME stored payload on retry is what makes a lost response safe.
-      await prisma.walletWorkflow.update({
-        where: key,
-        data: {
-          state: "PENDING_SIGNATURE",
-          stepIndex: answers.length,
-          pendingRequest: safeJson(req) as never,
-          pendingRequestHash: h,
-        },
-      });
-      return { status: "pending_signature", stepIndex: answers.length, requestHash: h, request: safeJson(req) };
-    }
-
-    // Crash fence: answer + SUBMITTING + intent-first RelayerTx land BEFORE the advance that may
-    // reach the relayer. attempts increments on every fence pass = per-submission counting.
-    answers.push({ requestHash: h, answer: ans });
-    await prisma.$transaction([
-      prisma.walletWorkflow.update({
-        where: key,
-        data: { state: "SUBMITTING", answers: answers as never, stepIndex: answers.length, pendingRequest: null as never, pendingRequestHash: null },
-      }),
-      prisma.relayerTx.upsert({
-        where: { userId_kind_workflowKey: { userId: args.userId, kind: args.kind, workflowKey: row.id } },
-        create: { userId: args.userId, kind: args.kind, workflowKey: row.id, status: "SUBMITTING" },
-        update: { attempts: { increment: 1 }, status: "SUBMITTING" },
-      }),
-    ]);
-
-    try {
-      step = await gen.next(ans);
-    } catch (e) {
-      // The advance itself failed. State stays SUBMITTING deliberately: whether the relayer saw
-      // the call is unknown — converge from chain, or a human resolves it. Record the error text.
-      await prisma.walletWorkflow.update({ where: key, data: { error: `advance failed: ${(e as Error).message}` } });
-      await prisma.relayerTx.update({
-        where: { userId_kind_workflowKey: { userId: args.userId, kind: args.kind, workflowKey: row.id } },
-        data: { status: "FAILED" },
-      });
-      return { status: "submitting", transactionId: null };
-    }
-
-    if (!step.done) {
-      // That advance only yielded another request — the fence was transient; fall through and
-      // the loop parks or answers it. (State corrects to PENDING_SIGNATURE when parking.)
-      continue;
-    }
-  }
-
-  // Generator returned: submission handed to the relayer. Store the transaction id and stay in
-  // SUBMITTING until the caller's chain-state verify confirms (completeWorkflow).
-  const result = step.value as { transactionId?: string } | undefined | void;
-  const txId = (result && typeof result === "object" && result.transactionId) || null;
-  await prisma.walletWorkflow.update({ where: key, data: { txHash: txId } });
-  return { status: "submitting", transactionId: txId };
-}
-
-// Chain-state convergence: the caller verified the operation's effect (allowance present, USDC.e
-// consumed, pUSD minted) — or definitively its failure — and closes the run.
-export async function completeWorkflow(
-  prisma: PrismaClient,
-  userId: string,
-  kind: WalletOpKind,
-  outcome: { ok: true; txHash?: string | null } | { ok: false; error: string },
-): Promise<void> {
-  const key = { userId_kind: { userId, kind } };
-  const row = await prisma.walletWorkflow.findUnique({ where: key });
-  if (!row || row.state === "DONE") return;
-  if (outcome.ok) {
-    await prisma.walletWorkflow.update({
-      where: key,
-      data: { state: "DONE", txHash: outcome.txHash ?? row.txHash, error: null },
+    // The advance failed. Whether the relayer saw it is unknown → stay SUBMITTING with the error;
+    // convergence or expiry resolves it. RelayerTx mirrors the failure.
+    live.delete(row.runId!);
+    const msg = `advance failed: ${(e as Error).message}`;
+    await prisma.walletWorkflow.updateMany({
+      where: { userId: spec.userId, kind: spec.kind, runId: row.runId, state: "SUBMITTING" },
+      data: { error: msg },
     });
     await prisma.relayerTx.updateMany({
-      where: { userId, kind, workflowKey: row.id },
-      data: { status: "CONFIRMED", txHash: outcome.txHash ?? undefined },
+      where: { userId: spec.userId, kind: spec.kind, workflowKey: row.runId! },
+      data: { status: "FAILED" },
     });
-  } else {
-    await prisma.walletWorkflow.update({ where: key, data: { state: "FAILED", error: outcome.error } });
-    await prisma.relayerTx.updateMany({ where: { userId, kind, workflowKey: row.id }, data: { status: "FAILED" } });
+    return { status: "submitting", runId: row.runId!, transactionId: null, error: msg };
   }
+
+  // Generator returned — submission handed off. Record the relayer transaction id (NOT a chain
+  // hash; convergence supplies that) and try immediate convergence.
+  live.delete(row.runId!);
+  const result = step.value as { transactionId?: string } | undefined | void;
+  const txId = (result && typeof result === "object" && result.transactionId) || null;
+  await prisma.walletWorkflow.updateMany({
+    where: { userId: spec.userId, kind: spec.kind, runId: row.runId },
+    data: { txHash: txId },
+  });
+  if (await tryConverge(prisma, spec, row.runId!)) return { status: "done" };
+  return { status: "submitting", runId: row.runId!, transactionId: txId, error: null };
+}
+
+async function tryConverge(prisma: PrismaClient, spec: WorkflowSpec, runId: string): Promise<boolean> {
+  try {
+    if (!(await spec.verify())) return false;
+  } catch {
+    return false; // verification unavailable ≠ verified
+  }
+  await prisma.walletWorkflow.updateMany({
+    where: { userId: spec.userId, kind: spec.kind, runId, state: { not: "DONE" } },
+    data: { state: "DONE", error: null },
+  });
+  await prisma.relayerTx.updateMany({
+    where: { userId: spec.userId, kind: spec.kind, workflowKey: runId, status: "SUBMITTING" },
+    data: { status: "CONFIRMED" },
+  });
+  return true;
+}
+
+async function freshRun(prisma: PrismaClient, spec: WorkflowSpec, existing: boolean): Promise<WorkflowResult> {
+  const runId = randomUUID();
+  const data = {
+    state: "PENDING_SIGNATURE" as const,
+    runId,
+    stepIndex: 0,
+    inputs: safeJson(spec.inputs) as never,
+    answers: [] as never,
+    pendingRequest: null as never,
+    pendingRequestHash: null,
+    txHash: null,
+    error: null,
+    expiresAt: null,
+  };
+  let row: WalletWorkflow;
+  if (existing) {
+    row = await prisma.walletWorkflow.update({ where: key(spec.userId, spec.kind), data });
+  } else {
+    try {
+      row = await prisma.walletWorkflow.create({ data: { userId: spec.userId, kind: spec.kind, ...data } });
+    } catch {
+      // First-call race (K3 L2): the loser re-enters through the normal path.
+      return { status: "stale" };
+    }
+  }
+  let gen: WorkflowGen;
+  try {
+    gen = await spec.factory();
+  } catch (e) {
+    // Factory failures are transient by default (network at construction) — release the slot.
+    const msg = `factory failed: ${(e as Error).message}`;
+    await prisma.walletWorkflow.updateMany({
+      where: { userId: spec.userId, kind: spec.kind, runId },
+      data: { state: "FAILED", error: msg },
+    });
+    return { status: "failed", error: msg };
+  }
+  return run(prisma, spec, row, gen);
+}
+
+// Entry point 1: start-or-status. No answer — returns the current state, re-serving the pending
+// request when the live session still exists, restarting the run when it was lost.
+export async function startWorkflow(prisma: PrismaClient, spec: WorkflowSpec): Promise<WorkflowResult> {
+  sweepLive(Date.now());
+  const row = await prisma.walletWorkflow.findUnique({ where: key(spec.userId, spec.kind) });
+  if (!row) return freshRun(prisma, spec, false);
+
+  switch (row.state) {
+    case "DONE": {
+      // Convergence-driven idempotency: still verified → done; effect gone/new run wanted → restart.
+      try {
+        if (await spec.verify()) return { status: "done" };
+      } catch {
+        return { status: "done" }; // can't verify right now — don't burn a run on it
+      }
+      return freshRun(prisma, spec, true);
+    }
+    case "FAILED":
+      return freshRun(prisma, spec, true); // same-inputs retry is legal (K3 H1)
+    case "SUBMITTING": {
+      if (await tryConverge(prisma, spec, row.runId!)) return { status: "done" };
+      const expired = row.expiresAt !== null && row.expiresAt.getTime() < Date.now();
+      if (expired && (await spec.definitelyNotDone().catch(() => false))) {
+        await prisma.relayerTx.updateMany({
+          where: { userId: spec.userId, kind: spec.kind, workflowKey: row.runId!, status: "SUBMITTING" },
+          data: { status: "FAILED" },
+        });
+        return freshRun(prisma, spec, true); // verifiably never happened — release the slot (K3 B3)
+      }
+      return { status: "submitting", runId: row.runId!, transactionId: row.txHash, error: row.error };
+    }
+    case "PENDING_SIGNATURE": {
+      const session = row.runId ? live.get(row.runId) : undefined;
+      if (session && row.pendingRequest && row.pendingRequestHash) {
+        session.at = Date.now();
+        return {
+          status: "pending_signature",
+          runId: row.runId!,
+          requestHash: row.pendingRequestHash,
+          request: row.pendingRequest,
+        };
+      }
+      // Live generator lost (restart / TTL): the stored envelope is unusable by construction
+      // (fresh nonce+deadline next build) — restart the run honestly.
+      return freshRun(prisma, spec, true);
+    }
+  }
+}
+
+// Entry point 2: the device answered the pending request.
+export async function answerWorkflow(
+  prisma: PrismaClient,
+  spec: WorkflowSpec,
+  answer: { runId: string; requestHash: string; signature: string },
+): Promise<WorkflowResult> {
+  sweepLive(Date.now());
+  const row = await prisma.walletWorkflow.findUnique({ where: key(spec.userId, spec.kind) });
+  if (
+    !row ||
+    row.state !== "PENDING_SIGNATURE" ||
+    row.runId !== answer.runId ||
+    row.pendingRequestHash !== answer.requestHash
+  ) {
+    return { status: "stale" };
+  }
+  const session = live.get(answer.runId);
+  if (!session) return freshRun(prisma, spec, true); // lost session → new envelope to sign
+  live.delete(answer.runId); // single consumer: a concurrent duplicate answer goes stale
+  const answers = ((row.answers as Array<{ requestHash: string; answer: string }> | null) ?? []).concat({
+    requestHash: answer.requestHash,
+    answer: answer.signature,
+  });
+  await prisma.walletWorkflow.updateMany({
+    where: { userId: spec.userId, kind: spec.kind, runId: row.runId },
+    data: { answers: answers as never },
+  });
+  return run(prisma, spec, row, session.gen, answer.signature);
 }
