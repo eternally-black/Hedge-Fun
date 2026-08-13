@@ -8,38 +8,91 @@ set -euo pipefail
 
 cd /opt/hedgefun
 
+# Telegram notify + failure trap. STEP tracks where we are so a red deploy names its step.
+# The deploy-in-progress marker tells the watchdog (hedgefun-watchdog.sh) to stand down
+# while services are deliberately being recreated; removed on any exit.
+STEP="init"
+MARKER=/var/lib/hedgefun/deploy-in-progress
+notify() { bash ops/notify.sh "$1" "$2" 2>/dev/null || true; }
+on_exit() {
+  code=$?
+  rm -f "$MARKER"
+  if [ "$code" -ne 0 ]; then notify CRIT "deploy FAILED at step: $STEP (exit $code)"; fi
+}
+trap on_exit EXIT
+mkdir -p /var/lib/hedgefun && touch "$MARKER"
+
 # Scripted rollback: `bash deploy.sh rollback <sha-short>` repins :latest to a prior immutable
 # image (CI pushes :sha-<short> for every build) and re-ups — no rebuild, deterministic. Find SHAs
 # in the repo's GHCR Packages tab; the currently-live one is recorded in .deployed_sha each deploy.
 if [ "${1:-}" = "rollback" ]; then
+  STEP="rollback"
   TARGET="${2:?usage: bash deploy.sh rollback <sha-short>}"
   IMG="ghcr.io/eternally-black/hedge-fun"
   set -a; . ./.env; set +a
+  notify WARN "rollback to $TARGET started"
   echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
   echo "[rollback] pulling $IMG:$TARGET and republishing as :latest"
   docker pull "$IMG:$TARGET"
   docker tag "$IMG:$TARGET" "$IMG:latest"
-  docker compose up -d --remove-orphans
+  docker compose up -d --remove-orphans --wait --wait-timeout 180
   echo "[rollback] done — live: $TARGET"
+  notify OK "rollback done — live: $TARGET"
   docker compose ps
   exit 0
 fi
 
+STEP="git sync"
 echo "[deploy] syncing repo (compose/Caddyfile/this script track main)"
 git fetch --prune origin
 git reset --hard origin/main     # mirror main; NOT used to build — only to keep infra files in sync
 
 # Load .env so GHCR_USER / GHCR_TOKEN (read:packages PAT) are available for the login.
 set -a; . ./.env; set +a
+notify INFO "deploy started → $(git rev-parse --short HEAD)"
 
+# Warn (not fail) on .env drift: a new key in .env.example that prod .env lacks means some
+# feature (alerts, error tracking, dead-man pings) is silently off.
+if [ -f .env.example ]; then
+  missing=$(grep -oE '^[A-Z0-9_]+=' .env.example | cut -d= -f1 | while read -r k; do
+    grep -qE "^$k=" .env || echo "$k"
+  done | paste -sd, -)
+  if [ -n "$missing" ]; then
+    notify WARN "deploy: /opt/hedgefun/.env lacks keys from .env.example: $missing"
+  fi
+fi
+
+STEP="ghcr login"
 echo "[deploy] logging in to GHCR"
 echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
 
+STEP="image pull"
 echo "[deploy] pulling image"
 docker compose pull              # pulls ghcr.io/eternally-black/hedge-fun:latest for app/migrate/poller
 
+# A bad Caddyfile would take down the sole ingress for app + GlitchTip on recreate.
+# Validate with the already-pulled caddy image and abort the deploy instead.
+STEP="caddyfile validation"
+echo "[deploy] validating Caddyfile"
+docker run --rm -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2-alpine \
+  caddy validate --config /etc/caddy/Caddyfile
+
+STEP="install-ops"
+echo "[deploy] applying host hardening + ops units (idempotent)"
+bash ops/vps/install-ops.sh
+
+STEP="db up"
 echo "[deploy] ensuring database is up"
-docker compose up -d db
+docker compose up -d --wait db
+
+# Verified snapshot BEFORE migrations touch a real-money schema. Skipped on the very first
+# deploy of a fresh host (no .deployed_sha yet -> empty DB, dump would trip the size floor).
+STEP="predeploy backup"
+if [ -f .deployed_sha ]; then
+  echo "[deploy] pre-migration backup"
+  bash ops/vps/backup.sh predeploy
+fi
+STEP="migrate"
 
 # Apply migrations, baseline-aware. A legacy db-push database has the tables but no
 # _prisma_migrations history, so `migrate deploy` would try to re-create existing tables and fail
@@ -59,14 +112,19 @@ if ! docker compose run --rm migrate npx prisma migrate deploy 2>/tmp/hf_migrate
 fi
 rm -f /tmp/hf_migrate.err
 
+STEP="services up"
 echo "[deploy] (re)creating services (migrate service re-runs deploy as a no-op gate, then app/poller)"
-docker compose up -d --remove-orphans
+# --wait: success means READY (healthchecks green), not merely started. A service that
+# never turns healthy fails the deploy loudly instead of leaving a zombie prod.
+docker compose up -d --remove-orphans --wait --wait-timeout 180
 
+STEP="prune"
 echo "[deploy] pruning dangling images"
 docker image prune -f
 
 echo "[deploy] done — live image sha-$(git rev-parse --short HEAD)"
 git rev-parse --short HEAD > .deployed_sha 2>/dev/null || true
+notify OK "deploy done — live: sha-$(git rev-parse --short HEAD)"
 docker compose ps
 
 # ---------------------------------------------------------------------------
