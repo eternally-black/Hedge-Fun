@@ -156,6 +156,11 @@ Sequential HTTP per yielded signature is the transport; the state lives in Postg
   money failed** — below-floor deposits park indefinitely and release on top-up (§6.2). Alert ops
   at `awaiting` >60 min (the parked-deposit scenario) and on watcher-level failures (5 consecutive
   failed scans); RPC errors never transition state.
+- Implementation notes from the S3 review round (K3): baselines are
+  `min(live, previous FUNDED close)` so a deposit that lands *before* the declare still fires;
+  **S6 prerequisite** — once trading/withdrawal can move pUSD out mid-attempt, deltas go negative
+  and the accounting needs cumulative tracking or a baseline floor (recorded, not yet needed);
+  multicall3 batching is deliberately deferred (2 sequential RPC calls per attempt at alpha scale).
 
 ### 2.6 Honest pricing — one shared primitive
 

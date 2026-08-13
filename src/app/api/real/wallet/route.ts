@@ -10,6 +10,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { authUser, syncEmbeddedWallet, isEvmAddress } from "@/lib/privy";
 import { isRealMoneyEligible, hasRealConsent } from "@/lib/real";
+import { captureToGlitchTip } from "@/lib/glitchtip";
 import { polymarketPublic } from "@/lib/polymarket-sdk";
 import { contractOwner } from "@/lib/polygon";
 // Low-level actions live in the /actions subpath, not the root (same trap as fetchBalanceAllowance).
@@ -57,11 +58,10 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "bad_address" }, { status: 400 });
   }
 
-  // Idempotent: if already persisted, only accept the same address — never silently overwrite.
-  if (user.depositWalletAddress) {
-    if (user.depositWalletAddress === address) {
-      return NextResponse.json({ depositWalletAddress: address });
-    }
+  // Different address than the persisted one is a hard 409 — never silently overwrite. The
+  // SAME-address early return deliberately comes AFTER the binding check below (K3): a row
+  // persisted by the pre-binding route version must not keep validating by its mere existence.
+  if (user.depositWalletAddress && user.depositWalletAddress !== address) {
     return NextResponse.json({ error: "wallet_mismatch" }, { status: 409 });
   }
 
@@ -73,7 +73,8 @@ export async function POST(req: Request) {
   try {
     deployed = await isWalletDeployed(polymarketPublic, { wallet: address, type: WalletType.DEPOSIT_WALLET });
     owner = deployed ? await contractOwner(address) : "";
-  } catch {
+  } catch (e) {
+    await captureToGlitchTip(e, { route: "real/wallet", stage: "chain-check" });
     return NextResponse.json({ error: "chain_check_unavailable" }, { status: 503 });
   }
   if (!deployed) {
@@ -83,27 +84,35 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "not_your_wallet" }, { status: 403 });
   }
 
+  if (user.depositWalletAddress === address) {
+    return NextResponse.json({ depositWalletAddress: address }); // idempotent re-report, re-validated
+  }
+
   // Persist with an atomic compare-and-set on depositWalletAddress IS NULL — a concurrent second
-  // device cannot silently replace an already-persisted money destination (Sol finding #2).
+  // device cannot silently replace an already-persisted money destination (Sol finding #2). The
+  // CAS and the ledger row commit together: a crash between them must not drop the observation.
   try {
-    const claimed = await prisma.user.updateMany({
-      where: { id: user.id, depositWalletAddress: null },
-      data: { depositWalletAddress: address },
+    const persisted = await prisma.$transaction(async (tx) => {
+      const claimed = await tx.user.updateMany({
+        where: { id: user.id, depositWalletAddress: null },
+        data: { depositWalletAddress: address },
+      });
+      if (claimed.count === 0) return false;
+      // Observed-deployment ledger row (NOT submission accounting — the deploy ran client-side).
+      await tx.relayerTx.upsert({
+        where: { userId_kind_workflowKey: { userId: user.id, kind: "DEPLOY", workflowKey: address } },
+        create: { userId: user.id, kind: "DEPLOY", workflowKey: address, status: "CONFIRMED" },
+        update: {},
+      });
+      return true;
     });
-    if (claimed.count === 0) {
+    if (!persisted) {
       const fresh = await prisma.user.findUniqueOrThrow({ where: { id: user.id }, select: { depositWalletAddress: true } });
       if (fresh.depositWalletAddress === address) {
         return NextResponse.json({ depositWalletAddress: address });
       }
       return NextResponse.json({ error: "wallet_mismatch" }, { status: 409 });
     }
-    // Observed-deployment ledger row (NOT submission accounting — the deploy ran client-side).
-    // Re-reports are no-ops: attempts counts submissions, and we observed exactly one deployment.
-    await prisma.relayerTx.upsert({
-      where: { userId_kind_workflowKey: { userId: user.id, kind: "DEPLOY", workflowKey: address } },
-      create: { userId: user.id, kind: "DEPLOY", workflowKey: address, status: "CONFIRMED" },
-      update: {},
-    });
   } catch (e) {
     if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
       return NextResponse.json({ error: "wallet_taken" }, { status: 409 });

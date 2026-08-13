@@ -27,6 +27,13 @@ export async function register() {
       "[boot] REFERRAL_HASH_SECRET unset — referral device anti-fraud and cross-browser attribution are DISABLED",
     );
   }
+
+  // Soft: without the builder code the bridge deposit proxy silently drops X-Builder-Code and
+  // deposit attribution vanishes with zero signal (K3, S3 review). Only matters once real-money
+  // routes are in use, hence a warn, not a throw.
+  if (!process.env.POLYMARKET_BUILDER_CODE) {
+    console.warn("[boot] POLYMARKET_BUILDER_CODE unset — bridge deposits will not be builder-attributed");
+  }
 }
 
 // Next 16 request-error hook: ships unhandled route errors to GlitchTip. Whitelisted fields ONLY —
