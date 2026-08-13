@@ -90,9 +90,13 @@ if command -v rclone >/dev/null 2>&1 && rclone listremotes 2>/dev/null | grep -q
         --max-duration 15m --quiet 2>/dev/null; then
     offsite_ok=0; notify CRIT "backup: offsite rclone copy FAILED (local dump is fine)"
   fi
+elif [ "$(envval "$HEDGEFUN_DIR/.env" BACKUP_OFFSITE_PULL)" = "1" ]; then
+  # VPS2 pulls the dumps nightly (ops/vps2/backup-pull.sh) — that IS the offsite copy.
+  # Its own dead-man check alerts if the pull stops; rclone/R2 stays a optional second leg.
+  :
 else
   offsite_ok=0
-  notify WARN "backup: offsite remote 'offsite:' not configured — dumps share the VPS failure domain"
+  notify WARN "backup: no offsite configured (neither rclone 'offsite:' nor BACKUP_OFFSITE_PULL=1) — dumps share the VPS failure domain"
 fi
 
 if [ "$fail" -eq 0 ]; then

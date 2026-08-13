@@ -1,11 +1,30 @@
 # HedgeFun Ops: Monitoring, Alerting & Self-Healing — Implementation Plan
 
-Status: **v3 FINAL** — reviewed by GPT Sol 5.6 and Kimi K3 (2026-08-13); their corrections are
-folded in and attributed inline. Owner requirement: real-money alpha is imminent; the system
-must survive unattended nights — every failure is either healed automatically or alerts the
-owner's personal Telegram bot immediately. Free / open-source tools only.
-Execution: DeepSeek v4 flash (Claude Code CLI) writes the [DS] files from per-slice packets;
-root (Fable) hand-writes the [ROOT] host-mutating files, line-reviews everything, and commits.
+Status: **v4 FINAL** — v3 was reviewed by GPT Sol 5.6 and Kimi K3 (2026-08-13, corrections
+attributed inline); v4 adds the owner's second VPS revealed mid-execution. Owner requirement:
+real-money alpha is imminent; the system must survive unattended nights — every failure is
+either healed automatically or alerts the owner's personal Telegram bot immediately.
+Free / open-source tools only. Execution: DeepSeek v4 flash (Claude Code CLI) wrote the [DS]
+files from per-slice packets; root (Fable) hand-wrote the [ROOT] host-mutating files,
+line-reviewed everything, and committed slice by slice.
+
+## v4 delta — VPS2, the monitoring host (supersedes v3 where they conflict)
+
+The owner has a SECOND VPS. Everything that must survive VPS1 dying moved there
+(`ops/vps2/`, its own README): **GlitchTip** (no longer on VPS1 — Sol's same-failure-domain
+objection is thereby resolved), **Uptime Kuma** (owner's pick; correct now that it lives on
+a different host — HTTP monitors + push dead-men + native Telegram, replacing the
+UptimeRobot/healthchecks.io accounts as the primary external layer; they remain optional
+backstops), **uptime-guard** (2-min network-level probe of VPS1 + the PRIMARY Contabo
+reboot lever — same rules as the CF worker: any HTTP response = alive, 6 h latch,
+instance-state check, `AUTO_REBOOT=0` until drilled), and **backup-pull** (append-only
+offsite copies over a read-only restricted key — a compromised VPS1 cannot reach them;
+`BACKUP_OFFSITE_PULL=1` then silences backup.sh's offsite WARN; rclone→R2 demoted to an
+optional second leg). The CF worker (`ops/cloudflare-uptime/`) is kept as an OPTIONAL
+third layer. VPS1's Caddy/glitchtip-shared-network ingress bits from v3-S2 were reverted;
+the VPS2 stack embeds its own Caddy (glitchtip + kuma subdomains → VPS2's IP).
+Watcher-of-the-watcher: one free UptimeRobot monitor on Kuma itself.
+Owner checklist: `ops/README.md`. VPS2 runbook: `ops/vps2/README.md`.
 
 ## 0. Verified environment facts (audited 2026-08-13 over SSH, read-only)
 
@@ -301,7 +320,11 @@ must never leave infra pointing at a route that doesn't exist — both advisors)
 - Hosted GlitchTip as primary (Sol's preference) — rejected for the 1,000 events/mo quota
   (K3) + owner's explicit self-host choice; Sol's containment adopted instead (limits, own
   backups, external-first for downtime detection).
-- Uptime Kuma, autoheal, Watchtower, Prometheus/Grafana/Loki — redundant here (both agreed).
+- Uptime Kuma (owner asked 2026-08-13), autoheal, Watchtower, Prometheus/Grafana/Loki —
+  redundant here (both advisors agreed). Kuma specifically: self-hosted on the only VPS it
+  would monitor = blind exactly when the VPS dies; UptimeRobot + healthchecks.io + the CF
+  Worker already cover its job from OUTSIDE. Revisit only if a second host ever exists
+  (then Kuma there is a fine dashboard).
 - `@sentry/nextjs`, client-side web SDK, mobile SDK (until Seeker build stabilizes).
 - Base-image digest pinning, DNS-integrity monitor, cert-expiry watchdog, WAL/PITR, SMS
   channel — noted in runbook as upgrade paths; not day-one (nightly RPO explicitly accepted

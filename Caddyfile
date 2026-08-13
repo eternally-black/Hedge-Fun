@@ -5,10 +5,5 @@ app.hedgeyour.fun {
 	reverse_proxy app:3000
 }
 
-# Self-hosted GlitchTip (separate compose project at /opt/glitchtip). Reached over the
-# shared external docker network `glitchtip-shared`; the DNS A record for this subdomain
-# must exist before Caddy can pass the ACME challenge (until then this block just logs
-# cert retries — the app site above is unaffected).
-glitchtip.hedgeyour.fun {
-	reverse_proxy glitchtip-web:8000
-}
+# GlitchTip + Uptime Kuma live on VPS2 (ops/vps2/) with their own Caddy — monitoring must
+# not share VPS1's failure domain. No monitoring ingress here on purpose.

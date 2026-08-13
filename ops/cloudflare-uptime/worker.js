@@ -17,10 +17,10 @@ const ALERT_COOLDOWN_MS = 30 * 60_000;
 const REBOOT_AFTER_MS = 10 * 60_000;
 const REBOOT_LATCH_MS = 6 * 60 * 60_000; // never a second reboot inside 6 h
 
-export default {
-  async scheduled(event, env, ctx) {
+const worker = {
+  async scheduled(event, env) {
     try {
-      await tick(env, ctx);
+      await tick(env);
     } catch (err) {
       // A failing tick must never wedge the cron. If KV reads fail we cannot trust
       // the reboot latch, so we bail safely: no hc.io ping this run → the worker's
@@ -29,8 +29,9 @@ export default {
     }
   },
 };
+export default worker;
 
-async function tick(env, ctx) {
+async function tick(env) {
   const healthUrl = env.HEALTH_URL || HEALTH_URL_DEFAULT;
   let probe;
   try {

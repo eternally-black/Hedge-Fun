@@ -1,0 +1,9 @@
+[Unit]
+Description=Nightly backup pull at 04:15 UTC (after VPS1's 03:30 dump)
+
+[Timer]
+OnCalendar=*-*-* 04:15:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

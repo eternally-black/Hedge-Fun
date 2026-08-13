@@ -1,0 +1,8 @@
+# VPS2 ingress. Both A records must point at VPS2 before first `up` (ACME HTTP challenge).
+glitchtip.hedgeyour.fun {
+	reverse_proxy web:8000
+}
+
+kuma.hedgeyour.fun {
+	reverse_proxy kuma:3001
+}

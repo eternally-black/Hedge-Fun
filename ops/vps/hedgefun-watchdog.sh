@@ -86,6 +86,7 @@ report_ok dockerd "dockerd is back"
 SERVICES=(
   "hedgefun:app:std" "hedgefun:poller:std" "hedgefun:db:db" "hedgefun:caddy:std"
   "glitchtip:web:std" "glitchtip:postgres:db" "glitchtip:valkey:std" "glitchtip:tg-bridge:std"
+  "glitchtip:kuma:std" "glitchtip:caddy:std"
 )
 
 svc_dir() { [ "$1" = hedgefun ] && echo "$HEDGEFUN_DIR" || echo "$GLITCHTIP_DIR"; }

@@ -130,9 +130,6 @@ services:
       - app
     networks:
       - internal
-      # Shared with the GlitchTip compose project so Caddy can reverse-proxy
-      # glitchtip-web:8000. Created by install-ops.sh / ops/glitchtip/install.sh.
-      - glitchtip-shared
     logging: *bounded-logs
     # Admin API answering with a loaded config proves the process is alive AND serving.
     healthcheck:
@@ -154,5 +151,3 @@ volumes:
 networks:
   internal:
     driver: bridge
-  glitchtip-shared:
-    external: true

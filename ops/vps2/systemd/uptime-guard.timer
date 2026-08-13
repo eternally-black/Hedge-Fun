@@ -1,0 +1,9 @@
+[Unit]
+Description=Run the VPS1 uptime guard every 2 minutes (offset from the watchdog)
+
+[Timer]
+OnCalendar=*:1/2
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
