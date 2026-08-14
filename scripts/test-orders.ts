@@ -20,11 +20,11 @@ const goodOrder = (over: Partial<SignedOrderWire> = {}): SignedOrderWire => ({
   salt: "1",
   side: "BUY",
   signatureType: 3,
-  signer: EW,
+  signer: DW, // POLY_1271: the order is signed BY the deposit wallet contract, not the EOA
   takerAmount: "19323671", // implies ~0.5175/share
-  timestamp: String(Math.floor(Date.now() / 1000)),
+  timestamp: String(Date.now()), // the SDK emits milliseconds
   tokenId: "tok-1",
-  signature: "0x" + "ab".repeat(65),
+  signature: "0x" + "ab".repeat(150), // ERC-1271-wrapped: EOA sig + separator + contents hash + type + length
   ...over,
 });
 const intent = { tokenId: "tok-1", side: "BUY" as const, allInCapMicro: 10_000_000n, maxPriceBp: 5200 };
@@ -41,7 +41,15 @@ async function main() {
     "bad_signature_shape",
   );
   assert.strictEqual(validateSignedOrder(goodOrder({ signature: "0xdead" }), intent, ctx), "bad_signature_shape");
-  assert.strictEqual(validateSignedOrder(goodOrder({ signature: "0x" + "AB".repeat(65) }), intent, ctx), null);
+  assert.strictEqual(validateSignedOrder(goodOrder({ signature: "0x" + "AB".repeat(150) }), intent, ctx), null);
+  // An UNWRAPPED 65-byte signature is what a hand-rolled client would send; the exchange would
+  // reject it, so the gate does. The embedded EOA in `signer` is the same class of mistake.
+  assert.strictEqual(validateSignedOrder(goodOrder({ signature: "0x" + "ab".repeat(65) }), intent, ctx), "bad_signature_shape");
+  assert.strictEqual(validateSignedOrder(goodOrder({ signer: EW }), intent, ctx), "signer_mismatch");
+  assert.strictEqual(
+    validateSignedOrder(goodOrder({ timestamp: String(Date.now() - 20 * 60 * 1000) }), intent, ctx),
+    "stale_signature",
+  );
   assert.strictEqual(validateSignedOrder(goodOrder({ tokenId: "tok-2" }), intent, ctx), "token_mismatch");
   assert.strictEqual(validateSignedOrder(goodOrder({ side: "SELL" }), intent, ctx), "side_mismatch");
   assert.strictEqual(validateSignedOrder(goodOrder({ orderType: "GTC" }), intent, ctx), "bad_order_type");

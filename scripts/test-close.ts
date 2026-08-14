@@ -18,11 +18,11 @@ const goodSell = (over: Partial<SignedOrderWire> = {}): SignedOrderWire => ({
   salt: "1",
   side: "SELL",
   signatureType: 3,
-  signer: EW,
+  signer: DW, // POLY_1271: the deposit wallet contract is the order signer, not the EOA
   takerAmount: "2500000", // $2.50 → 0.50/share
-  timestamp: String(Math.floor(Date.now() / 1000)),
+  timestamp: String(Date.now()), // the SDK emits milliseconds
   tokenId: "tok-1",
-  signature: "0x" + "ab".repeat(65),
+  signature: "0x" + "ab".repeat(150), // ERC-1271-wrapped, as the SDK produces
   ...over,
 });
 const exitIntent = { tokenId: "tok-1", sharesMicro: 5_000_000n, minPriceBp: 4800 };

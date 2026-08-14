@@ -12,6 +12,7 @@ import {
   fetchClosedOnlyMode,
 } from "@polymarket/client/actions";
 import { privySigner, rehydrateBigints, type EvmWalletLike } from "./real-signer";
+import { assertRelayPayload } from "./relay-guard";
 
 export type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 export type RealCtx = {
@@ -110,20 +111,14 @@ export async function runRealWorkflow(
     switch (response.status) {
       case "pending_signature": {
         const request = response.request as { kind?: unknown; payload?: unknown };
-        let signature: string;
-        switch (request.kind) {
-          case "signGaslessTypedData":
-            signature = await signer.signTypedData(rehydrateBigints(request.payload) as never);
-            break;
-          case "signGaslessMessage":
-            signature = await signer.signMessage(rehydrateBigints(request.payload) as never);
-            break;
-          case "requestAddress":
-            // The engine answers these server-side; seeing one means it changed under us.
-            throw new Error("relay asked the device for an address");
-          default:
-            throw new Error(`unknown workflow request kind: ${String(request.kind)}`);
-        }
+        // The device decides what it is willing to sign. Rehydrate FIRST so the guard reads the same
+        // values the wallet will (our wire form stringifies BigInt), then refuse anything that is
+        // not this user's own deposit-wallet batch on this chain (relay-guard.ts).
+        const payload = rehydrateBigints(request.payload);
+        assertRelayPayload(kind, { kind: request.kind, payload }, {
+          depositWallet: ctx.depositWalletAddress ?? "",
+        });
+        const signature = await signer.signTypedData(payload as never);
         answer = { runId: response.runId, requestHash: response.requestHash, signature };
         onStep?.(`signed step ${++step}`);
         continue;
@@ -197,8 +192,12 @@ export async function placeRealOrder(
       : await prepareMarketOrder(client, {
           tokenId: intent.params.tokenId,
           side: OrderSide.BUY,
-          // Micro-USD → dollars, never rounded up: the cap is what the server approved to be spent.
+          // Micro-USD → dollars. `amount` alone is FEE-EXCLUSIVE — the SDK's own words: "Leave
+          // [maxSpend] unset to pay fees on top of amount". Our stake IS the all-in cap, so both
+          // fields carry it and the SDK resizes the buy to fit fees inside it. Omitting maxSpend
+          // debits more than the user approved and still passes the server's makerAmount check.
           amount: Number(intent.params.allInCapMicro) / 1e6,
+          maxSpend: Number(intent.params.allInCapMicro) / 1e6,
           maxPrice: (intent.params.maxPriceBp / 10_000).toFixed(4),
           ...builder,
         } as never);

@@ -109,16 +109,25 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "consent_required" }, { status: 403 });
   }
 
-  const attempt = await prisma.fundingAttempt.findFirst({
+  const active = await prisma.fundingAttempt.findFirst({
     where: { userId: user.id, state: { not: "FUNDED" } },
     orderBy: { declaredAt: "desc" },
   });
-  if (!attempt) return NextResponse.json({ attempt: null });
-
-  // Re-arm on funding-screen open (plan §2.5): an old attempt may be hours into the slow sweep —
-  // clearing lastCheckedAt makes the next poller tick (≤60s) check it regardless of tier.
-  if (attempt.lastCheckedAt && Date.now() - attempt.lastCheckedAt.getTime() > 60_000) {
-    await prisma.fundingAttempt.update({ where: { id: attempt.id }, data: { lastCheckedAt: null } });
+  if (active) {
+    // Re-arm on funding-screen open (plan §2.5): an old attempt may be hours into the slow sweep —
+    // clearing lastCheckedAt makes the next poller tick (≤60s) check it regardless of tier.
+    if (active.lastCheckedAt && Date.now() - active.lastCheckedAt.getTime() > 60_000) {
+      await prisma.fundingAttempt.update({ where: { id: active.id }, data: { lastCheckedAt: null } });
+    }
+    return NextResponse.json(serializeAttempt(active));
   }
-  return NextResponse.json(serializeAttempt(attempt));
+
+  // Nothing active: return the newest attempt whatever its state, WITHOUT re-arming (a FUNDED one
+  // has nothing left to watch). Returning null here instead — as this route used to — made a
+  // successful deposit read as "no deposit declared yet" on the console, which invites a second one.
+  const newest = await prisma.fundingAttempt.findFirst({
+    where: { userId: user.id },
+    orderBy: { declaredAt: "desc" },
+  });
+  return NextResponse.json(newest ? serializeAttempt(newest) : { attempt: null });
 }

@@ -46,10 +46,11 @@ export function hashSignedOrder(signed: SignedOrderWire): string {
   return createHash("sha256").update(JSON.stringify(sorted)).digest("hex");
 }
 
-const EVM_SIG = /^0x[0-9a-fA-F]{130}$/; // 65 bytes: r,s,v
 
 // Shared checks across ENTRY and EXIT validators: maker/signer/signatureType/orderType/builder/
-// freshness. Behavior-identical to the pre-refactor BUY-only path.
+// freshness. Three of these encode SDK 0.6.0 facts that an earlier version of this file got wrong
+// and that would have rejected every real order: POLY_1271 signs as the deposit wallet, the
+// signature arrives ERC-1271-wrapped, and the timestamp is in milliseconds.
 function validateCommon(
   signed: SignedOrderWire,
   ctx: { depositWallet: string; embeddedWallet: string; builderCode: string | null; nowMs?: number },
@@ -57,20 +58,29 @@ function validateCommon(
   const now = ctx.nowMs ?? Date.now();
   const lc = (s: unknown) => (typeof s === "string" ? s.toLowerCase() : "");
   if (lc(signed.maker) !== ctx.depositWallet) return "maker_mismatch";
-  if (lc(signed.signer) !== ctx.embeddedWallet) return "signer_mismatch";
   if (signed.signatureType !== 3) return "bad_signature_type"; // POLY_1271, deposit wallet
-  // SHAPE only, and deliberately so: full EIP-712/ERC-7739 verification needs the exchange's
-  // domain and the POLY_1271 nesting confirmed against a real signed order, which is a Gate-0
-  // output — a hand-rolled hash here would false-reject valid orders on the money path. What this
-  // does buy: garbage never burns the intent's CAS claim or a post round-trip.
-  if (typeof signed.signature !== "string" || !EVM_SIG.test(signed.signature)) return "bad_signature_shape";
+  // POLY_1271 orders are signed BY THE CONTRACT: resolveOrderIdentity sets signer = wallet, and the
+  // exchange calls isValidSignature on it, which verifies the owner's signature internally. Reading
+  // the embedded EOA here (as this file once did) rejects every order the SDK can produce.
+  if (lc(signed.signer) !== ctx.depositWallet) return "signer_mismatch";
+  // SHAPE only, and deliberately loose: a POLY_1271 signature is the 65-byte EOA signature followed
+  // by the domain separator, the contents hash, the order-type string and a 2-byte length, so the
+  // honest bound is "even-length hex, at least 131 bytes". Its job is to stop garbage from burning
+  // the intent's CAS claim or a post round-trip — the real verification is the exchange's own
+  // ERC-1271 call, and a tighter hand-rolled length would false-reject valid orders on the money path.
+  if (typeof signed.signature !== "string" || !/^0x(?:[0-9a-fA-F]{2}){131,}$/.test(signed.signature)) {
+    return "bad_signature_shape";
+  }
   if (String(signed.orderType).toUpperCase() !== "FAK") return "bad_order_type";
   // builder is a SIGNED field — a client signing a different code redirects attribution (S1 review).
   if (ctx.builderCode && lc(signed.builder) !== ctx.builderCode.toLowerCase()) return "builder_mismatch";
-  // Freshness (D9): a stale signature must not fill at a bound the card no longer shows.
+  // Freshness (D9): a stale signature must not fill at a bound the card no longer shows. expiration
+  // IS in seconds (market orders set it to 0); timestamp is Date.now() MILLISECONDS — reading it as
+  // seconds made every real order stale by tens of thousands of years.
   if (signed.expiration > 0 && signed.expiration * 1000 < now) return "expired";
   const ts = Number(signed.timestamp);
-  if (Number.isFinite(ts) && ts > 0 && Math.abs(now - ts * 1000) > 10 * 60 * 1000) return "stale_signature";
+  const tsMs = Number.isFinite(ts) && ts > 0 ? (ts > 1e12 ? ts : ts * 1000) : 0;
+  if (tsMs > 0 && Math.abs(now - tsMs) > 10 * 60 * 1000) return "stale_signature";
   return null;
 }
 
