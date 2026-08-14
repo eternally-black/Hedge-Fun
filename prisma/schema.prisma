@@ -147,6 +147,8 @@ enum WalletOpKind {
   DEPLOY
   APPROVALS
   WRAP
+  REDEEM // burn resolved outcome tokens -> pUSD (S7)
+  WITHDRAW // collateral-return: pUSD out of the deposit wallet (S7, owner Q2 full cycle)
 }
 
 enum WalletWorkflowState {

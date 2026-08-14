@@ -14,9 +14,14 @@ import { serverSecureClient } from "@/lib/polymarket-server";
 import { buildWrapCalls, buildApprovalCalls, CTF_EXCHANGE, NEGRISK_CTF_EXCHANGE, CONDITIONAL_TOKENS } from "@/lib/wallet-ops";
 import { startWorkflow, answerWorkflow, type WorkflowGen, type WorkflowSpec, type StepRequest } from "@/lib/workflow";
 import { erc20BalanceOf, erc20Allowance, erc1155IsApprovedForAll, USDCE_ADDRESS, PUSD_ADDRESS } from "@/lib/polygon";
-import { prepareGaslessTransaction } from "@polymarket/client/actions";
+import {
+  prepareGaslessTransaction,
+  prepareRedeemPositions,
+  planCollateralReturn,
+  prepareCollateralReturnExecution,
+} from "@polymarket/client/actions";
 
-const KINDS = ["APPROVALS", "WRAP"] as const;
+const KINDS = ["APPROVALS", "WRAP", "REDEEM", "WITHDRAW"] as const;
 type Kind = (typeof KINDS)[number];
 
 const EVM_SIG = /^0x[0-9a-fA-F]{130}$/; // validate BEFORE the fence — the SDK throws on garbage inside it
@@ -102,6 +107,96 @@ export async function POST(req: Request) {
         ]);
         const a = await prisma.fundingAttempt.findUnique({ where: { id: runInputs.attemptId } });
         return usdce >= amount && (a ? pusd - a.baselinePusdMicro < amount : false);
+      },
+    };
+  } else if (kind === "REDEEM") {
+    // Redeem burns resolved outcome tokens → pUSD. The run binds to the NEWEST REAL bet whose
+    // market is RESOLVED and still has redeemable remainder — one at a time is fine for alpha.
+    const bet = await prisma.bet.findFirst({
+      where: { userId: user.id, mode: "REAL", market: { status: "RESOLVED" } },
+      orderBy: { createdAt: "desc" },
+      include: { market: true },
+    });
+    const remainder = bet ? (bet.filledSharesMicro ?? 0n) - (bet.closedSharesMicro ?? 0n) : 0n;
+    const row = await prisma.walletWorkflow.findUnique({ where: { userId_kind: { userId: user.id, kind: "REDEEM" } } });
+    const active = row && (row.state === "PENDING_SIGNATURE" || row.state === "SUBMITTING");
+    type RedeemInputs = { conditionId: string; wallet: string; pusdBaseline: string; betId: string; won: boolean };
+    // Mirror the WRAP pattern: an ACTIVE run drives on its own persisted inputs; a DONE row with
+    // nothing new to redeem answers idempotent done; otherwise require a redeemable position.
+    // `won`: side matches the resolved outcome; INVALID resolutions PUSH — collateral comes back,
+    // so they converge like wins (executor-review fix: the generated comparison was inverted).
+    const runInputs: RedeemInputs | null = active
+      ? (row.inputs as RedeemInputs)
+      : bet && remainder > 0n
+        ? {
+            conditionId: bet.market.polymarketId,
+            wallet,
+            pusdBaseline: (await erc20BalanceOf(PUSD_ADDRESS, wallet)).toString(),
+            betId: bet.id,
+            won: bet.market.resolvedOutcome === "INVALID" || bet.side === bet.market.resolvedOutcome,
+          }
+        : row?.state === "DONE"
+          ? (row.inputs as RedeemInputs)
+          : null;
+    if (!runInputs) return NextResponse.json({ error: "nothing_to_redeem" }, { status: 409 });
+    spec = {
+      userId: user.id,
+      kind,
+      inputs: runInputs,
+      factory: () =>
+        prepareRedeemPositions(client, { conditionId: runInputs.conditionId } as never) as Promise<WorkflowGen>,
+      autoAnswer: (r: StepRequest) => (r.kind === "requestAddress" ? signerAddress : null),
+      // A win (or INVALID push) redeems to collateral — pUSD increases past the run baseline. A
+      // LOSS redeems to zero: nothing to receive, converge right after submission. Loss-side
+      // convergence precision is a Gate-0 refinement; alpha keeps it simple.
+      verify: async () => {
+        if (!runInputs.won) return true;
+        const pusd = await erc20BalanceOf(PUSD_ADDRESS, runInputs.wallet);
+        return pusd > BigInt(runInputs.pusdBaseline);
+      },
+      // For losers we can never distinguish did-it-run from didn't — ambiguity keeps the slot
+      // until expiry (approvals-style idempotency does not apply to redemption).
+      definitelyNotDone: async () => {
+        if (!runInputs.won) return false;
+        const pusd = await erc20BalanceOf(PUSD_ADDRESS, runInputs.wallet);
+        return pusd <= BigInt(runInputs.pusdBaseline);
+      },
+    };
+  } else if (kind === "WITHDRAW") {
+    // Collateral-return: pUSD leaves the deposit wallet. The plan is fetched INSIDE the factory —
+    // once per run, so the two-phase plan→execute shape is safe under the live-session engine.
+    // WHERE the funds land (signer EOA vs bridge-out toward Solana) is a Gate-0 question — this
+    // workflow proves the mechanism; the destination leg is verified live (owner Q2 full cycle).
+    const pusd = await erc20BalanceOf(PUSD_ADDRESS, wallet);
+    const row = await prisma.walletWorkflow.findUnique({ where: { userId_kind: { userId: user.id, kind: "WITHDRAW" } } });
+    const active = row && (row.state === "PENDING_SIGNATURE" || row.state === "SUBMITTING");
+    type WithdrawInputs = { wallet: string; pusdBaseline: string };
+    const runInputs: WithdrawInputs | null = active
+      ? (row.inputs as WithdrawInputs)
+      : pusd > 0n
+        ? { wallet, pusdBaseline: pusd.toString() }
+        : row?.state === "DONE"
+          ? (row.inputs as WithdrawInputs)
+          : null;
+    if (!runInputs) return NextResponse.json({ error: "nothing_to_withdraw" }, { status: 409 });
+    spec = {
+      userId: user.id,
+      kind,
+      inputs: runInputs,
+      factory: async () => {
+        const plan = await planCollateralReturn(client);
+        return (await prepareCollateralReturnExecution(client, { plan } as never)) as WorkflowGen;
+      },
+      autoAnswer: (r: StepRequest) => (r.kind === "requestAddress" ? signerAddress : null),
+      // Collateral left the wallet: pUSD decreased from the run baseline.
+      verify: async () => {
+        const now = await erc20BalanceOf(PUSD_ADDRESS, runInputs.wallet);
+        return now < BigInt(runInputs.pusdBaseline);
+      },
+      // Nothing left yet — safe to reset.
+      definitelyNotDone: async () => {
+        const now = await erc20BalanceOf(PUSD_ADDRESS, runInputs.wallet);
+        return now >= BigInt(runInputs.pusdBaseline);
       },
     };
   } else {
