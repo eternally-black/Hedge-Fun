@@ -96,8 +96,8 @@ async function main() {
     assert.strictEqual(betRow.closedSharesMicro, 2_000_000n);
     assert.strictEqual(betRow.proceedsMicro, 1_000_000n);
     assert.strictEqual(betRow.closeFeeMicro, 35_000n);
-    // 1,000,000 − 35,000 − (2,600,000 × 2M/5M = 1,040,000) = −75,000: a small realized loss.
-    assert.strictEqual(betRow.realizedPnlMicro, -75_000n, "realized PnL exact");
+    // Fee-inclusive basis: 1,000,000 − 35,000 − ((2,600,000+87,360 entry fee)×2M/5M = 1,074,944) = −109,944.
+    assert.strictEqual(betRow.realizedPnlMicro, -109_944n, "realized PnL exact, entry fee in basis");
 
     // b) Replayed receipt: fill row deduped AND the aggregate does NOT double-book — increments
     // are driven only by fills actually inserted (the executor's own test surfaced the original
@@ -109,7 +109,7 @@ async function main() {
     assert.strictEqual(await prisma.fill.count({ where: { attemptId: a1.id } }), 1, "fill row deduped");
     betRow = await prisma.bet.findUniqueOrThrow({ where: { id: bet.id } });
     assert.strictEqual(betRow.closedSharesMicro, 2_000_000n, "aggregate NOT double-booked on replay");
-    assert.strictEqual(betRow.realizedPnlMicro, -75_000n, "PnL unchanged on replay");
+    assert.strictEqual(betRow.realizedPnlMicro, -109_944n, "PnL unchanged on replay");
 
     // c) Overshoot clamp: a fill larger than the remainder books only the remainder — the CHECK
     // constraint closedShares <= filledShares can never trip.

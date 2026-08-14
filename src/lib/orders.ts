@@ -4,6 +4,7 @@
 import { createHash } from "node:crypto";
 import type { Prisma, PrismaClient, OrderAttempt } from "@prisma/client";
 import { SWIPE_CAP } from "./config";
+import { feePerShareMicro } from "./quote";
 
 // ------------------------------------------------------------------ signed-order validation
 // The SignedOrder wire shape (0.6.0 typings): maker/signer/tokenId/side/signatureType/orderType/
@@ -134,32 +135,59 @@ export interface NormalizedFill {
   ts: Date;
 }
 
-// Best-effort parser over the (Gate-0-unverified) post/fill response shapes. Tolerant by design:
-// unknown shape → [] and the attempt stays POSTED for reconciliation, never a crash.
-// NOTE: for SELL responses `amountMicro` carries proceeds (the exchange reports the collateral
-// received), not spend — the EXIT booking path reads it accordingly.
-export function parseFills(raw: unknown, fallbackId: string): NormalizedFill[] {
-  if (!raw || typeof raw !== "object") return [];
+// The postOrder response classification. Verified 0.6.0 shape (bindings AcceptedOrderResponse):
+// { ok: true, orderId, status: "live"|"matched"|"delayed", makingAmount, takingAmount,
+//   tradeIds[], transactionsHashes[] } | { ok: false, code, message }.
+// The S6 review's critical: a fills-array guess would classify a real MATCHED response as
+// zero-fill and KILL an attempt whose money was spent. Classify first, book second.
+export type PostOutcome =
+  | { kind: "matched"; fills: NormalizedFill[] }
+  | { kind: "rejected"; code: string }
+  | { kind: "pending" } // live/delayed — FAK shouldn't rest, but never guess: reconcile later
+  | { kind: "unknown" }; // unrecognized shape — attempt stays POSTED for reconciliation
+
+export function classifyPostResponse(
+  raw: unknown,
+  dir: "ENTRY" | "EXIT",
+  fallbackId: string,
+  fee: { rateBp: number; expMilli: number } | null,
+): PostOutcome {
+  if (!raw || typeof raw !== "object") return { kind: "unknown" };
   const r = raw as Record<string, unknown>;
-  const arr = (r.fills ?? r.trades ?? r.matches) as unknown;
-  const list = Array.isArray(arr) ? arr : [];
-  const out: NormalizedFill[] = [];
-  for (let i = 0; i < list.length; i++) {
-    const f = list[i] as Record<string, unknown>;
-    const shares = num(f.size ?? f.shares ?? f.matchedAmount);
-    const price = num(f.price ?? f.avgPrice);
-    if (shares === null || price === null || shares <= 0 || price <= 0 || price >= 1) continue;
-    const fee = num(f.feeUsdc ?? f.fee) ?? 0;
-    out.push({
-      externalFillId: String(f.id ?? f.tradeId ?? f.fillId ?? `${fallbackId}:${i}`),
-      sharesMicro: BigInt(Math.round(shares * 1_000_000)),
-      amountMicro: BigInt(Math.round(shares * price * 1_000_000)),
-      feeMicro: BigInt(Math.round(fee * 1_000_000)),
-      priceBp: Math.round(price * 10_000),
-      ts: new Date(),
-    });
-  }
-  return out;
+  if (r.ok === false) return { kind: "rejected", code: String(r.code ?? "rejected") };
+  if (r.ok !== true) return { kind: "unknown" };
+  const status = String(r.status ?? "");
+  if (status === "live" || status === "delayed") return { kind: "pending" };
+  if (status !== "matched") return { kind: "unknown" };
+
+  // Amount semantics per side: maker = what WE give, taker = what we receive.
+  // ENTRY (BUY): making = collateral spent, taking = shares. EXIT (SELL): making = shares,
+  // taking = collateral received. DecimalStrings in whole units.
+  const making = num(r.makingAmount);
+  const taking = num(r.takingAmount);
+  if (making === null || taking === null || making <= 0 || taking <= 0) return { kind: "unknown" };
+  const shares = dir === "ENTRY" ? taking : making;
+  const amount = dir === "ENTRY" ? making : taking;
+  const price = amount / shares;
+  if (!(price > 0) || !(price < 1)) return { kind: "unknown" };
+  // The post response carries NO fee — the platform fee lives on the trade record. Estimate from
+  // the intent's fee params (the measured formula) so costs are never silently zero; the trade-
+  // record reconciliation at Gate-0 replaces the estimate with the charged number.
+  const feeMicro = fee ? BigInt(Math.round((feePerShareMicro(Math.round(price * 10_000), fee.rateBp, fee.expMilli) * shares))) : 0n;
+  const tradeIds = Array.isArray(r.tradeIds) ? (r.tradeIds as unknown[]).map(String) : [];
+  return {
+    kind: "matched",
+    fills: [
+      {
+        externalFillId: tradeIds[0] ?? String(r.orderId ?? fallbackId),
+        sharesMicro: BigInt(Math.round(shares * 1_000_000)),
+        amountMicro: BigInt(Math.round(amount * 1_000_000)),
+        feeMicro,
+        priceBp: Math.round(price * 10_000),
+        ts: new Date(),
+      },
+    ],
+  };
 }
 function num(v: unknown): number | null {
   const n = typeof v === "string" ? Number(v) : typeof v === "number" ? v : NaN;
@@ -367,9 +395,10 @@ export async function bookExitFills(
     const proceedsBooked = prorate ? (totalProceeds * sharesToBook) / totalShares : totalProceeds;
     const closeFeeBooked = prorate ? (totalFee * sharesToBook) / totalShares : totalFee;
 
-    // Realized PnL for the closed slice: proceeds − close fee − prorated cost basis.
-    // Cost basis prorated from the original spend in pure BigInt math.
-    const spend = bet.spendMicro ?? 0n;
+    // Realized PnL for the closed slice: proceeds − close fee − prorated cost basis, where the
+    // basis includes the prorated ENTRY fee — fee-inclusive economics end to end (S6/S7 review:
+    // omitting it overstated user PnL by the entry fee).
+    const spend = (bet.spendMicro ?? 0n) + (bet.feeMicro ?? 0n);
     const costBasis = filledShares > 0n ? (spend * sharesToBook) / filledShares : 0n;
     const realizedDelta = proceedsBooked - closeFeeBooked - costBasis;
 

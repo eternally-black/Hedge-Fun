@@ -4,7 +4,7 @@
 import assert from "node:assert";
 import { prisma } from "../src/lib/prisma";
 import { randomCode } from "../src/lib/refcode";
-import { validateSignedOrder, parseFills, bookEntryFills, type SignedOrderWire } from "../src/lib/orders";
+import { validateSignedOrder, classifyPostResponse, bookEntryFills, type SignedOrderWire } from "../src/lib/orders";
 import { SWIPE_CAP } from "../src/lib/config";
 
 const DW = "0x" + "aa".repeat(20);
@@ -58,18 +58,42 @@ async function main() {
     null,
   );
 
-  // ---- 2. parseFills: tolerant of unknown shapes, never throws.
-  assert.deepStrictEqual(parseFills(null, "a"), []);
-  assert.deepStrictEqual(parseFills({ status: "live" }, "a"), []);
-  const fills = parseFills(
-    { fills: [{ id: "f1", size: "5", price: "0.52", feeUsdc: "0.08736" }, { id: "junk", size: "0", price: "2" }] },
+  // ---- 2. classifyPostResponse: the REAL 0.6.0 response shape (S6-review critical — a
+  // fills-array guess read a matched response as zero-fill and killed paid attempts).
+  assert.deepStrictEqual(classifyPostResponse(null, "ENTRY", "a", null), { kind: "unknown" });
+  assert.deepStrictEqual(classifyPostResponse({ weird: 1 }, "ENTRY", "a", null), { kind: "unknown" });
+  assert.deepStrictEqual(classifyPostResponse({ ok: true, status: "live" }, "ENTRY", "a", null), { kind: "pending" });
+  assert.deepStrictEqual(classifyPostResponse({ ok: true, status: "delayed" }, "ENTRY", "a", null), { kind: "pending" });
+  const rej = classifyPostResponse({ ok: false, code: "not enough balance" }, "ENTRY", "a", null);
+  assert.strictEqual(rej.kind, "rejected");
+  // The measured fill, in the real shape: BUY 5 shares for $2.60, rate 700/exp 1000 → fee $0.08736.
+  const matched = classifyPostResponse(
+    { ok: true, orderId: "ord-1", status: "matched", makingAmount: "2.6", takingAmount: "5", tradeIds: ["t-1"], transactionsHashes: [] },
+    "ENTRY",
     "a",
+    { rateBp: 700, expMilli: 1000 },
   );
-  assert.strictEqual(fills.length, 1, "junk level dropped");
+  assert.strictEqual(matched.kind, "matched");
+  if (matched.kind !== "matched") throw new Error("unreachable");
+  const fills = matched.fills;
+  assert.strictEqual(fills.length, 1);
+  assert.strictEqual(fills[0]!.externalFillId, "t-1", "tradeId wins as the fill id");
   assert.strictEqual(fills[0]!.sharesMicro, 5_000_000n);
   assert.strictEqual(fills[0]!.amountMicro, 2_600_000n);
-  assert.strictEqual(fills[0]!.feeMicro, 87_360n);
+  assert.strictEqual(fills[0]!.feeMicro, 87_360n, "fee estimated from the measured formula");
   assert.strictEqual(fills[0]!.priceBp, 5200);
+  // EXIT semantics invert: making = shares given, taking = collateral received.
+  const sellMatch = classifyPostResponse(
+    { ok: true, orderId: "ord-2", status: "matched", makingAmount: "5", takingAmount: "2.5", tradeIds: [], transactionsHashes: [] },
+    "EXIT",
+    "b",
+    null,
+  );
+  assert.strictEqual(sellMatch.kind, "matched");
+  if (sellMatch.kind !== "matched") throw new Error("unreachable");
+  assert.strictEqual(sellMatch.fills[0]!.sharesMicro, 5_000_000n);
+  assert.strictEqual(sellMatch.fills[0]!.amountMicro, 2_500_000n);
+  assert.strictEqual(sellMatch.fills[0]!.priceBp, 5000);
 
   // ---- 3. Booking: fills create the REAL Bet ON FILL + Q1 participation; zero-fill frees the slot.
   const tag = `ord-${process.pid}-${Date.now() & 0xffffff}`;

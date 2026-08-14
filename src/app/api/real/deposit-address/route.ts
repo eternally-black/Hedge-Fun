@@ -3,7 +3,7 @@
 // deposit parks silently and indefinitely, which to the user looks exactly like theft.
 import { NextResponse } from "next/server";
 import { authUser } from "@/lib/privy";
-import { isRealMoneyEligible, hasRealConsent } from "@/lib/real";
+import { isRealMoneyEligible, hasRealConsent, sameOrigin } from "@/lib/real";
 import { captureToGlitchTip } from "@/lib/glitchtip";
 import { MIN_DEPOSIT_USD } from "@/lib/config";
 
@@ -22,6 +22,7 @@ export async function POST(req: Request) {
   if (!hasRealConsent(user)) {
     return NextResponse.json({ error: "consent_required" }, { status: 403 });
   }
+  if (!sameOrigin(req)) return NextResponse.json({ error: "bad_origin" }, { status: 403 });
 
   const wallet = user.depositWalletAddress;
   if (!wallet) {

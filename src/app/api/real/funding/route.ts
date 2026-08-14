@@ -6,7 +6,7 @@ import { NextResponse } from "next/server";
 import { Prisma, type FundingAttempt } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
-import { isRealMoneyEligible, hasRealConsent } from "@/lib/real";
+import { isRealMoneyEligible, hasRealConsent, sameOrigin } from "@/lib/real";
 import { captureToGlitchTip } from "@/lib/glitchtip";
 import { erc20BalanceOf, PUSD_ADDRESS, USDCE_ADDRESS } from "@/lib/polygon";
 
@@ -35,6 +35,7 @@ export async function POST(req: Request) {
   if (!hasRealConsent(user)) {
     return NextResponse.json({ error: "consent_required" }, { status: 403 });
   }
+  if (!sameOrigin(req)) return NextResponse.json({ error: "bad_origin" }, { status: 403 });
 
   const wallet = user.depositWalletAddress;
   if (!wallet) {

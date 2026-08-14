@@ -8,7 +8,7 @@ import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
-import { isRealMoneyEligible, hasRealConsent } from "@/lib/real";
+import { isRealMoneyEligible, hasRealConsent, sameOrigin } from "@/lib/real";
 import { captureToGlitchTip } from "@/lib/glitchtip";
 import { getMarketFee } from "@/lib/fees";
 import { getBook } from "@/lib/clob";
@@ -20,6 +20,7 @@ export async function POST(req: Request) {
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   if (!isRealMoneyEligible(user)) return NextResponse.json({ error: "real_disabled" }, { status: 403 });
   if (!hasRealConsent(user)) return NextResponse.json({ error: "consent_required" }, { status: 403 });
+  if (!sameOrigin(req)) return NextResponse.json({ error: "bad_origin" }, { status: 403 });
   if (!user.depositWalletAddress || !user.embeddedWalletAddress) {
     return NextResponse.json({ error: "no_deposit_wallet" }, { status: 409 });
   }
@@ -74,16 +75,24 @@ export async function POST(req: Request) {
   }
 
   // EXIT: the user must hold a REAL position with a positive remainder.
+  // ENTRY: the inverse — an OPEN position on this market blocks a second entry (S6/S7 review:
+  // an opposite-side entry would merge both tokens into one aggregate under one `side`,
+  // corrupting the position; same-side top-ups are deliberately out of alpha scope). Close first.
   let betSide: "YES" | "NO" = side;
   let remainder = 0n;
+  const existingBet = await prisma.bet.findUnique({
+    where: { userId_marketId_mode: { userId: user.id, marketId: market.id, mode: "REAL" } },
+  });
+  const existingRemainder = existingBet
+    ? (existingBet.filledSharesMicro ?? 0n) - (existingBet.closedSharesMicro ?? 0n)
+    : 0n;
+  if (direction === "ENTRY" && existingRemainder > 0n) {
+    return NextResponse.json({ error: "position_exists" }, { status: 409 });
+  }
   if (direction === "EXIT") {
-    const bet = await prisma.bet.findUnique({
-      where: { userId_marketId_mode: { userId: user.id, marketId: market.id, mode: "REAL" } },
-    });
-    if (!bet) return NextResponse.json({ error: "no_position" }, { status: 409 });
-    remainder = (bet.filledSharesMicro ?? 0n) - (bet.closedSharesMicro ?? 0n);
-    if (remainder <= 0n) return NextResponse.json({ error: "no_position" }, { status: 409 });
-    betSide = bet.side; // the side the user HOLDS — that's the token they sell
+    if (!existingBet || existingRemainder <= 0n) return NextResponse.json({ error: "no_position" }, { status: 409 });
+    remainder = existingRemainder;
+    betSide = existingBet.side; // the side the user HOLDS — that's the token they sell
   }
 
   // The token is the side the user buys (ENTRY) or holds (EXIT).
@@ -192,6 +201,15 @@ export async function POST(req: Request) {
         where: { userId: user.id, marketId: market.id, state: { in: ["ISSUED", "SIGNED", "SUBMITTING", "POSTED"] } },
       });
       if (existing && existing.state === "ISSUED") {
+        // A stale unsigned intent must not occupy the slot forever (S6/S7 review: an abandoned
+        // ENTRY intent would block a later EXIT). Expire it and let the client retry.
+        if (Date.now() - existing.updatedAt.getTime() > 10 * 60_000) {
+          await prisma.orderAttempt.updateMany({
+            where: { id: existing.id, state: "ISSUED" },
+            data: { state: "FAILED", error: "intent_expired" },
+          });
+          return NextResponse.json({ error: "intent_expired_retry" }, { status: 409 });
+        }
         return NextResponse.json({ intentId: existing.id, params: existing.approvedParams });
       }
       return NextResponse.json({ error: "attempt_in_flight" }, { status: 409 });

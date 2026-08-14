@@ -9,7 +9,7 @@ import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { authUser, syncEmbeddedWallet, isEvmAddress } from "@/lib/privy";
-import { isRealMoneyEligible, hasRealConsent } from "@/lib/real";
+import { isRealMoneyEligible, hasRealConsent, sameOrigin } from "@/lib/real";
 import { captureToGlitchTip } from "@/lib/glitchtip";
 import { polymarketPublic } from "@/lib/polymarket-sdk";
 import { contractOwner } from "@/lib/polygon";
@@ -29,6 +29,7 @@ export async function POST(req: Request) {
   if (!hasRealConsent(user)) {
     return NextResponse.json({ error: "consent_required" }, { status: 403 });
   }
+  if (!sameOrigin(req)) return NextResponse.json({ error: "bad_origin" }, { status: 403 });
 
   let embeddedWallet: string | null;
   try {

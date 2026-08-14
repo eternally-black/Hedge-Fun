@@ -149,6 +149,25 @@ export async function syncEmbeddedWallet(user: User): Promise<string | null> {
   return wallet;
 }
 
+// Money routes must distinguish "bad token" (401) from "our infra is down" (503) — authUser
+// below collapses both to null (S2 review finding, deferred to S8).
+export type AuthResult = { user: User } | { error: "unauthorized" | "infra" };
+export async function authUserStrict(req: Request): Promise<AuthResult> {
+  const token = bearer(req);
+  if (!token) return { error: "unauthorized" };
+  try {
+    const privyId = await verifyPrivyToken(token);
+    const user = await ensureUser(privyId, deviceHashes(req.headers));
+    return { user };
+  } catch (e) {
+    if (e instanceof Error && /token|jwt|auth/i.test(e.message)) {
+      return { error: "unauthorized" };
+    }
+    console.error("[authUserStrict] infra failure:", e);
+    return { error: "infra" };
+  }
+}
+
 // Convenience for API routes: verify the request and return the app user, or null.
 export async function authUser(req: Request): Promise<User | null> {
   const token = bearer(req);

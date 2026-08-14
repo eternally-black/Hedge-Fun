@@ -9,14 +9,14 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
-import { isRealMoneyEligible, hasRealConsent } from "@/lib/real";
+import { isRealMoneyEligible, hasRealConsent, sameOrigin } from "@/lib/real";
 import { captureToGlitchTip } from "@/lib/glitchtip";
 import { serverSecureClient } from "@/lib/polymarket-server";
 import {
   validateSignedOrder,
   validateSignedSellOrder,
   hashSignedOrder,
-  parseFills,
+  classifyPostResponse,
   bookEntryFills,
   bookExitFills,
   type SignedOrderWire,
@@ -28,6 +28,7 @@ export async function POST(req: Request) {
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   if (!isRealMoneyEligible(user)) return NextResponse.json({ error: "real_disabled" }, { status: 403 });
   if (!hasRealConsent(user)) return NextResponse.json({ error: "consent_required" }, { status: 403 });
+  if (!sameOrigin(req)) return NextResponse.json({ error: "bad_origin" }, { status: 403 });
   const depositWallet = user.depositWalletAddress;
   const embeddedWallet = user.embeddedWalletAddress;
   if (!depositWallet || !embeddedWallet) return NextResponse.json({ error: "no_deposit_wallet" }, { status: 409 });
@@ -40,6 +41,12 @@ export async function POST(req: Request) {
   }
   if (typeof intentId !== "string" || !signedOrder || typeof signedOrder !== "object") {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+  // Client-supplied receipts are REFUSED (S6 review critical: a fabricated receipt would book
+  // fills, points and counters the exchange never saw). The server posts; the browser-posting
+  // locus returns only with a verified-receipt design at Gate-0.
+  if (postResponse !== undefined && postResponse !== null) {
+    return NextResponse.json({ error: "receipts_not_accepted" }, { status: 400 });
   }
   const signed = signedOrder as SignedOrderWire;
 
@@ -93,41 +100,53 @@ export async function POST(req: Request) {
   });
   if (claimed.count === 0) return NextResponse.json({ status: "submitting" });
 
-  // Obtain the authoritative post response: the browser's receipt (browser-posting locus), or
-  // our own postOrder (server-posting locus). The signed payload is forwarded VERBATIM.
-  let response: unknown = postResponse ?? null;
-  if (!response) {
-    const client = await serverSecureClient(prisma, user);
-    if (!client) {
-      await prisma.orderAttempt.updateMany({
-        where: { id: attempt.id, state: "SUBMITTING" },
-        data: { state: "ISSUED", signedOrderHash: null, error: "real_not_configured" },
-      });
-      return NextResponse.json({ error: "real_not_configured" }, { status: 503 });
-    }
-    try {
-      response = await postOrder(client)(signed as never); // 0.6.0: curried (client)(order)
-    } catch (e) {
-      // Whether the CLOB accepted it is unknown — keep SUBMITTING for reconciliation, never
-      // silently retry with a fresh signature (plan §2.1 biggest-risk rule).
-      await captureToGlitchTip(e, { route: "real/submit", stage: "post" });
-      await prisma.orderAttempt.updateMany({
-        where: { id: attempt.id, state: "SUBMITTING" },
-        data: { error: `post failed: ${(e as Error).message}` },
-      });
-      return NextResponse.json({ status: "submitting", error: "post_ambiguous" });
-    }
+  // Server posts — the response is the authoritative receipt. Forward the signed payload VERBATIM.
+  const client = await serverSecureClient(prisma, user);
+  if (!client) {
+    await prisma.orderAttempt.updateMany({
+      where: { id: attempt.id, state: "SUBMITTING" },
+      data: { state: "ISSUED", signedOrderHash: null, error: "real_not_configured" },
+    });
+    return NextResponse.json({ error: "real_not_configured" }, { status: 503 });
+  }
+  let response: unknown;
+  try {
+    response = await postOrder(client)(signed as never); // 0.6.0: curried (client)(order)
+  } catch (e) {
+    // Whether the CLOB accepted it is unknown — keep SUBMITTING for reconciliation, never
+    // silently retry with a fresh signature (plan §2.1 biggest-risk rule).
+    await captureToGlitchTip(e, { route: "real/submit", stage: "post" });
+    await prisma.orderAttempt.updateMany({
+      where: { id: attempt.id, state: "SUBMITTING" },
+      data: { error: `post failed: ${(e as Error).message}` },
+    });
+    return NextResponse.json({ status: "submitting", error: "post_ambiguous" });
   }
 
   const rr = response as Record<string, unknown> | null;
-  const externalOrderId = rr && typeof rr.orderId === "string" ? rr.orderId : rr && typeof rr.id === "string" ? rr.id : null;
+  const externalOrderId = rr && typeof rr.orderId === "string" ? rr.orderId : null;
   await prisma.orderAttempt.updateMany({
     where: { id: attempt.id, state: "SUBMITTING" },
     data: { state: "POSTED", postResponse: (response ?? undefined) as never, externalOrderId },
   });
 
-  const params = attempt.approvedParams as { betSide?: "YES" | "NO"; sharesMicro?: string } | null;
-  const fills = parseFills(response, attempt.id);
+  // Classify BEFORE booking (S6 review critical: the real matched response carries scalar
+  // making/taking amounts, not a fills array — a shape-guess parser read it as zero-fill and
+  // KILLED attempts whose money was spent). Only a POSITIVE terminal signal books; everything
+  // ambiguous stays POSTED for reconciliation (the stuck-attempt watcher alerts on it).
+  const params = attempt.approvedParams as
+    | { betSide?: "YES" | "NO"; sharesMicro?: string; feeRateBp?: number; feeExpMilli?: number }
+    | null;
+  const fee =
+    typeof params?.feeRateBp === "number" && typeof params?.feeExpMilli === "number"
+      ? { rateBp: params.feeRateBp, expMilli: params.feeExpMilli }
+      : null;
+  const outcome = classifyPostResponse(response, attempt.dir === "EXIT" ? "EXIT" : "ENTRY", attempt.id, fee);
+
+  if (outcome.kind === "pending" || outcome.kind === "unknown") {
+    return NextResponse.json({ status: "posted", outcome: outcome.kind });
+  }
+  const fills = outcome.kind === "matched" ? outcome.fills : []; // rejected → zero-fill KILLED path
   const finalState =
     attempt.dir === "EXIT"
       ? await bookExitFills(prisma, attempt, BigInt(params?.sharesMicro ?? "0"), fills)

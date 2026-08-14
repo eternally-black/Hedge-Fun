@@ -14,6 +14,7 @@ import { DECK_MIN_SERVABLE } from "../src/lib/config";
 import { captureToGlitchTip, sendOpsTelegram } from "../src/lib/glitchtip";
 import { settleMarket, type Resolution } from "./settle";
 import { watchFunding } from "../src/lib/funding";
+import { watchStuckAttempts } from "../src/lib/attempts-watch";
 import { evaluateStreak } from "../src/lib/streak";
 import { refreshDeck } from "./refresh-deck";
 import { pruneMarkets } from "./prune-markets";
@@ -194,6 +195,16 @@ async function tick() {
   } catch (e) {
     console.warn("[funding] watcher error:", (e as Error).message);
     subsystemFailed("funding", e);
+  }
+
+  // Stuck real-order attempts (S8): ambiguous submissions must reach ops, never silently rot.
+  try {
+    const sa = await watchStuckAttempts(prisma);
+    if (sa.stuck > 0) console.warn(`[real] ${sa.stuck} stuck order attempt(s) awaiting reconciliation`);
+    subsystemOk("real-attempts");
+  } catch (e) {
+    console.warn("[real] stuck-attempt watcher error:", (e as Error).message);
+    subsystemFailed("real-attempts", e);
   }
 
   // Streak sweep — only streaks that can actually transition (M1): ACTIVE that missed a

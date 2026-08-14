@@ -30,3 +30,12 @@ export function isRealMoneyEligible(user: { email: string | null; twitterHandle:
 export function hasRealConsent(user: { realConsentAt: Date | null }): boolean {
   return user.realConsentAt !== null;
 }
+
+// Same-origin check for money routes (S8): browser-posted state-changing requests must carry our
+// own Origin. APP_ORIGIN env (e.g. https://hedgefun.app); unset = check disabled (dev).
+export function sameOrigin(req: Request): boolean {
+  const appOrigin = process.env.APP_ORIGIN;
+  if (!appOrigin) return true;
+  return req.headers.get("origin") === appOrigin;
+}
+export const ORIGIN_ENFORCED = !!process.env.APP_ORIGIN;
