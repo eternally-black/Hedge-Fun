@@ -41,8 +41,10 @@ export interface Quote {
 // live client and the fixtures need the same normalization — an unsorted ladder silently produces a
 // wrong VWAP rather than an error, so normalizing in ONE place is load-bearing.
 export function normalizeAsks(levels: BookLevel[]): BookLevel[] {
+  // priceBp < 10000: a binary-token share can never cost ≥ $1 — a malformed upstream level above
+  // that flips p(1−p) negative in the fee formula and silently understates all-in cost.
   return levels
-    .filter((l) => Number.isFinite(l.priceBp) && Number.isFinite(l.size) && l.priceBp > 0 && l.size > 0)
+    .filter((l) => Number.isFinite(l.priceBp) && Number.isFinite(l.size) && l.priceBp > 0 && l.priceBp < 10_000 && l.size > 0)
     .sort((a, b) => a.priceBp - b.priceBp);
 }
 
@@ -165,9 +167,15 @@ export function sideIsTradable(asks: BookLevel[], stakeCents: number, maxSlippag
 // locally exact for the proven single-level case; per-level-vs-VWAP for multi-level fills is an
 // open trap-list question Gate-0 revisits.
 
-export function feePerShareMicro(priceBp: number, feeRateBp: number, feeExpMilli: number): number {
+// Unrounded, in DOLLARS per share — the walk accumulates this and rounds ONCE at the aggregate
+// boundary (rounding per share first then multiplying under-reserves: at 104bp/rate 700 the true
+// per-share fee is 720.4288µ$ — rounding to 720 loses 428µ$ over 1000 shares; Sol S5 #2).
+function feePerShareExact(priceBp: number, feeRateBp: number, feeExpMilli: number): number {
   const p = priceBp / 10_000;
-  return Math.round((feeRateBp / 10_000) * Math.pow(p * (1 - p), feeExpMilli / 1000) * 1_000_000);
+  return (feeRateBp / 10_000) * Math.pow(p * (1 - p), feeExpMilli / 1000);
+}
+export function feePerShareMicro(priceBp: number, feeRateBp: number, feeExpMilli: number): number {
+  return Math.round(feePerShareExact(priceBp, feeRateBp, feeExpMilli) * 1_000_000);
 }
 
 export interface AllInQuote {
@@ -192,21 +200,26 @@ export function quoteBuyAllIn(
   const ladder = normalizeAsks(asks);
   if (ladder.length === 0 || budgetMicro <= 0n) return null;
 
-  let remaining = Number(budgetMicro) / 1_000_000; // dollars; float is fine — outputs re-integerize
+  if (!(feeRateBp >= 0) || !(feeExpMilli > 0)) return null; // malformed fee params never quote
+
+  const MICRO_SHARE = 1e-6;
+  let remaining = Number(budgetMicro) / 1_000_000; // dollars; float internally, integers out
   let shares = 0;
   let spend = 0;
   let fee = 0;
   let marginalAskBp = ladder[0]!.priceBp;
-  let exhaustedBook = true;
+  let bookRanOut = true;
 
   for (const l of ladder) {
     const p = l.priceBp / 10_000;
-    const fps = feePerShareMicro(l.priceBp, feeRateBp, feeExpMilli) / 1_000_000;
+    const fps = feePerShareExact(l.priceBp, feeRateBp, feeExpMilli); // unrounded — ceil ONCE at the end
     const costPerShare = p + fps;
     const affordable = remaining / costPerShare;
     const take = Math.min(l.size, affordable);
-    if (take <= 0) {
-      exhaustedBook = false;
+    // Sub-micro-share takes are not representable: taking one would move marginalAsk (and thus
+    // the future maxPrice bound) to a level the returned quantity never touches (Sol S5 #6).
+    if (take < MICRO_SHARE) {
+      bookRanOut = false;
       break;
     }
     shares += take;
@@ -215,25 +228,31 @@ export function quoteBuyAllIn(
     remaining -= take * costPerShare;
     marginalAskBp = l.priceBp;
     if (take < l.size) {
-      exhaustedBook = false;
+      bookRanOut = false;
       break;
     }
   }
 
-  if (shares <= 0) return null;
+  if (shares < MICRO_SHARE) return null;
+  const sharesMicro = BigInt(Math.floor(shares * 1_000_000));
   let spendMicro = Math.ceil(spend * 1_000_000);
-  const feeMicro = Math.ceil(fee * 1_000_000);
-  // Rounding both UP can overshoot an exactly-exhausted budget by 1–2 micro-dollars; the cap is
-  // the binding contract (it becomes the order's maxSpend), so shave the dust off the notional.
+  const feeMicro = Math.ceil(fee * 1_000_000); // the single aggregate-boundary ceil (Sol S5 #2)
+  // Rounding both halves UP can overshoot an exactly-exhausted budget by micro-dollar dust; the
+  // cap is the binding contract (it becomes the order's maxSpend), so the dust comes off notional.
   const over = spendMicro + feeMicro - Number(budgetMicro);
   if (over > 0) spendMicro -= over;
+  // Prices derive from the INTEGER outputs so every returned field describes the same transaction
+  // (float-derived prices next to integer amounts drifted on degenerate inputs; Sol S5 #5).
+  const ceilDiv = (a: bigint, b: bigint) => Number((a + b - 1n) / b);
   return {
-    sharesMicro: BigInt(Math.floor(shares * 1_000_000)),
+    sharesMicro,
     spendMicro: BigInt(spendMicro),
     feeMicro: BigInt(feeMicro),
-    vwapBp: Math.ceil((spend / shares) * 10_000),
-    allInPriceBp: Math.ceil(((spend + fee) / shares) * 10_000),
+    vwapBp: ceilDiv(BigInt(spendMicro) * 10_000n, sharesMicro),
+    allInPriceBp: ceilDiv((BigInt(spendMicro) + BigInt(feeMicro)) * 10_000n, sharesMicro),
     marginalAskBp,
-    exhaustedBook,
+    // True only when the LADDER ran out with budget left — exact simultaneous exhaustion is a
+    // full fill, not a liquidity shortfall (Sol S5 #10).
+    exhaustedBook: bookRanOut && remaining > (MICRO_SHARE * marginalAskBp) / 10_000,
   };
 }

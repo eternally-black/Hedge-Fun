@@ -64,13 +64,16 @@ export async function POST(req: Request) {
     });
     const row = await prisma.walletWorkflow.findUnique({ where: { userId_kind: { userId: user.id, kind: "WRAP" } } });
     const active = row && (row.state === "PENDING_SIGNATURE" || row.state === "SUBMITTING");
-    // A fresh start needs a DETECTED attempt; an ACTIVE run must be drivable regardless of what
-    // the watcher did to the attempt since (FUNDED included).
+    // Priority: an ACTIVE run drives on its own persisted inputs regardless of what the watcher
+    // did to the attempt since (FUNDED included); a DETECTED attempt starts a fresh run; a DONE
+    // row with neither stays idempotently DONE instead of 409ing (Sol S4-recheck #7).
     const runInputs = active
       ? (row.inputs as { attemptId: string; wallet: string; amountMicro: string })
       : attempt && attempt.latestUsdceMicro > 0n
         ? { attemptId: attempt.id, wallet, amountMicro: attempt.latestUsdceMicro.toString() }
-        : null;
+        : row?.state === "DONE"
+          ? (row.inputs as { attemptId: string; wallet: string; amountMicro: string })
+          : null;
     if (!runInputs) return NextResponse.json({ error: "nothing_to_wrap" }, { status: 409 });
     const amount = BigInt(runInputs.amountMicro);
     spec = {
@@ -122,7 +125,9 @@ export async function POST(req: Request) {
           erc1155IsApprovedForAll(CONDITIONAL_TOKENS, wallet, CTF_EXCHANGE),
           erc1155IsApprovedForAll(CONDITIONAL_TOKENS, wallet, NEGRISK_CTF_EXCHANGE),
         ]);
-        return a1 > 0n && a2 > 0n && o1 && o2;
+        // We grant MAX — a dust allowance must not read as "approved" (Sol S4-recheck #5).
+        const FLOOR = 10n ** 15n; // $1B in micro-USD: unreachable by dust, trivially met by MAX
+        return a1 >= FLOOR && a2 >= FLOOR && o1 && o2;
       },
       definitelyNotDone: async () => true,
     };

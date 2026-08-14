@@ -175,14 +175,22 @@ async function tryConverge(prisma: PrismaClient, spec: WorkflowSpec, runId: stri
     where: { userId: spec.userId, kind: spec.kind, runId, state: { not: "DONE" } },
     data: { state: "DONE", error: null },
   });
+  // FAILED included: an advance that threw but whose submission actually landed must not leave a
+  // contradictory WalletWorkflow=DONE / RelayerTx=FAILED pair (Sol S4-recheck #9).
   await prisma.relayerTx.updateMany({
-    where: { userId: spec.userId, kind: spec.kind, workflowKey: runId, status: "SUBMITTING" },
+    where: { userId: spec.userId, kind: spec.kind, workflowKey: runId, status: { in: ["SUBMITTING", "FAILED"] } },
     data: { status: "CONFIRMED" },
   });
   return true;
 }
 
-async function freshRun(prisma: PrismaClient, spec: WorkflowSpec, existing: boolean): Promise<WorkflowResult> {
+async function freshRun(
+  prisma: PrismaClient,
+  spec: WorkflowSpec,
+  // The reset is CAS-qualified on the EXACT prior row observed — a request that read DONE/FAILED/
+  // lost-PENDING must not overwrite a run another request has since advanced (Sol S4-recheck #2).
+  prior: { state: WalletWorkflow["state"]; runId: string | null } | null,
+): Promise<WorkflowResult> {
   const runId = randomUUID();
   const data = {
     state: "PENDING_SIGNATURE" as const,
@@ -197,8 +205,13 @@ async function freshRun(prisma: PrismaClient, spec: WorkflowSpec, existing: bool
     expiresAt: null,
   };
   let row: WalletWorkflow;
-  if (existing) {
-    row = await prisma.walletWorkflow.update({ where: key(spec.userId, spec.kind), data });
+  if (prior) {
+    const reset = await prisma.walletWorkflow.updateMany({
+      where: { userId: spec.userId, kind: spec.kind, state: prior.state, runId: prior.runId },
+      data,
+    });
+    if (reset.count === 0) return { status: "stale" }; // someone else moved the slot — re-enter
+    row = await prisma.walletWorkflow.findUniqueOrThrow({ where: key(spec.userId, spec.kind) });
   } else {
     try {
       row = await prisma.walletWorkflow.create({ data: { userId: spec.userId, kind: spec.kind, ...data } });
@@ -227,7 +240,7 @@ async function freshRun(prisma: PrismaClient, spec: WorkflowSpec, existing: bool
 export async function startWorkflow(prisma: PrismaClient, spec: WorkflowSpec): Promise<WorkflowResult> {
   sweepLive(Date.now());
   const row = await prisma.walletWorkflow.findUnique({ where: key(spec.userId, spec.kind) });
-  if (!row) return freshRun(prisma, spec, false);
+  if (!row) return freshRun(prisma, spec, null);
 
   switch (row.state) {
     case "DONE": {
@@ -237,10 +250,10 @@ export async function startWorkflow(prisma: PrismaClient, spec: WorkflowSpec): P
       } catch {
         return { status: "done" }; // can't verify right now — don't burn a run on it
       }
-      return freshRun(prisma, spec, true);
+      return freshRun(prisma, spec, { state: row.state, runId: row.runId });
     }
     case "FAILED":
-      return freshRun(prisma, spec, true); // same-inputs retry is legal (K3 H1)
+      return freshRun(prisma, spec, { state: row.state, runId: row.runId }); // same-inputs retry is legal (K3 H1)
     case "SUBMITTING": {
       if (await tryConverge(prisma, spec, row.runId!)) return { status: "done" };
       const expired = row.expiresAt !== null && row.expiresAt.getTime() < Date.now();
@@ -249,7 +262,7 @@ export async function startWorkflow(prisma: PrismaClient, spec: WorkflowSpec): P
           where: { userId: spec.userId, kind: spec.kind, workflowKey: row.runId!, status: "SUBMITTING" },
           data: { status: "FAILED" },
         });
-        return freshRun(prisma, spec, true); // verifiably never happened — release the slot (K3 B3)
+        return freshRun(prisma, spec, { state: row.state, runId: row.runId }); // verifiably never happened — release the slot (K3 B3)
       }
       return { status: "submitting", runId: row.runId!, transactionId: row.txHash, error: row.error };
     }
@@ -266,7 +279,7 @@ export async function startWorkflow(prisma: PrismaClient, spec: WorkflowSpec): P
       }
       // Live generator lost (restart / TTL): the stored envelope is unusable by construction
       // (fresh nonce+deadline next build) — restart the run honestly.
-      return freshRun(prisma, spec, true);
+      return freshRun(prisma, spec, { state: row.state, runId: row.runId });
     }
   }
 }
@@ -288,7 +301,7 @@ export async function answerWorkflow(
     return { status: "stale" };
   }
   const session = live.get(answer.runId);
-  if (!session) return freshRun(prisma, spec, true); // lost session → new envelope to sign
+  if (!session) return freshRun(prisma, spec, { state: row.state, runId: row.runId }); // lost session → new envelope to sign
   live.delete(answer.runId); // single consumer: a concurrent duplicate answer goes stale
   const answers = ((row.answers as Array<{ requestHash: string; answer: string }> | null) ?? []).concat({
     requestHash: answer.requestHash,
