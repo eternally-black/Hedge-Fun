@@ -83,7 +83,15 @@ authoritative object, and every parameter in it must be server-derived **first**
    a swallowed unique violation inside a Postgres transaction turns the COMMIT into a silent
    ROLLBACK, which discarded a whole booking while reporting FILLED (found 2026-08-14).
 6. Poller reconciles any attempt stuck in `SUBMITTING` (crash between post and record — Sol's
-   "distributed-state divergence", the plan's biggest named risk).
+   "distributed-state divergence", the plan's biggest named risk). **Implemented as
+   `src/lib/reconcile.ts` + `POST /api/real/reconcile`:** the poller stays SDK-free and pings the
+   route (shared secret, machine-to-machine); the route probes `fetchOrder` + `listAccountTrades`
+   and hands an SDK-free verdict to the module. A verdict resolves the attempt: terminal with zero
+   matched → KILLED (slot frees); matched → the trades are booked as an order-cumulative fill, so
+   the delta lands and the fee ESTIMATE is replaced by the CHARGED total (`trueUpAttemptFee`,
+   per-trade fee at each trade's own price and rate — the fee is convex in price). Unreachable or
+   unpriced → no writes, the next pass retries. Only POSTED attempts carrying an exchange order id
+   are reconcilable; a SUBMITTING one has no id to ask about and stays with the ops watcher.
 
 The server is a policy gate, not a barrier (K3): a determined user holding their own creds can
 bypass us and post directly — server validation protects the integrity of *our* records and fees,

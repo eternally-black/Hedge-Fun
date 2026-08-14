@@ -37,6 +37,10 @@ const HEDGE_INDEX_EVERY_N_TICKS = 5;
 // cost in the steady state, where it finds nothing. Deliberately OFFSET from the hedge index above
 // (see the tick body) so the two heavy passes don't land on the same tick.
 const PRUNE_EVERY_N_TICKS = 5;
+// Order reconciliation ping. The poller is deliberately SDK-free, so it cannot reconcile orders
+// itself — it pings the route that can. Offset to tick phase 4 so it never lands on the same
+// minute as the hedge index (phase 0) or the prune (phase 2).
+const RECONCILE_EVERY_N_TICKS = 5;
 let tickCount = 0;
 
 // Silent-failure watch: subsystem errors are swallowed by design (a failed deck refresh
@@ -208,6 +212,34 @@ async function tick() {
   } catch (e) {
     console.warn("[real] stuck-attempt watcher error:", (e as Error).message);
     subsystemFailed("real-attempts", e);
+  }
+
+  // Order reconciliation (plan §2.1 step 6): POSTED attempts are resolved against the exchange's
+  // own records by /api/real/reconcile — the SDK lives there, not here. Feature-gated by env
+  // (unset = off, alpha default). A non-ok response is a subsystem FAILURE on purpose: a 401 or
+  // 503 means reconciliation is silently NOT happening, which is exactly what ops must hear.
+  const reconcileUrl = process.env.REAL_RECONCILE_URL;
+  const reconcileSecret = process.env.REAL_RECONCILE_SECRET;
+  if (reconcileUrl && reconcileSecret && (tickCount - 1) % RECONCILE_EVERY_N_TICKS === 4) {
+    try {
+      const resp = await fetch(reconcileUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-reconcile-secret": reconcileSecret },
+        body: JSON.stringify({}),
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (!resp.ok) throw new Error(`reconcile HTTP ${resp.status}`);
+      const c = (await resp.json()) as Partial<Record<"booked" | "killed" | "pending" | "unknown" | "scanned", number>>;
+      if ((c.scanned ?? 0) > 0) {
+        console.log(
+          `[real-reconcile] scanned ${c.scanned}: booked ${c.booked ?? 0}, killed ${c.killed ?? 0}, pending ${c.pending ?? 0}, unknown ${c.unknown ?? 0}`,
+        );
+      }
+      subsystemOk("real-reconcile");
+    } catch (e) {
+      console.warn("[real-reconcile] error:", (e as Error).message);
+      subsystemFailed("real-reconcile", e);
+    }
   }
 
   // Streak sweep — only streaks that can actually transition (M1): ACTIVE that missed a

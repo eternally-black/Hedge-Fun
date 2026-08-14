@@ -515,3 +515,72 @@ export async function bookExitFills(
 
   return outcome;
 }
+
+// The receipt's fee is an ESTIMATE (the post response has no fee field — classifyPostResponse
+// derives it from the intent's fee params). Once the exchange's own trade records are read, the
+// CHARGED total is known and must replace the estimate on the Fill ledger AND on the position
+// aggregate (pre-Gate-0 item 4). The correction lands on the NEWEST fill — the most recent
+// knowledge — and the same delta hits the aggregate, so ledger and aggregate never diverge.
+// Both CHECK constraints (fills_sane, bets_real_fields_nonneg) forbid negative fees, so the
+// delta is clamped against BOTH before anything is written; the applied delta is returned.
+export async function trueUpAttemptFee(
+  prisma: PrismaClient,
+  attempt: OrderAttempt & { userId: string; marketId: string },
+  trueFeeMicro: bigint,
+): Promise<bigint> {
+  return prisma.$transaction(async (tx) => {
+    const fills = await tx.fill.findMany({ where: { attemptId: attempt.id }, orderBy: { createdAt: "asc" } });
+    if (fills.length === 0) return 0n;
+    const booked = fills.reduce((s, f) => s + f.feeMicro, 0n);
+
+    const bet = attempt.betId
+      ? await tx.bet.findUnique({ where: { id: attempt.betId } })
+      : await tx.bet.findUnique({
+          where: { userId_marketId_mode: { userId: attempt.userId, marketId: attempt.marketId, mode: "REAL" } },
+        });
+    const isExit = attempt.dir === "EXIT";
+    const aggregateFee = bet ? (isExit ? (bet.closeFeeMicro ?? 0n) : (bet.feeMicro ?? 0n)) : null;
+
+    // How far DOWN the correction can go before something would turn negative: the ledger can give
+    // back what it booked, the aggregate what it holds. Decided before any write so both move by
+    // the same number.
+    const floor = aggregateFee === null ? -booked : -(booked < aggregateFee ? booked : aggregateFee);
+    let applied = trueFeeMicro - booked;
+    if (applied < floor) applied = floor;
+    if (applied === 0n) return 0n;
+
+    if (applied > 0n) {
+      // An increase lands on the newest fill — the most recent knowledge.
+      const last = fills[fills.length - 1];
+      await tx.fill.update({ where: { id: last.id }, data: { feeMicro: last.feeMicro + applied } });
+    } else {
+      // A decrease is absorbed newest-first: the over-estimate usually sits on an EARLIER receipt
+      // row, and the newest row alone often cannot give back enough (its fee may be zero).
+      let left = -applied;
+      for (let i = fills.length - 1; i >= 0 && left > 0n; i--) {
+        const f = fills[i];
+        const take = f.feeMicro < left ? f.feeMicro : left;
+        if (take === 0n) continue;
+        await tx.fill.update({ where: { id: f.id }, data: { feeMicro: f.feeMicro - take } });
+        left -= take;
+      }
+    }
+    if (!bet) return applied;
+
+    // Explicit SET, not { increment }: these columns are NULL on rows that never got there and
+    // SQL NULL + x = NULL (the rule the close test pinned). Safe — the row was read in THIS tx.
+    await tx.bet.update({
+      where: { id: bet.id },
+      data: isExit
+        ? {
+            // A higher charged close fee lowers realized PnL by exactly that much.
+            closeFeeMicro: (bet.closeFeeMicro ?? 0n) + applied,
+            realizedPnlMicro: (bet.realizedPnlMicro ?? 0n) - applied,
+          }
+        : // The entry fee needs no PnL correction: the cost basis IS spendMicro + feeMicro, so
+          // every future exit prices itself off the corrected number.
+          { feeMicro: (bet.feeMicro ?? 0n) + applied },
+    });
+    return applied;
+  });
+}
