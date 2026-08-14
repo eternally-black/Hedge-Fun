@@ -123,3 +123,23 @@ export async function POST(req: Request) {
 
   return NextResponse.json({ depositWalletAddress: address });
 }
+
+// GET /api/real/wallet — the real-money console's single status read. Without it the browser can
+// only infer eligibility/consent/provisioning from 403s on other routes, which is guesswork.
+export async function GET(req: Request) {
+  const user = await authUser(req);
+  if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+
+  // Deliberately ungated: this read is what TELLS the client whether consent exists, and it exposes
+  // nothing about the account the user cannot already see.
+  return NextResponse.json(
+    {
+      eligible: isRealMoneyEligible(user),
+      consented: hasRealConsent(user),
+      embeddedWalletAddress: user.embeddedWalletAddress ?? null,
+      depositWalletAddress: user.depositWalletAddress ?? null,
+    },
+    // A stale provisioning state would render a "Provision wallet" button for a wallet that exists.
+    { headers: { "Cache-Control": "no-store" } },
+  );
+}
