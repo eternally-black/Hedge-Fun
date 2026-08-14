@@ -201,3 +201,38 @@ exercises the live Polymarket Gamma integration (deck fetch, `closed=true` resol
 lookup, market mapping). **Red = Polymarket API drifted** — settlement/deck can silently
 break (the "stuck in Awaiting resolution" class). Investigate `src/lib/polymarket.ts`
 before the next deploy.
+
+## Real-money console (`/real`) — alpha operating order
+
+The whole real-money surface is one page, `/real`, and it is invisible in the deck by design.
+Access needs the operator's email/X handle in `REAL_MONEY_EMAILS` / `REAL_MONEY_TWITTER` **and**
+consent recorded on the account; the recovery verbs (close, redeem, withdraw) deliberately survive a
+flipped allowlist, so removing someone from the list can never trap their funds.
+
+Order of operations for a fresh account — each step's button stays visible until its state is real:
+
+1. **Enable real money** — records consent. Every money route 403s `consent_required` until it is set.
+2. **Provision wallet** — deploys the Deposit Wallet from the DEVICE (one signature), then binds it
+   server-side after an on-chain `owner()` check, and pushes the derived CLOB creds to the encrypted
+   store. Expect two Privy prompts on a first run: one to derive L2 creds, one for the deploy.
+3. **Funding** — copy the bridge address, send USDC, then **Declare deposit** with the dollar amount.
+   The status line polls every 20 s; that poll is also what re-arms the server-side watcher, so
+   leaving the page kills detection until it is reopened.
+4. **Wrap USDC.e → pUSD**, then **Set approvals** (four calls: pUSD to both exchanges, CTF
+   `setApprovalForAll` to both). Both ride the relay: the server drives the SDK generator, the device
+   signs, the relayer submits.
+5. **Order** — pick a market, type the stake (it is the all-in cap, fee included), Buy YES/NO. The
+   result line never says "success": a killed attempt says the slot is free, a posted one says the
+   reconciler will book it when the trade record lands.
+6. **Recovery** — Close (sells the whole remainder), Redeem resolved, Withdraw.
+
+Env this page needs beyond the list above: `POLYMARKET_BUILDER_{API_KEY,SECRET,PASSPHRASE}` (server
+only — `/api/builder/sign` signs browser requests with them), `POLYMARKET_BUILDER_CODE` and its
+public twin `NEXT_PUBLIC_POLYMARKET_BUILDER_CODE` (attribution tag, signed INTO each order),
+`REAL_CREDS_KEY` (AES-256-GCM key for stored CLOB creds), `APP_ORIGIN` (same-origin enforcement),
+and `REAL_RECONCILE_URL` + `REAL_RECONCILE_SECRET` for the poller's reconciliation pass.
+
+**If `/api/builder/sign` starts logging `builder sign refused` to GlitchTip**, the SDK is calling a
+path outside the allowlist (any GET, plus POST to `/submit`, `/order`, `/orders`, `/auth/api-key`).
+Widen it deliberately — that endpoint signs as our builder identity, and `DELETE
+/auth/builder-api-key` would revoke the key outright.
