@@ -53,8 +53,13 @@ async function refreshMarketFee(prisma: PrismaClient, market: FeeCacheRow): Prom
     };
     const rateBp = Math.round(info.feeInfo.rate * 10_000);
     const expMilli = Math.round(info.feeInfo.exponent * 1000);
-    // Validate before caching: a malformed pair must not poison quoting (quote.ts refuses it too).
-    if (rateBp >= 0 && rateBp <= 2_000 && expMilli > 0 && expMilli <= 5_000) {
+    // {0,0} is what the SDK transform yields when the fee descriptor is ABSENT (`fd` nullish →
+    // rate 0, exponent 0 — bindings source): indistinguishable from a genuinely free market, and
+    // caching it as "no fee" understates by the entire fee (K3 F1). Pessimism rule: treat it as
+    // fallback-worthy, never cache it; Gate-0 probes the real fd distribution.
+    if (rateBp === 0 && expMilli === 0) {
+      console.warn(`[fees] absent/zero feeInfo for ${market.polymarketId} — using pessimistic fallback`);
+    } else if (rateBp >= 0 && rateBp <= 2_000 && expMilli > 0 && expMilli <= 5_000) {
       fetched = { rateBp, expMilli, negRisk: info.negRisk };
     }
   } catch {

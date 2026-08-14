@@ -65,6 +65,11 @@ export async function POST(req: Request) {
 
   const book = await getBook(tokenId).catch(() => null);
   if (!book) return NextResponse.json({ error: "book_unavailable" }, { status: 503 });
+  // Belt over the fee-cache flag (K3 F2): the raw book's own per-token neg_risk wins when it
+  // disagrees or the cache came from an absent-field default. true OR unknown-on-both = excluded.
+  if (book.negRisk !== false) {
+    return NextResponse.json({ error: "neg_risk_excluded" }, { status: 409 });
+  }
 
   const budgetMicro = BigInt(stake) * 10_000n; // cents → micro-USD
   const q = quoteBuyAllIn(book.asks, budgetMicro, fee.rateBp, fee.expMilli);

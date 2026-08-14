@@ -48,6 +48,10 @@ export interface TokenBook {
   fetchedAtMs: number; // when WE read this book (local receipt clock) — honest even when stale-served
   minOrderSize: number; // shares (upstream minimum order)
   tickSize: number; // price tick in dollars (e.g. 0.01)
+  // Per-token neg-risk flag straight off the raw book — the belt for the real-mode exclusion:
+  // the SDK's market-info transform defaults an ABSENT flag to false (= included), which is the
+  // unsafe direction (K3 F2). undefined = upstream didn't say; the intent route fails closed.
+  negRisk?: boolean;
 }
 
 // Raw upstream shape (only the fields we read).
@@ -249,6 +253,7 @@ function toTokenBook(r: RawBook): TokenBook | null {
     fetchedAtMs: Date.now(),
     minOrderSize: Number(r.min_order_size) || 0,
     tickSize: Number(r.tick_size) || 0,
+    negRisk: typeof r.neg_risk === "boolean" ? r.neg_risk : undefined,
   };
 }
 

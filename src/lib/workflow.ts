@@ -46,7 +46,10 @@ export function hashRequest(req: StepRequest): string {
 // ---------------------------------------------------------------- live generator sessions
 const LIVE_TTL_MS = 5 * 60 * 1000;
 const SUBMIT_EXPIRY_MS = 10 * 60 * 1000;
-type LiveSession = { gen: WorkflowGen; at: number };
+// The relayer envelope carries deadline = build-time + 600s (SDK source): re-serving an older
+// session invites signing a dead envelope, so sessions hard-expire on AGE, not just idle time.
+const ENVELOPE_TTL_MS = 8 * 60 * 1000;
+type LiveSession = { gen: WorkflowGen; at: number; bornAt: number };
 const live = new Map<string, LiveSession>(); // runId → session
 
 function sweepLive(now: number): void {
@@ -111,10 +114,12 @@ async function run(
             data: { state: "SUBMITTING", expiresAt: new Date(Date.now() + SUBMIT_EXPIRY_MS) },
           });
           if (claimed.count === 0) return false;
+          // attempts counts SUBMISSIONS, not generator advances (K3): 0 at fence time; the
+          // completion/failure paths below increment when a submit actually (or ambiguously) ran.
           await tx.relayerTx.upsert({
             where: { userId_kind_workflowKey: { userId: spec.userId, kind: spec.kind, workflowKey: row.runId! } },
-            create: { userId: spec.userId, kind: spec.kind, workflowKey: row.runId!, status: "SUBMITTING" },
-            update: { attempts: { increment: 1 }, status: "SUBMITTING" },
+            create: { userId: spec.userId, kind: spec.kind, workflowKey: row.runId!, status: "SUBMITTING", attempts: 0 },
+            update: { status: "SUBMITTING" },
           });
           return true;
         });
@@ -133,7 +138,8 @@ async function run(
         feeding = auto;
         continue;
       }
-      live.set(row.runId!, { gen, at: Date.now() });
+      const existing = live.get(row.runId!);
+      live.set(row.runId!, { gen, at: Date.now(), bornAt: existing?.bornAt ?? Date.now() });
       return park(prisma, row, "SUBMITTING", req, stepIndex);
     }
   } catch (e) {
@@ -147,7 +153,7 @@ async function run(
     });
     await prisma.relayerTx.updateMany({
       where: { userId: spec.userId, kind: spec.kind, workflowKey: row.runId! },
-      data: { status: "FAILED" },
+      data: { status: "FAILED", attempts: { increment: 1 } }, // ambiguous submit counts as one
     });
     return { status: "submitting", runId: row.runId!, transactionId: null, error: msg };
   }
@@ -160,6 +166,10 @@ async function run(
   await prisma.walletWorkflow.updateMany({
     where: { userId: spec.userId, kind: spec.kind, runId: row.runId },
     data: { txHash: txId },
+  });
+  await prisma.relayerTx.updateMany({
+    where: { userId: spec.userId, kind: spec.kind, workflowKey: row.runId! },
+    data: { attempts: { increment: 1 }, txHash: txId }, // one real submission handed off
   });
   if (await tryConverge(prisma, spec, row.runId!)) return { status: "done" };
   return { status: "submitting", runId: row.runId!, transactionId: txId, error: null };
@@ -241,6 +251,9 @@ export async function startWorkflow(prisma: PrismaClient, spec: WorkflowSpec): P
   sweepLive(Date.now());
   const row = await prisma.walletWorkflow.findUnique({ where: key(spec.userId, spec.kind) });
   if (!row) return freshRun(prisma, spec, null);
+  // Pre-rework (v1) rows have runId NULL and inputs the v2 closures can't drive — converging or
+  // expiring them would 500 on the non-nullable workflowKey filter (K3). Restart them cleanly.
+  if (!row.runId) return freshRun(prisma, spec, { state: row.state, runId: null });
 
   switch (row.state) {
     case "DONE": {
@@ -268,6 +281,12 @@ export async function startWorkflow(prisma: PrismaClient, spec: WorkflowSpec): P
     }
     case "PENDING_SIGNATURE": {
       const session = row.runId ? live.get(row.runId) : undefined;
+      if (session && Date.now() - session.bornAt > ENVELOPE_TTL_MS) {
+        // The envelope's relayer deadline is fixed at build time — re-serving past it invites
+        // signing a dead payload. Drop the session; the branch below restarts the run.
+        live.delete(row.runId!);
+        return freshRun(prisma, spec, { state: row.state, runId: row.runId });
+      }
       if (session && row.pendingRequest && row.pendingRequestHash) {
         session.at = Date.now();
         return {

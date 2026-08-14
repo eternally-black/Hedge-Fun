@@ -41,7 +41,12 @@ export async function serverSecureClient(prisma: PrismaClient, user: User): Prom
   const cached = clientCache.get(user.id);
   if (cached && Date.now() - cached.at < CLIENT_TTL_MS) return cached.client;
 
-  const credentials = await loadClobCreds(prisma, user.id);
+  let credentials;
+  try {
+    credentials = await loadClobCreds(prisma, user.id);
+  } catch {
+    return null; // DB hiccup reads as not-configured (503), never a raw 500 on a money route
+  }
   if (!credentials) return null;
 
   try {

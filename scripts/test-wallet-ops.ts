@@ -2,8 +2,15 @@
 // transaction (poly-spike wrap.mjs --check fixture, tx 0x451fe401…c56406). A wrong ABI guess here
 // would otherwise only surface as a relayer rejection with real money in flight.
 import assert from "node:assert";
-import { buildWrapCalls, COLLATERAL_ONRAMP } from "../src/lib/wallet-ops";
-import { USDCE_ADDRESS } from "../src/lib/polygon";
+import {
+  buildWrapCalls,
+  buildApprovalCalls,
+  COLLATERAL_ONRAMP,
+  CTF_EXCHANGE,
+  NEGRISK_CTF_EXCHANGE,
+  CONDITIONAL_TOKENS,
+} from "../src/lib/wallet-ops";
+import { USDCE_ADDRESS, PUSD_ADDRESS } from "../src/lib/polygon";
 
 async function main() {
   const wallet = "0x0b699a09e593bff83ec0d9b97291a75b400bf2a9";
@@ -34,6 +41,24 @@ async function main() {
   assert.strictEqual(zeroCalls[0].data.slice(0, 10 + 64), calls[0].data.slice(0, 10 + 64), "approve selector+spender intact");
   assert.ok(zeroCalls[1].data.endsWith("0".repeat(64)), "wrap amount word zero");
   assert.strictEqual(zeroCalls[1].data.slice(0, 10 + 128), calls[1].data.slice(0, 10 + 128), "wrap selector+addresses intact");
+
+  // Approval set: byte-pin the EXACT four calls (the higher-blast-radius output — a wrong ABI or
+  // address here surfaces as MAX_UINT granted to the wrong contract). Addresses externally
+  // verified against PolygonScan labels in the S4 review round.
+  const approvals = buildApprovalCalls();
+  assert.strictEqual(approvals.length, 4, "exactly four calls, nothing more");
+  const MAX = "f".repeat(64);
+  const pad = (a: string) => a.toLowerCase().replace(/^0x/, "").padStart(64, "0");
+  assert.deepStrictEqual(
+    approvals.map((c) => [c.to, c.data]),
+    [
+      [PUSD_ADDRESS, "0x095ea7b3" + pad(CTF_EXCHANGE) + MAX],
+      [PUSD_ADDRESS, "0x095ea7b3" + pad(NEGRISK_CTF_EXCHANGE) + MAX],
+      [CONDITIONAL_TOKENS, "0xa22cb465" + pad(CTF_EXCHANGE) + "1".padStart(64, "0")],
+      [CONDITIONAL_TOKENS, "0xa22cb465" + pad(NEGRISK_CTF_EXCHANGE) + "1".padStart(64, "0")],
+    ],
+    "approval calldata pinned byte for byte",
+  );
 
   console.log("OK: wallet-ops calldata matches the recorded production fixture byte for byte");
 }

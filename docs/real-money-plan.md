@@ -35,8 +35,11 @@ wallet** (not a raw-key throwaway — K3's top risk):
 6. `maxPrice` semantics: per-share ceiling vs aggregate cap (if per-share, the bound must come from
    the **marginal ask**, not VWAP — Sol); whether the platform fee applies per level or on VWAP.
    `maxSpend` resize behavior.
-7. Gasless-generator determinism: rebuild-and-replay a wrap workflow, byte-matching every yielded
-   request — this validates the durable-workflow relay design (§2.4).
+7. ~~Gasless-generator determinism~~ **ANSWERED STATICALLY (S4 review round): the generator is
+   non-deterministic by construction** (fresh nonce + deadline=now+600s per build, verified in
+   0.6.0 source) — §2.4 was amended to the live-session engine. Gate-0 instead exercises the
+   LIVE relay end to end: start → device signs → advance → relayer accepts; plus a
+   lost-session restart mid-flow.
 8. Do resolved positions in a Deposit Wallet **auto-redeem**? (Funds-recovery question — Sol.)
 9. **Withdrawal mechanics** (in scope for alpha per owner decision Q2): getting pUSD back out —
    unwrap pUSD → USDC.e, transfer/bridge back toward Solana. Proven nowhere; the bridge endpoint
@@ -124,19 +127,24 @@ hedge path, not to re-deal swiped cards.
 - Intent-first everywhere: the durable operation row is written **before** the external call, the
   result reconciled after; never an external call inside `runSerializable`.
 
-### 2.4 Signature relay (wrap, approvals) — durable workflow, not an in-memory generator
+### 2.4 Signature relay (wrap, approvals) — live-session engine (AMENDED, S4 review round)
 
-Sequential HTTP per yielded signature is the transport; the state lives in Postgres:
+The original rebuild-and-replay design is impossible against the real SDK: the generator refetches
+the wallet nonce and stamps `deadline = now+600s` on every build (verified in 0.6.0 source), so
+regenerated yields can never byte-match. Shipped design (`bb3ba15`):
 
-- `WalletWorkflow` row: kind (APPROVALS/WRAP), immutable inputs, current step, yielded-request
-  hash, accepted answer, expiry, `SUBMITTING` fence, txHash. Single-flight per (user, kind) via
-  unique in-flight constraint — a second tab gets the current step, never a second generator.
-- Rebuild the generator from immutable inputs per request, replay stored answers, and require each
-  regenerated yield to **byte-match** the stored hash (validated in Gate-0 §1.7); bind each answer
-  to its request by digest and recovered signer.
-- Ambiguity rule: crash after relayer submit → converge from **chain state** (allowance present,
-  pUSD present), never resubmit blindly. Approve-succeeded/wrap-failed residue re-enters
-  `wrap-needed`, not an error state.
+- The generator lives **in memory** for the seconds-long signature roundtrip (single app
+  container), keyed by a per-RUN id with a hard envelope-age TTL. The `WalletWorkflow` row is the
+  single-flight slot per (user, kind), the SUBMIT fence, and the audit transcript.
+- Lost session before the fence (restart/TTL) → the run restarts cleanly with a fresh envelope —
+  one extra device prompt, never a stale signature. All transitions are CAS on (state, runId).
+- Answers bind by runId + request digest; signature SHAPE is validated pre-fence. Recovered-signer
+  validation is **deliberately deferred to the Gate-0 bundle** (needs keccak/secp; the relayer's
+  own ERC-7739 validation is the enforcement meanwhile).
+- Ambiguity rule (unchanged): after the fence, converge from **chain state** only (on-chain
+  allowance floors + isApprovedForAll for approvals; the run's attempt-bound finalized pUSD delta
+  for wrap), never resubmit blindly; expired SUBMITTING + verifiably-nothing-happened releases
+  the slot. Approvals use OUR explicit 4-call set, not the SDK's generic MAX-to-everything setup.
 - Wrap needs the user's signature so it only runs with a screen open; resume on next open.
 - Step-4 acceptance also verifies the **conditional-token approval a SELL needs** (Sol R5 — the
   close path ships broken otherwise), and neg-risk markets are excluded from the real-mode
