@@ -205,12 +205,15 @@ regenerated yields can never byte-match. Shipped design (`bb3ba15`):
   **S6 prerequisite** — once trading/withdrawal can move pUSD out mid-attempt, deltas go negative
   and the accounting needs cumulative tracking or a baseline floor. **Half-closed:** the *workflow*
   side of this (WRAP/REDEEM/WITHDRAW convergence) no longer reads wallet-wide deltas at all — it
-  converges on the run's own relayer transaction state (§2.4, `runScoped`). The *watcher* side
-  (`checkFundingAttempt`, AWAITING→DETECTED→FUNDED) still compares against declare-time baselines,
-  so a pUSD outflow mid-attempt can still strand an attempt short of FUNDED; the trailing-low
-  watermark that fixes it also widens the existing "any inflow counts as the deposit" false
-  positive, so it wants deposit attribution (Transfer logs) rather than another delta — open,
-  pre-Gate-0;
+  converges on the run's own relayer transaction state (§2.4, `runScoped`). **CLOSED (2026-08-14):** the *watcher* side now
+  ATTRIBUTES deposits from ERC-20 Transfer logs — `eth_getLogs` for `Transfer(_, wallet, value)`
+  over a per-attempt cursor (`scanBlock`, advanced in the same write as the transition), with the
+  totals accumulated on the row (`inUsdceMicro`/`inPusdMicro`) and the transaction recorded
+  (`lastDepositTx`). An outflow can no longer mask a deposit, and "any inflow counts" is replaced
+  by a named transfer. The span is bounded (9k blocks/pass, free RPCs reject wide ranges) so a
+  long-parked attempt still converges across passes; balances are still read for
+  `latestUsdceMicro` (the WRAP amount pins to it), and with no chain probe passed the old
+  delta path stands unchanged as the fallback;
   multicall3 batching is deliberately deferred (2 sequential RPC calls per attempt at alpha scale).
 
 ### 2.6 Honest pricing — one shared primitive

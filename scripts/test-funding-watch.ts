@@ -164,9 +164,90 @@ async function main() {
 
   console.log("OK: funding watcher — deltas, cadence, error isolation, one-active guard, alert-once");
 
+  // ---- Deposit ATTRIBUTION (§2.5): the watcher's transitions come from Transfer logs when a
+  // chain probe is passed. The regression it exists for: an OUTFLOW (a trade, a withdrawal) makes
+  // the balance delta negative and the old watcher could never transition. Without a probe the
+  // delta path is unchanged — every section above still exercises it.
+  const attrWallet = `0x${"44".repeat(20)}`;
+  const attrUser = await prisma.user.create({
+    data: {
+      privyId: `did:privy:${tag}-attr`,
+      authProvider: "EMAIL",
+      referralCode: randomCode(),
+      depositWalletAddress: attrWallet,
+    },
+  });
+  const attrAttempt = await prisma.fundingAttempt.create({
+    data: {
+      userId: attrUser.id,
+      state: "AWAITING",
+      baselineUsdceMicro: 5_000_000n, // the wallet HELD $5 at declare time…
+      baselinePusdMicro: 0n,
+      latestUsdceMicro: 5_000_000n,
+      latestPusdMicro: 0n,
+      declaredAt: new Date(Date.now() - 60_000),
+      lastCheckedAt: null,
+    },
+  });
+
+  const head = { n: 100_000n };
+  const logs: { token: "usdce" | "pusd"; block: bigint; micro: bigint; tx: string }[] = [];
+  const ranges: { from: bigint; to: bigint }[] = [];
+  const chain = {
+    head: async () => head.n,
+    incoming: async (token: string, holder: string, from: bigint, to: bigint) => {
+      ranges.push({ from, to });
+      if (holder.toLowerCase() !== attrWallet) return { totalMicro: 0n, transfers: 0, lastTxHash: null };
+      const kind = token.toLowerCase().includes("2791") ? "usdce" : "pusd";
+      const hits = logs.filter((l) => l.token === kind && l.block >= from && l.block <= to);
+      return {
+        totalMicro: hits.reduce((s, l) => s + l.micro, 0n),
+        transfers: hits.length,
+        lastTxHash: hits.length ? hits[hits.length - 1]!.tx : null,
+      };
+    },
+  };
+  // …and holds LESS now: the delta is negative while a $5 deposit really did land.
+  const attrBalances = { usdce: 1_000_000n, pusd: 0n };
+  const attrReader: BalanceReader = async (token) =>
+    token.toLowerCase().includes("2791") ? attrBalances.usdce : attrBalances.pusd;
+  logs.push({ token: "usdce", block: head.n - 10n, micro: 5_000_000n, tx: "0xattr1" });
+
+  r = await watchFunding(prisma, attrReader, new Date(Date.now() + 1000), chain);
+  assert.ok(r.detected >= 1, "attribution detects the deposit the negative delta hid");
+  row = await prisma.fundingAttempt.findUniqueOrThrow({ where: { id: attrAttempt.id } });
+  assert.strictEqual(row.state, "DETECTED");
+  assert.strictEqual(row.inUsdceMicro, 5_000_000n, "attributed exactly the transferred amount");
+  assert.strictEqual(row.lastDepositTx, "0xattr1", "the transition names a real transaction");
+  assert.ok(row.scanBlock !== null, "cursor persisted");
+
+  // Re-scan with nothing new must not re-count: the cursor only moves forward.
+  await watchFunding(prisma, attrReader, new Date(Date.now() + 70_000), chain);
+  row = await prisma.fundingAttempt.findUniqueOrThrow({ where: { id: attrAttempt.id } });
+  assert.strictEqual(row.inUsdceMicro, 5_000_000n, "no double-count on re-scan");
+  assert.ok(row.scanBlock !== null && row.scanBlock >= head.n - 1n, "cursor caught up to head");
+
+  // pUSD arriving above the cursor funds the attempt.
+  const cursor = row.scanBlock!;
+  logs.push({ token: "pusd", block: cursor + 5n, micro: 5_000_000n, tx: "0xattr2" });
+  head.n = cursor + 10n;
+  r = await watchFunding(prisma, attrReader, new Date(Date.now() + 140_000), chain);
+  assert.ok(r.funded >= 1, "pUSD attribution funds");
+  row = await prisma.fundingAttempt.findUniqueOrThrow({ where: { id: attrAttempt.id } });
+  assert.strictEqual(row.state, "FUNDED");
+  assert.strictEqual(row.inPusdMicro, 5_000_000n);
+  assert.ok(row.fundedAt, "fundedAt set");
+
+  // Every scan stayed inside the RPC-safe span — one unbounded getLogs would break a parked attempt.
+  for (const range of ranges) {
+    assert.ok(range.to - range.from <= 9_000n, `span bounded: ${range.from}..${range.to}`);
+    assert.ok(range.to <= head.n, `never scans past the finalized head: ${range.to} <= ${head.n}`);
+  }
+  console.log("OK: funding attribution — Transfer logs beat balance deltas, cursor bounded and monotone");
+
   // Cleanup.
-  await prisma.fundingAttempt.deleteMany({ where: { userId: { in: [userA.id, userB.id, userC.id] } } });
-  await prisma.user.deleteMany({ where: { id: { in: [userA.id, userB.id, userC.id] } } });
+  await prisma.fundingAttempt.deleteMany({ where: { userId: { in: [userA.id, userB.id, userC.id, attrUser.id] } } });
+  await prisma.user.deleteMany({ where: { id: { in: [userA.id, userB.id, userC.id, attrUser.id] } } });
 
   console.log("PASS: funding-watch");
 }

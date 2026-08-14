@@ -13,7 +13,7 @@ import { DECK_FETCH_HORIZON_HOURS } from "../src/lib/deck-mix";
 import { DECK_MIN_SERVABLE } from "../src/lib/config";
 import { captureToGlitchTip, sendOpsTelegram } from "../src/lib/glitchtip";
 import { settleMarket, type Resolution } from "./settle";
-import { watchFunding } from "../src/lib/funding";
+import { watchFunding, rpcChain } from "../src/lib/funding";
 import { watchStuckAttempts } from "../src/lib/attempts-watch";
 import { evaluateStreak } from "../src/lib/streak";
 import { refreshDeck } from "./refresh-deck";
@@ -193,7 +193,7 @@ async function tick() {
   // tiered per-attempt cadence itself, so calling it each tick is cheap. RPC errors surface as a
   // subsystem failure only when NOTHING could be checked — per-attempt errors are counted inside.
   try {
-    const f = await watchFunding(prisma);
+    const f = await watchFunding(prisma, undefined, new Date(), rpcChain);
     if (f.checked + f.errors > 0) {
       console.log(`[funding] checked ${f.checked}, detected ${f.detected}, funded ${f.funded}, errors ${f.errors}`);
     }

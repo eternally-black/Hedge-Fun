@@ -758,6 +758,13 @@ model FundingAttempt {
   latestUsdceMicro   BigInt @default(0)
   latestPusdMicro    BigInt @default(0)
 
+  // Deposit ATTRIBUTION (§2.5): the Transfer-log cursor and what it has attributed so far. A
+  // balance delta is an inference — an outflow masks it, any inflow fires it; a log names the tx.
+  scanBlock     BigInt? // last finalized block scanned, inclusive; null = never scanned (delta fallback)
+  inUsdceMicro  BigInt  @default(0)
+  inPusdMicro   BigInt  @default(0)
+  lastDepositTx String? // the transaction that carried the most recent attributed transfer
+
   declaredAt    DateTime  @default(now())
   lastCheckedAt DateTime?
   fundedAt      DateTime?
