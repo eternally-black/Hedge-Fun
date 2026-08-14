@@ -12,19 +12,54 @@ import { isRealMoneyEligible, hasRealConsent, sameOrigin } from "@/lib/real";
 import { captureToGlitchTip } from "@/lib/glitchtip";
 import { serverSecureClient } from "@/lib/polymarket-server";
 import { buildWrapCalls, buildApprovalCalls, CTF_EXCHANGE, NEGRISK_CTF_EXCHANGE, CONDITIONAL_TOKENS } from "@/lib/wallet-ops";
-import { startWorkflow, answerWorkflow, type WorkflowGen, type WorkflowSpec, type StepRequest } from "@/lib/workflow";
+import {
+  startWorkflow,
+  answerWorkflow,
+  runScoped,
+  type TxVerdict,
+  type WorkflowGen,
+  type WorkflowSpec,
+  type StepRequest,
+} from "@/lib/workflow";
 import { erc20BalanceOf, erc20Allowance, erc1155IsApprovedForAll, USDCE_ADDRESS, PUSD_ADDRESS } from "@/lib/polygon";
 import {
   prepareGaslessTransaction,
   prepareRedeemPositions,
   planCollateralReturn,
   prepareCollateralReturnExecution,
+  fetchTransaction,
 } from "@polymarket/client/actions";
 
 const KINDS = ["APPROVALS", "WRAP", "REDEEM", "WITHDRAW"] as const;
 type Kind = (typeof KINDS)[number];
 
 const EVM_SIG = /^0x[0-9a-fA-F]{130}$/; // validate BEFORE the fence — the SDK throws on garbage inside it
+
+// Run-scoped convergence probe (K3 S6/S7 MEDIUM-1). The relayer's own view of THIS run's
+// transaction — no other flow can move it, unlike the wallet-wide pUSD balance the predicates
+// below read. State semantics are the SDK's own (TransactionHandle.wait): STATE_CONFIRMED =
+// landed, STATE_FAILED/STATE_INVALID = terminal failure, everything else still in flight.
+// Never cached: txHash legitimately changes mid-request when a run restarts.
+async function relayerVerdict(
+  userId: string,
+  kind: Kind,
+  client: NonNullable<Awaited<ReturnType<typeof serverSecureClient>>>,
+): Promise<TxVerdict> {
+  const row = await prisma.walletWorkflow.findUnique({
+    where: { userId_kind: { userId, kind } },
+    select: { txHash: true },
+  });
+  if (!row?.txHash) return "unknown"; // nothing handed off to the relayer yet
+  try {
+    const tx = await fetchTransaction(client, { transactionId: row.txHash });
+    const state = String(tx.state);
+    if (state === "STATE_CONFIRMED") return "landed";
+    if (state === "STATE_FAILED" || state === "STATE_INVALID") return "failed";
+    return "pending"; // STATE_NEW / STATE_EXECUTED / STATE_MINED
+  } catch {
+    return "unknown"; // probe unreachable — the balance predicates stay in charge
+  }
+}
 
 export async function POST(req: Request) {
   const user = await authUser(req);
@@ -267,6 +302,12 @@ export async function POST(req: Request) {
       definitelyNotDone: async () => true,
     };
   }
+
+  // The money verbs converge on the RUN's own relayer transaction instead of a wallet-wide pUSD
+  // delta (K3 S6/S7 MEDIUM-1: a concurrent fill/wrap/withdraw satisfies or masks every one of
+  // them). APPROVALS keeps its live allowance check — approvals are idempotent and an external
+  // revocation SHOULD re-arm the run, which is state semantics, not event semantics.
+  if (kind !== "APPROVALS") spec = runScoped(spec, () => relayerVerdict(user.id, kind, client));
 
   try {
     const result = answer ? await answerWorkflow(prisma, spec, answer) : await startWorkflow(prisma, spec);

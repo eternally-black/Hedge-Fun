@@ -332,3 +332,38 @@ export async function answerWorkflow(
   });
   return run(prisma, spec, row, session.gen, answer.signature);
 }
+
+// ---------------------------------------------------------------- run-scoped convergence
+// The convergence predicates above are supplied by the caller as wallet-wide balance reads, and
+// those are SHARED mutable state: a concurrent fill, wrap or withdrawal can satisfy one (false
+// DONE — the op never happened) or mask one (false "verifiably nothing happened" → a second
+// submission of an op that already landed). K3 S6/S7 MEDIUM-1: the same defect in three costumes.
+// The run-scoped truth is the relayer transaction this run handed off — persisted in
+// WalletWorkflow.txHash (the relayer transactionId, NOT a chain hash) and readable per-run, so no
+// other flow can move it. A definite relayer verdict therefore OVERRIDES the balance predicate;
+// "unknown" (probe unreachable, or nothing submitted yet) falls back to it unchanged.
+// Known ceiling: a tx that never leaves a non-terminal relayer state holds the slot in SUBMITTING
+// instead of releasing it at expiry — honest (we must not re-submit what may have landed), but
+// only the relayer can resolve it.
+export type TxVerdict = "landed" | "failed" | "pending" | "unknown";
+
+export function runScoped(spec: WorkflowSpec, verdict: () => Promise<TxVerdict>): WorkflowSpec {
+  const ask = async (): Promise<TxVerdict> => {
+    try {
+      return await verdict();
+    } catch {
+      return "unknown";
+    }
+  };
+  return {
+    ...spec,
+    verify: async () => {
+      const v = await ask();
+      return v === "unknown" ? spec.verify() : v === "landed";
+    },
+    definitelyNotDone: async () => {
+      const v = await ask();
+      return v === "unknown" ? spec.definitelyNotDone() : v === "failed";
+    },
+  };
+}

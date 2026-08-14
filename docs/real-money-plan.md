@@ -145,6 +145,17 @@ regenerated yields can never byte-match. Shipped design (`bb3ba15`):
   allowance floors + isApprovedForAll for approvals; the run's attempt-bound finalized pUSD delta
   for wrap), never resubmit blindly; expired SUBMITTING + verifiably-nothing-happened releases
   the slot. Approvals use OUR explicit 4-call set, not the SDK's generic MAX-to-everything setup.
+- **Run-scoped convergence (K3 S6/S7 M1).** Wallet-wide pUSD deltas are shared state: a concurrent
+  fill, wrap or withdrawal can satisfy a `verify` (false DONE) or mask one (false "nothing
+  happened" → a second submission of an op that already landed) — the same defect in three
+  costumes. The money verbs (WRAP/REDEEM/WITHDRAW) therefore converge on **this run's relayer
+  transaction**: `WalletWorkflow.txHash` holds the relayer `transactionId`, and `fetchTransaction`
+  gives a per-run verdict — `STATE_CONFIRMED` = landed, `STATE_FAILED`/`STATE_INVALID` = terminal
+  failure, anything else = in flight (the SDK's own `TransactionHandle.wait` semantics). A definite
+  verdict overrides the balance predicate; only an unreachable probe (or a run that never handed
+  off) falls back to it. APPROVALS is deliberately NOT wrapped — its verify is a live allowance
+  check whose state semantics must survive an external revocation. Ceiling: a relayer tx stuck in a
+  non-terminal state holds the slot in SUBMITTING rather than releasing it at expiry.
 - Wrap needs the user's signature so it only runs with a screen open; resume on next open.
 - Step-4 acceptance also verifies the **conditional-token approval a SELL needs** (Sol R5 — the
   close path ships broken otherwise), and neg-risk markets are excluded from the real-mode
@@ -167,7 +178,14 @@ regenerated yields can never byte-match. Shipped design (`bb3ba15`):
 - Implementation notes from the S3 review round (K3): baselines are
   `min(live, previous FUNDED close)` so a deposit that lands *before* the declare still fires;
   **S6 prerequisite** — once trading/withdrawal can move pUSD out mid-attempt, deltas go negative
-  and the accounting needs cumulative tracking or a baseline floor (recorded, not yet needed);
+  and the accounting needs cumulative tracking or a baseline floor. **Half-closed:** the *workflow*
+  side of this (WRAP/REDEEM/WITHDRAW convergence) no longer reads wallet-wide deltas at all — it
+  converges on the run's own relayer transaction state (§2.4, `runScoped`). The *watcher* side
+  (`checkFundingAttempt`, AWAITING→DETECTED→FUNDED) still compares against declare-time baselines,
+  so a pUSD outflow mid-attempt can still strand an attempt short of FUNDED; the trailing-low
+  watermark that fixes it also widens the existing "any inflow counts as the deposit" false
+  positive, so it wants deposit attribution (Transfer logs) rather than another delta — open,
+  pre-Gate-0;
   multicall3 batching is deliberately deferred (2 sequential RPC calls per attempt at alpha scale).
 
 ### 2.6 Honest pricing — one shared primitive

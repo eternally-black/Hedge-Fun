@@ -3,7 +3,15 @@
 // expiry reset, plus the encrypted CLOB-creds roundtrip (with AAD). Run: npx tsx scripts/test-workflow.ts
 import assert from "node:assert";
 import { prisma } from "../src/lib/prisma";
-import { startWorkflow, answerWorkflow, _dropLiveSessions, type WorkflowGen, type WorkflowSpec } from "../src/lib/workflow";
+import {
+  startWorkflow,
+  answerWorkflow,
+  runScoped,
+  _dropLiveSessions,
+  type TxVerdict,
+  type WorkflowGen,
+  type WorkflowSpec,
+} from "../src/lib/workflow";
 import { saveClobCreds, loadClobCreds } from "../src/lib/clob-creds";
 import { randomCode } from "../src/lib/refcode";
 
@@ -155,6 +163,64 @@ async function main() {
     assert.strictEqual(rFail.status, "failed");
     const rRetry = await startWorkflow(prisma, spec("f", log, { kind: "APPROVALS", inputs: { wallet: "0xw" } }));
     assert.strictEqual(rRetry.status, "pending_signature", "same-inputs retry after FAILED works");
+
+    // 12b. Run-scoped convergence: the relayer's verdict on THIS run's transaction overrides the
+    // wallet-wide balance predicates, which can lie in BOTH directions (a concurrent inflow
+    // satisfies "done"; a concurrent outflow masks it). So the base spec here lies both ways.
+    const verdict = { value: "pending" as TxVerdict };
+    const scoped = (marker: string, over: Partial<WorkflowSpec> = {}) =>
+      runScoped(
+        spec(marker, undefined, {
+          kind: "REDEEM",
+          inputs: { betId: "b-1" },
+          verify: async () => true,
+          definitelyNotDone: async () => true,
+          ...over,
+        }),
+        async () => verdict.value,
+      );
+    const s1 = await startWorkflow(prisma, scoped("s1"));
+    assert.strictEqual(s1.status, "pending_signature");
+    if (s1.status !== "pending_signature") throw new Error("unreachable");
+    const a1 = await answerWorkflow(prisma, scoped("s1"), { runId: s1.runId, requestHash: s1.requestHash, signature: "sig1" });
+    assert.strictEqual(a1.status, "pending_signature");
+    if (a1.status !== "pending_signature") throw new Error("unreachable");
+    const a2 = await answerWorkflow(prisma, scoped("s1"), { runId: s1.runId, requestHash: a1.requestHash, signature: "sig2" });
+    assert.strictEqual(a2.status, "submitting", "in-flight tx: base verify=true must NOT converge it");
+
+    // Expired SUBMITTING + still in flight: base definitelyNotDone=true would release the slot and
+    // re-submit an operation that may have landed. The verdict holds it.
+    const before = await prisma.walletWorkflow.findUniqueOrThrow({ where: { userId_kind: { userId: user.id, kind: "REDEEM" } } });
+    await prisma.walletWorkflow.update({
+      where: { userId_kind: { userId: user.id, kind: "REDEEM" } },
+      data: { expiresAt: new Date(Date.now() - 1000) },
+    });
+    assert.strictEqual((await startWorkflow(prisma, scoped("s2"))).status, "submitting", "in-flight is never re-driven");
+
+    // Terminal relayer failure is the one case where releasing the slot is safe.
+    verdict.value = "failed";
+    const s3 = await startWorkflow(prisma, scoped("s3"));
+    assert.strictEqual(s3.status, "pending_signature");
+    if (s3.status !== "pending_signature") throw new Error("unreachable");
+    assert.notStrictEqual(s3.runId, before.runId, "failed verdict releases the slot");
+
+    // Landed converges even though no balance predicate changed.
+    verdict.value = "landed";
+    const b1 = await answerWorkflow(prisma, scoped("s4"), { runId: s3.runId, requestHash: s3.requestHash, signature: "sig1" });
+    assert.strictEqual(b1.status, "pending_signature");
+    if (b1.status !== "pending_signature") throw new Error("unreachable");
+    const b2 = await answerWorkflow(prisma, scoped("s4"), { runId: s3.runId, requestHash: b1.requestHash, signature: "sig2" });
+    assert.strictEqual(b2.status, "done", "landed verdict converges");
+    const rel = await prisma.relayerTx.findUniqueOrThrow({
+      where: { userId_kind_workflowKey: { userId: user.id, kind: "REDEEM", workflowKey: s3.runId } },
+    });
+    assert.strictEqual(rel.status, "CONFIRMED");
+
+    // Unknown (probe unreachable / nothing submitted) defers to the base predicate instead of
+    // answering for it: verify=false there still means "restart the run".
+    verdict.value = "unknown";
+    const s5 = await startWorkflow(prisma, scoped("s5", { verify: async () => false }));
+    assert.strictEqual(s5.status, "pending_signature", "unknown falls back to the base predicate");
 
     // 13. Encrypted CLOB-creds roundtrip with AAD binding.
     const originalKey = process.env.REAL_CREDS_KEY;
