@@ -46,6 +46,8 @@ export function hashSignedOrder(signed: SignedOrderWire): string {
   return createHash("sha256").update(JSON.stringify(sorted)).digest("hex");
 }
 
+const EVM_SIG = /^0x[0-9a-fA-F]{130}$/; // 65 bytes: r,s,v
+
 // Shared checks across ENTRY and EXIT validators: maker/signer/signatureType/orderType/builder/
 // freshness. Behavior-identical to the pre-refactor BUY-only path.
 function validateCommon(
@@ -57,6 +59,11 @@ function validateCommon(
   if (lc(signed.maker) !== ctx.depositWallet) return "maker_mismatch";
   if (lc(signed.signer) !== ctx.embeddedWallet) return "signer_mismatch";
   if (signed.signatureType !== 3) return "bad_signature_type"; // POLY_1271, deposit wallet
+  // SHAPE only, and deliberately so: full EIP-712/ERC-7739 verification needs the exchange's
+  // domain and the POLY_1271 nesting confirmed against a real signed order, which is a Gate-0
+  // output — a hand-rolled hash here would false-reject valid orders on the money path. What this
+  // does buy: garbage never burns the intent's CAS claim or a post round-trip.
+  if (typeof signed.signature !== "string" || !EVM_SIG.test(signed.signature)) return "bad_signature_shape";
   if (String(signed.orderType).toUpperCase() !== "FAK") return "bad_order_type";
   // builder is a SIGNED field — a client signing a different code redirects attribution (S1 review).
   if (ctx.builderCode && lc(signed.builder) !== ctx.builderCode.toLowerCase()) return "builder_mismatch";
@@ -510,7 +517,19 @@ export async function bookExitFills(
       },
     });
 
-    await tx.orderAttempt.update({ where: { id: attempt.id }, data: { state: outcome, betId: bet.id } });
+    // A clamp means the exchange sold MORE than we thought the position held: the Fill rows carry
+    // the exchange's number, the aggregate carries the remainder, and the two now disagree. That
+    // is a reconciliation question for a human, so it lands on the attempt (the stuck-attempt
+    // watcher and anyone reading the row see it) instead of being swallowed. Cleared when the
+    // clamp does not fire, so a stale error never sticks.
+    await tx.orderAttempt.update({
+      where: { id: attempt.id },
+      data: {
+        state: outcome,
+        betId: bet.id,
+        error: prorate ? `clamped: fill ${totalShares} > remainder ${remainder}` : null,
+      },
+    });
   });
 
   return outcome;

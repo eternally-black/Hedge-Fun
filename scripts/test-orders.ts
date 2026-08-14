@@ -36,6 +36,12 @@ async function main() {
   assert.strictEqual(validateSignedOrder(goodOrder({ maker: "0x" + "11".repeat(20) }), intent, ctx), "maker_mismatch");
   assert.strictEqual(validateSignedOrder(goodOrder({ signer: "0x" + "11".repeat(20) }), intent, ctx), "signer_mismatch");
   assert.strictEqual(validateSignedOrder(goodOrder({ signatureType: 0 }), intent, ctx), "bad_signature_type");
+  assert.strictEqual(
+    validateSignedOrder(goodOrder({ signature: undefined as unknown as string }), intent, ctx),
+    "bad_signature_shape",
+  );
+  assert.strictEqual(validateSignedOrder(goodOrder({ signature: "0xdead" }), intent, ctx), "bad_signature_shape");
+  assert.strictEqual(validateSignedOrder(goodOrder({ signature: "0x" + "AB".repeat(65) }), intent, ctx), null);
   assert.strictEqual(validateSignedOrder(goodOrder({ tokenId: "tok-2" }), intent, ctx), "token_mismatch");
   assert.strictEqual(validateSignedOrder(goodOrder({ side: "SELL" }), intent, ctx), "side_mismatch");
   assert.strictEqual(validateSignedOrder(goodOrder({ orderType: "GTC" }), intent, ctx), "bad_order_type");

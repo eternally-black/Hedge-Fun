@@ -121,6 +121,11 @@ async function main() {
     betRow = await prisma.bet.findUniqueOrThrow({ where: { id: bet.id } });
     assert.ok(betRow.closedSharesMicro! <= betRow.filledSharesMicro!, "clamp holds");
     assert.strictEqual(betRow.closedSharesMicro, 5_000_000n, "closed exactly to the remainder");
+    // The clamp means the exchange sold more than the position held — never silent (Sol S6/S7).
+    const a2row = await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a2.id } });
+    assert.ok(a2row.error?.startsWith("clamped:"), "clamp is recorded on the attempt");
+    // The remainder here is 3M (step (a) already closed 2M of the 5M position), not the 5M total.
+    assert.ok(a2row.error?.includes("10000000") && a2row.error.includes("3000000"), "and names fill vs remainder");
 
     // d) Zero fills → KILLED.
     const a3 = await mkAttempt();
@@ -207,6 +212,13 @@ async function main() {
     assert.strictEqual(bet2Row.closedSharesMicro, 4_000_000n, "fully closed");
     assert.strictEqual(bet2Row.proceedsMicro, 2_000_000n, "proceeds = $2");
     assert.strictEqual(bet2Row.realizedPnlMicro, -60_000n, "PnL = proceeds − basis incl. entry fee");
+
+    // No clamp on this position → the attempt's error stays null (a stale clamp must not stick).
+    assert.strictEqual(
+      (await prisma.orderAttempt.findUniqueOrThrow({ where: { id: attempt2.id } })).error,
+      null,
+      "an unclamped close records no error",
+    );
 
     const s7 = await bookExitFills(prisma, attempt2, 4_000_000n, r2.fills, { cumulative: true });
     assert.strictEqual(s7, "FILLED", "replay reports FILLED");
