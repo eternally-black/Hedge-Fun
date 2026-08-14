@@ -58,8 +58,13 @@ API. Escalate to Polymarket; funding/wrap work (§3 steps 1–4) is unaffected a
 
 ## 2. Architecture v2
 
-One new dependency: `@polymarket/client` (+ `@polymarket/bindings`). Only the server ever sees
-builder creds.
+One new dependency: `@polymarket/client` (+ `@polymarket/bindings`). ~~Only the server ever sees
+builder creds.~~ **CORRECTED (S9 review):** the browser client authenticates as our builder through
+`/api/builder/sign`, and the SDK's contract requires that response to carry the builder API KEY and
+PASSPHRASE — they travel as request headers. Only the HMAC **secret** never leaves the server. Two
+related precisions the reviewers insisted on: "non-custodial" means **no on-chain signing keys** on
+the server, not "no keys" — the user's L2 CLOB creds are deliberately server-held and encrypted
+(owner decision Q4), and a server breach yields cancel + read, not custody.
 
 ### 2.1 Two-phase order protocol (replaces v1's "validate and post")
 
