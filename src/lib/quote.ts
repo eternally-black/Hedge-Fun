@@ -178,6 +178,12 @@ export function feePerShareMicro(priceBp: number, feeRateBp: number, feeExpMilli
   return Math.round(feePerShareExact(priceBp, feeRateBp, feeExpMilli) * 1_000_000);
 }
 
+// Binary float dust (0.07×0.25 = 0.017500000000000002) must not tip an exact aggregate over the
+// next integer micro-dollar: ceil/floor with a sub-µ$ epsilon. 1e-6 µ$ = 10⁻¹² dollars — twelve
+// orders below anything either exchange or user can observe.
+const ceilEps = (x: number) => Math.ceil(x - 1e-6);
+const floorEps = (x: number) => Math.floor(x + 1e-6);
+
 export interface AllInQuote {
   sharesMicro: bigint; // micro-shares bought within the budget
   spendMicro: bigint; // notional spent on shares (excl. fee), rounded UP
@@ -235,8 +241,8 @@ export function quoteBuyAllIn(
 
   if (shares < MICRO_SHARE) return null;
   const sharesMicro = BigInt(Math.floor(shares * 1_000_000));
-  let spendMicro = Math.ceil(spend * 1_000_000);
-  const feeMicro = Math.ceil(fee * 1_000_000); // the single aggregate-boundary ceil (Sol S5 #2)
+  let spendMicro = ceilEps(spend * 1_000_000);
+  const feeMicro = ceilEps(fee * 1_000_000); // the single aggregate-boundary ceil (Sol S5 #2)
   // Rounding both halves UP can overshoot an exactly-exhausted budget by micro-dollar dust; the
   // cap is the binding contract (it becomes the order's maxSpend), so the dust comes off notional.
   const over = spendMicro + feeMicro - Number(budgetMicro);
@@ -254,5 +260,88 @@ export function quoteBuyAllIn(
     // True only when the LADDER ran out with budget left — exact simultaneous exhaustion is a
     // full fill, not a liquidity shortfall (Sol S5 #10).
     exhaustedBook: bookRanOut && remaining > (MICRO_SHARE * marginalAskBp) / 10_000,
+  };
+}
+
+export interface SellAllInQuote {
+  sharesMicro: bigint; // micro-shares actually sellable into the bids
+  proceedsMicro: bigint; // notional received BEFORE fee, rounded DOWN (never overstate proceeds)
+  feeMicro: bigint; // platform fee, rounded UP (never understate cost)
+  netMicro: bigint; // proceeds - fee (what the user actually receives)
+  vwapBp: number; // proceeds/shares, rounded DOWN (payout side — never overstate)
+  marginalBidBp: number; // the CHEAPEST bid level touched — the future minPrice bound derives from THIS
+  exhaustedBook: boolean; // the bid ladder ran out before the shares did
+}
+
+// Walk `bids` selling up to `sharesToSellMicro` micro-shares. The user's shares are the binding
+// constraint (owner rule: they sell what they hold); proceeds are the derived quantity. Returns
+// null when nothing is sellable.
+//
+// ASYMMETRY vs the buy side: on a SELL every rounding must favor UNDERSTATING what the user
+// receives — proceeds down, fee up, vwap down. The buy side rounds spend UP because spend is a
+// debit; here proceeds is a credit, so it rounds DOWN. And the future minPrice bound derives from
+// marginalBidBp and will round DOWN to a tick — rounding up would make the protection unfillable
+// (mirror of the BUY trap where maxPrice rounds up to stay fillable).
+export function quoteSellAllIn(
+  bids: BookLevel[],
+  sharesToSellMicro: bigint,
+  feeRateBp: number,
+  feeExpMilli: number,
+): SellAllInQuote | null {
+  // normalizeBids sorts best-first but does NOT filter the upper price bound (a bid ≥ $1 is
+  // malformed — a binary token can never be worth ≥ $1). Filter it ourselves, same domain as
+  // normalizeAsks.
+  const ladder = normalizeBids(bids).filter((l) => l.priceBp < 10_000);
+  if (ladder.length === 0 || sharesToSellMicro <= 0n) return null;
+
+  if (!(feeRateBp >= 0) || !(feeExpMilli > 0)) return null; // malformed fee params never quote
+
+  const MICRO_SHARE = 1e-6;
+  let remaining = Number(sharesToSellMicro) / 1_000_000; // shares; float internally, integers out
+  let sold = 0;
+  let proceeds = 0;
+  let fee = 0;
+  let marginalBidBp = ladder[0]!.priceBp;
+  let bookRanOut = true;
+
+  for (const l of ladder) {
+    const p = l.priceBp / 10_000;
+    const fps = feePerShareExact(l.priceBp, feeRateBp, feeExpMilli); // unrounded — round ONCE at the end
+    const take = Math.min(l.size, remaining);
+    // Sub-micro-share takes are not representable: taking one would move marginalBid (and thus
+    // the future minPrice bound) to a level the returned quantity never touches (mirror of S5 #6).
+    if (take < MICRO_SHARE) {
+      bookRanOut = false;
+      break;
+    }
+    sold += take;
+    proceeds += take * p;
+    fee += take * fps;
+    remaining -= take;
+    marginalBidBp = l.priceBp;
+    if (take < l.size) {
+      bookRanOut = false;
+      break;
+    }
+  }
+
+  if (sold < MICRO_SHARE) return null;
+  const sharesMicro = BigInt(Math.floor(sold * 1_000_000));
+  const proceedsMicro = BigInt(floorEps(proceeds * 1_000_000)); // FLOOR — never overstate proceeds
+  const feeMicro = BigInt(ceilEps(fee * 1_000_000)); // CEIL — never understate cost
+  // Fee rounding can push net negative on dust-sized proceeds; floor at zero — the user never
+  // pays more than they receive.
+  const netMicro = proceedsMicro > feeMicro ? proceedsMicro - feeMicro : 0n;
+  return {
+    sharesMicro,
+    proceedsMicro,
+    feeMicro,
+    netMicro,
+    // Plain division = floor for positive integers — vwap rounds DOWN (payout side).
+    vwapBp: Number((proceedsMicro * 10_000n) / sharesMicro),
+    marginalBidBp,
+    // True only when the LADDER ran out with shares still unsold — exact simultaneous exhaustion
+    // is a full fill, not a liquidity shortfall (mirror of S5 #10).
+    exhaustedBook: bookRanOut && remaining >= MICRO_SHARE,
   };
 }

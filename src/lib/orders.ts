@@ -34,9 +34,36 @@ export interface IntentParams {
   maxPriceBp: number; // marginal-ask bound, tick-rounded
 }
 
+export interface ExitIntentParams {
+  tokenId: string;
+  sharesMicro: bigint; // the position remainder the user is allowed to sell
+  minPriceBp: number; // tick-rounded floor — a SELL below this is the harm
+}
+
 export function hashSignedOrder(signed: SignedOrderWire): string {
   const sorted = Object.fromEntries(Object.keys(signed).sort().map((k) => [k, signed[k]]));
   return createHash("sha256").update(JSON.stringify(sorted)).digest("hex");
+}
+
+// Shared checks across ENTRY and EXIT validators: maker/signer/signatureType/orderType/builder/
+// freshness. Behavior-identical to the pre-refactor BUY-only path.
+function validateCommon(
+  signed: SignedOrderWire,
+  ctx: { depositWallet: string; embeddedWallet: string; builderCode: string | null; nowMs?: number },
+): string | null {
+  const now = ctx.nowMs ?? Date.now();
+  const lc = (s: unknown) => (typeof s === "string" ? s.toLowerCase() : "");
+  if (lc(signed.maker) !== ctx.depositWallet) return "maker_mismatch";
+  if (lc(signed.signer) !== ctx.embeddedWallet) return "signer_mismatch";
+  if (signed.signatureType !== 3) return "bad_signature_type"; // POLY_1271, deposit wallet
+  if (String(signed.orderType).toUpperCase() !== "FAK") return "bad_order_type";
+  // builder is a SIGNED field — a client signing a different code redirects attribution (S1 review).
+  if (ctx.builderCode && lc(signed.builder) !== ctx.builderCode.toLowerCase()) return "builder_mismatch";
+  // Freshness (D9): a stale signature must not fill at a bound the card no longer shows.
+  if (signed.expiration > 0 && signed.expiration * 1000 < now) return "expired";
+  const ts = Number(signed.timestamp);
+  if (Number.isFinite(ts) && ts > 0 && Math.abs(now - ts * 1000) > 10 * 60 * 1000) return "stale_signature";
+  return null;
 }
 
 // Returns an error code, or null when the signed order matches the intent. Never reserializes the
@@ -46,16 +73,10 @@ export function validateSignedOrder(
   intent: IntentParams,
   ctx: { depositWallet: string; embeddedWallet: string; builderCode: string | null; nowMs?: number },
 ): string | null {
-  const now = ctx.nowMs ?? Date.now();
-  const lc = (s: unknown) => (typeof s === "string" ? s.toLowerCase() : "");
-  if (lc(signed.maker) !== ctx.depositWallet) return "maker_mismatch";
-  if (lc(signed.signer) !== ctx.embeddedWallet) return "signer_mismatch";
-  if (signed.signatureType !== 3) return "bad_signature_type"; // POLY_1271, deposit wallet
+  const common = validateCommon(signed, ctx);
+  if (common) return common;
   if (signed.tokenId !== intent.tokenId) return "token_mismatch";
   if (String(signed.side).toUpperCase() !== intent.side) return "side_mismatch";
-  if (String(signed.orderType).toUpperCase() !== "FAK") return "bad_order_type";
-  // builder is a SIGNED field — a client signing a different code redirects attribution (S1 review).
-  if (ctx.builderCode && lc(signed.builder) !== ctx.builderCode.toLowerCase()) return "builder_mismatch";
   let makerAmount: bigint;
   let takerAmount: bigint;
   try {
@@ -71,10 +92,35 @@ export function validateSignedOrder(
     if (makerAmount > intent.allInCapMicro) return "over_cap";
     if (makerAmount * 10_000n > takerAmount * BigInt(intent.maxPriceBp)) return "over_max_price";
   }
-  // Freshness (D9): a stale signature must not fill at a bound the card no longer shows.
-  if (signed.expiration > 0 && signed.expiration * 1000 < now) return "expired";
-  const ts = Number(signed.timestamp);
-  if (Number.isFinite(ts) && ts > 0 && Math.abs(now - ts * 1000) > 10 * 60 * 1000) return "stale_signature";
+  return null;
+}
+
+// EXIT validator: the signed SELL order must not sell more than the position remainder, and the
+// implied worst price (takerAmount/makerAmount = collateral per share) must be >= the floor.
+// SELL amount semantics (CTF exchange): makerAmount = SHARES offered, takerAmount = collateral.
+export function validateSignedSellOrder(
+  signed: SignedOrderWire,
+  intent: ExitIntentParams,
+  ctx: { depositWallet: string; embeddedWallet: string; builderCode: string | null; nowMs?: number },
+): string | null {
+  const common = validateCommon(signed, ctx);
+  if (common) return common;
+  if (signed.tokenId !== intent.tokenId) return "token_mismatch";
+  if (String(signed.side).toUpperCase() !== "SELL") return "side_mismatch";
+  let makerAmount: bigint;
+  let takerAmount: bigint;
+  try {
+    makerAmount = BigInt(signed.makerAmount);
+    takerAmount = BigInt(signed.takerAmount);
+  } catch {
+    return "bad_amounts";
+  }
+  if (makerAmount <= 0n || takerAmount <= 0n) return "bad_amounts";
+  // makerAmount = SHARES offered (micro-shares); cannot sell more than the position's remainder.
+  if (makerAmount > intent.sharesMicro) return "over_position";
+  // SELL protection: a LOWER price than the bound is the harm. Implied worst price =
+  // takerAmount/makerAmount must be >= minPriceBp.
+  if (takerAmount * 10_000n < makerAmount * BigInt(intent.minPriceBp)) return "below_min_price";
   return null;
 }
 
@@ -82,7 +128,7 @@ export function validateSignedOrder(
 export interface NormalizedFill {
   externalFillId: string;
   sharesMicro: bigint;
-  amountMicro: bigint; // notional spent (BUY)
+  amountMicro: bigint; // notional spent (BUY) or proceeds (SELL)
   feeMicro: bigint;
   priceBp: number;
   ts: Date;
@@ -90,6 +136,8 @@ export interface NormalizedFill {
 
 // Best-effort parser over the (Gate-0-unverified) post/fill response shapes. Tolerant by design:
 // unknown shape → [] and the attempt stays POSTED for reconciliation, never a crash.
+// NOTE: for SELL responses `amountMicro` carries proceeds (the exchange reports the collateral
+// received), not spend — the EXIT booking path reads it accordingly.
 export function parseFills(raw: unknown, fallbackId: string): NormalizedFill[] {
   if (!raw || typeof raw !== "object") return [];
   const r = raw as Record<string, unknown>;
@@ -137,16 +185,35 @@ export async function bookEntryFills(
     return "KILLED";
   }
 
-  const totalShares = fills.reduce((s, f) => s + f.sharesMicro, 0n);
-  const totalSpend = fills.reduce((s, f) => s + f.amountMicro, 0n);
-  const totalFee = fills.reduce((s, f) => s + f.feeMicro, 0n);
-  const vwapBp = Number((totalSpend * 10_000n + totalShares - 1n) / totalShares); // ceil
-  const state = totalShares >= requestedSharesMicro ? "FILLED" : "PARTIAL";
   const utcDay = new Date().toISOString().slice(0, 10);
+  let outcome: "FILLED" | "PARTIAL" | "KILLED" = "KILLED";
 
   await prisma.$transaction(async (tx) => {
+    // Aggregate increments are driven ONLY by fills actually INSERTED this call — a replayed
+    // receipt deduped by the unique fill id must not double-book the position (executor-test
+    // finding). No skipDuplicates: a true concurrent replay hits the unique and aborts cleanly.
+    const seen = new Set(
+      (
+        await tx.fill.findMany({
+          where: { externalFillId: { in: fills.map((f) => f.externalFillId) } },
+          select: { externalFillId: true },
+        })
+      ).map((e) => e.externalFillId),
+    );
+    const fresh = fills.filter((f) => !seen.has(f.externalFillId));
+    if (fresh.length === 0) {
+      const cur = await tx.orderAttempt.findUnique({ where: { id: attempt.id }, select: { state: true } });
+      outcome = cur?.state === "PARTIAL" || cur?.state === "FILLED" ? cur.state : "KILLED";
+      return; // full replay: nothing new to book
+    }
+    const totalShares = fresh.reduce((s, f) => s + f.sharesMicro, 0n);
+    const totalSpend = fresh.reduce((s, f) => s + f.amountMicro, 0n);
+    const totalFee = fresh.reduce((s, f) => s + f.feeMicro, 0n);
+    const vwapBp = Number((totalSpend * 10_000n + totalShares - 1n) / totalShares); // ceil
+    outcome = totalShares >= requestedSharesMicro ? "FILLED" : "PARTIAL";
+
     await tx.fill.createMany({
-      data: fills.map((f) => ({
+      data: fresh.map((f) => ({
         attemptId: attempt.id,
         externalFillId: f.externalFillId,
         sharesMicro: f.sharesMicro,
@@ -155,7 +222,6 @@ export async function bookEntryFills(
         priceBp: f.priceBp,
         ts: f.ts,
       })),
-      skipDuplicates: true, // replayed receipts must not double-book
     });
 
     // The position aggregate — one REAL row per (user, market). stakeCents keeps the swiped
@@ -184,7 +250,7 @@ export async function bookEntryFills(
       },
     });
 
-    await tx.orderAttempt.update({ where: { id: attempt.id }, data: { state, betId: bet.id } });
+    await tx.orderAttempt.update({ where: { id: attempt.id }, data: { state: outcome, betId: bet.id } });
 
     // Q1 (owner, locked): real swipes fully participate — swipe counter + point book AT FILL,
     // idempotent via the PointsLedger betId unique. Over-cap fills (day rolled over between
@@ -207,5 +273,121 @@ export async function bookEntryFills(
     }
   });
 
-  return state;
+  return outcome;
+}
+
+// Book fills for an EXIT attempt: Fill rows (idempotent on externalFillId), the REAL Bet
+// aggregate (must already exist — the intent route guarantees it), and realized PnL for the
+// closed slice. Returns the attempt's terminal state.
+export async function bookExitFills(
+  prisma: PrismaClient,
+  attempt: OrderAttempt & { userId: string; marketId: string },
+  requestedSharesMicro: bigint,
+  fills: NormalizedFill[],
+): Promise<"FILLED" | "PARTIAL" | "KILLED"> {
+  if (fills.length === 0) {
+    await prisma.orderAttempt.updateMany({
+      where: { id: attempt.id, state: { in: ["SUBMITTING", "POSTED"] } },
+      data: { state: "KILLED" },
+    });
+    return "KILLED";
+  }
+
+  // The tx callback owns the outcome — it may downgrade (missing position / no remainder /
+  // full replay); the route must report what actually got booked (executor-review fix).
+  let outcome: "FILLED" | "PARTIAL" | "KILLED" = "KILLED";
+
+  await prisma.$transaction(async (tx) => {
+    // Aggregate increments are driven ONLY by fills actually INSERTED this call (same replay
+    // discipline as the entry booker — the executor's own test surfaced the double-book).
+    const seen = new Set(
+      (
+        await tx.fill.findMany({
+          where: { externalFillId: { in: fills.map((f) => f.externalFillId) } },
+          select: { externalFillId: true },
+        })
+      ).map((e) => e.externalFillId),
+    );
+    const fresh = fills.filter((f) => !seen.has(f.externalFillId));
+    if (fresh.length === 0) {
+      const cur = await tx.orderAttempt.findUnique({ where: { id: attempt.id }, select: { state: true } });
+      outcome = cur?.state === "PARTIAL" || cur?.state === "FILLED" ? cur.state : "KILLED";
+      return; // full replay: nothing new to book
+    }
+    const totalShares = fresh.reduce((s, f) => s + f.sharesMicro, 0n);
+    const totalProceeds = fresh.reduce((s, f) => s + f.amountMicro, 0n); // amountMicro = proceeds for SELL
+    const totalFee = fresh.reduce((s, f) => s + f.feeMicro, 0n);
+    outcome = totalShares >= requestedSharesMicro ? "FILLED" : "PARTIAL";
+
+    await tx.fill.createMany({
+      data: fresh.map((f) => ({
+        attemptId: attempt.id,
+        externalFillId: f.externalFillId,
+        sharesMicro: f.sharesMicro,
+        amountMicro: f.amountMicro,
+        feeMicro: f.feeMicro,
+        priceBp: f.priceBp,
+        ts: f.ts,
+      })),
+    });
+
+    // The REAL Bet must exist — the intent route guarantees one, but be defensive: a missing
+    // position means the close is invalid, so fail the attempt rather than fabricate a row.
+    const bet = attempt.betId
+      ? await tx.bet.findUnique({ where: { id: attempt.betId } })
+      : await tx.bet.findUnique({
+          where: { userId_marketId_mode: { userId: attempt.userId, marketId: attempt.marketId, mode: "REAL" } },
+        });
+    if (!bet) {
+      await tx.orderAttempt.update({
+        where: { id: attempt.id },
+        data: { state: "FAILED", error: "no_position" },
+      });
+      outcome = "KILLED";
+      return;
+    }
+
+    // Clamp to the position remainder — the CHECK constraint closedSharesMicro <= filledSharesMicro
+    // must never trip on a double receipt (createMany dedup already guards, but belt-and-braces).
+    const filledShares = bet.filledSharesMicro ?? 0n;
+    const closedShares = bet.closedSharesMicro ?? 0n;
+    const remainder = filledShares - closedShares;
+    const sharesToBook = totalShares > remainder ? remainder : totalShares;
+    if (sharesToBook <= 0n) {
+      await tx.orderAttempt.update({
+        where: { id: attempt.id },
+        data: { state: "KILLED", error: "no_remainder" },
+      });
+      outcome = "KILLED";
+      return;
+    }
+
+    // Prorate proceeds/fee if we're closing less than the fill total (clamp fired).
+    const prorate = sharesToBook < totalShares;
+    const proceedsBooked = prorate ? (totalProceeds * sharesToBook) / totalShares : totalProceeds;
+    const closeFeeBooked = prorate ? (totalFee * sharesToBook) / totalShares : totalFee;
+
+    // Realized PnL for the closed slice: proceeds − close fee − prorated cost basis.
+    // Cost basis prorated from the original spend in pure BigInt math.
+    const spend = bet.spendMicro ?? 0n;
+    const costBasis = filledShares > 0n ? (spend * sharesToBook) / filledShares : 0n;
+    const realizedDelta = proceedsBooked - closeFeeBooked - costBasis;
+
+    // Explicit SET, not { increment }: these columns are NULL on an entry-created row, and SQL
+    // NULL + x = NULL — an increment would silently book nothing (caught by the close test).
+    // Safe because the row was read in THIS transaction.
+    await tx.bet.update({
+      where: { id: bet.id },
+      data: {
+        closedSharesMicro: closedShares + sharesToBook,
+        proceedsMicro: (bet.proceedsMicro ?? 0n) + proceedsBooked,
+        closeFeeMicro: (bet.closeFeeMicro ?? 0n) + closeFeeBooked,
+        realizedPnlMicro: (bet.realizedPnlMicro ?? 0n) + realizedDelta, // can be negative — schema allows it
+      },
+    });
+
+    await tx.orderAttempt.update({ where: { id: attempt.id }, data: { state: outcome, betId: bet.id } });
+  });
+
+  return outcome;
 }

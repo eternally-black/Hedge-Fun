@@ -3,6 +3,9 @@
 // CAS, post (or accept the browser's post receipt — the locus is a Gate-0 outcome; both arms
 // funnel through the same validation and booking), persist the authoritative response verbatim,
 // book fills. Zero fill → KILLED → the market slot frees for a retry.
+// Branches on attempt.dir: ENTRY → BUY validation + bookEntryFills; EXIT → SELL validation +
+// bookExitFills. Everything else (CAS claim, posting arms, POSTED persist, ambiguity rule) is
+// identical for both directions.
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
@@ -11,9 +14,11 @@ import { captureToGlitchTip } from "@/lib/glitchtip";
 import { serverSecureClient } from "@/lib/polymarket-server";
 import {
   validateSignedOrder,
+  validateSignedSellOrder,
   hashSignedOrder,
   parseFills,
   bookEntryFills,
+  bookExitFills,
   type SignedOrderWire,
 } from "@/lib/orders";
 import { postOrder } from "@polymarket/client/actions";
@@ -47,20 +52,36 @@ export async function POST(req: Request) {
     return NextResponse.json({ status: "submitting" });
   }
 
-  const err = validateSignedOrder(
-    signed,
-    {
-      tokenId: attempt.tokenId,
-      side: "BUY",
-      allInCapMicro: attempt.allInCapMicro,
-      maxPriceBp: attempt.maxPriceBp,
-    },
-    {
-      depositWallet,
-      embeddedWallet,
-      builderCode: process.env.POLYMARKET_BUILDER_CODE ?? null,
-    },
-  );
+  // Validate the signed order against the durable intent — the validator depends on the direction.
+  const ctx = {
+    depositWallet,
+    embeddedWallet,
+    builderCode: process.env.POLYMARKET_BUILDER_CODE ?? null,
+  };
+  let err: string | null;
+  if (attempt.dir === "EXIT") {
+    const params = attempt.approvedParams as { tokenId?: string; sharesMicro?: string; minPriceBp?: number } | null;
+    err = validateSignedSellOrder(
+      signed,
+      {
+        tokenId: attempt.tokenId,
+        sharesMicro: BigInt(params?.sharesMicro ?? "0"),
+        minPriceBp: params?.minPriceBp ?? attempt.maxPriceBp, // maxPriceBp column holds minPriceBp for EXIT
+      },
+      ctx,
+    );
+  } else {
+    err = validateSignedOrder(
+      signed,
+      {
+        tokenId: attempt.tokenId,
+        side: "BUY",
+        allInCapMicro: attempt.allInCapMicro,
+        maxPriceBp: attempt.maxPriceBp,
+      },
+      ctx,
+    );
+  }
   if (err) return NextResponse.json({ error: err }, { status: 422 });
 
   // CAS claim: ISSUED → SUBMITTING with the signed-order hash (unique = replay guard). A losing
@@ -107,13 +128,16 @@ export async function POST(req: Request) {
 
   const params = attempt.approvedParams as { betSide?: "YES" | "NO"; sharesMicro?: string } | null;
   const fills = parseFills(response, attempt.id);
-  const finalState = await bookEntryFills(
-    prisma,
-    attempt,
-    params?.betSide === "NO" ? "NO" : "YES",
-    BigInt(params?.sharesMicro ?? "0"),
-    fills,
-  );
+  const finalState =
+    attempt.dir === "EXIT"
+      ? await bookExitFills(prisma, attempt, BigInt(params?.sharesMicro ?? "0"), fills)
+      : await bookEntryFills(
+          prisma,
+          attempt,
+          params?.betSide === "NO" ? "NO" : "YES",
+          BigInt(params?.sharesMicro ?? "0"),
+          fills,
+        );
   return NextResponse.json({
     status: finalState.toLowerCase(),
     filledSharesMicro: fills.reduce((s, f) => s + f.sharesMicro, 0n).toString(),
