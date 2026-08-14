@@ -155,3 +155,85 @@ export function sideIsTradable(asks: BookLevel[], stakeCents: number, maxSlippag
   const q = quoteBuy(asks, stakeCents);
   return q !== null && q.filled && q.slippageBp <= maxSlippageBp;
 }
+
+// ============================================================ real-money all-in quoting (§2.6)
+// The platform taker fee, PER SHARE: rate × (p(1−p))^exp — proven against a real fill 2026-08-13
+// (rate 0.07, exp 1, p=0.52, 5 shares → predicted $0.08736, charged $0.08736, exact). It peaks at
+// 50/50 — exactly where a hedge lives — and NO price estimate includes it, so the honest card
+// price and the order sizing must both add it. Fee params are per market (fees.ts cache);
+// rateBp = rate×10⁴, expMilli = exponent×10³. Applied PER LEVEL at that level's own price —
+// locally exact for the proven single-level case; per-level-vs-VWAP for multi-level fills is an
+// open trap-list question Gate-0 revisits.
+
+export function feePerShareMicro(priceBp: number, feeRateBp: number, feeExpMilli: number): number {
+  const p = priceBp / 10_000;
+  return Math.round((feeRateBp / 10_000) * Math.pow(p * (1 - p), feeExpMilli / 1000) * 1_000_000);
+}
+
+export interface AllInQuote {
+  sharesMicro: bigint; // micro-shares bought within the budget
+  spendMicro: bigint; // notional spent on shares (excl. fee), rounded UP
+  feeMicro: bigint; // platform fee, rounded UP
+  vwapBp: number; // spend/shares, rounded UP (payout denominator — never understate)
+  allInPriceBp: number; // (spend+fee)/shares, rounded UP — the number the card shows
+  marginalAskBp: number; // the dearest level touched — the maxPrice bound derives from THIS, not VWAP
+  exhaustedBook: boolean; // the ladder ran out before the budget did
+}
+
+// Walk `asks` spending at most `budgetMicro` ALL-IN (notional + fee). The user's stake is the
+// all-in debit cap (owner rule: the card shows what they actually pay); shares are the derived
+// quantity. Returns null when nothing is buyable.
+export function quoteBuyAllIn(
+  asks: BookLevel[],
+  budgetMicro: bigint,
+  feeRateBp: number,
+  feeExpMilli: number,
+): AllInQuote | null {
+  const ladder = normalizeAsks(asks);
+  if (ladder.length === 0 || budgetMicro <= 0n) return null;
+
+  let remaining = Number(budgetMicro) / 1_000_000; // dollars; float is fine — outputs re-integerize
+  let shares = 0;
+  let spend = 0;
+  let fee = 0;
+  let marginalAskBp = ladder[0]!.priceBp;
+  let exhaustedBook = true;
+
+  for (const l of ladder) {
+    const p = l.priceBp / 10_000;
+    const fps = feePerShareMicro(l.priceBp, feeRateBp, feeExpMilli) / 1_000_000;
+    const costPerShare = p + fps;
+    const affordable = remaining / costPerShare;
+    const take = Math.min(l.size, affordable);
+    if (take <= 0) {
+      exhaustedBook = false;
+      break;
+    }
+    shares += take;
+    spend += take * p;
+    fee += take * fps;
+    remaining -= take * costPerShare;
+    marginalAskBp = l.priceBp;
+    if (take < l.size) {
+      exhaustedBook = false;
+      break;
+    }
+  }
+
+  if (shares <= 0) return null;
+  let spendMicro = Math.ceil(spend * 1_000_000);
+  const feeMicro = Math.ceil(fee * 1_000_000);
+  // Rounding both UP can overshoot an exactly-exhausted budget by 1–2 micro-dollars; the cap is
+  // the binding contract (it becomes the order's maxSpend), so shave the dust off the notional.
+  const over = spendMicro + feeMicro - Number(budgetMicro);
+  if (over > 0) spendMicro -= over;
+  return {
+    sharesMicro: BigInt(Math.floor(shares * 1_000_000)),
+    spendMicro: BigInt(spendMicro),
+    feeMicro: BigInt(feeMicro),
+    vwapBp: Math.ceil((spend / shares) * 10_000),
+    allInPriceBp: Math.ceil(((spend + fee) / shares) * 10_000),
+    marginalAskBp,
+    exhaustedBook,
+  };
+}

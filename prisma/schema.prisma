@@ -260,6 +260,16 @@ model Market {
   noMaxStakeCents  Int?
   bookTsAt         DateTime?
 
+  // Real-money fee cache (plan §2.6): per-market platform taker fee, fee = rate × (p(1−p))^exp
+  // per share (proven against a real fill 2026-08-13 — predicted == charged to the micro-cent).
+  // Source: fetchMarketInfo via the credential-free public client, refreshed at INTENT time on a
+  // 24h TTL (fees.ts). rateBp = rate×10⁴, expMilli = exponent×10³ — integers per house rule.
+  // negRisk from the same call: neg-risk markets are EXCLUDED from real mode (third approval unset).
+  feeRateBp    Int?
+  feeExpMilli  Int?
+  feeUpdatedAt DateTime?
+  negRisk      Boolean?
+
   startsAt           DateTime? // from startDate (sports/esports kickoff); null for crypto/Yes-No. Gates "not started yet" in the deck.
   resolutionDeadline DateTime // from endDate; powers <=24h blitz filter
   status             MarketStatus   @default(OPEN)

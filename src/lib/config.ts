@@ -8,6 +8,11 @@ export const STAKE_CENTS = 1_000; // $10.00 fixed per swipe
 // it a deposit parks silently and indefinitely. Hard client minimum with margin — never trust the
 // advertised number.
 export const MIN_DEPOSIT_USD = 5;
+// Pessimistic fee fallback when a market's feeInfo is unfetchable (fees.ts): the highest measured
+// tier (rate 0.07, exponent 1 — the 2026-08-13 real fill). Overstating shrinks a hedge slightly;
+// understating lies on the card.
+export const REAL_FEE_FALLBACK_RATE_BP = 700;
+export const REAL_FEE_FALLBACK_EXP_MILLI = 1000;
 
 // ---- Top-up (DECIDED) ----
 // Cash/Locked model: a swipe locks STAKE_CENTS (Locked = Σ pending stakes); balance is never
