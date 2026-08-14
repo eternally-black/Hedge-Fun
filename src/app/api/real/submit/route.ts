@@ -94,10 +94,20 @@ export async function POST(req: Request) {
   // CAS claim: ISSUED → SUBMITTING with the signed-order hash (unique = replay guard). A losing
   // concurrent submit sees count 0 and reports the in-flight state instead of double-posting.
   const orderHash = hashSignedOrder(signed);
-  const claimed = await prisma.orderAttempt.updateMany({
-    where: { id: attempt.id, state: "ISSUED" },
-    data: { state: "SUBMITTING", signedOrderHash: orderHash },
-  });
+  let claimed;
+  try {
+    claimed = await prisma.orderAttempt.updateMany({
+      where: { id: attempt.id, state: "ISSUED" },
+      data: { state: "SUBMITTING", signedOrderHash: orderHash },
+    });
+  } catch (e) {
+    // signedOrderHash unique: the SAME signed order replayed against a NEW intent — a clean
+    // duplicate response, not a raw 500 (K3 S6/S7 M2 edge).
+    if ((e as { code?: string }).code === "P2002") {
+      return NextResponse.json({ error: "duplicate_order" }, { status: 409 });
+    }
+    throw e;
+  }
   if (claimed.count === 0) return NextResponse.json({ status: "submitting" });
 
   // Server posts — the response is the authoritative receipt. Forward the signed payload VERBATIM.

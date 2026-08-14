@@ -29,7 +29,6 @@ const EVM_SIG = /^0x[0-9a-fA-F]{130}$/; // validate BEFORE the fence — the SDK
 export async function POST(req: Request) {
   const user = await authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  if (!isRealMoneyEligible(user)) return NextResponse.json({ error: "real_disabled" }, { status: 403 });
   if (!hasRealConsent(user)) return NextResponse.json({ error: "consent_required" }, { status: 403 });
   if (!sameOrigin(req)) return NextResponse.json({ error: "bad_origin" }, { status: 403 });
   const wallet = user.depositWalletAddress;
@@ -56,10 +55,18 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "bad_json" }, { status: 400 });
   }
 
+  // The env allowlist gates GETTING IN (funding-side verbs); the funds-recovery verbs REDEEM and
+  // WITHDRAW must survive a flag flip or a removed tester — trapping balances behind an env list
+  // is the harm the close-only tier exists to prevent (K3 S6/S7 M3). Identity+consent still gate.
+  if ((kind === "APPROVALS" || kind === "WRAP") && !isRealMoneyEligible(user)) {
+    return NextResponse.json({ error: "real_disabled" }, { status: 403 });
+  }
+
   const client = await serverSecureClient(prisma, user);
   if (!client) return NextResponse.json({ error: "real_not_configured" }, { status: 503 });
 
   let spec: WorkflowSpec;
+  let onDone: (() => Promise<void>) | null = null;
   if (kind === "WRAP") {
     // The run binds to a specific funding attempt; amount pins to the watcher-observed FINALIZED
     // balance. SUBMITTING/DONE handling never re-reads the current attempt (S4 review B2) — the
@@ -111,21 +118,32 @@ export async function POST(req: Request) {
       },
     };
   } else if (kind === "REDEEM") {
-    // Redeem burns resolved outcome tokens → pUSD. The run binds to the NEWEST REAL bet whose
-    // market is RESOLVED and still has redeemable remainder — one at a time is fine for alpha.
-    const bet = await prisma.bet.findFirst({
-      where: { userId: user.id, mode: "REAL", market: { status: "RESOLVED" } },
+    // Redeem burns resolved outcome tokens → pUSD. Binds the newest REAL bet on a TERMINAL market
+    // (RESOLVED or CANCELED — invalid resolutions land as CANCELED/INVALID and PUSH; K3 S6/S7
+    // HIGH-1.2) that still has a redeemable remainder — the remainder predicate can't live in a
+    // Prisma where, so scan a small window instead of newest-or-nothing (HIGH-1.3).
+    const candidates = await prisma.bet.findMany({
+      where: { userId: user.id, mode: "REAL", market: { status: { in: ["RESOLVED", "CANCELED"] } } },
       orderBy: { createdAt: "desc" },
       include: { market: true },
+      take: 10,
     });
+    const bet = candidates.find((b) => (b.filledSharesMicro ?? 0n) - (b.closedSharesMicro ?? 0n) > 0n) ?? null;
     const remainder = bet ? (bet.filledSharesMicro ?? 0n) - (bet.closedSharesMicro ?? 0n) : 0n;
     const row = await prisma.walletWorkflow.findUnique({ where: { userId_kind: { userId: user.id, kind: "REDEEM" } } });
     const active = row && (row.state === "PENDING_SIGNATURE" || row.state === "SUBMITTING");
-    type RedeemInputs = { conditionId: string; wallet: string; pusdBaseline: string; betId: string; won: boolean };
+    type RedeemInputs = {
+      conditionId: string;
+      wallet: string;
+      pusdBaseline: string;
+      betId: string;
+      won: boolean;
+      remainderMicro: string;
+    };
     // Mirror the WRAP pattern: an ACTIVE run drives on its own persisted inputs; a DONE row with
     // nothing new to redeem answers idempotent done; otherwise require a redeemable position.
-    // `won`: side matches the resolved outcome; INVALID resolutions PUSH — collateral comes back,
-    // so they converge like wins (executor-review fix: the generated comparison was inverted).
+    // `won`: CANCELED = push (collateral returns, converge like a win); else side === outcome
+    // (executor-review fix: the generated comparison was inverted).
     const runInputs: RedeemInputs | null = active
       ? (row.inputs as RedeemInputs)
       : bet && remainder > 0n
@@ -134,12 +152,33 @@ export async function POST(req: Request) {
             wallet,
             pusdBaseline: (await erc20BalanceOf(PUSD_ADDRESS, wallet)).toString(),
             betId: bet.id,
-            won: bet.market.resolvedOutcome === "INVALID" || bet.side === bet.market.resolvedOutcome,
+            won: bet.market.status === "CANCELED" || bet.side === bet.market.resolvedOutcome,
+            remainderMicro: remainder.toString(),
           }
         : row?.state === "DONE"
           ? (row.inputs as RedeemInputs)
           : null;
     if (!runInputs) return NextResponse.json({ error: "nothing_to_redeem" }, { status: 409 });
+    // Consume the position on convergence (K3 HIGH-1.4): without this the same bet rebinds on
+    // every poll — a fresh signature prompt and a burned relayer submission per cycle. Winners
+    // book $1/share on the remainder; losers book zero; basis is fee-inclusive and prorated.
+    onDone = async () => {
+      const b = await prisma.bet.findUnique({ where: { id: runInputs.betId } });
+      if (!b) return;
+      const filled = b.filledSharesMicro ?? 0n;
+      const rem = filled - (b.closedSharesMicro ?? 0n);
+      if (rem <= 0n) return; // already consumed — idempotent
+      const proceeds = runInputs.won ? rem : 0n; // winning shares redeem 1:1 to micro-USD
+      const basis = filled > 0n ? (((b.spendMicro ?? 0n) + (b.feeMicro ?? 0n)) * rem) / filled : 0n;
+      await prisma.bet.update({
+        where: { id: b.id },
+        data: {
+          closedSharesMicro: filled,
+          proceedsMicro: (b.proceedsMicro ?? 0n) + proceeds,
+          realizedPnlMicro: (b.realizedPnlMicro ?? 0n) + proceeds - basis,
+        },
+      });
+    };
     spec = {
       userId: user.id,
       kind,
@@ -231,12 +270,15 @@ export async function POST(req: Request) {
 
   try {
     const result = answer ? await answerWorkflow(prisma, spec, answer) : await startWorkflow(prisma, spec);
-    if (result.status === "done" && kind === "WRAP") {
-      // Nudge the watcher so the funding attempt confirms FUNDED off the pUSD delta ASAP.
-      await prisma.fundingAttempt.updateMany({
-        where: { userId: user.id, state: { not: "FUNDED" } },
-        data: { lastCheckedAt: null },
-      });
+    if (result.status === "done") {
+      if (kind === "WRAP") {
+        // Nudge the watcher so the funding attempt confirms FUNDED off the pUSD delta ASAP.
+        await prisma.fundingAttempt.updateMany({
+          where: { userId: user.id, state: { not: "FUNDED" } },
+          data: { lastCheckedAt: null },
+        });
+      }
+      if (onDone) await onDone(); // REDEEM: consume the position so it never rebinds (K3 HIGH-1.4)
     }
     return NextResponse.json(result);
   } catch (e) {

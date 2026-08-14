@@ -13,7 +13,7 @@ import { captureToGlitchTip } from "@/lib/glitchtip";
 import { getMarketFee } from "@/lib/fees";
 import { getBook } from "@/lib/clob";
 import { quoteBuyAllIn, quoteSellAllIn } from "@/lib/quote";
-import { STAKE_CENTS, HEDGE_MIN_STAKE_CENTS, HEDGE_MAX_STAKE_CENTS, SWIPE_CAP, DECK_MIN_LEAD_MS } from "@/lib/config";
+import { STAKE_CENTS, HEDGE_MIN_STAKE_CENTS, HEDGE_MAX_STAKE_CENTS, SWIPE_CAP, DECK_MIN_LEAD_MS, BOOK_MAX_STALE_MS } from "@/lib/config";
 
 export async function POST(req: Request) {
   const user = await authUser(req);
@@ -34,7 +34,11 @@ export async function POST(req: Request) {
   if (typeof marketId !== "string" || (side !== "YES" && side !== "NO")) {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
-  const direction = dir === "EXIT" ? "EXIT" : "ENTRY"; // default ENTRY; anything else is ENTRY
+  // Strict: a malformed dir must 400, never silently buy (K3 S6/S7: lowercase "exit" became ENTRY).
+  if (dir !== undefined && dir !== "ENTRY" && dir !== "EXIT") {
+    return NextResponse.json({ error: "bad_dir" }, { status: 400 });
+  }
+  const direction = dir === "EXIT" ? "EXIT" : "ENTRY";
 
   // Geo (plan §2.7): the browser-reported verdict is REQUIRED for both arms and recorded on the
   // attempt. It is policy, not proof — Polymarket's own IP rejection is the real barrier.
@@ -108,6 +112,11 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "neg_risk_excluded" }, { status: 409 });
   }
 
+  // The cache never decides freshness — callers do (clob.ts contract). The paper lock refuses
+  // books older than BOOK_MAX_STALE_MS; the REAL lock can hardly demand less (K3 S6/S7 M4).
+  if (Date.now() - book.fetchedAtMs > BOOK_MAX_STALE_MS) {
+    return NextResponse.json({ error: "book_unavailable" }, { status: 503 });
+  }
   const tickBp = Math.round(book.tickSize * 10_000);
   if (tickBp <= 0) return NextResponse.json({ error: "book_unavailable" }, { status: 503 });
 
@@ -116,7 +125,10 @@ export async function POST(req: Request) {
   let maxPriceBp: number;
 
   if (direction === "ENTRY") {
-    const stake = typeof stakeCents === "number" && Number.isInteger(stakeCents) ? stakeCents : STAKE_CENTS;
+    if (stakeCents !== undefined && (typeof stakeCents !== "number" || !Number.isInteger(stakeCents))) {
+      return NextResponse.json({ error: "bad_stake" }, { status: 400 });
+    }
+    const stake = typeof stakeCents === "number" ? stakeCents : STAKE_CENTS;
     if (stake < HEDGE_MIN_STAKE_CENTS || stake > HEDGE_MAX_STAKE_CENTS) {
       return NextResponse.json({ error: "bad_stake" }, { status: 400 });
     }
@@ -200,6 +212,11 @@ export async function POST(req: Request) {
       const existing = await prisma.orderAttempt.findFirst({
         where: { userId: user.id, marketId: market.id, state: { in: ["ISSUED", "SIGNED", "SUBMITTING", "POSTED"] } },
       });
+      if (existing && existing.dir !== direction) {
+        // Handing an ENTRY intent's params to an EXIT request makes a client BUY when it meant
+        // to SELL (K3 S6/S7 M2). The stale-intent expiry below frees the slot within 10 minutes.
+        return NextResponse.json({ error: "attempt_in_flight" }, { status: 409 });
+      }
       if (existing && existing.state === "ISSUED") {
         // A stale unsigned intent must not occupy the slot forever (S6/S7 review: an abandoned
         // ENTRY intent would block a later EXIT). Expire it and let the client retry.

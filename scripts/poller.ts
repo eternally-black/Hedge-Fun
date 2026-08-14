@@ -167,9 +167,12 @@ async function tick() {
     }
   }
 
-  // Markets that still have unsettled PAPER bets (real positions never enter paper settlement).
+  // Markets that still have unsettled bets of EITHER mode and are not yet terminal. Real bets
+  // never paper-settle (settleMarket filters mode internally) but their markets MUST get the
+  // status flip or REDEEM can never bind (K3 S6/S7 HIGH-1); the market-status predicate bounds
+  // the scan — once terminal, the market drops out even while real bets stay PENDING.
   const pending = await prisma.bet.findMany({
-    where: { settlementStatus: "PENDING", mode: "PAPER" },
+    where: { settlementStatus: "PENDING", market: { status: "OPEN" } },
     distinct: ["marketId"],
     select: { market: { select: { id: true, polymarketId: true, source: true, resolutionDeadline: true } } },
   });
