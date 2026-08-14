@@ -3,7 +3,7 @@
 import assert from "node:assert";
 import { prisma } from "../src/lib/prisma";
 import { randomCode } from "../src/lib/refcode";
-import { validateSignedSellOrder, bookExitFills, type SignedOrderWire } from "../src/lib/orders";
+import { validateSignedSellOrder, bookExitFills, classifyPostResponse, type SignedOrderWire } from "../src/lib/orders";
 
 const DW = "0x" + "aa".repeat(20);
 const EW = "0x" + "bb".repeat(20);
@@ -127,14 +127,100 @@ async function main() {
     const s4 = await bookExitFills(prisma, a3, 5_000_000n, []);
     assert.strictEqual(s4, "KILLED");
 
+    // ---- e) Cumulative EXIT receipts: the CLOB reports the ORDER's running totals, so a grown
+    // receipt must book the DELTA and the FILLED label must come from cumulative shares. Own
+    // position (the seeded one is fully closed by step (c)).
+    const market2 = await prisma.market.create({
+      data: {
+        polymarketId: `${tag}-m2`,
+        question: "exit cumulative receipt test",
+        status: "OPEN",
+        resolutionDeadline: new Date(Date.now() + 3_600_000),
+      },
+    });
+    const bet2 = await prisma.bet.create({
+      data: {
+        userId: user.id,
+        marketId: market2.id,
+        side: "YES",
+        mode: "REAL",
+        stakeCents: 1000,
+        lockedPriceBp: 5200,
+        utcDay,
+        filledSharesMicro: 4_000_000n,
+        spendMicro: 2_000_000n,
+        feeMicro: 60_000n,
+        vwapBp: 5000,
+      },
+    });
+    const attempt2 = await prisma.orderAttempt.create({
+      data: {
+        userId: user.id,
+        marketId: market2.id,
+        dir: "EXIT",
+        side: "YES",
+        tokenId: "tok-1",
+        idempotencyKey: crypto.randomUUID(),
+        approvedParams: {},
+        allInCapMicro: 2_000_000n,
+        maxPriceBp: 4800,
+        state: "SUBMITTING",
+        betId: bet2.id,
+      },
+    });
+
+    // Receipt #1 — 2 shares at 0.50 → PARTIAL.
+    const r1 = classifyPostResponse(
+      { ok: true, status: "matched", orderId: `${tag}-x`, makingAmount: "2", takingAmount: "1", tradeIds: [`${tag}-x-t1`] },
+      "EXIT",
+      `${tag}-x`,
+      null,
+    );
+    if (r1.kind !== "matched") throw new Error("receipt #1 not matched");
+    const s5 = await bookExitFills(prisma, attempt2, 4_000_000n, r1.fills, { cumulative: true });
+    assert.strictEqual(s5, "PARTIAL", "2 of 4 shares → PARTIAL");
+
+    // Receipt #2 — same order grown to 4 shares / $2, a second trade id → FILLED.
+    const r2 = classifyPostResponse(
+      {
+        ok: true,
+        status: "matched",
+        orderId: `${tag}-x`,
+        makingAmount: "4",
+        takingAmount: "2",
+        tradeIds: [`${tag}-x-t1`, `${tag}-x-t2`],
+      },
+      "EXIT",
+      `${tag}-x`,
+      null,
+    );
+    if (r2.kind !== "matched") throw new Error("receipt #2 not matched");
+    const s6 = await bookExitFills(prisma, attempt2, 4_000_000n, r2.fills, { cumulative: true });
+    assert.strictEqual(s6, "FILLED", "cumulative 4 of 4 → FILLED");
+
+    const fills2 = await prisma.fill.findMany({ where: { attemptId: attempt2.id } });
+    assert.strictEqual(fills2.length, 2, "two fill rows");
+    assert.strictEqual(fills2.reduce((s, f) => s + f.sharesMicro, 0n), 4_000_000n, "shares sum = 4M");
+    assert.strictEqual(fills2.reduce((s, f) => s + f.amountMicro, 0n), 2_000_000n, "delta booked, not the whole 4 again");
+
+    const bet2Row = await prisma.bet.findUniqueOrThrow({ where: { id: bet2.id } });
+    assert.strictEqual(bet2Row.closedSharesMicro, 4_000_000n, "fully closed");
+    assert.strictEqual(bet2Row.proceedsMicro, 2_000_000n, "proceeds = $2");
+    assert.strictEqual(bet2Row.realizedPnlMicro, -60_000n, "PnL = proceeds − basis incl. entry fee");
+
+    const s7 = await bookExitFills(prisma, attempt2, 4_000_000n, r2.fills, { cumulative: true });
+    assert.strictEqual(s7, "FILLED", "replay reports FILLED");
+    assert.strictEqual(await prisma.fill.count({ where: { attemptId: attempt2.id } }), 2, "no third fill row");
+
     console.log("OK: exit validation + close booking, realized PnL exact, replay-safe, clamp holds");
+    console.log("OK: cumulative EXIT receipts book the delta, label FILLED, close the position exactly");
     console.log("PASS: close");
   } finally {
     await prisma.fill.deleteMany({ where: { attempt: { userId: user.id } } });
     await prisma.orderAttempt.deleteMany({ where: { userId: user.id } });
     await prisma.bet.deleteMany({ where: { userId: user.id } });
     await prisma.dailyCounter.deleteMany({ where: { userId: user.id } });
-    await prisma.market.deleteMany({ where: { id: market.id } });
+    await prisma.market.deleteMany({ where: { polymarketId: { startsWith: tag } } });
     await prisma.user.deleteMany({ where: { id: user.id } });
   }
 }

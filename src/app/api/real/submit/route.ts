@@ -157,15 +157,19 @@ export async function POST(req: Request) {
     return NextResponse.json({ status: "posted", outcome: outcome.kind });
   }
   const fills = outcome.kind === "matched" ? outcome.fills : []; // rejected → zero-fill KILLED path
+  // The receipt carries the ORDER's cumulative matched totals — the booker subtracts what this
+  // attempt already holds, so a re-delivered or grown receipt neither double-books nor drops fills.
+  const bookOpts = { cumulative: outcome.kind === "matched" };
   const finalState =
     attempt.dir === "EXIT"
-      ? await bookExitFills(prisma, attempt, BigInt(params?.sharesMicro ?? "0"), fills)
+      ? await bookExitFills(prisma, attempt, BigInt(params?.sharesMicro ?? "0"), fills, bookOpts)
       : await bookEntryFills(
           prisma,
           attempt,
           params?.betSide === "NO" ? "NO" : "YES",
           BigInt(params?.sharesMicro ?? "0"),
           fills,
+          bookOpts,
         );
   return NextResponse.json({
     status: finalState.toLowerCase(),

@@ -171,7 +171,66 @@ async function main() {
     );
     void betAfter;
 
+    // ---- 4. Cumulative receipts: split CLOB receipts book deltas, label from cumulative totals,
+    // vwap from the position aggregate (pre-Gate-0 items 2+3).
+    const a3 = await mkAttempt();
+    const rec1 = classifyPostResponse(
+      { ok: true, status: "matched", orderId: `${tag}-o1`, makingAmount: "3.12", takingAmount: "6", tradeIds: [`${tag}-t1`] },
+      "ENTRY",
+      "fallback",
+      { rateBp: 700, expMilli: 1000 },
+    );
+    if (rec1.kind !== "matched") throw new Error("receipt 1 not matched");
+    assert.strictEqual(rec1.cumulative, true);
+    const s4 = await bookEntryFills(prisma, a3, "YES", 12_000_000n, rec1.fills, { cumulative: true });
+    assert.strictEqual(s4, "PARTIAL", "first cumulative receipt books 6 of 12 shares");
+
+    // Same order, grown to 12 shares / $6.30 and a SECOND trade id — a different receipt key.
+    const rec2 = classifyPostResponse(
+      { ok: true, status: "matched", orderId: `${tag}-o1`, makingAmount: "6.3", takingAmount: "12", tradeIds: [`${tag}-t1`, `${tag}-t2`] },
+      "ENTRY",
+      "fallback",
+      { rateBp: 700, expMilli: 1000 },
+    );
+    if (rec2.kind !== "matched") throw new Error("receipt 2 not matched");
+    const s5 = await bookEntryFills(prisma, a3, "YES", 12_000_000n, rec2.fills, { cumulative: true });
+    assert.strictEqual(s5, "FILLED", "cumulative labeling reaches FILLED on the second receipt");
+
+    const fills3 = await prisma.fill.findMany({ where: { attemptId: a3.id } });
+    assert.strictEqual(fills3.length, 2, "exactly two fill rows for the split receipts");
+    assert.strictEqual(fills3.reduce((s, f) => s + f.sharesMicro, 0n), 12_000_000n, "delta booked 12 shares total");
+    assert.strictEqual(fills3.reduce((s, f) => s + f.amountMicro, 0n), 6_300_000n, "delta booked $6.30 total");
+
+    const s6 = await bookEntryFills(prisma, a3, "YES", 12_000_000n, rec2.fills, { cumulative: true });
+    assert.strictEqual(s6, "FILLED", "exact replay still reports FILLED");
+    assert.strictEqual(await prisma.fill.count({ where: { attemptId: a3.id } }), 2, "replay adds no third fill row");
+
+    const betCum = await prisma.bet.findUniqueOrThrow({
+      where: { userId_marketId_mode: { userId: user.id, marketId: market.id, mode: "REAL" } },
+    });
+    assert.strictEqual(betCum.filledSharesMicro, 17_000_000n, "aggregate sums earlier steps plus this attempt");
+    assert.strictEqual(betCum.spendMicro, 8_900_000n, "aggregate spend sums earlier steps plus this attempt");
+    const expectedVwap = Number(
+      ((betCum.spendMicro ?? 0n) * 10_000n + (betCum.filledSharesMicro ?? 1n) - 1n) / (betCum.filledSharesMicro ?? 1n),
+    );
+    assert.strictEqual(betCum.vwapBp, expectedVwap, "vwap re-derived from the aggregate");
+    assert.strictEqual(betCum.vwapBp, 5236, "literal vwap so a silent drift fails");
+
+    // Q1 fires once per POSITION: a second receipt must not burn another swipe of the daily cap,
+    // and the point stays single. (The old P2002-catch made this whole transaction roll back
+    // silently — fills booked, then discarded, with FILLED still reported.)
+    const counterAfter = await prisma.dailyCounter.findUniqueOrThrow({
+      where: { userId_utcDay: { userId: user.id, utcDay } },
+    });
+    assert.strictEqual(counterAfter.swipeCount, 1, "one swipe per position, not per receipt");
+    assert.strictEqual(
+      await prisma.pointsLedger.count({ where: { userId: user.id, type: "SWIPE" } }),
+      1,
+      "one point per position across split receipts",
+    );
+
     console.log("OK: order validation matrix, tolerant fill parsing, on-fill booking, zero-fill slot release");
+    console.log("OK: cumulative receipts — delta booking, cumulative FILLED label, aggregate-derived vwap");
     console.log("PASS: orders");
   } finally {
     await prisma.pointsLedger.deleteMany({ where: { userId: user.id } });

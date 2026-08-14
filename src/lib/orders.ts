@@ -2,7 +2,7 @@
 // fill booking into the append-only ledger + the REAL Bet aggregate. SDK-free and pure where
 // possible — the route wires the SDK; this module is what the tests pin.
 import { createHash } from "node:crypto";
-import type { Prisma, PrismaClient, OrderAttempt } from "@prisma/client";
+import type { PrismaClient, OrderAttempt } from "@prisma/client";
 import { SWIPE_CAP } from "./config";
 import { feePerShareMicro } from "./quote";
 
@@ -141,10 +141,23 @@ export interface NormalizedFill {
 // The S6 review's critical: a fills-array guess would classify a real MATCHED response as
 // zero-fill and KILL an attempt whose money was spent. Classify first, book second.
 export type PostOutcome =
-  | { kind: "matched"; fills: NormalizedFill[] }
+  // `cumulative`: the post response reports the ORDER's cumulative matched totals, not one
+  // increment — the booker books the DELTA against what this attempt already holds.
+  | { kind: "matched"; fills: NormalizedFill[]; cumulative: true }
   | { kind: "rejected"; code: string }
   | { kind: "pending" } // live/delayed — FAK shouldn't rest, but never guess: reconcile later
   | { kind: "unknown" }; // unrecognized shape — attempt stays POSTED for reconciliation
+
+// The WHOLE trade set keys the receipt row: a FAK order can match several trades, so keying by
+// tradeIds[0] would let a later receipt covering a different set dedup silently and lose fills.
+// A single-trade receipt still keys by the real trade id, so a per-trade reconciliation dedups
+// against this very row; with no trade ids the cumulative size disambiguates a larger receipt.
+export function receiptFillKey(tradeIds: string[], orderId: string, sharesMicro: bigint): string {
+  const ids = [...tradeIds].filter(Boolean).sort();
+  if (ids.length === 1) return ids[0];
+  if (ids.length > 1) return "trades:" + createHash("sha256").update(ids.join(",")).digest("hex").slice(0, 32);
+  return `${orderId}:${sharesMicro.toString()}`;
+}
 
 export function classifyPostResponse(
   raw: unknown,
@@ -175,12 +188,15 @@ export function classifyPostResponse(
   // record reconciliation at Gate-0 replaces the estimate with the charged number.
   const feeMicro = fee ? BigInt(Math.round((feePerShareMicro(Math.round(price * 10_000), fee.rateBp, fee.expMilli) * shares))) : 0n;
   const tradeIds = Array.isArray(r.tradeIds) ? (r.tradeIds as unknown[]).map(String) : [];
+  const orderId = typeof r.orderId === "string" && r.orderId ? r.orderId : fallbackId;
+  const sharesMicro = BigInt(Math.round(shares * 1_000_000));
   return {
     kind: "matched",
+    cumulative: true,
     fills: [
       {
-        externalFillId: tradeIds[0] ?? String(r.orderId ?? fallbackId),
-        sharesMicro: BigInt(Math.round(shares * 1_000_000)),
+        externalFillId: receiptFillKey(tradeIds, orderId, sharesMicro),
+        sharesMicro,
         amountMicro: BigInt(Math.round(amount * 1_000_000)),
         feeMicro,
         priceBp: Math.round(price * 10_000),
@@ -194,6 +210,34 @@ function num(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+// Order-cumulative receipts: the CLOB response reports the ORDER's running totals, so a second
+// receipt for the same order (reconciliation, delayed match) must be booked as the DELTA against
+// what this attempt already holds — keying by trade id alone either double-books the overlap or
+// silently drops the new trades (pre-Gate-0 items 2+3). Rounding follows the repo convention:
+// cost up (ENTRY), proceeds down (EXIT). null = the receipt adds nothing new.
+function receiptDelta(
+  receipt: NormalizedFill,
+  booked: { shares: bigint; amount: bigint; fee: bigint },
+  dir: "ENTRY" | "EXIT",
+): NormalizedFill | null {
+  const sharesMicro = receipt.sharesMicro - booked.shares;
+  if (sharesMicro <= 0n) return null;
+  const clamp = (x: bigint) => (x < 0n ? 0n : x);
+  const amountMicro = clamp(receipt.amountMicro - booked.amount);
+  const priceBp =
+    dir === "ENTRY"
+      ? Number((amountMicro * 10_000n + sharesMicro - 1n) / sharesMicro)
+      : Number((amountMicro * 10_000n) / sharesMicro);
+  return { ...receipt, sharesMicro, amountMicro, feeMicro: clamp(receipt.feeMicro - booked.fee), priceBp };
+}
+
+// FILLED vs PARTIAL is decided by the attempt's CUMULATIVE booked shares — comparing one batch
+// against the whole request means split receipts never reach FILLED (K3 S6/S7 Q2).
+function fillLabel(cumulativeShares: bigint, requestedSharesMicro: bigint): "FILLED" | "PARTIAL" | "KILLED" {
+  if (cumulativeShares <= 0n) return "KILLED";
+  return cumulativeShares >= requestedSharesMicro ? "FILLED" : "PARTIAL";
+}
+
 // Book fills for an ENTRY attempt: Fill rows (idempotent on externalFillId), the REAL Bet
 // aggregate (created ON FILL — a zero-fill leaves no position and frees the slot, plan §2.1),
 // and the paper-game participation per owner decision Q1 (point + swipe counter AT FILL TIME;
@@ -204,6 +248,7 @@ export async function bookEntryFills(
   betSide: "YES" | "NO",
   requestedSharesMicro: bigint,
   fills: NormalizedFill[],
+  opts?: { cumulative?: boolean },
 ): Promise<"FILLED" | "PARTIAL" | "KILLED"> {
   if (fills.length === 0) {
     await prisma.orderAttempt.updateMany({
@@ -217,28 +262,46 @@ export async function bookEntryFills(
   let outcome: "FILLED" | "PARTIAL" | "KILLED" = "KILLED";
 
   await prisma.$transaction(async (tx) => {
+    // What this attempt already holds — the base for both the cumulative-receipt delta and the
+    // FILLED/PARTIAL label.
+    const booked = await tx.fill.aggregate({
+      where: { attemptId: attempt.id },
+      _sum: { sharesMicro: true, amountMicro: true, feeMicro: true },
+    });
+    const bookedShares = booked._sum.sharesMicro ?? 0n;
+
     // Aggregate increments are driven ONLY by fills actually INSERTED this call — a replayed
     // receipt deduped by the unique fill id must not double-book the position (executor-test
     // finding). No skipDuplicates: a true concurrent replay hits the unique and aborts cleanly.
-    const seen = new Set(
-      (
-        await tx.fill.findMany({
-          where: { externalFillId: { in: fills.map((f) => f.externalFillId) } },
-          select: { externalFillId: true },
-        })
-      ).map((e) => e.externalFillId),
-    );
-    const fresh = fills.filter((f) => !seen.has(f.externalFillId));
+    // A cumulative receipt needs no id dedup: an exact replay simply yields a zero delta.
+    let fresh: NormalizedFill[];
+    if (opts?.cumulative && fills.length === 1) {
+      const delta = receiptDelta(
+        fills[0],
+        { shares: bookedShares, amount: booked._sum.amountMicro ?? 0n, fee: booked._sum.feeMicro ?? 0n },
+        "ENTRY",
+      );
+      fresh = delta ? [delta] : [];
+    } else {
+      const seen = new Set(
+        (
+          await tx.fill.findMany({
+            where: { externalFillId: { in: fills.map((f) => f.externalFillId) } },
+            select: { externalFillId: true },
+          })
+        ).map((e) => e.externalFillId),
+      );
+      fresh = fills.filter((f) => !seen.has(f.externalFillId));
+    }
     if (fresh.length === 0) {
-      const cur = await tx.orderAttempt.findUnique({ where: { id: attempt.id }, select: { state: true } });
-      outcome = cur?.state === "PARTIAL" || cur?.state === "FILLED" ? cur.state : "KILLED";
+      outcome = fillLabel(bookedShares, requestedSharesMicro);
       return; // full replay: nothing new to book
     }
     const totalShares = fresh.reduce((s, f) => s + f.sharesMicro, 0n);
     const totalSpend = fresh.reduce((s, f) => s + f.amountMicro, 0n);
     const totalFee = fresh.reduce((s, f) => s + f.feeMicro, 0n);
     const vwapBp = Number((totalSpend * 10_000n + totalShares - 1n) / totalShares); // ceil
-    outcome = totalShares >= requestedSharesMicro ? "FILLED" : "PARTIAL";
+    outcome = fillLabel(bookedShares + totalShares, requestedSharesMicro);
 
     await tx.fill.createMany({
       data: fresh.map((f) => ({
@@ -250,6 +313,13 @@ export async function bookEntryFills(
         priceBp: f.priceBp,
         ts: f.ts,
       })),
+    });
+
+    // Q1 participation fires once per POSITION: this read decides whether this call is the one
+    // creating it (a split receipt must not burn a second swipe of the daily cap).
+    const priorBet = await tx.bet.findUnique({
+      where: { userId_marketId_mode: { userId: attempt.userId, marketId: attempt.marketId, mode: "REAL" } },
+      select: { id: true },
     });
 
     // The position aggregate — one REAL row per (user, market). stakeCents keeps the swiped
@@ -274,29 +344,38 @@ export async function bookEntryFills(
         filledSharesMicro: { increment: totalShares },
         spendMicro: { increment: totalSpend },
         feeMicro: { increment: totalFee },
-        vwapBp,
+        // vwapBp is NOT set from this batch — it is re-derived from the post-increment aggregate
+        // below, so it can never diverge from spendMicro/filledSharesMicro after an add-to-
+        // position (K3 S6/S7 Q2). Still fee-EXCLUSIVE: the micro fields carry the all-in truth.
       },
     });
+    const nextVwap =
+      bet.filledSharesMicro && bet.filledSharesMicro > 0n
+        ? Number(((bet.spendMicro ?? 0n) * 10_000n + bet.filledSharesMicro - 1n) / bet.filledSharesMicro)
+        : vwapBp;
+    if (nextVwap !== bet.vwapBp) await tx.bet.update({ where: { id: bet.id }, data: { vwapBp: nextVwap } });
 
     await tx.orderAttempt.update({ where: { id: attempt.id }, data: { state: outcome, betId: bet.id } });
 
     // Q1 (owner, locked): real swipes fully participate — swipe counter + point book AT FILL,
-    // idempotent via the PointsLedger betId unique. Over-cap fills (day rolled over between
-    // intent and fill) record earnedPoint=false, like paper over-cap feed bets.
-    const counter = await tx.dailyCounter.upsert({
-      where: { userId_utcDay: { userId: attempt.userId, utcDay } },
-      create: { userId: attempt.userId, utcDay, swipeCount: 1 },
-      update: { swipeCount: { increment: 1 } },
-    });
-    if (counter.swipeCount <= SWIPE_CAP) {
-      try {
+    // VirtualBalance untouched. Over-cap fills (day rolled over between intent and fill) record
+    // earnedPoint=false, like paper over-cap feed bets.
+    // NO P2002 catch here: a swallowed unique violation inside a Postgres transaction turns the
+    // COMMIT into a silent ROLLBACK — the earlier version discarded the very fills, increments and
+    // state transition this transaction had just written and still returned FILLED (verified: the
+    // second receipt for a position booked zero rows). The duplicate is PREVENTED via priorBet;
+    // a genuine concurrent duplicate now throws — visible and reconcilable, never silent loss.
+    if (!priorBet) {
+      const counter = await tx.dailyCounter.upsert({
+        where: { userId_utcDay: { userId: attempt.userId, utcDay } },
+        create: { userId: attempt.userId, utcDay, swipeCount: 1 },
+        update: { swipeCount: { increment: 1 } },
+      });
+      if (counter.swipeCount <= SWIPE_CAP) {
         await tx.pointsLedger.create({
           data: { userId: attempt.userId, type: "SWIPE", amount: 1, utcDay, betId: bet.id },
         });
         await tx.bet.update({ where: { id: bet.id }, data: { earnedPoint: true } });
-      } catch (e) {
-        // betId unique — the point was already booked by an earlier partial receipt. Fine.
-        if ((e as Prisma.PrismaClientKnownRequestError).code !== "P2002") throw e;
       }
     }
   });
@@ -312,6 +391,7 @@ export async function bookExitFills(
   attempt: OrderAttempt & { userId: string; marketId: string },
   requestedSharesMicro: bigint,
   fills: NormalizedFill[],
+  opts?: { cumulative?: boolean },
 ): Promise<"FILLED" | "PARTIAL" | "KILLED"> {
   if (fills.length === 0) {
     await prisma.orderAttempt.updateMany({
@@ -327,25 +407,40 @@ export async function bookExitFills(
 
   await prisma.$transaction(async (tx) => {
     // Aggregate increments are driven ONLY by fills actually INSERTED this call (same replay
-    // discipline as the entry booker — the executor's own test surfaced the double-book).
-    const seen = new Set(
-      (
-        await tx.fill.findMany({
-          where: { externalFillId: { in: fills.map((f) => f.externalFillId) } },
-          select: { externalFillId: true },
-        })
-      ).map((e) => e.externalFillId),
-    );
-    const fresh = fills.filter((f) => !seen.has(f.externalFillId));
+    // discipline as the entry booker — the executor's own test surfaced the double-book), and a
+    // cumulative receipt books its delta against what the attempt already holds.
+    const booked = await tx.fill.aggregate({
+      where: { attemptId: attempt.id },
+      _sum: { sharesMicro: true, amountMicro: true, feeMicro: true },
+    });
+    const bookedShares = booked._sum.sharesMicro ?? 0n;
+    let fresh: NormalizedFill[];
+    if (opts?.cumulative && fills.length === 1) {
+      const delta = receiptDelta(
+        fills[0],
+        { shares: bookedShares, amount: booked._sum.amountMicro ?? 0n, fee: booked._sum.feeMicro ?? 0n },
+        "EXIT",
+      );
+      fresh = delta ? [delta] : [];
+    } else {
+      const seen = new Set(
+        (
+          await tx.fill.findMany({
+            where: { externalFillId: { in: fills.map((f) => f.externalFillId) } },
+            select: { externalFillId: true },
+          })
+        ).map((e) => e.externalFillId),
+      );
+      fresh = fills.filter((f) => !seen.has(f.externalFillId));
+    }
     if (fresh.length === 0) {
-      const cur = await tx.orderAttempt.findUnique({ where: { id: attempt.id }, select: { state: true } });
-      outcome = cur?.state === "PARTIAL" || cur?.state === "FILLED" ? cur.state : "KILLED";
+      outcome = fillLabel(bookedShares, requestedSharesMicro);
       return; // full replay: nothing new to book
     }
     const totalShares = fresh.reduce((s, f) => s + f.sharesMicro, 0n);
     const totalProceeds = fresh.reduce((s, f) => s + f.amountMicro, 0n); // amountMicro = proceeds for SELL
     const totalFee = fresh.reduce((s, f) => s + f.feeMicro, 0n);
-    outcome = totalShares >= requestedSharesMicro ? "FILLED" : "PARTIAL";
+    outcome = fillLabel(bookedShares + totalShares, requestedSharesMicro);
 
     await tx.fill.createMany({
       data: fresh.map((f) => ({

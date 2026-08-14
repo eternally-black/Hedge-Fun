@@ -75,6 +75,13 @@ authoritative object, and every parameter in it must be server-derived **first**
    unique columns (replay-proof).
 5. Zero fill → attempt `KILLED`, **no position row** — the market slot frees for a retry.
    Fill(s) → `Fill` rows and a real `Bet` position row created/updated from **actual** fills.
+   A receipt reports the ORDER's **cumulative** matched totals, so booking subtracts what the
+   attempt already holds and writes the delta; the row is keyed by the WHOLE trade set (a
+   `tradeIds[0]` key either double-books the overlap or drops the new trades). FILLED-vs-PARTIAL
+   and the position vwap are derived from cumulative aggregates, never from one batch. Q1
+   participation (swipe counter + point) fires once per POSITION — and never via a caught P2002:
+   a swallowed unique violation inside a Postgres transaction turns the COMMIT into a silent
+   ROLLBACK, which discarded a whole booking while reporting FILLED (found 2026-08-14).
 6. Poller reconciles any attempt stuck in `SUBMITTING` (crash between post and record — Sol's
    "distributed-state divergence", the plan's biggest named risk).
 
