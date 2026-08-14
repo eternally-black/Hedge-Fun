@@ -23,11 +23,18 @@ wallet** (not a raw-key throwaway — K3's top risk):
 1. `createSecureClient` initializes with user CLOB creds only, **no builder API key**.
 2. A hand-rolled `Signer` adapter over Privy's browser SDK (`getAddress` / `signTypedData` /
    `signMessage` / `sendTransaction`) produces a POLY_1271/ERC-7739 order the CLOB **accepts**;
-   cancel it before match — costs nothing.
+   cancel it before match — costs nothing. **WRITTEN (S9): `src/lib/real-signer.ts`** — the spike is
+   now "open `/real` and press the buttons", not "write an adapter first".
 3. **CORS from our origin** for cred derivation, books, and `postOrder`. This decides the posting
    locus: if the browser can post directly, it should (Sol: server posting shows the CLOB *our* IP
    and defeats Polymarket's own geo enforcement — the "real barrier" of §6.3). If CORS blocks it,
    the server posts and the IP-enforcement question escalates to `builder@polymarket.com`.
+   **S9 finding: the SDK ships the missing half of the browser arm** —
+   `remoteBuilderSigning({url})` has the browser client fetch builder HMAC headers from our own
+   `/api/builder/sign` per request, so the browser gets builder attribution AND gasless without the
+   secret entering the bundle. What browser-posting still costs is the booking story: our server
+   would only learn an orderId, so it must book from `src/lib/reconcile.ts` (exchange trade records)
+   rather than from a client receipt — client receipts stay REFUSED either way.
 4. User CLOB creds **cannot** place an order without the signer (prove, don't assume); measure what
    cancel access allows (blast radius for custody decision).
 5. Exact FAK response semantics: payload shape, order id, fill ids, what a partial and a zero fill
@@ -270,6 +277,7 @@ regenerated yields can never byte-match. Shipped design (`bb3ba15`):
 | 6 | Order path: two-phase intent + async statuses + geo enforcement + partial booking | first real FAK fill books from actual fills; predicted fee == charged `feeUsdc`; zero-fill frees the slot; D9: no blocking UI |
 | 7 | Close path (bid-walk SELL) + redemption + withdrawal (Q2: full cycle) | position closed for a geo-restricted test user; a win redeemed to pUSD; pUSD withdrawn back toward Solana end to end |
 | 8 | Rollout hardening | CSP/origin checks, consent UI, ops counters (onboarding vs retry relayer spend), docs de-staled |
+| 9 | Browser half: device signer + builder-signing endpoint + `/real` console | a device signs; provisioning, funding, wrap/approvals and recovery all drivable from the browser; builder secret never in the bundle. **The real-mode SWIPE is deliberately NOT here** — it needs Gate-0's posting locus and real FAK response shape |
 
 Steps 1–4 do not depend on Gate-0's answer; 0b runs in parallel with them. Step 6 is where v1's
 steps 5–7 merged: pricing, async pipeline, and geo enforcement all land **before or with** the
