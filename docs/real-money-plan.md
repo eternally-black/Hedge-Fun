@@ -93,6 +93,16 @@ authoritative object, and every parameter in it must be server-derived **first**
    unpriced → no writes, the next pass retries. Only POSTED attempts carrying an exchange order id
    are reconcilable; a SUBMITTING one has no id to ask about and stays with the ops watcher.
 
+**REDEEM binding (pre-Gate-0 items 5+6, `src/lib/redeem.ts` — pure, so it is testable at all):**
+the candidate window is classified before anything binds. A LOST position redeems to zero
+collateral, so it is booked and consumed with NO run — a relay run would spend a device prompt and
+a relayer submission to move no money, on a convergence arm that cannot tell did-it-run from
+didn't. A NEG-RISK position is never bound: redemption routes through the NegRisk Adapter, which
+the explicit alpha approval set deliberately does not grant (it covers the two exchanges only —
+widening it is an owner decision), so the workflow surfaces it to ops (`neg_risk_redeem_manual`)
+instead of asking for a signature that cannot land. Entries on neg-risk markets are already
+fail-closed, so such a position can only arise from a stale flag.
+
 The server is a policy gate, not a barrier (K3): a determined user holding their own creds can
 bypass us and post directly — server validation protects the integrity of *our* records and fees,
 not the exchange. That posture is accepted in spec §6.3.

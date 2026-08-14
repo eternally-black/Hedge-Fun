@@ -9,7 +9,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 import { isRealMoneyEligible, hasRealConsent, sameOrigin } from "@/lib/real";
-import { captureToGlitchTip } from "@/lib/glitchtip";
+import { captureToGlitchTip, sendOpsTelegram } from "@/lib/glitchtip";
 import { serverSecureClient } from "@/lib/polymarket-server";
 import { buildWrapCalls, buildApprovalCalls, CTF_EXCHANGE, NEGRISK_CTF_EXCHANGE, CONDITIONAL_TOKENS } from "@/lib/wallet-ops";
 import {
@@ -22,6 +22,7 @@ import {
   type StepRequest,
 } from "@/lib/workflow";
 import { erc20BalanceOf, erc20Allowance, erc1155IsApprovedForAll, USDCE_ADDRESS, PUSD_ADDRESS } from "@/lib/polygon";
+import { planRedeem } from "@/lib/redeem";
 import {
   prepareGaslessTransaction,
   prepareRedeemPositions,
@@ -34,6 +35,31 @@ const KINDS = ["APPROVALS", "WRAP", "REDEEM", "WITHDRAW"] as const;
 type Kind = (typeof KINDS)[number];
 
 const EVM_SIG = /^0x[0-9a-fA-F]{130}$/; // validate BEFORE the fence — the SDK throws on garbage inside it
+
+// Consume a resolved position: the remainder closes, winners book $1/share on it, losers zero,
+// basis is fee-inclusive and prorated. One transaction with the re-read INSIDE it — the previous
+// read-then-update could double-book under two concurrent runs. Idempotent: a consumed position
+// has no remainder left, and false says "nothing was left to consume".
+async function consumeResolvedPosition(betId: string, won: boolean): Promise<boolean> {
+  return prisma.$transaction(async (tx) => {
+    const b = await tx.bet.findUnique({ where: { id: betId } });
+    if (!b) return false;
+    const filled = b.filledSharesMicro ?? 0n;
+    const rem = filled - (b.closedSharesMicro ?? 0n);
+    if (rem <= 0n) return false;
+    const proceeds = won ? rem : 0n; // winning shares redeem 1:1 to micro-USD
+    const basis = filled > 0n ? (((b.spendMicro ?? 0n) + (b.feeMicro ?? 0n)) * rem) / filled : 0n;
+    await tx.bet.update({
+      where: { id: b.id },
+      data: {
+        closedSharesMicro: filled,
+        proceedsMicro: (b.proceedsMicro ?? 0n) + proceeds,
+        realizedPnlMicro: (b.realizedPnlMicro ?? 0n) + proceeds - basis,
+      },
+    });
+    return true;
+  });
+}
 
 // Run-scoped convergence probe (K3 S6/S7 MEDIUM-1). The relayer's own view of THIS run's
 // transaction — no other flow can move it, unlike the wallet-wide pUSD balance the predicates
@@ -163,8 +189,6 @@ export async function POST(req: Request) {
       include: { market: true },
       take: 10,
     });
-    const bet = candidates.find((b) => (b.filledSharesMicro ?? 0n) - (b.closedSharesMicro ?? 0n) > 0n) ?? null;
-    const remainder = bet ? (bet.filledSharesMicro ?? 0n) - (bet.closedSharesMicro ?? 0n) : 0n;
     const row = await prisma.walletWorkflow.findUnique({ where: { userId_kind: { userId: user.id, kind: "REDEEM" } } });
     const active = row && (row.state === "PENDING_SIGNATURE" || row.state === "SUBMITTING");
     type RedeemInputs = {
@@ -175,44 +199,54 @@ export async function POST(req: Request) {
       won: boolean;
       remainderMicro: string;
     };
+    // Pick what to bind. `won`: CANCELED = push (collateral returns, converge like a win); else
+    // side === outcome (executor-review fix: the generated comparison was inverted). Two candidate
+    // classes never reach a run at all:
+    //   LOST (pre-Gate-0 item 6) — redeems to zero collateral, so a run would spend a device
+    //     prompt and a relayer submission to move no money, with a convergence arm that cannot
+    //     tell did-it-run from didn't. Book it here and move on.
+    //   NEG-RISK (item 5) — redemption goes through the NegRisk Adapter, which the explicit alpha
+    //     approval set does NOT grant (it covers the two exchanges only; widening it is the
+    //     owner's call). Binding it would ask for a signature that cannot land, so skip and tell
+    //     ops instead of failing silently.
+    // The classification itself is pure and lives in lib/redeem.ts (this route can't be tested —
+    // it imports the SDK); here we only ACT on the plan.
+    const plan = active ? { bind: null, losses: [], negRisk: [] } : planRedeem(candidates);
+    let lossesBooked = 0;
+    for (const l of plan.losses) if (await consumeResolvedPosition(l.id, false)) lossesBooked++;
+    for (const n of plan.negRisk) {
+      void sendOpsTelegram(
+        `[real] neg-risk redemption needs a human: bet ${n.id} — the NegRisk Adapter approval is not in the ` +
+          `alpha allow-list, so this position cannot be redeemed by the workflow`,
+      );
+    }
+    const boundBet = plan.bind ? candidates.find((c) => c.id === plan.bind!.id) ?? null : null;
     // Mirror the WRAP pattern: an ACTIVE run drives on its own persisted inputs; a DONE row with
     // nothing new to redeem answers idempotent done; otherwise require a redeemable position.
-    // `won`: CANCELED = push (collateral returns, converge like a win); else side === outcome
-    // (executor-review fix: the generated comparison was inverted).
     const runInputs: RedeemInputs | null = active
       ? (row.inputs as RedeemInputs)
-      : bet && remainder > 0n
+      : boundBet
         ? {
-            conditionId: bet.market.polymarketId,
+            conditionId: boundBet.market.polymarketId,
             wallet,
             pusdBaseline: (await erc20BalanceOf(PUSD_ADDRESS, wallet)).toString(),
-            betId: bet.id,
-            won: bet.market.status === "CANCELED" || bet.side === bet.market.resolvedOutcome,
-            remainderMicro: remainder.toString(),
+            betId: boundBet.id,
+            won: true, // bound candidates are winners by construction — losers were booked above
+            remainderMicro: ((boundBet.filledSharesMicro ?? 0n) - (boundBet.closedSharesMicro ?? 0n)).toString(),
           }
         : row?.state === "DONE"
           ? (row.inputs as RedeemInputs)
           : null;
-    if (!runInputs) return NextResponse.json({ error: "nothing_to_redeem" }, { status: 409 });
+    if (!runInputs) {
+      // Losses ARE the work when there is nothing to redeem — they were just booked and consumed.
+      if (lossesBooked > 0) return NextResponse.json({ status: "done", lossesBooked });
+      if (plan.negRisk.length > 0) return NextResponse.json({ error: "neg_risk_redeem_manual" }, { status: 409 });
+      return NextResponse.json({ error: "nothing_to_redeem" }, { status: 409 });
+    }
     // Consume the position on convergence (K3 HIGH-1.4): without this the same bet rebinds on
-    // every poll — a fresh signature prompt and a burned relayer submission per cycle. Winners
-    // book $1/share on the remainder; losers book zero; basis is fee-inclusive and prorated.
+    // every poll — a fresh signature prompt and a burned relayer submission per cycle.
     onDone = async () => {
-      const b = await prisma.bet.findUnique({ where: { id: runInputs.betId } });
-      if (!b) return;
-      const filled = b.filledSharesMicro ?? 0n;
-      const rem = filled - (b.closedSharesMicro ?? 0n);
-      if (rem <= 0n) return; // already consumed — idempotent
-      const proceeds = runInputs.won ? rem : 0n; // winning shares redeem 1:1 to micro-USD
-      const basis = filled > 0n ? (((b.spendMicro ?? 0n) + (b.feeMicro ?? 0n)) * rem) / filled : 0n;
-      await prisma.bet.update({
-        where: { id: b.id },
-        data: {
-          closedSharesMicro: filled,
-          proceedsMicro: (b.proceedsMicro ?? 0n) + proceeds,
-          realizedPnlMicro: (b.realizedPnlMicro ?? 0n) + proceeds - basis,
-        },
-      });
+      await consumeResolvedPosition(runInputs.betId, runInputs.won);
     };
     spec = {
       userId: user.id,
@@ -221,9 +255,9 @@ export async function POST(req: Request) {
       factory: () =>
         prepareRedeemPositions(client, { conditionId: runInputs.conditionId } as never) as Promise<WorkflowGen>,
       autoAnswer: (r: StepRequest) => (r.kind === "requestAddress" ? signerAddress : null),
-      // A win (or INVALID push) redeems to collateral — pUSD increases past the run baseline. A
-      // LOSS redeems to zero: nothing to receive, converge right after submission. Loss-side
-      // convergence precision is a Gate-0 refinement; alpha keeps it simple.
+      // A win (or INVALID push) redeems to collateral — pUSD increases past the run baseline. The
+      // loss arms below are dead for NEW runs (losers never bind any more, item 6) but must stay:
+      // an ACTIVE row persisted before this change can still carry `won: false`.
       verify: async () => {
         if (!runInputs.won) return true;
         const pusd = await erc20BalanceOf(PUSD_ADDRESS, runInputs.wallet);
