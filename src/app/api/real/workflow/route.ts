@@ -294,6 +294,18 @@ export async function POST(req: Request) {
       inputs: runInputs,
       factory: async () => {
         const plan = await planCollateralReturn(client);
+        // The service TRUNCATES a plan it cannot fit in one router call (Sol's deferred chunking
+        // question): this run then drains only part of the balance and converges anyway, because
+        // convergence only asks whether pUSD went DOWN. The next POST re-binds while pUSD > 0, so
+        // the remainder does drain — but silently, which is the wrong way for money to behave.
+        const p = plan as unknown as { truncated?: boolean; operationCount?: number; netPusdOut?: string };
+        if (p.truncated) {
+          console.warn(`[real] withdraw plan truncated: ${p.operationCount} ops, netPusdOut ${p.netPusdOut}`);
+          void sendOpsTelegram(
+            `[real] withdrawal plan TRUNCATED for ${user.id}: ${p.operationCount ?? "?"} operations, ` +
+              `netPusdOut ${p.netPusdOut ?? "?"} — this run drains part of the balance; the user must run withdrawal again`,
+          );
+        }
         return (await prepareCollateralReturnExecution(client, { plan } as never)) as WorkflowGen;
       },
       autoAnswer: (r: StepRequest) => (r.kind === "requestAddress" ? signerAddress : null),

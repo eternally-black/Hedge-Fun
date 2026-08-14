@@ -93,6 +93,12 @@ authoritative object, and every parameter in it must be server-derived **first**
    unpriced → no writes, the next pass retries. Only POSTED attempts carrying an exchange order id
    are reconcilable; a SUBMITTING one has no id to ask about and stays with the ops watcher.
 
+**WITHDRAW truncation:** the collateral-return service truncates a plan it cannot fit in one
+router call. The run then drains only part of the balance and still converges (convergence only
+asks whether pUSD went down), and the next POST re-binds while pUSD > 0 — so the remainder does
+drain, but silently. A truncated plan now warns and pages ops with the operation count and
+`netPusdOut`. WHERE the funds land is still the owner's Gate-0 question (Q2).
+
 **REDEEM binding (pre-Gate-0 items 5+6, `src/lib/redeem.ts` — pure, so it is testable at all):**
 the candidate window is classified before anything binds. A LOST position redeems to zero
 collateral, so it is booked and consumed with NO run — a relay run would spend a device prompt and
