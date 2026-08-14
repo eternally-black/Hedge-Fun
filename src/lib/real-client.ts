@@ -5,7 +5,12 @@
 // through privySigner (D5) — the server relays requests and validates results, it never signs.
 // React-free on purpose: the screen calls these, and so can a harness.
 import { createSecureClient, remoteBuilderSigning, OrderSide } from "@polymarket/client";
-import { isWalletDeployed, deployDepositWallet, prepareMarketOrder } from "@polymarket/client/actions";
+import {
+  isWalletDeployed,
+  deployDepositWallet,
+  prepareMarketOrder,
+  fetchClosedOnlyMode,
+} from "@polymarket/client/actions";
 import { privySigner, rehydrateBigints, type EvmWalletLike } from "./real-signer";
 
 export type Api = (path: string, init?: RequestInit) => Promise<unknown>;
@@ -145,17 +150,35 @@ type IntentParams =
   | { side: "BUY"; tokenId: string; allInCapMicro: string; maxPriceBp: number }
   | { side: "SELL"; tokenId: string; sharesMicro: string; minPriceBp: number };
 
+// /api/real/intent REQUIRES a browser-side geo verdict (plan §2.7 — policy, not proof; Polymarket's
+// own IP rejection is the real barrier). `fetchClosedOnlyMode` is the only geo signal the SDK
+// exposes: a restricted caller is refused outright, a close-only tier answers with the flag set.
+async function geoVerdict(client: SecureClient): Promise<{ blocked: boolean; closedOnly: boolean }> {
+  try {
+    return { blocked: false, closedOnly: await fetchClosedOnlyMode(client) };
+  } catch (e) {
+    // ONLY a refusal is a geo verdict. A transport hiccup rethrows rather than reading as "you are
+    // in a banned country" — the wrong diagnosis on the money path is worse than no order.
+    const status = (e as { status?: number }).status;
+    if (status === 403 || status === 451) return { blocked: true, closedOnly: true };
+    throw e;
+  }
+}
+
 export async function placeRealOrder(
   api: Api,
   ctx: RealCtx,
   input: { marketId: string; side: "YES" | "NO"; stakeCents?: number; dir?: "ENTRY" | "EXIT" },
 ): Promise<{ status: string; filledSharesMicro?: string }> {
-  const intent = (await api("/api/real/intent", { method: "POST", body: JSON.stringify(input) })) as {
+  const client = await getRealClient(ctx);
+  const intent = (await api("/api/real/intent", {
+    method: "POST",
+    body: JSON.stringify({ ...input, geo: await geoVerdict(client) }),
+  })) as {
     intentId: string;
     params: IntentParams;
   };
 
-  const client = await getRealClient(ctx);
   const signer = privySigner(ctx.wallet);
   // The builder field is SIGNED into the order and the server validates it, so a missing code fails
   // loudly at /api/real/submit instead of quietly posting unattributed volume.

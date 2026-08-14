@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { usePrivy, useWallets } from "@privy-io/react-auth";
 import { provisionReal, runRealWorkflow, type RealCtx, type WorkflowKind } from "@/lib/real-client";
+import { RealOrderCard } from "./RealOrderCard";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
@@ -374,6 +375,9 @@ export function RealScreen({ api }: { api: Api }) {
         </div>
         {fundingError ? <div style={ERR}>{fundingError}</div> : null}
       </div>
+
+      {/* Ordering needs a bound deposit wallet; without one every intent 409s on no_deposit_wallet. */}
+      {consented && provisioned ? <RealOrderCard api={api} ctx={ctx} /> : null}
 
       <div style={CARD}>
         <div style={LABEL}>Trading setup</div>
