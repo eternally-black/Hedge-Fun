@@ -195,24 +195,48 @@ async function main() {
     assert.strictEqual(bet6row.closeFeeMicro, trueFee6, "close fee = the charged fee");
     assert.strictEqual(bet6row.realizedPnlMicro, -60_000n - trueFee6, "realized PnL dropped by exactly that fee");
 
-    // ---- 7. Sweep selection: only POSTED attempts that carry an exchange order id. A SUBMITTING
-    // attempt has nothing to ask the exchange about, and a POSTED one without an id likewise.
+    // ---- 7. Sweep selection: attempts that carry an exchange order id and are worth asking about —
+    // POSTED (verdict still unknown) plus FILLED/PARTIAL (booked, but their fee is still the
+    // ESTIMATE until the charged one replaces it). A SUBMITTING attempt has nothing to ask about, a
+    // POSTED one without an id likewise, and anything older than 48h is settled history.
     const m7a = await mkMarket("c7a");
     await mkAttempt(m7a.id, { externalOrderId: `${tag}-o7a` });
     const m7b = await mkMarket("c7b");
     await mkAttempt(m7b.id, { state: "SUBMITTING", externalOrderId: `${tag}-o7b` });
     const m7c = await mkMarket("c7c");
     await mkAttempt(m7c.id); // POSTED, no order id
-    const eligible = await prisma.orderAttempt.count({ where: { state: "POSTED", externalOrderId: { not: null } } });
+    const m7d = await mkMarket("c7d");
+    const a7d = await mkAttempt(m7d.id, { state: "FILLED", externalOrderId: `${tag}-o7d` });
+    const m7e = await mkMarket("c7e");
+    const a7e = await mkAttempt(m7e.id, { state: "FILLED", externalOrderId: `${tag}-o7e` });
+    // Nudged past the floor: a fee trued up two days ago must not be rescanned every pass.
+    await prisma.orderAttempt.update({
+      where: { id: a7e.id },
+      data: { updatedAt: new Date(Date.now() - 49 * 60 * 60_000) },
+    });
+    const window = { lt: new Date(), gt: new Date(Date.now() - 48 * 60 * 60_000) };
+    const eligible = await prisma.orderAttempt.count({
+      where: {
+        state: { in: ["POSTED", "FILLED", "PARTIAL"] },
+        externalOrderId: { not: null },
+        updatedAt: window,
+      },
+    });
     const swept = await reconcileStuckAttempts(prisma, async () => null, { minAgeMs: 0, limit: 50 });
-    assert.strictEqual(swept.scanned, eligible, "scanned exactly the POSTED attempts carrying an order id");
+    assert.strictEqual(swept.scanned, eligible, "scanned exactly the id-carrying attempts inside the window");
+    assert.ok(
+      await prisma.orderAttempt
+        .findMany({ where: { id: { in: [a7d.id, a7e.id] } }, select: { id: true, updatedAt: true } })
+        .then((rows) => rows.length === 2),
+      "both FILLED fixtures still exist — one inside the window, one past the floor",
+    );
     assert.ok(swept.scanned >= 1);
     assert.strictEqual(swept.unknown, swept.scanned, "a null probe leaves everything unknown");
 
     console.log("OK: unknown probe / matched-without-trades / terminal + live zero-match verdicts");
     console.log("OK: trade records replace the receipt estimate — delta booked, fee trued up");
     console.log("OK: EXIT true-up moves realized PnL by the charged close fee");
-    console.log("OK: the sweep selects only POSTED attempts with an exchange order id");
+    console.log("OK: the sweep selects id-carrying POSTED/FILLED/PARTIAL attempts inside the 48h window");
     console.log("PASS: reconcile");
   } finally {
     await prisma.pointsLedger.deleteMany({ where: { userId: user.id } });

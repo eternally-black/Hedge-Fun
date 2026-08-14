@@ -109,9 +109,17 @@ export async function reconcileStuckAttempts(
   const now = opts.now ?? new Date();
   const cutoff = new Date(now.getTime() - (opts.minAgeMs ?? 10 * 60_000));
   const attempts = await prisma.orderAttempt.findMany({
-    // Only POSTED attempts carry an exchange order id; a SUBMITTING one has nothing to ask about
-    // (the ambiguous-post case) and stays with the ops watcher until Gate-0 says otherwise.
-    where: { state: "POSTED", externalOrderId: { not: null }, updatedAt: { lt: cutoff } },
+    // POSTED = the ambiguous case still awaiting a verdict. FILLED/PARTIAL are already booked and
+    // are revisited for ONE reason: their fee is the formula ESTIMATE until the exchange's own
+    // trade records replace it (the booking is order-cumulative, so a re-run books a zero delta,
+    // and the true-up is idempotent once the ledger carries the charged amount). A SUBMITTING
+    // attempt has no order id to ask about. The 48-hour floor stops settled history from being
+    // rescanned forever.
+    where: {
+      state: { in: ["POSTED", "FILLED", "PARTIAL"] },
+      externalOrderId: { not: null },
+      updatedAt: { lt: cutoff, gt: new Date(now.getTime() - 48 * 60 * 60_000) },
+    },
     orderBy: { updatedAt: "asc" },
     take: opts.limit ?? 20,
   });

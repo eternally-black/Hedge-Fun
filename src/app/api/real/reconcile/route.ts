@@ -84,6 +84,11 @@ export async function POST(req: Request) {
             ts: Number.isNaN(ts.getTime()) ? new Date() : ts,
           });
         }
+        // A short trade set is indistinguishable from a paging cut or a dropped malformed record,
+        // and booking it would mark the attempt terminal with money missing from the ledger — treat
+        // it as unknown instead: write nothing, let the next pass retry.
+        const collectedMicro = trades.reduce((sum, t) => sum + t.sizeMicro, 0n);
+        if (collectedMicro < matchedSharesMicro) return null;
       }
       return { terminal, matchedSharesMicro, trades };
     } catch {
