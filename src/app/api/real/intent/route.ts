@@ -70,13 +70,10 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "market_closing" }, { status: 409 });
   }
 
-  // Fee always; neg-risk exclusion is ENTRY-ONLY (fail-closed: unknown = excluded). EXIT must
-  // never reject on negRisk — the user exits whatever they hold, however the market got flagged
-  // after entry (executor-review fix: the original check ran before the branch and blocked exits).
+  // Neg-risk markets are SUPPORTED as of the owner's decision — their legs are ordinary Yes/No
+  // cards and excluding them refused about a quarter of the deck. The descriptor still carries the
+  // flag, but it is no longer a gate; this fetch is here for rateBp/expMilli.
   const fee = await getMarketFee(prisma, market);
-  if (direction === "ENTRY" && fee.negRisk !== false) {
-    return NextResponse.json({ error: "neg_risk_excluded" }, { status: 409 });
-  }
 
   // EXIT: the user must hold a REAL position with a positive remainder.
   // ENTRY: the inverse — an OPEN position on this market blocks a second entry (S6/S7 review:
@@ -105,12 +102,8 @@ export async function POST(req: Request) {
 
   const book = await getBook(tokenId).catch(() => null);
   if (!book) return NextResponse.json({ error: "book_unavailable" }, { status: 503 });
-  // Belt over the fee-cache flag (K3 F2): the raw book's own per-token neg_risk wins when it
-  // disagrees or the cache came from an absent-field default. true OR unknown-on-both = excluded.
-  // ENTRY-only, same rationale as above.
-  if (direction === "ENTRY" && book.negRisk !== false) {
-    return NextResponse.json({ error: "neg_risk_excluded" }, { status: 409 });
-  }
+  // The book carries its own per-token neg_risk flag; since neg-risk is supported it is no longer
+  // read as a gate here (the redemption path routes on the market's own flag instead).
 
   // The cache never decides freshness — callers do (clob.ts contract). The paper lock refuses
   // books older than BOOK_MAX_STALE_MS; the REAL lock can hardly demand less (K3 S6/S7 M4).

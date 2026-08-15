@@ -32,8 +32,8 @@ function payload(calls: readonly CallInput[], over: Record<string, unknown> = {}
 const req = (p: unknown, kind: unknown = "signGaslessTypedData") => ({ kind, payload: p });
 
 async function main() {
-  // 1 — the six calls the alpha actually makes must pass untouched, or the guard breaks the product.
-  assert.strictEqual(APPROVAL_ALLOWLIST.length, 6); // 2 exchanges × 2 token kinds + the collateral adapter pair
+  // 1 — the eight calls the alpha actually makes must pass untouched, or the guard breaks the product.
+  assert.strictEqual(APPROVAL_ALLOWLIST.length, 8); // 2 exchanges + 2 collateral adapters, each × pUSD and CTF
   assert.doesNotThrow(() => assertRelayPayload("APPROVALS", req(payload(asCalls(approvals))), ctx));
 
   // 2 — same for the wrap pair (approve + on-ramp), which is byte-pinned to a production transaction.
@@ -67,7 +67,7 @@ async function main() {
     /nonzero_value/,
   );
 
-  // 10 — an approval aimed at an attacker's own contract is not one of the six.
+  // 10 — an approval aimed at an attacker's own contract is not one of the eight.
   assert.throws(
     () => assertRelayPayload("APPROVALS", req(payload([{ target: ATTACKER, data: `0x095ea7b3${word(ATTACKER)}${"f".repeat(64)}` }])), ctx),
     /target_not_allowed/,

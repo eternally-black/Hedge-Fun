@@ -315,7 +315,14 @@ approve exact amounts). New from review:
   Gate-0 §1.6.
 - SELL needs the **bid** side, which the current book parsing drops.
 - Repo book shape (asks cheapest-first) vs SDK shape (descending) must never mix in one function.
-- Neg-risk markets excluded from real mode until the third approval is implemented.
+- ~~Neg-risk markets excluded from real mode until the third approval is implemented.~~ **REVERSED
+  (owner, 2026-08-15): neg-risk is SUPPORTED.** Its legs are ordinary Yes/No cards that pass the
+  binary-only ingest filter — a live Gamma sample put them at 28 of the 100 soonest-ending open
+  markets, so excluding them refused about a quarter of the deck in real mode. The alpha approval
+  set grew to eight calls (both collateral adapters). Gate-0 must still verify one thing: neg-risk
+  positions are ERC-1155 on the `negRiskAdapter` contract and Polymarket's own required-approvals
+  list grants nothing there — if a live neg-risk redemption reverts, an operator right on that
+  contract is the first thing to add.
 - No external call inside `runSerializable`; durable intent row **before** every external call.
 
 ## 6. Ops & rollout

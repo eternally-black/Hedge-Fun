@@ -38,15 +38,23 @@ export const CONDITIONAL_TOKENS = "0x4d97dcd97ec945f40cf65f87097ace5ea0476045";
 const MAX_UINT256 = "f".repeat(64);
 
 export const COLLATERAL_ADAPTER = "0xAdA100Db00Ca00073811820692005400218FcE1f"; // redeems normal-market wins
-export const NEG_RISK_COLLATERAL_ADAPTER = "0xadA2005600Dec949baf300f4C6120000bDB6eAab"; // neg-risk redemption — NOT approved in the alpha
+export const NEG_RISK_COLLATERAL_ADAPTER = "0xadA2005600Dec949baf300f4C6120000bDB6eAab"; // redeems neg-risk wins
 
 // approve(spender, MAX)   0x095ea7b3   |   setApprovalForAll(operator, true)   0xa22cb465
-// The EXPLICIT alpha set: trade on the two exchanges, redeem through the normal collateral adapter.
+// The EXPLICIT alpha set: trade on the two exchanges, redeem through BOTH collateral adapters.
 // The collateral adapter is the contract that PERFORMS a redemption (the SDK builds redeem as
 // ctfRedeemPositionsCall(adapterAddress,…)) — without these two calls a winning position could be
-// redeemed by nobody, which is why they are here and not in the "widen later" pile. Still excluded
-// on purpose, unlike the SDK's generic prepareTradingApprovals: the neg-risk collateral adapter,
-// the auto-redeem operator, perps, the v3 exchange and the v2 router.
+// redeemed by nobody, which is why they are here and not in the "widen later" pile. Neg-risk is
+// supported as of the owner's decision — its legs are ordinary Yes/No cards (a live Gamma sample
+// put them at 28 of the 100 soonest-ending open markets), so excluding them refused a quarter of
+// the deck in real mode. Still excluded on purpose, unlike the SDK's generic
+// prepareTradingApprovals: the auto-redeem operator, perps, the v3 exchange, the v2 router and the
+// position manager.
+//
+// OPEN QUESTION (Gate-0): neg-risk positions are held as ERC-1155 on the negRiskAdapter contract
+// (0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296), and Polymarket's own required-approvals list grants
+// nothing on THAT contract — if a live neg-risk redemption reverts for a missing approval, an
+// operator right there is the first thing to try.
 export function buildApprovalCalls(): WalletCall[] {
   const approvePusd = (spender: string) => ({ to: PUSD_ADDRESS, data: "0x095ea7b3" + addr(spender) + MAX_UINT256 });
   const approveCtf = (operator: string) => ({
@@ -60,5 +68,7 @@ export function buildApprovalCalls(): WalletCall[] {
     approveCtf(NEGRISK_CTF_EXCHANGE),
     approvePusd(COLLATERAL_ADAPTER),
     approveCtf(COLLATERAL_ADAPTER),
+    approvePusd(NEG_RISK_COLLATERAL_ADAPTER),
+    approveCtf(NEG_RISK_COLLATERAL_ADAPTER),
   ];
 }

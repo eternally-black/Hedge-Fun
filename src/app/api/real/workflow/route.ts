@@ -205,21 +205,14 @@ export async function POST(req: Request) {
     //   LOST (pre-Gate-0 item 6) — redeems to zero collateral, so a run would spend a device
     //     prompt and a relayer submission to move no money, with a convergence arm that cannot
     //     tell did-it-run from didn't. Book it here and move on.
-    //   NEG-RISK (item 5) — redemption goes through the NegRisk Adapter, which the explicit alpha
-    //     approval set does NOT grant (it covers the two exchanges only; widening it is the
-    //     owner's call). Binding it would ask for a signature that cannot land, so skip and tell
-    //     ops instead of failing silently.
+    //   WINNER — the first eligible one binds. Neg-risk winners are ordinary winners now: the
+    //     alpha approval set grants the neg-risk collateral adapter, which is what performs their
+    //     redemption.
     // The classification itself is pure and lives in lib/redeem.ts (this route can't be tested —
     // it imports the SDK); here we only ACT on the plan.
-    const plan = active ? { bind: null, losses: [], negRisk: [] } : planRedeem(candidates);
+    const plan = active ? { bind: null, losses: [] } : planRedeem(candidates);
     let lossesBooked = 0;
     for (const l of plan.losses) if (await consumeResolvedPosition(l.id, false)) lossesBooked++;
-    for (const n of plan.negRisk) {
-      void sendOpsTelegram(
-        `[real] neg-risk redemption needs a human: bet ${n.id} — the NegRisk Adapter approval is not in the ` +
-          `alpha allow-list, so this position cannot be redeemed by the workflow`,
-      );
-    }
     const boundBet = plan.bind ? candidates.find((c) => c.id === plan.bind!.id) ?? null : null;
     // Mirror the WRAP pattern: an ACTIVE run drives on its own persisted inputs; a DONE row with
     // nothing new to redeem answers idempotent done; otherwise require a redeemable position.
@@ -240,7 +233,6 @@ export async function POST(req: Request) {
     if (!runInputs) {
       // Losses ARE the work when there is nothing to redeem — they were just booked and consumed.
       if (lossesBooked > 0) return NextResponse.json({ status: "done", lossesBooked });
-      if (plan.negRisk.length > 0) return NextResponse.json({ error: "neg_risk_redeem_manual" }, { status: 409 });
       return NextResponse.json({ error: "nothing_to_redeem" }, { status: 409 });
     }
     // Consume the position on convergence (K3 HIGH-1.4): without this the same bet rebinds on

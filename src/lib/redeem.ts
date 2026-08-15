@@ -11,15 +11,15 @@ export interface RedeemCandidate {
 }
 
 export interface RedeemPlan {
-  bind: RedeemCandidate | null; // the position to actually redeem (a winner, non-neg-risk)
+  bind: RedeemCandidate | null; // the position to actually redeem — a winner, neg-risk included
   losses: RedeemCandidate[]; // lost positions to book + consume WITHOUT any run
-  negRisk: RedeemCandidate[]; // winners this workflow cannot redeem — the adapter is not approved
 }
 
 export function planRedeem(candidates: RedeemCandidate[]): RedeemPlan {
-  const plan: RedeemPlan = { bind: null, losses: [], negRisk: [] };
+  const plan: RedeemPlan = { bind: null, losses: [] };
   // The whole window is classified even after a bind is found: the losses behind the bound winner
-  // still need booking, and ops still needs to hear about neg-risk positions.
+  // still need booking. Neg-risk winners are ordinary winners since the alpha approval set gained
+  // the neg-risk collateral adapter.
   for (const c of candidates) {
     if ((c.filledSharesMicro ?? 0n) - (c.closedSharesMicro ?? 0n) <= 0n) continue; // already consumed
     // CANCELED = push: the collateral returns, so it converges like a win.
@@ -28,12 +28,6 @@ export function planRedeem(candidates: RedeemCandidate[]): RedeemPlan {
       // A lost position redeems to ZERO collateral — a run would spend a device prompt and a
       // relayer submission to move no money (pre-Gate-0 item 6).
       plan.losses.push(c);
-      continue;
-    }
-    if (c.market.negRisk === true) {
-      // Neg-risk redemption routes through the NegRisk Adapter, which the explicit alpha approval
-      // set does not grant (item 5) — binding it would ask for a signature that cannot land.
-      plan.negRisk.push(c);
       continue;
     }
     if (!plan.bind) plan.bind = c; // first eligible winner, newest-first order preserved
