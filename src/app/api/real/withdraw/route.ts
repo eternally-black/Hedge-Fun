@@ -129,7 +129,22 @@ export async function GET(req: Request) {
   // The asset list rides along so the browser needs no second endpoint; a bridge outage degrades
   // it to an empty list rather than failing the read.
   const assets = await fetchSupportedAssets().catch(() => []);
-  if (!row) return NextResponse.json({ workflow: null, withdrawal: null, assets });
+  // Autofill convenience, NOT a default to trust with money: a linked hedge wallet only proves the
+  // user typed that address once, not that they control it. The EVM side is the account's own
+  // signer, which is the honest default for an EVM destination. Either way the field stays editable
+  // and the user confirms the destination themselves.
+  const connected = {
+    evm: user.embeddedWalletAddress,
+    solana:
+      (
+        await prisma.hedgeWallet.findFirst({
+          where: { userId: user.id },
+          orderBy: { createdAt: "desc" },
+          select: { address: true },
+        })
+      )?.address ?? null,
+  };
+  if (!row) return NextResponse.json({ workflow: null, withdrawal: null, assets, connected });
 
   const inputs = row.inputs as unknown as BridgeOutInputs | null;
   let status: string | null = null;
@@ -163,5 +178,6 @@ export async function GET(req: Request) {
         }
       : null,
     assets,
+    connected,
   });
 }

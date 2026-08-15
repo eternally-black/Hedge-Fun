@@ -8,6 +8,7 @@ import { withdrawViaBridge, type Api, type RealCtx } from "@/lib/real-client";
 
 type BridgeAsset = { chainId: string; chainName: string; symbol: string; tokenAddress: string; minUsd: number };
 type WorkflowInfo = { state: string; stepIndex: number; error: string | null };
+type Connected = { evm: string | null; solana: string | null };
 type WithdrawalInfo = {
   bridgeAddress: string;
   recipient: string;
@@ -38,6 +39,7 @@ const MUTED = { fontSize: 12, color: "var(--muted)" } as const;
 const ERR = { marginTop: 10, fontSize: 12, color: "var(--no)" } as const;
 const BTN = { font: "inherit", fontSize: 14, padding: "10px 16px", borderRadius: 12, cursor: "pointer" } as const;
 const PRIMARY = { ...BTN, background: "var(--gold)", color: "#1a1205", border: "none" } as const;
+const SMALL = { ...BTN, fontSize: 12, padding: "8px 10px", background: "var(--panel2)", color: "var(--text)", border: "1px solid var(--line)" } as const;
 const OFF = { opacity: 0.5, cursor: "default" } as const;
 const FIELD = {
   font: "inherit",
@@ -80,6 +82,7 @@ export function RealWithdrawCard({ api, ctx }: { api: Api; ctx: RealCtx }) {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const [error, setError] = useState("");
+  const [connected, setConnected] = useState<Connected>({ evm: null, solana: null });
 
   const refresh = useCallback(async () => {
     try {
@@ -87,10 +90,12 @@ export function RealWithdrawCard({ api, ctx }: { api: Api; ctx: RealCtx }) {
         workflow: WorkflowInfo | null;
         withdrawal: WithdrawalInfo | null;
         assets?: BridgeAsset[];
+        connected?: Connected;
       };
       setWorkflow(res.workflow);
       setWithdrawal(res.withdrawal);
       setAssets(res.assets ?? []);
+      setConnected(res.connected ?? { evm: null, solana: null });
     } catch (e) {
       setError(errText(e));
     }
@@ -103,6 +108,21 @@ export function RealWithdrawCard({ api, ctx }: { api: Api; ctx: RealCtx }) {
   const chains = [...new Map(assets.map((a) => [a.chainId, a.chainName])).entries()];
   const tokens = assets.filter((a) => a.chainId === chainId);
   const chosen = tokens.find((t) => t.tokenAddress === tokenAddress) ?? tokens.find((t) => t.symbol === "USDC") ?? tokens[0];
+
+  const connectedAddress = chainId === SOLANA ? connected.solana : connected.evm;
+  const noConnectedHint =
+    connectedAddress
+      ? null
+      : chainId === SOLANA
+        ? "link a Solana wallet first, or paste an address"
+        : "no embedded wallet available";
+  // Sending to an address of the wrong chain family is the one mistake in this flow that cannot be
+  // undone, so it disables the button instead of merely warning.
+  const wrongFamily =
+    recipient.trim() !== "" &&
+    (chainId === SOLANA
+      ? recipient.trim().startsWith("0x")
+      : !/^0x[0-9a-fA-F]{40}$/.test(recipient.trim()));
 
   const submit = async () => {
     const dest = recipient.trim();
@@ -170,15 +190,29 @@ export function RealWithdrawCard({ api, ctx }: { api: Api; ctx: RealCtx }) {
         </select>
       </div>
 
-      <input
-        type="text"
-        value={recipient}
-        onChange={(e) => setRecipient(e.target.value)}
-        // The destination lives on the CHOSEN chain — pasting an EVM address for a Solana
-        // withdrawal is the one mistake that cannot be undone.
-        placeholder={chainId === SOLANA ? "your Solana address" : "your address on the chosen chain"}
-        style={{ ...FIELD, width: "100%", marginTop: 10, boxSizing: "border-box" }}
-      />
+      <div style={{ display: "flex", gap: 8, marginTop: 10, alignItems: "center" }}>
+        <input
+          type="text"
+          value={recipient}
+          onChange={(e) => setRecipient(e.target.value)}
+          // The destination lives on the CHOSEN chain — pasting an EVM address for a Solana
+          // withdrawal is the one mistake that cannot be undone.
+          placeholder={chainId === SOLANA ? "your Solana address" : "your address on the chosen chain"}
+          style={{ ...FIELD, flex: 1, minWidth: 0, boxSizing: "border-box" }}
+        />
+        <button
+          type="button"
+          onClick={() => setRecipient(connectedAddress ?? "")}
+          disabled={!connectedAddress}
+          style={{ ...SMALL, ...(connectedAddress ? {} : OFF) }}
+        >
+          Use connected
+        </button>
+      </div>
+      {noConnectedHint ? <div style={{ ...MUTED, marginTop: 6 }}>{noConnectedHint}</div> : null}
+      {wrongFamily ? (
+        <div style={ERR}>this address belongs to another chain — sending there is unrecoverable</div>
+      ) : null}
 
       <div style={{ display: "flex", gap: 10, marginTop: 10, alignItems: "center", flexWrap: "wrap" }}>
         <input
@@ -189,7 +223,12 @@ export function RealWithdrawCard({ api, ctx }: { api: Api; ctx: RealCtx }) {
           placeholder="all"
           style={{ ...FIELD, width: 110 }}
         />
-        <button type="button" onClick={submit} disabled={busy} style={{ ...PRIMARY, ...(busy ? OFF : {}) }}>
+        <button
+          type="button"
+          onClick={submit}
+          disabled={busy || wrongFamily}
+          style={{ ...PRIMARY, ...(busy || wrongFamily ? OFF : {}) }}
+        >
           {busy ? "…" : "Withdraw"}
         </button>
       </div>
