@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from "react";
 import { usePrivy, useWallets } from "@privy-io/react-auth";
 import { provisionReal, runRealWorkflow, type RealCtx, type WorkflowKind } from "@/lib/real-client";
 import { RealOrderCard } from "./RealOrderCard";
+import { RealWithdrawCard } from "./RealWithdrawCard";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
@@ -415,8 +416,11 @@ export function RealScreen({ api }: { api: Api }) {
         <div style={{ ...MUTED, marginTop: 4 }}>The funds-out path: redeem what resolved, then withdraw.</div>
         <div style={{ display: "flex", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
           {runButton("REDEEM", "Redeem resolved")}
-          {runButton("WITHDRAW", "Withdraw")}
+          {/* WITHDRAW is the collateral return — positions back into pUSD. Getting the money OFF
+              Polygon is the bridge card below, and the two are deliberately separate buttons. */}
+          {runButton("WITHDRAW", "Collect into pUSD")}
         </div>
+        {consented && provisioned ? <RealWithdrawCard api={api} ctx={ctx} /> : null}
         <div style={{ marginTop: 8 }}>
           {(["REDEEM", "WITHDRAW"] as const).map((k) =>
             notes[k] ? (

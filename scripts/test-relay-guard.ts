@@ -2,7 +2,14 @@
 // asks for it. Each case names the drain it prevents.
 import assert from "node:assert/strict";
 import { APPROVAL_ALLOWLIST, EXCHANGE_ALLOWLIST, WRAP_ALLOWLIST, assertRelayPayload } from "../src/lib/relay-guard";
-import { buildApprovalCalls, buildWrapCalls, COLLATERAL_ADAPTER, CONDITIONAL_TOKENS } from "../src/lib/wallet-ops";
+import {
+  buildApprovalCalls,
+  buildPusdTransferCall,
+  buildWrapCalls,
+  COLLATERAL_ADAPTER,
+  CONDITIONAL_TOKENS,
+  PUSD_ADDRESS,
+} from "../src/lib/wallet-ops";
 
 const DEPOSIT = "0x1111111111111111111111111111111111111111";
 const OTHER = "0x2222222222222222222222222222222222222222";
@@ -103,6 +110,43 @@ async function main() {
   const unknown = [{ target: ATTACKER, data: "0x12345678" }];
   assert.doesNotThrow(() => assertRelayPayload("WITHDRAW", req(payload(unknown)), ctx));
   assert.throws(() => assertRelayPayload("WITHDRAW", req(payload(unknown, { message: { wallet: OTHER } })), ctx), /wrong_wallet/);
+
+  // 14 — BRIDGE_OUT: a pUSD transfer to the address our own server minted is the whole operation.
+  const BRIDGE = "0x4444444444444444444444444444444444444444";
+  const bridgeCtx = { ...ctx, expectedRecipient: BRIDGE };
+  const good = buildPusdTransferCall(BRIDGE, 1_000_000n);
+  assert.doesNotThrow(() =>
+    assertRelayPayload("BRIDGE_OUT", req(payload([{ target: good.to, data: good.data }])), bridgeCtx),
+  );
+
+  // 15 — without an expected recipient there is nothing to verify against, so the device refuses
+  // rather than trusting the server's word about where the money goes.
+  assert.throws(
+    () => assertRelayPayload("BRIDGE_OUT", req(payload([{ target: good.to, data: good.data }])), ctx),
+    /recipient_unknown/,
+  );
+
+  // 16 — THE bridge attack: a legitimate-looking pUSD transfer whose destination was swapped.
+  const redirected = buildPusdTransferCall(ATTACKER, 1_000_000n);
+  assert.throws(
+    () => assertRelayPayload("BRIDGE_OUT", req(payload([{ target: redirected.to, data: redirected.data }])), bridgeCtx),
+    /recipient_not_allowed/,
+  );
+
+  // 17+18 — only pUSD, and only transfer(): anything else riding in a BRIDGE_OUT batch is refused.
+  assert.throws(
+    () => assertRelayPayload("BRIDGE_OUT", req(payload([{ target: COLLATERAL_ADAPTER, data: good.data }])), bridgeCtx),
+    /target_not_allowed/,
+  );
+  assert.throws(
+    () =>
+      assertRelayPayload(
+        "BRIDGE_OUT",
+        req(payload([{ target: PUSD_ADDRESS, data: `0x12345678${word(BRIDGE)}${"f".repeat(64)}` }])),
+        bridgeCtx,
+      ),
+    /selector_not_allowed/,
+  );
 
   console.log("test-relay-guard: OK");
 }

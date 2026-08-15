@@ -74,7 +74,7 @@ export async function provisionReal(api: Api, ctx: RealCtx): Promise<{ depositWa
   return { depositWalletAddress };
 }
 
-export type WorkflowKind = "APPROVALS" | "WRAP" | "REDEEM" | "WITHDRAW";
+export type WorkflowKind = "APPROVALS" | "WRAP" | "REDEEM" | "WITHDRAW" | "BRIDGE_OUT";
 export type WorkflowOutcome =
   | { status: "done" }
   | { status: "submitting"; transactionId: string | null }
@@ -87,11 +87,17 @@ type WorkflowResponse =
   | { status: "failed"; error: string }
   | { status: "stale" };
 
-export async function runRealWorkflow(
+type RelayLoopOptions = {
+  firstResponse?: WorkflowResponse; // a run another route already started (BRIDGE_OUT)
+  expectedRecipient?: string; // the bridge address the device must see inside the transfer
+  onStep?: (note: string) => void;
+};
+
+async function runRelayLoop(
   api: Api,
   ctx: RealCtx,
   kind: WorkflowKind,
-  onStep?: (note: string) => void,
+  options: RelayLoopOptions = {},
 ): Promise<WorkflowOutcome> {
   // No SecureClient here: the relay needs signatures, not CLOB creds, and constructing one would
   // cost an extra device prompt for nothing.
@@ -99,36 +105,46 @@ export async function runRealWorkflow(
   let answer: { runId: string; requestHash: string; signature: string } | undefined;
   let restarts = 0;
   let step = 0;
+  let response: WorkflowResponse | undefined = options.firstResponse;
 
   // Bounded: a server that keeps yielding must not be able to prompt the device forever.
   for (let i = 0; i < 12; i++) {
-    const response = (await api("/api/real/workflow", {
-      method: "POST",
-      body: JSON.stringify(answer ? { kind, answer } : { kind }),
-    })) as WorkflowResponse;
+    if (!response) {
+      response = (await api("/api/real/workflow", {
+        method: "POST",
+        body: JSON.stringify(answer ? { kind, answer } : { kind }),
+      })) as WorkflowResponse;
+    }
     answer = undefined;
 
     switch (response.status) {
       case "pending_signature": {
         const request = response.request as { kind?: unknown; payload?: unknown };
         // The device decides what it is willing to sign. Rehydrate FIRST so the guard reads the same
-        // values the wallet will (our wire form stringifies BigInt), then refuse anything that is
-        // not this user's own deposit-wallet batch on this chain (relay-guard.ts).
+        // values the wallet will (our wire form stringifies BigInt), then refuse anything that is not
+        // this user's own deposit-wallet batch on this chain (relay-guard.ts).
         const payload = rehydrateBigints(request.payload);
-        assertRelayPayload(kind, { kind: request.kind, payload }, {
-          depositWallet: ctx.depositWalletAddress ?? "",
-        });
+        assertRelayPayload(
+          kind,
+          { kind: request.kind, payload },
+          { depositWallet: ctx.depositWalletAddress ?? "", expectedRecipient: options.expectedRecipient },
+        );
         const signature = await signer.signTypedData(payload as never);
         answer = { runId: response.runId, requestHash: response.requestHash, signature };
-        onStep?.(`signed step ${++step}`);
+        options.onStep?.(`signed step ${++step}`);
+        response = undefined;
         continue;
       }
       case "stale":
+        // A stale BRIDGE_OUT is terminal: only /api/real/withdraw may start one, and going back there
+        // would mint a SECOND single-purpose bridge address while the first stays live.
+        if (kind === "BRIDGE_OUT") return { status: "failed", error: "workflow_stale" };
         if (restarts++ >= 2) return { status: "failed", error: "workflow_stale" };
-        onStep?.("run went stale — restarting");
+        options.onStep?.("run went stale — restarting");
+        response = undefined;
         continue;
       case "submitting":
-        onStep?.("submitted to the relayer");
+        options.onStep?.("submitted to the relayer");
         return { status: "submitting", transactionId: response.transactionId ?? null };
       case "done":
         return { status: "done" };
@@ -139,6 +155,37 @@ export async function runRealWorkflow(
     }
   }
   return { status: "failed", error: "relay_loop_bound" };
+}
+
+export async function runRealWorkflow(
+  api: Api,
+  ctx: RealCtx,
+  kind: WorkflowKind,
+  onStep?: (note: string) => void,
+): Promise<WorkflowOutcome> {
+  return runRelayLoop(api, ctx, kind, { onStep });
+}
+
+// The money-out leg. /api/real/withdraw mints the single-purpose bridge address AND starts the run,
+// so the loop is entered with that first response — and with that address as the recipient the guard
+// pins, which is what stops a compromised server from retargeting the transfer.
+export async function withdrawViaBridge(
+  api: Api,
+  ctx: RealCtx,
+  params: { chainId: string; tokenAddress: string; recipient: string; amountMicro?: string },
+  onStep?: (note: string) => void,
+): Promise<WorkflowOutcome & { bridgeAddress?: string }> {
+  const started = (await api("/api/real/withdraw", {
+    method: "POST",
+    body: JSON.stringify(params),
+  })) as WorkflowResponse & { bridgeAddress?: string };
+  if (!started.bridgeAddress) throw new Error("bridge_address_missing");
+  const outcome = await runRelayLoop(api, ctx, "BRIDGE_OUT", {
+    firstResponse: started,
+    expectedRecipient: started.bridgeAddress,
+    onStep,
+  });
+  return { ...outcome, bridgeAddress: started.bridgeAddress };
 }
 
 type IntentParams =

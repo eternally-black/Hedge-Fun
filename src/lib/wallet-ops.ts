@@ -31,6 +31,7 @@ export function buildWrapCalls(wallet: string, amountMicro: bigint): WalletCall[
 // two EXCHANGES is the documented deliberate exception to the exact-amount rule (plan §2.2; the
 // exact-amount rule is for the wrap onramp).
 import { PUSD_ADDRESS } from "./polygon";
+export { PUSD_ADDRESS }; // re-exported so the browser-side relay guard need not pull in the RPC module
 
 export const CTF_EXCHANGE = "0xe111180000d2663c0091e4f400237545b87b996b"; // V2 CTF Exchange
 export const NEGRISK_CTF_EXCHANGE = "0xe2222d279d744050d28e00520010520000310f59"; // NegRisk CTF Exchange
@@ -71,4 +72,13 @@ export function buildApprovalCalls(): WalletCall[] {
     approvePusd(NEG_RISK_COLLATERAL_ADAPTER),
     approveCtf(NEG_RISK_COLLATERAL_ADAPTER),
   ];
+}
+
+// The bridge address created for a withdrawal is SINGLE-PURPOSE: whatever lands on it is forwarded
+// to the recipient that address was created for. So a bridge withdrawal is a plain ERC-20 transfer
+// of pUSD to it — no router plan, no second hop, and a recipient the device can verify.
+export function buildPusdTransferCall(to: string, amountMicro: bigint): WalletCall {
+  if (amountMicro <= 0n) throw new Error("transfer amount must be positive");
+  if (!/^0x[0-9a-fA-F]{40}$/.test(to)) throw new Error("transfer recipient is not an EVM address");
+  return { to: PUSD_ADDRESS, data: "0xa9059cbb" + addr(to) + uint(amountMicro) };
 }

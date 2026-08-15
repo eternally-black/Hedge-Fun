@@ -9,12 +9,13 @@ import {
   CTF_EXCHANGE,
   NEGRISK_CTF_EXCHANGE,
   NEG_RISK_COLLATERAL_ADAPTER,
+  PUSD_ADDRESS,
 } from "./wallet-ops";
 
-export type RelayKind = "APPROVALS" | "WRAP" | "REDEEM" | "WITHDRAW";
+export type RelayKind = "APPROVALS" | "WRAP" | "REDEEM" | "WITHDRAW" | "BRIDGE_OUT";
 
 type RelayRequest = { kind?: unknown; payload?: unknown };
-type RelayContext = { depositWallet: string; chainId?: number };
+type RelayContext = { depositWallet: string; chainId?: number; expectedRecipient?: string };
 type CallRecord = Record<string, unknown>;
 
 export type TargetSelectorRule = { target: string; selector: string };
@@ -166,6 +167,22 @@ export function assertRelayPayload(kind: RelayKind, request: RelayRequest, ctx: 
       for (const call of calls) {
         const target = String(call.target).toLowerCase();
         if (!redeemTargets.includes(target)) throw new Error(`target_not_allowed: ${target}`);
+      }
+      break;
+    }
+    case "BRIDGE_OUT": {
+      // This is the arm that CLOSES the ceiling the WITHDRAW case still documents: a bridge
+      // recipient is knowable because our own server created it, unlike a router plan. The bridge
+      // address is single-purpose, so the device can demand an exact pUSD transfer to exactly it.
+      const recipient = address(ctx.expectedRecipient);
+      if (!recipient) throw new Error("recipient_unknown: no bridge address to verify against");
+      for (const call of calls) {
+        const target = String(call.target).toLowerCase();
+        if (target !== PUSD_ADDRESS.toLowerCase()) throw new Error(`target_not_allowed: ${target}`);
+        const selector = String(call.data).slice(0, 10).toLowerCase();
+        if (selector !== "0xa9059cbb") throw new Error(`selector_not_allowed: ${selector}`);
+        const decoded = firstAddressArg(String(call.data));
+        if (!decoded || decoded !== recipient) throw new Error(`recipient_not_allowed: ${decoded ?? "unreadable"}`);
       }
       break;
     }

@@ -11,12 +11,13 @@ import { authUser } from "@/lib/privy";
 import { isRealMoneyEligible, hasRealConsent, sameOrigin } from "@/lib/real";
 import { captureToGlitchTip, sendOpsTelegram } from "@/lib/glitchtip";
 import { serverSecureClient } from "@/lib/polymarket-server";
+import { relayerVerdict } from "@/lib/relayer-verdict";
+import { bridgeOutSpec, type BridgeOutInputs } from "@/lib/bridge-out";
 import { buildWrapCalls, buildApprovalCalls, CTF_EXCHANGE, NEGRISK_CTF_EXCHANGE, CONDITIONAL_TOKENS } from "@/lib/wallet-ops";
 import {
   startWorkflow,
   answerWorkflow,
   runScoped,
-  type TxVerdict,
   type WorkflowGen,
   type WorkflowSpec,
   type StepRequest,
@@ -28,10 +29,9 @@ import {
   prepareRedeemPositions,
   planCollateralReturn,
   prepareCollateralReturnExecution,
-  fetchTransaction,
 } from "@polymarket/client/actions";
 
-const KINDS = ["APPROVALS", "WRAP", "REDEEM", "WITHDRAW"] as const;
+const KINDS = ["APPROVALS", "WRAP", "REDEEM", "WITHDRAW", "BRIDGE_OUT"] as const;
 type Kind = (typeof KINDS)[number];
 
 const EVM_SIG = /^0x[0-9a-fA-F]{130}$/; // validate BEFORE the fence — the SDK throws on garbage inside it
@@ -66,26 +66,6 @@ async function consumeResolvedPosition(betId: string, won: boolean): Promise<boo
 // below read. State semantics are the SDK's own (TransactionHandle.wait): STATE_CONFIRMED =
 // landed, STATE_FAILED/STATE_INVALID = terminal failure, everything else still in flight.
 // Never cached: txHash legitimately changes mid-request when a run restarts.
-async function relayerVerdict(
-  userId: string,
-  kind: Kind,
-  client: NonNullable<Awaited<ReturnType<typeof serverSecureClient>>>,
-): Promise<TxVerdict> {
-  const row = await prisma.walletWorkflow.findUnique({
-    where: { userId_kind: { userId, kind } },
-    select: { txHash: true },
-  });
-  if (!row?.txHash) return "unknown"; // nothing handed off to the relayer yet
-  try {
-    const tx = await fetchTransaction(client, { transactionId: row.txHash });
-    const state = String(tx.state);
-    if (state === "STATE_CONFIRMED") return "landed";
-    if (state === "STATE_FAILED" || state === "STATE_INVALID") return "failed";
-    return "pending"; // STATE_NEW / STATE_EXECUTED / STATE_MINED
-  } catch {
-    return "unknown"; // probe unreachable — the balance predicates stay in charge
-  }
-}
 
 export async function POST(req: Request) {
   const user = await authUser(req);
@@ -312,6 +292,19 @@ export async function POST(req: Request) {
         return now >= BigInt(runInputs.pusdBaseline);
       },
     };
+  } else if (kind === "BRIDGE_OUT") {
+    // The single-purpose bridge address is minted by POST /api/real/withdraw and NEVER here. The
+    // split is the whole safety property: each address forwards whatever lands on it to the
+    // recipient it was created for, so a retry that minted a fresh one would leave live
+    // forwarding addresses lying around. This arm only drives a run that already exists.
+    const row = await prisma.walletWorkflow.findUnique({
+      where: { userId_kind: { userId: user.id, kind: "BRIDGE_OUT" } },
+    });
+    if (!row || (row.state !== "PENDING_SIGNATURE" && row.state !== "SUBMITTING" && row.state !== "DONE")) {
+      return NextResponse.json({ error: "no_withdrawal_pending" }, { status: 409 });
+    }
+    const runInputs = row.inputs as unknown as BridgeOutInputs;
+    spec = bridgeOutSpec(user.id, signerAddress, client, runInputs);
   } else {
     spec = {
       userId: user.id,
@@ -345,7 +338,7 @@ export async function POST(req: Request) {
   // delta (K3 S6/S7 MEDIUM-1: a concurrent fill/wrap/withdraw satisfies or masks every one of
   // them). APPROVALS keeps its live allowance check — approvals are idempotent and an external
   // revocation SHOULD re-arm the run, which is state semantics, not event semantics.
-  if (kind !== "APPROVALS") spec = runScoped(spec, () => relayerVerdict(user.id, kind, client));
+  if (kind !== "APPROVALS") spec = runScoped(spec, () => relayerVerdict(prisma, user.id, kind, client));
 
   try {
     const result = answer ? await answerWorkflow(prisma, spec, answer) : await startWorkflow(prisma, spec);
