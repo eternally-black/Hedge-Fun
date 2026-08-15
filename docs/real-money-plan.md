@@ -48,10 +48,14 @@ wallet** (not a raw-key throwaway — K3's top risk):
    LIVE relay end to end: start → device signs → advance → relayer accepts; plus a
    lost-session restart mid-flow.
 8. Do resolved positions in a Deposit Wallet **auto-redeem**? (Funds-recovery question — Sol.)
-9. **Withdrawal mechanics** (in scope for alpha per owner decision Q2): getting pUSD back out —
-   unwrap pUSD → USDC.e, transfer/bridge back toward Solana. Proven nowhere; the bridge endpoint
-   we use is deposit-only. Likely a small real-money mini-spike (~$2) and relayer txs; if no
-   self-serve path exists, this escalates to Polymarket **early**, not at step 7.
+9. ~~**Withdrawal mechanics** — proven nowhere; the bridge endpoint we use is deposit-only.~~
+   **ANSWERED (2026-08-15): the bridge does withdrawals too**, documented at
+   `docs.polymarket.com/trading/bridge/withdraw` and implemented as `BRIDGE_OUT`:
+   `GET /supported-assets` → `POST /withdraw {address,toChainId,toTokenAddress,recipientAddr}` with
+   `X-Builder-Code` → send pUSD to the returned **evm** address (even for Solana — the deposit
+   wallet lives on Polygon) → poll `GET /status/{address}`. No Polymarket fee; per-asset minimums
+   (Solana USDC: $2, chain id is the STRING `1151111081099710`). Gate-0 now only has to run it once
+   with real money, not discover whether a path exists.
 
 Path B (if 1 or 2 fails): server builds orders, device signs — requires reaching past the public
 API. Escalate to Polymarket; funding/wrap work (§3 steps 1–4) is unaffected and proceeds.
