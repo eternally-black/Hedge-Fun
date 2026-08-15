@@ -3,6 +3,7 @@
 // would otherwise only surface as a relayer rejection with real money in flight.
 import assert from "node:assert";
 import {
+  COLLATERAL_ADAPTER,
   buildWrapCalls,
   buildApprovalCalls,
   COLLATERAL_ONRAMP,
@@ -42,11 +43,12 @@ async function main() {
   assert.ok(zeroCalls[1].data.endsWith("0".repeat(64)), "wrap amount word zero");
   assert.strictEqual(zeroCalls[1].data.slice(0, 10 + 128), calls[1].data.slice(0, 10 + 128), "wrap selector+addresses intact");
 
-  // Approval set: byte-pin the EXACT four calls (the higher-blast-radius output — a wrong ABI or
-  // address here surfaces as MAX_UINT granted to the wrong contract). Addresses externally
-  // verified against PolygonScan labels in the S4 review round.
+  // Approval set: byte-pin the EXACT six calls (the higher-blast-radius output — a wrong ABI or
+  // address here surfaces as MAX_UINT granted to the wrong contract). Exchange addresses were
+  // externally verified against PolygonScan labels in the S4 review round; the collateral adapter
+  // comes from the SDK's own production environment config and is what PERFORMS a redemption.
   const approvals = buildApprovalCalls();
-  assert.strictEqual(approvals.length, 4, "exactly four calls, nothing more");
+  assert.strictEqual(approvals.length, 6, "exactly six calls, nothing more");
   const MAX = "f".repeat(64);
   const pad = (a: string) => a.toLowerCase().replace(/^0x/, "").padStart(64, "0");
   assert.deepStrictEqual(
@@ -56,6 +58,8 @@ async function main() {
       [PUSD_ADDRESS, "0x095ea7b3" + pad(NEGRISK_CTF_EXCHANGE) + MAX],
       [CONDITIONAL_TOKENS, "0xa22cb465" + pad(CTF_EXCHANGE) + "1".padStart(64, "0")],
       [CONDITIONAL_TOKENS, "0xa22cb465" + pad(NEGRISK_CTF_EXCHANGE) + "1".padStart(64, "0")],
+      [PUSD_ADDRESS, "0x095ea7b3" + pad(COLLATERAL_ADAPTER) + MAX],
+      [CONDITIONAL_TOKENS, "0xa22cb465" + pad(COLLATERAL_ADAPTER) + "1".padStart(64, "0")],
     ],
     "approval calldata pinned byte for byte",
   );

@@ -37,12 +37,28 @@ export const NEGRISK_CTF_EXCHANGE = "0xe2222d279d744050d28e00520010520000310f59"
 export const CONDITIONAL_TOKENS = "0x4d97dcd97ec945f40cf65f87097ace5ea0476045";
 const MAX_UINT256 = "f".repeat(64);
 
+export const COLLATERAL_ADAPTER = "0xAdA100Db00Ca00073811820692005400218FcE1f"; // redeems normal-market wins
+export const NEG_RISK_COLLATERAL_ADAPTER = "0xadA2005600Dec949baf300f4C6120000bDB6eAab"; // neg-risk redemption — NOT approved in the alpha
+
 // approve(spender, MAX)   0x095ea7b3   |   setApprovalForAll(operator, true)   0xa22cb465
+// The EXPLICIT alpha set: trade on the two exchanges, redeem through the normal collateral adapter.
+// The collateral adapter is the contract that PERFORMS a redemption (the SDK builds redeem as
+// ctfRedeemPositionsCall(adapterAddress,…)) — without these two calls a winning position could be
+// redeemed by nobody, which is why they are here and not in the "widen later" pile. Still excluded
+// on purpose, unlike the SDK's generic prepareTradingApprovals: the neg-risk collateral adapter,
+// the auto-redeem operator, perps, the v3 exchange and the v2 router.
 export function buildApprovalCalls(): WalletCall[] {
   const approvePusd = (spender: string) => ({ to: PUSD_ADDRESS, data: "0x095ea7b3" + addr(spender) + MAX_UINT256 });
   const approveCtf = (operator: string) => ({
     to: CONDITIONAL_TOKENS,
     data: "0xa22cb465" + addr(operator) + "1".padStart(64, "0"),
   });
-  return [approvePusd(CTF_EXCHANGE), approvePusd(NEGRISK_CTF_EXCHANGE), approveCtf(CTF_EXCHANGE), approveCtf(NEGRISK_CTF_EXCHANGE)];
+  return [
+    approvePusd(CTF_EXCHANGE),
+    approvePusd(NEGRISK_CTF_EXCHANGE),
+    approveCtf(CTF_EXCHANGE),
+    approveCtf(NEGRISK_CTF_EXCHANGE),
+    approvePusd(COLLATERAL_ADAPTER),
+    approveCtf(COLLATERAL_ADAPTER),
+  ];
 }

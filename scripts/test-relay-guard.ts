@@ -2,7 +2,7 @@
 // asks for it. Each case names the drain it prevents.
 import assert from "node:assert/strict";
 import { APPROVAL_ALLOWLIST, EXCHANGE_ALLOWLIST, WRAP_ALLOWLIST, assertRelayPayload } from "../src/lib/relay-guard";
-import { buildApprovalCalls, buildWrapCalls, CONDITIONAL_TOKENS } from "../src/lib/wallet-ops";
+import { buildApprovalCalls, buildWrapCalls, COLLATERAL_ADAPTER, CONDITIONAL_TOKENS } from "../src/lib/wallet-ops";
 
 const DEPOSIT = "0x1111111111111111111111111111111111111111";
 const OTHER = "0x2222222222222222222222222222222222222222";
@@ -32,8 +32,8 @@ function payload(calls: readonly CallInput[], over: Record<string, unknown> = {}
 const req = (p: unknown, kind: unknown = "signGaslessTypedData") => ({ kind, payload: p });
 
 async function main() {
-  // 1 — the four calls the alpha actually makes must pass untouched, or the guard breaks the product.
-  assert.strictEqual(APPROVAL_ALLOWLIST.length, 4);
+  // 1 — the six calls the alpha actually makes must pass untouched, or the guard breaks the product.
+  assert.strictEqual(APPROVAL_ALLOWLIST.length, 6); // 2 exchanges × 2 token kinds + the collateral adapter pair
   assert.doesNotThrow(() => assertRelayPayload("APPROVALS", req(payload(asCalls(approvals))), ctx));
 
   // 2 — same for the wrap pair (approve + on-ramp), which is byte-pinned to a production transaction.
@@ -67,7 +67,7 @@ async function main() {
     /nonzero_value/,
   );
 
-  // 10 — an approval aimed at an attacker's own contract is not one of the four.
+  // 10 — an approval aimed at an attacker's own contract is not one of the six.
   assert.throws(
     () => assertRelayPayload("APPROVALS", req(payload([{ target: ATTACKER, data: `0x095ea7b3${word(ATTACKER)}${"f".repeat(64)}` }])), ctx),
     /target_not_allowed/,
@@ -85,8 +85,14 @@ async function main() {
     /spender_not_allowed/,
   );
 
-  // 12 — REDEEM is pinned to the conditional-tokens contract; its selector deliberately is not.
-  assert.doesNotThrow(() => assertRelayPayload("REDEEM", req(payload([{ target: CONDITIONAL_TOKENS, data: "0x12345678" }])), ctx));
+  // 12 — REDEEM goes to the COLLATERAL ADAPTER, not to conditional-tokens: the SDK builds it as
+  // ctfRedeemPositionsCall(adapterAddress, …). Pinning conditional-tokens (the guard's first rule)
+  // refused every real redemption, so that exact regression is asserted here.
+  assert.doesNotThrow(() => assertRelayPayload("REDEEM", req(payload([{ target: COLLATERAL_ADAPTER, data: "0x12345678" }])), ctx));
+  assert.throws(
+    () => assertRelayPayload("REDEEM", req(payload([{ target: CONDITIONAL_TOKENS, data: "0x12345678" }])), ctx),
+    /target_not_allowed/,
+  );
   assert.throws(
     () => assertRelayPayload("REDEEM", req(payload([{ target: ATTACKER, data: "0x12345678" }])), ctx),
     /target_not_allowed/,

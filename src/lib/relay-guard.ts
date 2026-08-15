@@ -2,7 +2,14 @@
 // WHAT the device signs — so without this, a compromised or buggy server can hand the browser a
 // deposit-wallet Batch whose calls approve an attacker, and one routine-looking prompt drains the
 // wallet (found independently by both S9 reviewers). Pure and SDK-free so tsx can test it.
-import { buildApprovalCalls, buildWrapCalls, CONDITIONAL_TOKENS, CTF_EXCHANGE, NEGRISK_CTF_EXCHANGE } from "./wallet-ops";
+import {
+  buildApprovalCalls,
+  buildWrapCalls,
+  COLLATERAL_ADAPTER,
+  CTF_EXCHANGE,
+  NEGRISK_CTF_EXCHANGE,
+  NEG_RISK_COLLATERAL_ADAPTER,
+} from "./wallet-ops";
 
 export type RelayKind = "APPROVALS" | "WRAP" | "REDEEM" | "WITHDRAW";
 
@@ -86,8 +93,13 @@ function assertAgainst(calls: readonly CallRecord[], allowed: readonly TargetSel
       throw new Error(`selector_not_allowed: ${selector}`);
     }
     if (checkSpender) {
+      // The spender set is DERIVED from our own approval calls, so the check is the full triple
+      // (target, selector, spender) and it cannot drift when the approval set grows.
       const spender = firstAddressArg(String(call.data));
-      if (!spender || !EXCHANGE_ALLOWLIST.includes(spender)) throw new Error(`spender_not_allowed: ${spender ?? "unreadable"}`);
+      const granted = APPROVAL_ALLOWLIST.some(
+        (a) => a.target === target && a.selector === selector && a.spender === spender,
+      );
+      if (!spender || !granted) throw new Error(`spender_not_allowed: ${spender ?? "unreadable"}`);
     }
   }
 }
@@ -143,11 +155,17 @@ export function assertRelayPayload(kind: RelayKind, request: RelayRequest, ctx: 
       assertAgainst(calls, WRAP_ALLOWLIST, false);
       break;
     case "REDEEM": {
-      // Target only: the SDK builds the redeem calldata and we have not byte-pinned it, so pinning
-      // a selector here would false-reject a valid redemption.
-      const ctf = CONDITIONAL_TOKENS.toLowerCase();
+      // Target only, and NOT the conditional-tokens contract: the SDK builds redemption as
+      // ctfRedeemPositionsCall(adapterAddress, …) where the adapter is the normal-market or the
+      // neg-risk collateral adapter. Pinning conditional-tokens here (as this guard first did)
+      // refuses every legitimate redemption. The selector stays unpinned — the SDK's redeem
+      // calldata is not byte-pinned, and a guessed selector would false-reject a valid one. The
+      // neg-risk adapter is allowed as a TARGET although the alpha does not approve it, so such an
+      // attempt fails on chain with the real reason instead of on a misleading local refusal.
+      const redeemTargets = [COLLATERAL_ADAPTER.toLowerCase(), NEG_RISK_COLLATERAL_ADAPTER.toLowerCase()];
       for (const call of calls) {
-        if (String(call.target).toLowerCase() !== ctf) throw new Error(`target_not_allowed: ${String(call.target)}`);
+        const target = String(call.target).toLowerCase();
+        if (!redeemTargets.includes(target)) throw new Error(`target_not_allowed: ${target}`);
       }
       break;
     }
