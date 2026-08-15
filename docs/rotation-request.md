@@ -4,9 +4,15 @@
 engineering side cannot do any of this: both actions need console/account ownership, and neither
 should ever pass through a developer's hands.
 
-**Why now:** an older set of Polymarket builder credentials and a throwaway spike-wallet key were
-pasted into a chat transcript, so both must be treated as public. The real-money layer is code-
-complete and blocked on this one item before any live funds move.
+**Why now — lead time, not an incident.** An older set of Polymarket builder credentials and a
+throwaway spike-wallet key were pasted into a chat transcript, so both have to be treated as public.
+Nothing is live yet and no user funds are exposed, so this is not a fire drill: the reason to start
+today is that the rotation is not an engineering action, it may need a round-trip with Polymarket,
+and it gates the first live run of the real-money path. The code is finished and green; development
+continues on the current credentials regardless.
+
+Nothing sensitive is in the repository — `.env*` has always been git-ignored and only `.env.example`
+files were ever committed (verified 2026-08-15).
 
 ---
 
