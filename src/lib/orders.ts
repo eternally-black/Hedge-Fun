@@ -3,8 +3,26 @@
 // possible — the route wires the SDK; this module is what the tests pin.
 import { createHash } from "node:crypto";
 import type { PrismaClient, OrderAttempt } from "@prisma/client";
-import { SWIPE_CAP } from "./config";
 import { feePerShareMicro } from "./quote";
+// Aliased: `utcDay` is also a LOCAL const inside the bookers, and the zero-fill release below runs
+// before that declaration — an unaliased import would resolve into its temporal dead zone.
+import { utcDay as utcDayOf } from "./time";
+
+// Give back a reserved daily-cap slot. /api/real/submit reserves one inside the CAS-claim
+// transaction, so every terminal path that ends with NO position must return it. The counter is
+// SHARED with the paper economy (swipe.ts), so the guard floors it at zero rather than letting a
+// double release borrow from a paper swipe.
+export async function releaseSwipeSlot(
+  // Accepts a transaction client too, so a caller can make the release atomic with its own write.
+  prisma: Pick<PrismaClient, "dailyCounter">,
+  userId: string,
+  utcDay: string,
+): Promise<void> {
+  await prisma.dailyCounter.updateMany({
+    where: { userId, utcDay, swipeCount: { gt: 0 } },
+    data: { swipeCount: { decrement: 1 } },
+  });
+}
 
 // ------------------------------------------------------------------ signed-order validation
 // The SignedOrder wire shape (0.6.0 typings): maker/signer/tokenId/side/signatureType/orderType/
@@ -42,8 +60,24 @@ export interface ExitIntentParams {
 }
 
 export function hashSignedOrder(signed: SignedOrderWire): string {
-  const sorted = Object.fromEntries(Object.keys(signed).sort().map((k) => [k, signed[k]]));
-  return createHash("sha256").update(JSON.stringify(sorted)).digest("hex");
+  // A canonical tuple of the VALIDATED fields, not the whole wire object. Hashing every key the
+  // client happened to send made the replay guard defeatable by a key the exchange ignores: the
+  // same order carrying an extra `"junk": 1`, or `expiration` as the string "0" instead of 0,
+  // hashes differently and slips past the signedOrderHash unique — the wire type admits arbitrary
+  // keys (`[k: string]: unknown` above). The exchange's order dedup and the Fill unique are the
+  // real backstops, so nothing double-booked, but a guard any extra key defeats is not a guard.
+  // Changing the shape is safe: the hash is only ever compared against other hashes we compute.
+  const canonical = [
+    String(signed.maker).toLowerCase(),
+    String(signed.signer).toLowerCase(),
+    String(signed.tokenId),
+    String(signed.side).toUpperCase(),
+    String(signed.makerAmount),
+    String(signed.takerAmount),
+    String(signed.salt),
+    String(signed.signature).toLowerCase(),
+  ].join("|");
+  return createHash("sha256").update(canonical).digest("hex");
 }
 
 
@@ -268,14 +302,25 @@ export async function bookEntryFills(
   opts?: { cumulative?: boolean },
 ): Promise<"FILLED" | "PARTIAL" | "KILLED"> {
   if (fills.length === 0) {
-    await prisma.orderAttempt.updateMany({
-      where: { id: attempt.id, state: { in: ["SUBMITTING", "POSTED"] } },
-      data: { state: "KILLED" },
+    // KILL and release in ONE transaction. Two statements meant a crash in between left the attempt
+    // terminal with the slot still spent, and unrecoverably so: the retry's updateMany matches zero
+    // rows, so nothing downstream can tell that the release still owes.
+    const killed = await prisma.$transaction(async (tx) => {
+      const k = await tx.orderAttempt.updateMany({
+        where: { id: attempt.id, state: { in: ["SUBMITTING", "POSTED"] } },
+        data: { state: "KILLED" },
+      });
+      if (k.count > 0) await releaseSwipeSlot(tx, attempt.userId, utcDayOf(attempt.createdAt));
+      return k;
     });
     return "KILLED";
   }
 
-  const utcDay = new Date().toISOString().slice(0, 10);
+  // The ATTEMPT's day everywhere below — the same key /api/real/submit reserved the cap slot under.
+  // Using the wall clock here would put the point (and the bet) on the fill day while the slot was
+  // spent on the submit day, so a fill that lands after midnight could mint a point on a day whose
+  // cap was already full.
+  const utcDay = utcDayOf(attempt.createdAt);
   let outcome: "FILLED" | "PARTIAL" | "KILLED" = "KILLED";
 
   await prisma.$transaction(async (tx) => {
@@ -336,8 +381,20 @@ export async function bookEntryFills(
     // creating it (a split receipt must not burn a second swipe of the daily cap).
     const priorBet = await tx.bet.findUnique({
       where: { userId_marketId_mode: { userId: attempt.userId, marketId: attempt.marketId, mode: "REAL" } },
-      select: { id: true },
+      select: { id: true, filledSharesMicro: true, closedSharesMicro: true },
     });
+
+    // REOPEN vs add-to-position. The intent route admits an ENTRY whenever the remainder is zero,
+    // so this row can be a fully-CLOSED lot from an earlier trade — and, since the block it passed
+    // was only about the remainder, a lot on the OTHER side. Incrementing into it keeps the stale
+    // `side`, and EXIT reads exactly that field to pick the token to sell: the user would sign a
+    // SELL for a token they do not hold. It also leaves the closed lot's cost in spendMicro, which
+    // bookExitFills prorates as basis, so the reopened position's realized PnL is priced against
+    // money that was already realized. Reset the LOT to this fill and adopt the side actually
+    // bought. realizedPnlMicro is deliberately NOT reset — it is the account's running history,
+    // not this lot's basis. Unreachable with zero fills: the fresh.length===0 return above.
+    const reopening =
+      priorBet !== null && (priorBet.filledSharesMicro ?? 0n) - (priorBet.closedSharesMicro ?? 0n) <= 0n;
 
     // The position aggregate — one REAL row per (user, market). stakeCents keeps the swiped
     // all-in INTENT; actuals live in the micro fields (PnL derives from these, never stakeCents).
@@ -357,14 +414,33 @@ export async function bookEntryFills(
         feeMicro: totalFee,
         vwapBp,
       },
-      update: {
-        filledSharesMicro: { increment: totalShares },
-        spendMicro: { increment: totalSpend },
-        feeMicro: { increment: totalFee },
-        // vwapBp is NOT set from this batch — it is re-derived from the post-increment aggregate
-        // below, so it can never diverge from spendMicro/filledSharesMicro after an add-to-
-        // position (K3 S6/S7 Q2). Still fee-EXCLUSIVE: the micro fields carry the all-in truth.
-      },
+      update: reopening
+        ? {
+            // A new lot in every field the basis is computed from, plus the side that was actually
+            // bought. The close-side counters go back to zero or the next EXIT would think part of
+            // this lot is already sold.
+            side: betSide,
+            stakeCents: Number(attempt.allInCapMicro / 10_000n),
+            utcDay,
+            // New lot, new number. Every attempt stamps the lot it booked into, so a late fee
+            // true-up for the PREVIOUS lot can tell that the counters it wants to prorate against
+            // are no longer its own.
+            lotSeq: { increment: 1 },
+            filledSharesMicro: totalShares,
+            spendMicro: totalSpend,
+            feeMicro: totalFee,
+            closedSharesMicro: 0n,
+            proceedsMicro: 0n,
+            closeFeeMicro: 0n,
+          }
+        : {
+            filledSharesMicro: { increment: totalShares },
+            spendMicro: { increment: totalSpend },
+            feeMicro: { increment: totalFee },
+            // vwapBp is NOT set from this batch — it is re-derived from the post-increment aggregate
+            // below, so it can never diverge from spendMicro/filledSharesMicro after an add-to-
+            // position (K3 S6/S7 Q2). Still fee-EXCLUSIVE: the micro fields carry the all-in truth.
+          },
     });
     const nextVwap =
       bet.filledSharesMicro && bet.filledSharesMicro > 0n
@@ -372,7 +448,10 @@ export async function bookEntryFills(
         : vwapBp;
     if (nextVwap !== bet.vwapBp) await tx.bet.update({ where: { id: bet.id }, data: { vwapBp: nextVwap } });
 
-    await tx.orderAttempt.update({ where: { id: attempt.id }, data: { state: outcome, betId: bet.id } });
+    await tx.orderAttempt.update({
+      where: { id: attempt.id },
+      data: { state: outcome, betId: bet.id, lotSeq: bet.lotSeq },
+    });
 
     // Q1 (owner, locked): real swipes fully participate — swipe counter + point book AT FILL,
     // VirtualBalance untouched. Over-cap fills (day rolled over between intent and fill) record
@@ -383,17 +462,23 @@ export async function bookEntryFills(
     // second receipt for a position booked zero rows). The duplicate is PREVENTED via priorBet;
     // a genuine concurrent duplicate now throws — visible and reconcilable, never silent loss.
     if (!priorBet) {
-      const counter = await tx.dailyCounter.upsert({
-        where: { userId_utcDay: { userId: attempt.userId, utcDay } },
-        create: { userId: attempt.userId, utcDay, swipeCount: 1 },
-        update: { swipeCount: { increment: 1 } },
+      // The swipe COUNTER is no longer bumped here — /api/real/submit reserves it inside the same
+      // transaction as the CAS claim, because a bare read at intent time let N parallel intents
+      // pass on one value and let a re-entry after a full EXIT skip the increment entirely via the
+      // `!priorBet` guard right above. The reservation throws when the post-increment value would
+      // exceed the cap, so anything that reaches this line was within it by construction — the
+      // old `swipeCount <= SWIPE_CAP` re-check would now only mis-fire on a later swipe's bump.
+      // ponytail: a REOPENED lot consumes a swipe slot at /submit but earns no point, because this
+      // block is gated on `!priorBet` and a reopen reuses the same Bet row. Do NOT fix it by
+      // relaxing the guard: PointsLedger.betId is UNIQUE, so a second row for the same bet throws
+      // P2002 inside this transaction, and a swallowed P2002 in Postgres turns the COMMIT into a
+      // silent ROLLBACK — the exact failure the comment above this block was written about. The
+      // column it needs now exists (Bet.lotSeq); the remaining work is replacing that unique with a
+      // composite on (betId, lotSeq), which is a data migration, not an additive one.
+      await tx.pointsLedger.create({
+        data: { userId: attempt.userId, type: "SWIPE", amount: 1, utcDay, betId: bet.id },
       });
-      if (counter.swipeCount <= SWIPE_CAP) {
-        await tx.pointsLedger.create({
-          data: { userId: attempt.userId, type: "SWIPE", amount: 1, utcDay, betId: bet.id },
-        });
-        await tx.bet.update({ where: { id: bet.id }, data: { earnedPoint: true } });
-      }
+      await tx.bet.update({ where: { id: bet.id }, data: { earnedPoint: true } });
     }
   });
 
@@ -535,6 +620,7 @@ export async function bookExitFills(
     await tx.orderAttempt.update({
       where: { id: attempt.id },
       data: {
+        lotSeq: bet.lotSeq, // the lot this close belongs to — see trueUpAttemptFee
         state: outcome,
         betId: bet.id,
         error: prorate ? `clamped: fill ${totalShares} > remainder ${remainder}` : null,
@@ -595,6 +681,17 @@ export async function trueUpAttemptFee(
       }
     }
     if (!bet) return applied;
+    // The aggregate half only applies while the row still describes THIS attempt's lot. A reopened
+    // position reuses the same bets row with the counters reset and lotSeq bumped, so prorating
+    // against them would charge a correction to a basis that never paid it and leave the closed lot
+    // still holding a fee now known to be wrong. The Fill rows above are per-attempt and were
+    // already corrected — that part is always right. Null lotSeq means the attempt predates lot
+    // tracking: treated as a match, so historical rows keep behaving exactly as they did.
+    if (attempt.lotSeq !== null && attempt.lotSeq !== bet.lotSeq) return applied;
+    // How much of this lot is already realized — the slice a late entry-fee correction must restate
+    // by hand, because it has no future exit to price itself off the corrected basis.
+    const filledShare = bet.filledSharesMicro ?? 0n;
+    const closedShare = filledShare > 0n ? (bet.closedSharesMicro ?? 0n) : 0n;
 
     // Explicit SET, not { increment }: these columns are NULL on rows that never got there and
     // SQL NULL + x = NULL (the rule the close test pinned). Safe — the row was read in THIS tx.
@@ -606,9 +703,20 @@ export async function trueUpAttemptFee(
             closeFeeMicro: (bet.closeFeeMicro ?? 0n) + applied,
             realizedPnlMicro: (bet.realizedPnlMicro ?? 0n) - applied,
           }
-        : // The entry fee needs no PnL correction: the cost basis IS spendMicro + feeMicro, so
-          // every future exit prices itself off the corrected number.
-          { feeMicro: (bet.feeMicro ?? 0n) + applied },
+        : // An entry-fee correction reprices the cost basis (basis IS spendMicro + feeMicro), so
+          // every FUTURE exit picks it up for free. The shares already closed have no future exit
+          // left to pick it up: bookExitFills computed their realizedDelta against the fee that was
+          // on the row at the time, and that number is now known to be wrong. Restate exactly the
+          // closed fraction — a fully closed lot would otherwise swallow the whole correction, and
+          // a position entered at a 20_000µ¢ under-estimate and closed flat would keep reporting
+          // zero PnL on what was really a 20_000µ¢ loss. Floor-divides like the exit's own prorate,
+          // so the correction never claims more than the closed slice actually bore.
+          {
+            feeMicro: (bet.feeMicro ?? 0n) + applied,
+            ...(closedShare > 0n
+              ? { realizedPnlMicro: (bet.realizedPnlMicro ?? 0n) - (applied * closedShare) / filledShare }
+              : {}),
+          },
     });
     return applied;
   });

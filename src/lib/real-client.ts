@@ -90,6 +90,7 @@ type WorkflowResponse =
 type RelayLoopOptions = {
   firstResponse?: WorkflowResponse; // a run another route already started (BRIDGE_OUT)
   expectedRecipient?: string; // the bridge address the device must see inside the transfer
+  expectedAmountMicro?: string; // and how much: word 1 of the transfer, not just word 0
   onStep?: (note: string) => void;
 };
 
@@ -127,7 +128,11 @@ async function runRelayLoop(
         assertRelayPayload(
           kind,
           { kind: request.kind, payload },
-          { depositWallet: ctx.depositWalletAddress ?? "", expectedRecipient: options.expectedRecipient },
+          {
+            depositWallet: ctx.depositWalletAddress ?? "",
+            expectedRecipient: options.expectedRecipient,
+            expectedAmountMicro: options.expectedAmountMicro,
+          },
         );
         const signature = await signer.signTypedData(payload as never);
         answer = { runId: response.runId, requestHash: response.requestHash, signature };
@@ -178,18 +183,27 @@ export async function withdrawViaBridge(
   const started = (await api("/api/real/withdraw", {
     method: "POST",
     body: JSON.stringify(params),
-  })) as WorkflowResponse & { bridgeAddress?: string };
+  })) as WorkflowResponse & { bridgeAddress?: string; amountMicro?: string };
   if (!started.bridgeAddress) throw new Error("bridge_address_missing");
   const outcome = await runRelayLoop(api, ctx, "BRIDGE_OUT", {
     firstResponse: started,
     expectedRecipient: started.bridgeAddress,
+    // Prefer the amount the USER typed over the one the server echoed: pinning the payload against
+    // a number from the same server that built it only catches a buggy server, not a hostile one.
+    // An empty amount means "send everything", which only the server can resolve to a figure, so
+    // there the echoed value is all the device has — still better than leaving word 1 unchecked.
+    // `?? ` alone would let an empty string through, and the guard treats "" as unreadable and
+    // refuses to sign — killing exactly the "send everything" case this line exists to support. The
+    // shipped card already sends undefined for it, but this function is exported and the failure
+    // would be a refusal to withdraw, so it is normalised here rather than trusted upstream.
+    expectedAmountMicro: params.amountMicro?.trim() ? params.amountMicro.trim() : started.amountMicro,
     onStep,
   });
   return { ...outcome, bridgeAddress: started.bridgeAddress };
 }
 
 type IntentParams =
-  | { side: "BUY"; tokenId: string; allInCapMicro: string; maxPriceBp: number }
+  | { side: "BUY"; tokenId: string; allInCapMicro: string; maxPriceBp: number; quote: { feeMicro: string } }
   | { side: "SELL"; tokenId: string; sharesMicro: string; minPriceBp: number };
 
 // /api/real/intent REQUIRES a browser-side geo verdict (plan §2.7 — policy, not proof; Polymarket's
@@ -210,7 +224,15 @@ async function geoVerdict(client: SecureClient): Promise<{ blocked: boolean; clo
 export async function placeRealOrder(
   api: Api,
   ctx: RealCtx,
-  input: { marketId: string; side: "YES" | "NO"; stakeCents?: number; dir?: "ENTRY" | "EXIT" },
+  // quotedPriceBp = the price the user actually saw on the card. The server refuses the intent if
+  // the book has since moved against them past tolerance — same contract as the paper /api/swipe.
+  input: {
+    marketId: string;
+    side: "YES" | "NO";
+    stakeCents?: number;
+    dir?: "ENTRY" | "EXIT";
+    quotedPriceBp?: number;
+  },
 ): Promise<{ status: string; filledSharesMicro?: string }> {
   const client = await getRealClient(ctx);
   const intent = (await api("/api/real/intent", {
@@ -224,7 +246,15 @@ export async function placeRealOrder(
   const signer = privySigner(ctx.wallet);
   // The builder field is SIGNED into the order and the server validates it, so a missing code fails
   // loudly at /api/real/submit instead of quietly posting unattributed volume.
+  // The SDK's `builderCode` is NOT a human-readable name: toBuilderCode throws unless it is exactly
+  // a 32-byte hex string (0x + 64 hex chars). A plain word here would fail as a TypeError from
+  // inside prepareMarketOrder, at order-placement time, on every attributed order. Checked at the
+  // point the env is read so a misconfigured deployment says what is wrong instead of surfacing as
+  // a Zod failure deep in the SDK. Absent is fine and stays fine — that arm just posts unattributed.
   const code = process.env.NEXT_PUBLIC_POLYMARKET_BUILDER_CODE;
+  if (code && !/^0x[0-9a-fA-F]{64}$/.test(code)) {
+    throw new Error("NEXT_PUBLIC_POLYMARKET_BUILDER_CODE must be a 32-byte hex string (0x + 64 hex chars)");
+  }
   const builder = code ? { builderCode: code } : {};
 
   const workflow =
@@ -239,11 +269,19 @@ export async function placeRealOrder(
       : await prepareMarketOrder(client, {
           tokenId: intent.params.tokenId,
           side: OrderSide.BUY,
-          // Micro-USD → dollars. `amount` alone is FEE-EXCLUSIVE — the SDK's own words: "Leave
-          // [maxSpend] unset to pay fees on top of amount". Our stake IS the all-in cap, so both
-          // fields carry it and the SDK resizes the buy to fit fees inside it. Omitting maxSpend
-          // debits more than the user approved and still passes the server's makerAmount check.
-          amount: Number(intent.params.allInCapMicro) / 1e6,
+          // Micro-USD → dollars. `amount` is FEE-EXCLUSIVE — the SDK's own words: "Leave [maxSpend]
+          // unset to pay fees on top of amount". Omitting maxSpend therefore debits more than the
+          // user approved and still passes the server's makerAmount check, so the cap must be in it.
+          // But the cap must NOT also be `amount`: the SDK's resize reserves the fee at the order's
+          // BOUND price, and the fee curve rate·(p(1−p))^exp PEAKS at p=0.5, so fills nearer the
+          // middle than the bound pay more than it reserved. Asks [0.50×50, 0.99×50] on a $60 stake
+          // bound at 0.99 reserve almost nothing and debit ~$60.85. `amount` is instead the server's
+          // OWN exact per-level quote — cap minus its quoted fee, which quoteBuyAllIn guarantees is
+          // exactly spendMicro — so the resize can only ever tighten it.
+          // CEILING: this does not fully close the gap. The exchange never sees maxSpend, and the
+          // fee is still charged at fill prices, so a fill far from the bound can still exceed the
+          // quote by the difference between the two fee points.
+          amount: Number(BigInt(intent.params.allInCapMicro) - BigInt(intent.params.quote.feeMicro)) / 1e6,
           maxSpend: Number(intent.params.allInCapMicro) / 1e6,
           maxPrice: (intent.params.maxPriceBp / 10_000).toFixed(4),
           ...builder,

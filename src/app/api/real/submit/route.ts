@@ -22,6 +22,13 @@ import {
   type SignedOrderWire,
 } from "@/lib/orders";
 import { postOrder } from "@polymarket/client/actions";
+import { SWIPE_CAP } from "@/lib/config";
+import { utcDay } from "@/lib/time";
+import { releaseSwipeSlot } from "@/lib/orders";
+
+// Thrown INSIDE the claim transaction so the rollback undoes the CAS as well — the cap must never
+// be able to reject a submit that has already moved the attempt out of ISSUED.
+class CapReachedError extends Error {}
 
 export async function POST(req: Request) {
   const user = await authUser(req);
@@ -58,6 +65,20 @@ export async function POST(req: Request) {
   if (attempt.state === "SUBMITTING" || attempt.state === "POSTED") {
     return NextResponse.json({ status: "submitting" });
   }
+  // The intent's OWN ten-minute lifetime, enforced on this side too. validateCommon checks the
+  // freshness of the SIGNATURE, never of the intent, so an ISSUED attempt could be signed days
+  // later and still fill against a price bound frozen from a book that was 30s old at intent time —
+  // exactly the invariant D9 states. The bound caps the worst case either way, but the slot could
+  // otherwise sit ISSUED indefinitely: the intent route's expiry only runs when another intent
+  // happens to arrive on the same market. FAILED here frees it deterministically, and nothing was
+  // posted, so there is no ambiguity to preserve.
+  if (Date.now() - attempt.createdAt.getTime() > 10 * 60_000) {
+    await prisma.orderAttempt.updateMany({
+      where: { id: attempt.id, state: "ISSUED" },
+      data: { state: "FAILED", error: "intent_expired" },
+    });
+    return NextResponse.json({ error: "intent_expired" }, { status: 409 });
+  }
 
   // Validate the signed order against the durable intent — the validator depends on the direction.
   const ctx = {
@@ -93,14 +114,50 @@ export async function POST(req: Request) {
 
   // CAS claim: ISSUED → SUBMITTING with the signed-order hash (unique = replay guard). A losing
   // concurrent submit sees count 0 and reports the in-flight state instead of double-posting.
+  //
+  // The daily cap is RESERVED in the same transaction, and the increment itself is the gate — the
+  // paper path's proven shape (swipe.ts): bump, then throw if the post-increment value went over,
+  // so the rollback undoes the claim too. It used to be a bare read at intent time with the
+  // increment minutes later at fill, which failed twice over: N parallel intents all read the same
+  // value and all passed (9/10 used + five parallel entries = 14 on a 10-cap day, $2k past the
+  // throttle at max stake), and a re-entry after a full EXIT hit the `!priorBet` guard at fill and
+  // never incremented at all, so one market could be churned forever on a single slot.
+  // Reserved HERE and not at intent because an abandoned intent must stay free: the user who opens
+  // a card and walks away should not burn a swipe, and between CAS and fill the window is
+  // milliseconds instead of the intent's ten minutes. EXIT is not a swipe, so it reserves nothing.
   const orderHash = hashSignedOrder(signed);
-  let claimed;
+  // Keyed to the ATTEMPT's creation day, not to now. Reserve and release must name the same row, and
+  // the release happens deep in the booker, which only has the attempt — deriving the day from an
+  // immutable field of the attempt is what makes the two agree by construction. `utcDay()` here
+  // instead would drift whenever an intent is created before midnight and submitted after it (the
+  // intent lifetime is ten minutes, so that window is real): the reservation would land on D2 while
+  // every release path computed D1, leaking a real slot and handing back a paper one.
+  const capDay = utcDay(attempt.createdAt);
+  let claimed: { count: number };
   try {
-    claimed = await prisma.orderAttempt.updateMany({
-      where: { id: attempt.id, state: "ISSUED" },
-      data: { state: "SUBMITTING", signedOrderHash: orderHash },
+    claimed = await prisma.$transaction(async (tx) => {
+      const cas = await tx.orderAttempt.updateMany({
+        where: { id: attempt.id, state: "ISSUED" },
+        // The payload is persisted HERE, before the post that may or may not reach the exchange. An
+        // attempt that dies in that window has no externalOrderId, and every reconcile scan filters
+        // on that being non-null — so the row is invisible to reconciliation and wedges the market
+        // slot forever. Recovery is still manual (the SDK exports no helper to derive the exchange
+        // order id from a signed order), but with this an operator can at least see what was signed.
+        data: { state: "SUBMITTING", signedOrderHash: orderHash, signedOrder: signed as never },
+      });
+      if (cas.count === 0 || attempt.dir === "EXIT") return cas;
+      const counter = await tx.dailyCounter.upsert({
+        where: { userId_utcDay: { userId: user.id, utcDay: capDay } },
+        create: { userId: user.id, utcDay: capDay, swipeCount: 1 },
+        update: { swipeCount: { increment: 1 } },
+      });
+      if (counter.swipeCount > SWIPE_CAP) throw new CapReachedError();
+      return cas;
     });
   } catch (e) {
+    if (e instanceof CapReachedError) {
+      return NextResponse.json({ error: "daily swipe limit reached" }, { status: 403 });
+    }
     // signedOrderHash unique: the SAME signed order replayed against a NEW intent — a clean
     // duplicate response, not a raw 500 (K3 S6/S7 M2 edge).
     if ((e as { code?: string }).code === "P2002") {
@@ -113,9 +170,16 @@ export async function POST(req: Request) {
   // Server posts — the response is the authoritative receipt. Forward the signed payload VERBATIM.
   const client = await serverSecureClient(prisma, user);
   if (!client) {
-    await prisma.orderAttempt.updateMany({
-      where: { id: attempt.id, state: "SUBMITTING" },
-      data: { state: "ISSUED", signedOrderHash: null, error: "real_not_configured" },
+    // Nothing was posted and the attempt goes back to ISSUED, so the slot this claim reserved is
+    // returned — in the SAME transaction as the rollback, because two statements meant a crash in
+    // between left the attempt retryable with the slot still spent, and no later pass could tell.
+    // Gated on the update actually landing so a concurrent path cannot release it twice.
+    await prisma.$transaction(async (tx) => {
+      const rolledBack = await tx.orderAttempt.updateMany({
+        where: { id: attempt.id, state: "SUBMITTING" },
+        data: { state: "ISSUED", signedOrderHash: null, error: "real_not_configured" },
+      });
+      if (rolledBack.count > 0 && attempt.dir !== "EXIT") await releaseSwipeSlot(tx, user.id, capDay);
     });
     return NextResponse.json({ error: "real_not_configured" }, { status: 503 });
   }
@@ -160,14 +224,22 @@ export async function POST(req: Request) {
   // The receipt carries the ORDER's cumulative matched totals — the booker subtracts what this
   // attempt already holds, so a re-delivered or grown receipt neither double-books nor drops fills.
   const bookOpts = { cumulative: outcome.kind === "matched" };
+  // FILLED/PARTIAL is judged against the size actually SIGNED, not the intent's PREDICTED
+  // sharesMicro. The SDK re-sizes and decimal-caps the order before signing (maker collateral is
+  // floored to the tick's amount decimals), so the signed size sits systematically below the
+  // prediction and a FAK that matched every share of itself still booked cumulative < predicted and
+  // reported PARTIAL — real trace: predicted 18_605_546, signed 18_596_200, fully matched, labelled
+  // partial. This value feeds fillLabel and nothing else (orders.ts:314/321/481/487), so it moves
+  // the label without touching a booked amount. BUY: takerAmount is shares. SELL: makerAmount is.
+  const signedSharesMicro = attempt.dir === "EXIT" ? BigInt(signed.makerAmount) : BigInt(signed.takerAmount);
   const finalState =
     attempt.dir === "EXIT"
-      ? await bookExitFills(prisma, attempt, BigInt(params?.sharesMicro ?? "0"), fills, bookOpts)
+      ? await bookExitFills(prisma, attempt, signedSharesMicro, fills, bookOpts)
       : await bookEntryFills(
           prisma,
           attempt,
           params?.betSide === "NO" ? "NO" : "YES",
-          BigInt(params?.sharesMicro ?? "0"),
+          signedSharesMicro,
           fills,
           bookOpts,
         );

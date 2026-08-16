@@ -4,7 +4,13 @@
 import assert from "node:assert";
 import { prisma } from "../src/lib/prisma";
 import { randomCode } from "../src/lib/refcode";
-import { validateSignedOrder, classifyPostResponse, bookEntryFills, type SignedOrderWire } from "../src/lib/orders";
+import {
+  validateSignedOrder,
+  classifyPostResponse,
+  bookEntryFills,
+  trueUpAttemptFee,
+  type SignedOrderWire,
+} from "../src/lib/orders";
 import { SWIPE_CAP } from "../src/lib/config";
 
 const DW = "0x" + "aa".repeat(20);
@@ -140,14 +146,35 @@ async function main() {
         },
       });
 
-    // Zero fill → KILLED, no Bet row, slot freed (a second attempt is creatable).
+    // The daily cap is RESERVED by /api/real/submit inside its CAS-claim transaction, not by the
+    // booker — a bare read at intent time let parallel intents share one value and let a re-entry
+    // after a full EXIT skip the count entirely. These tests call the booker directly, so they
+    // stand in for the route by seeding the reservation the route would have made.
+    const utcDay = new Date().toISOString().slice(0, 10);
+    const reserve = () =>
+      prisma.dailyCounter.upsert({
+        where: { userId_utcDay: { userId: user.id, utcDay } },
+        create: { userId: user.id, utcDay, swipeCount: 1 },
+        update: { swipeCount: { increment: 1 } },
+      });
+
+    // Zero fill → KILLED, no Bet row, slot freed (a second attempt is creatable) — and the booker
+    // hands the reserved swipe back, or an unfillable market would silently eat the day's cap.
+    await reserve();
     const a1 = await mkAttempt();
     const s1 = await bookEntryFills(prisma, a1, "YES", 19_000_000n, []);
     assert.strictEqual(s1, "KILLED");
     assert.strictEqual(await prisma.bet.count({ where: { userId: user.id } }), 0, "no position on zero fill");
+    assert.strictEqual(
+      (await prisma.dailyCounter.findUniqueOrThrow({ where: { userId_utcDay: { userId: user.id, utcDay } } }))
+        .swipeCount,
+      0,
+      "a zero-fill ENTRY releases its reserved swipe",
+    );
     const a2 = await mkAttempt(); // partial unique allows it — the slot is free
 
-    // Partial fill → PARTIAL, REAL Bet created with actuals, point + counter booked (Q1).
+    // Partial fill → PARTIAL, REAL Bet created with actuals, point booked (Q1).
+    await reserve();
     const s2 = await bookEntryFills(prisma, a2, "YES", 19_000_000n, [
       { externalFillId: `${tag}-f1`, sharesMicro: 5_000_000n, amountMicro: 2_600_000n, feeMicro: 87_360n, priceBp: 5200, ts: new Date() },
     ]);
@@ -161,11 +188,12 @@ async function main() {
     assert.strictEqual(bet.feeMicro, 87_360n);
     assert.strictEqual(bet.stakeCents, 1000, "stakeCents keeps the all-in INTENT");
     assert.strictEqual(bet.earnedPoint, true, "Q1: point booked at fill");
-    const utcDay = new Date().toISOString().slice(0, 10);
     const counter = await prisma.dailyCounter.findUniqueOrThrow({
       where: { userId_utcDay: { userId: user.id, utcDay } },
     });
-    assert.strictEqual(counter.swipeCount, 1, "Q1: swipe counter consumed at fill");
+    // Exactly the one slot reserved above: the booker awards the point but must NEVER bump the
+    // counter itself, or every fill would double-charge the cap the route already charged.
+    assert.strictEqual(counter.swipeCount, 1, "Q1: the reserved swipe is consumed, not doubled");
     assert.ok(counter.swipeCount <= SWIPE_CAP);
     const a2row = await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a2.id } });
     assert.strictEqual(a2row.state, "PARTIAL");
@@ -243,6 +271,55 @@ async function main() {
       "one point per position across split receipts",
     );
 
+    // ─── lot attribution: a reopened position must not absorb the OLD lot's fee correction ──────
+    // The reopen resets filled/closed/proceeds on the SAME bets row, which is what makes a late
+    // trueUpAttemptFee for the previous attempt prorate against a basis that never paid it. lotSeq
+    // is the marker that lets the true-up notice; without it the correction silently lands on the
+    // wrong lot and the closed one keeps a realized PnL computed from a fee proved wrong.
+    {
+      const lotBet = await prisma.bet.findUniqueOrThrow({
+        where: { userId_marketId_mode: { userId: user.id, marketId: market.id, mode: "REAL" } },
+      });
+      // Close the lot out so the intent route's remainder rule would admit a re-entry.
+      await prisma.bet.update({
+        where: { id: lotBet.id },
+        data: { closedSharesMicro: lotBet.filledSharesMicro, realizedPnlMicro: 0n },
+      });
+      const oldAttempt = await prisma.orderAttempt.findFirstOrThrow({
+        where: { userId: user.id, lotSeq: { not: null } },
+        orderBy: { createdAt: "asc" },
+      });
+      assert.strictEqual(oldAttempt.lotSeq, 0, "the first booking stamps lot 0");
+
+      await reserve();
+      const reAttempt = await mkAttempt();
+      await bookEntryFills(prisma, reAttempt, "NO", 5_000_000n, [
+        { externalFillId: `${tag}-lot2`, sharesMicro: 4_000_000n, amountMicro: 2_000_000n, feeMicro: 50_000n, priceBp: 5000, ts: new Date() },
+      ]);
+      const reopened = await prisma.bet.findUniqueOrThrow({ where: { id: lotBet.id } });
+      assert.strictEqual(reopened.lotSeq, 1, "a reopen advances the lot");
+      assert.strictEqual(reopened.side, "NO", "…and adopts the side actually bought");
+      assert.strictEqual(reopened.closedSharesMicro, 0n, "…with the close counters cleared");
+
+      // A late fee true-up for the OLD attempt must correct its own fill rows and leave the new
+      // lot's aggregate alone.
+      const feeBefore = (await prisma.bet.findUniqueOrThrow({ where: { id: lotBet.id } })).feeMicro;
+      const pnlBefore = (await prisma.bet.findUniqueOrThrow({ where: { id: lotBet.id } })).realizedPnlMicro;
+      const appliedOld = await trueUpAttemptFee(prisma, oldAttempt, 999_999n);
+      const afterOld = await prisma.bet.findUniqueOrThrow({ where: { id: lotBet.id } });
+      assert.notStrictEqual(appliedOld, 0n, "the old attempt's own fill rows are still corrected");
+      assert.strictEqual(afterOld.feeMicro, feeBefore, "a foreign lot's aggregate fee is untouched");
+      assert.strictEqual(afterOld.realizedPnlMicro, pnlBefore, "…and so is its realized PnL");
+
+      // The CURRENT lot's own attempt still trues up normally — the guard must not freeze everything.
+      const curAttempt = await prisma.orderAttempt.findUniqueOrThrow({ where: { id: reAttempt.id } });
+      assert.strictEqual(curAttempt.lotSeq, 1, "the re-entry stamps the new lot");
+      await trueUpAttemptFee(prisma, curAttempt, 60_000n);
+      const afterCur = await prisma.bet.findUniqueOrThrow({ where: { id: lotBet.id } });
+      assert.strictEqual(afterCur.feeMicro, 60_000n, "the matching lot IS corrected");
+    }
+
+    console.log("OK: lot attribution — a reopen advances lotSeq and a foreign lot's true-up is refused");
     console.log("OK: order validation matrix, tolerant fill parsing, on-fill booking, zero-fill slot release");
     console.log("OK: cumulative receipts — delta booking, cumulative FILLED label, aggregate-derived vwap");
     console.log("PASS: orders");

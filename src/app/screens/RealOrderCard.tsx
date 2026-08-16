@@ -79,8 +79,14 @@ function resultText(res: { status: string; filledSharesMicro?: string }): string
     case "killed":
       return "no fill — the market slot is free again";
     case "posted":
-    case "submitting":
       return "posted, awaiting the exchange — the reconciler books it when the trade record lands";
+    // NOT the same promise. "posted" carries an exchange order id and the reconciler really does
+    // pick it up; "submitting" means the post outcome is unknown, and an attempt with no order id
+    // is excluded from every reconcile scan (reconcile.ts filters `externalOrderId: { not: null }`).
+    // Ops is paged by the stuck-attempt watcher and resolves it by hand, so promising an automatic
+    // booking here was telling the user to wait for something that never runs.
+    case "submitting":
+      return "sent, outcome not yet confirmed — support is alerted and will reconcile this by hand";
     default:
       return `status: ${res.status}`;
   }
@@ -130,7 +136,12 @@ export function RealOrderCard({ api, ctx }: { api: Api; ctx: RealCtx }) {
     if (!marketId) return setError("Choose a market first.");
     const stakeCents = Math.round(Number(dollars) * 100);
     if (!Number.isFinite(stakeCents) || stakeCents <= 0) return setError("Enter a positive dollar amount.");
-    return order(`buy:${side}`, { marketId, side, stakeCents, dir: "ENTRY" });
+    // Send the price this card is DISPLAYING (the same number the option label above renders), so
+    // the server can refuse an order whose book moved after the deck was fetched. Omitted when the
+    // deck row has no price — the server then skips the check rather than guessing a baseline.
+    const card = cards.find((c) => c.id === marketId);
+    const quotedPriceBp = side === "YES" ? card?.yesPriceBp : card?.noPriceBp;
+    return order(`buy:${side}`, { marketId, side, stakeCents, dir: "ENTRY", quotedPriceBp });
   };
 
   return (

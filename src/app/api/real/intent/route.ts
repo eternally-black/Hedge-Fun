@@ -12,6 +12,7 @@ import { isRealMoneyEligible, hasRealConsent, sameOrigin } from "@/lib/real";
 import { captureToGlitchTip } from "@/lib/glitchtip";
 import { getMarketFee } from "@/lib/fees";
 import { getBook } from "@/lib/clob";
+import { quoteMovedAgainstUser } from "@/lib/depth";
 import { quoteBuyAllIn, quoteSellAllIn } from "@/lib/quote";
 import { STAKE_CENTS, HEDGE_MIN_STAKE_CENTS, HEDGE_MAX_STAKE_CENTS, SWIPE_CAP, DECK_MIN_LEAD_MS, BOOK_MAX_STALE_MS } from "@/lib/config";
 
@@ -25,9 +26,9 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "no_deposit_wallet" }, { status: 409 });
   }
 
-  let marketId: unknown, side: unknown, stakeCents: unknown, geo: unknown, dir: unknown;
+  let marketId: unknown, side: unknown, stakeCents: unknown, geo: unknown, dir: unknown, quotedPriceBp: unknown;
   try {
-    ({ marketId, side, stakeCents, geo, dir } = await req.json());
+    ({ marketId, side, stakeCents, geo, dir, quotedPriceBp } = await req.json());
   } catch {
     return NextResponse.json({ error: "bad_json" }, { status: 400 });
   }
@@ -129,6 +130,26 @@ export async function POST(req: Request) {
     const q = quoteBuyAllIn(book.asks, budgetMicro, fee.rateBp, fee.expMilli);
     if (!q) return NextResponse.json({ error: "no_liquidity" }, { status: 409 });
 
+    // Seen-vs-executed, the same rule /api/swipe and /api/feed/bet apply to PAPER stakes — the real
+    // path was the one without it, so a card price that had already moved was executed silently
+    // here while a play-money swipe at the same price was refused. maxPriceBp below bounds the
+    // WORST fill, not the drift from what the user tapped: the two are the same number only on a
+    // single-level book. Optional, and absent → never rejects, exactly like the paper routes.
+    // ENTRY only: quoteMovedAgainstUser reads "up is bad", which is the buyer's direction; a SELL
+    // is harmed by the opposite move and its floor already lives in minPriceBp.
+    //
+    // Compared against vwapBp, NOT allInPriceBp, and the difference is the whole check. The client
+    // sends the price the DECK served, and that is `yesEffPriceBp` — a book-walked VWAP with no fee
+    // term anywhere in depth.ts. allInPriceBp is (spend+fee)/shares. Comparing the two measures the
+    // platform fee, not book drift: at the measured 700bp/1000 tier the fee alone is 175bp of price
+    // at p=0.5 (test-fee-quote.ts pins allInPriceBp 5175 on a 5000 book) against a 100bp allowance,
+    // so every ENTRY on a fee-bearing market would 409 `price_moved` forever while the book sat
+    // still — and the only escape would be a client that omits the field, i.e. no protection at all.
+    // vwapBp is spend/shares, the same fee-exclusive basis the card was drawn from.
+    if (typeof quotedPriceBp === "number" && quoteMovedAgainstUser(quotedPriceBp, q.vwapBp)) {
+      return NextResponse.json({ error: "price_moved", freshPriceBp: q.vwapBp }, { status: 409 });
+    }
+
     // minOrderSize is SHARES (trap list); reject before anyone signs an unfillable order.
     if (q.sharesMicro < BigInt(Math.round(book.minOrderSize * 1_000_000))) {
       return NextResponse.json({ error: "stake_too_small", minShares: book.minOrderSize }, { status: 409 });
@@ -220,6 +241,16 @@ export async function POST(req: Request) {
           });
           return NextResponse.json({ error: "intent_expired_retry" }, { status: 409 });
         }
+        // The replay must be the SAME order. `dir` matching is not enough: the client signs these
+        // params VERBATIM (real-client builds the order from intent.params, never from its own
+        // input), so handing a YES intent back to a request that just asked for NO — or a $5 intent
+        // back to a $50 request — deploys real money on a side/size the user did not ask for. Only
+        // an exact match may replay; anything else waits for the slot like any other in-flight
+        // attempt. EXIT is exempt from the size check: its cap is the live quoted proceeds, which
+        // move with the book, while its side is derived from the position and cannot differ.
+        const sameOrder =
+          existing.side === betSide && (direction !== "ENTRY" || existing.allInCapMicro === allInCapMicro);
+        if (!sameOrder) return NextResponse.json({ error: "attempt_in_flight" }, { status: 409 });
         return NextResponse.json({ intentId: existing.id, params: existing.approvedParams });
       }
       return NextResponse.json({ error: "attempt_in_flight" }, { status: 409 });
