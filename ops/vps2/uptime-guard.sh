@@ -21,7 +21,7 @@ flock -n 9 || exit 0
 envval() {
   local v="${!1:-}"
   if [ -z "$v" ] && [ -f "$ENV_FILE" ]; then
-    v="$(grep -E "^${1}=" "$ENV_FILE" | head -1 | cut -d= -f2- | sed -e 's/^["'\'']//' -e 's/["'\'']$//')"
+    v="$(grep -E "^${1}=" "$ENV_FILE" | head -1 | cut -d= -f2- | tr -d '' | sed -e 's/^["'\'']//' -e 's/["'\'']$//')"
   fi
   printf '%s' "$v"
 }
@@ -38,7 +38,7 @@ now() { date +%s; }
 # file on stdin — never argv, which is world-readable via /proc/<pid>/cmdline. Config values
 # are quoted, so backslash and double quote have to be escaped for curl's parser.
 cfgesc() { local v=$1; v=${v//\\/\\\\}; v=${v//\"/\\\"}; printf '%s' "$v"; }
-hc_ping() { printf 'url = "%s"\n' "$1" | curl -fsS --max-time 10 -o /dev/null -K - || true; }
+hc_ping() { [ -n "${1:-}" ] || return 0; printf 'url = "%s"\n' "$1" | curl -fsS --max-time 10 -o /dev/null -K - || true; }
 
 DOWN_F="$STATE_DIR/guard.down_since"
 ALERT_F="$STATE_DIR/guard.last_alert"

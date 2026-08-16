@@ -22,7 +22,7 @@ STAMP=$(date -u +%Y%m%d)
 notify() { bash "$NOTIFY" "$1" "$2" || true; }
 envval() { # envval <file> <key>
   [ -f "$1" ] || return 0
-  grep -E "^${2}=" "$1" | head -1 | cut -d= -f2- | sed -e 's/^["'\'']//' -e 's/["'\'']$//'
+  grep -E "^${2}=" "$1" | head -1 | cut -d= -f2- | tr -d '' | sed -e 's/^["'\'']//' -e 's/["'\'']$//'
 }
 
 mkdir -p "$BACKUP_DIR"; chmod 700 "$BACKUP_DIR"

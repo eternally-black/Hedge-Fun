@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 # PULL VPS1's verified dumps onto VPS2, nightly at 04:15 (after VPS1's 03:30 dump).
+# Paths are RELATIVE on purpose: VPS1 pins this key to `rrsync -ro /opt/hedgefun/backups/`, which
+# prepends its own root, so an absolute path here resolves to <root>/<root> and rsync fails with
+# `change_dir ... failed`. rrsync rather than a literal `command="rsync --server --sender -logD..."`
+# because that string pins the exact flags the client sends and any change to them breaks the pull.
 # Pull (not push) on purpose: VPS2 holds a read-only key to VPS1, so a compromised VPS1
 # cannot reach — let alone delete — the offsite copies. --ignore-existing makes the copy
 # append-only from VPS1's perspective; retention is decided here, by VPS2 alone.
@@ -14,14 +18,14 @@ KEY="${KEY:-/root/.ssh/backup_pull}"
 envval() {
   local v="${!1:-}"
   if [ -z "$v" ] && [ -f "$ENV_FILE" ]; then
-    v="$(grep -E "^${1}=" "$ENV_FILE" | head -1 | cut -d= -f2- | sed -e 's/^["'\'']//' -e 's/["'\'']$//')"
+    v="$(grep -E "^${1}=" "$ENV_FILE" | head -1 | cut -d= -f2- | tr -d '' | sed -e 's/^["'\'']//' -e 's/["'\'']$//')"
   fi
   printf '%s' "$v"
 }
 notify() { bash "$NOTIFY" "$1" "$2" || true; }
 # The push URL is a bearer secret — whoever holds it can fake "offsite backup ran" while it
 # is dead. Feed it to curl on stdin; argv is world-readable via /proc/<pid>/cmdline.
-hc_ping() { printf 'url = "%s"\n' "$1" | curl -fsS --max-time 10 -o /dev/null -K - || true; }
+hc_ping() { [ -n "${1:-}" ] || return 0; printf 'url = "%s"\n' "$1" | curl -fsS --max-time 10 -o /dev/null -K - || true; }
 
 VPS1="$(envval BACKUP_PULL_SOURCE)"   # e.g. root@84.247.169.158 — set in /opt/ops/.env
 PORT="$(envval BACKUP_PULL_PORT)"; PORT="${PORT:-22}"
@@ -45,7 +49,7 @@ SSH_CMD="ssh -i $KEY -p $PORT -o StrictHostKeyChecking=accept-new -o BatchMode=y
 # <name>.tmp.enc, so '*.tmp' alone still shipped a partial, unverified, sidecar-less artifact that
 # then looks exactly like a real encrypted dump during an incident.
 if ! rsync -az --ignore-existing --exclude='*.tmp' --exclude='*.tmp.enc' --timeout=600 -e "$SSH_CMD" \
-      "$VPS1:/opt/hedgefun/backups/" "$DEST/"; then
+      "$VPS1:./" "$DEST/"; then
   notify CRIT "backup-pull: rsync from VPS1 FAILED — offsite backup did not run"
   exit 1
 fi
@@ -66,7 +70,7 @@ for sums in "$DEST"/*.sha256; do
     mv -f "$f" "$f.corrupt"; mv -f "$sums" "$sums.corrupt"
     rsync -az --timeout=600 -e "$SSH_CMD" \
       --include="$(basename "$f")" --include="$(basename "$sums")" --exclude='*' \
-      "$VPS1:/opt/hedgefun/backups/" "$DEST/" || true
+      "$VPS1:./" "$DEST/" || true
     if [ -f "$f" ] && [ -f "$sums" ] && [ "$(sha256sum "$f" | awk '{print $1}')" = "$(cat "$sums")" ]; then
       rm -f "$f.corrupt" "$sums.corrupt"
       notify WARN "backup-pull: $(basename "$f") was corrupt offsite — re-fetched, now verifies"

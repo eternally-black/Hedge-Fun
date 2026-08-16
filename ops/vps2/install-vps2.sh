@@ -46,8 +46,9 @@ systemctl enable --now vps2-watchdog.timer uptime-guard.timer backup-pull.timer 
 if [ ! -f /root/.ssh/backup_pull ]; then
   ssh-keygen -t ed25519 -N "" -f /root/.ssh/backup_pull -C "vps2-backup-pull" >/dev/null
   echo ">>> Generated /root/.ssh/backup_pull. On VPS1, append to /root/.ssh/authorized_keys"
-  echo "    (restricted to rsync-read of the backups dir):"
-  echo "    command=\"rsync --server --sender -logDtprze.iLsfxC . /opt/hedgefun/backups/\",restrict $(cat /root/.ssh/backup_pull.pub)"
+  echo "    (rrsync confines it to a read-only view of the backups dir; a literal rsync --server"
+  echo "     command= would pin the exact flag string the client sends and break on any change):"
+  echo "    command=\"/usr/bin/rrsync -ro /opt/hedgefun/backups/\",restrict $(cat /root/.ssh/backup_pull.pub)"
 fi
 
 # --- monitoring stack --------------------------------------------------------

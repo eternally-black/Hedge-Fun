@@ -5,3 +5,10 @@ Dockerfile  text eol=lf
 Caddyfile   text eol=lf
 *.yml       text eol=lf
 *.yaml      text eol=lf
+*.mjs       text eol=lf
+# systemd units and the env TEMPLATES the installers copy into place: a CRLF here does not
+# announce itself, it makes every value read out of .env end in a carriage return, so a token
+# looks set but is malformed and a heartbeat URL becomes "".
+*.service   text eol=lf
+*.timer     text eol=lf
+*.example   text eol=lf

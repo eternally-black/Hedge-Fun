@@ -32,7 +32,7 @@ fi
 envval() { # envval KEY -> value from environment or /opt/hedgefun/.env (never sourced)
   local v="${!1:-}"
   if [ -z "$v" ] && [ -f "$ENV_FILE" ]; then
-    v="$(grep -E "^${1}=" "$ENV_FILE" | head -1 | cut -d= -f2- | sed -e 's/^["'\'']//' -e 's/["'\'']$//')"
+    v="$(grep -E "^${1}=" "$ENV_FILE" | head -1 | cut -d= -f2- | tr -d '' | sed -e 's/^["'\'']//' -e 's/["'\'']$//')"
   fi
   printf '%s' "$v"
 }
@@ -45,7 +45,7 @@ now() { date +%s; }
 
 # The push URL is a bearer secret (whoever has it can fake "watchdog alive"), so it goes to
 # curl via a config file on stdin — argv is world-readable through /proc/<pid>/cmdline.
-hc_ping() { printf 'url = "%s"\n' "$1" | curl -fsS --max-time 10 -o /dev/null -K - || true; }
+hc_ping() { [ -n "${1:-}" ] || return 0; printf 'url = "%s"\n' "$1" | curl -fsS --max-time 10 -o /dev/null -K - || true; }
 
 # --- deduped alert state: absent file = ok; contents = "<first_break> <last_alert>" ---
 REALERT_SECS=1800
