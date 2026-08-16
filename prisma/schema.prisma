@@ -339,11 +339,18 @@ model Bet {
   closeFeeMicro     BigInt?
   realizedPnlMicro  BigInt?
 
+  // Which LOT the fill fields above describe. A fully-closed REAL position is re-enterable, and the
+  // re-entry reuses this row with the counters reset (orders.ts bookEntryFills), so "filled/closed"
+  // stop describing the attempt that produced them. Every OrderAttempt records the lotSeq it booked
+  // into; a late fee true-up compares the two and refuses to restate a lot it no longer belongs to.
+  lotSeq            Int       @default(0)
+
   createdAt DateTime  @default(now())
   settledAt DateTime?
   seenAt    DateTime? // null = result not yet revealed to the user (inbox/reveal). Drives unread count.
 
   shardGrant    ShardGrant?
+  pointsLedger  PointsLedger? // back-relation of the SWIPE point credit's FK (PointsLedger.betId)
   orderAttempts OrderAttempt[]
 
   // One bet per market per user PER MODE (C1): a card is swiped once. Kills the
@@ -368,7 +375,14 @@ model PointsLedger {
   amount Int // RAW points, never pre-multiplied
   utcDay String     @db.VarChar(10)
 
-  betId      String?  @unique // SWIPE provenance + idempotency (1 pt/bet)
+  // SWIPE provenance + idempotency (1 pt/bet). The unique alone was NOT enough: with no FK a credit
+  // could name a bet that never existed (or another user's), and nothing in the DB objected —
+  // ShardGrant.betId has had a real FK since 0_init. ON DELETE SET NULL (the Prisma default for an
+  // optional relation) keeps awarded points and drops only the link. The FK is added NOT VALID in
+  // 20260815210000_ledger_integrity: the table has live rows, so legacy orphans are left for ops to
+  // clear + VALIDATE, while every new write is already constrained.
+  betId      String?  @unique
+  bet        Bet?     @relation(fields: [betId], references: [id])
   referralId String? // REFERRAL provenance
   metadata   Json?
   createdAt  DateTime @default(now())
@@ -605,8 +619,8 @@ model MarketMeta {
   strikeCents    Int? // parsed strike in integer cents ($62,600 -> 6_260_000)
   direction      HedgeMarketDirection? // UP (above/reach/hit) | DOWN (dip/below/under)
   parsedDeadline DateTime? // canonical resolution instant (Gamma endDate)
-  liquidityCents Int? // for ranking candidates (rounded USD liquidity × 100)
-  volumeCents    Int? // for ranking candidates (rounded USD volume × 100)
+  liquidityCents Int? // ranking only, SATURATES at the INT4 ceiling (~$21.47M) — see rankCents()
+  volumeCents    Int? // ranking only, SATURATES at the INT4 ceiling (~$21.47M) — see rankCents()
   parseOk        Boolean               @default(false) // strike + date + direction all parsed -> S1-eligible
 
   // S2 (life-event hedge) enrichment. A NAMED sports/esports (later: entertainment) market whose
@@ -677,6 +691,15 @@ model OrderAttempt {
 
   state           OrderAttemptState @default(ISSUED)
   signedOrderHash String?           @unique // replay guard
+  // The signed order VERBATIM, persisted at CAS time — before the post that may or may not reach the
+  // exchange. An attempt that crashes between postOrder and the POSTED write is invisible to every
+  // reconcile scan (they filter on a non-null externalOrderId) and wedges the market slot forever;
+  // without the payload nobody can even work out which exchange order it became. Recovery is still a
+  // human with this row, not an automatic path — the SDK exports no order-hash helper to derive the
+  // id from it — but "a human can" beats "nobody can".
+  signedOrder     Json?
+  // The Bet lot this attempt's fills landed in; null on attempts that never booked. See Bet.lotSeq.
+  lotSeq          Int?
   externalOrderId String?           @unique
   postResponse    Json? // authoritative receipt, persisted verbatim at post time
   error           String?
@@ -733,7 +756,12 @@ model WalletWorkflow {
   answers            Json    @default("[]") // ordered accepted answers [{requestHash, signature}] — audit transcript
   pendingRequest     Json? // the yielded signature request awaiting the device
   pendingRequestHash String?
-  txHash             String? // relayer transactionId (NOT a chain hash)
+  // Relayer transactionId (NOT a chain hash). UNIQUE for the same reason as RelayerTx.txHash below,
+  // and it is free here: freshRun() resets this row's txHash to NULL before every run, so a re-run
+  // rewrites its OWN row and can never collide with itself. A collision across two rows would mean one
+  // relayer submission is bound to two state machines — the exact ambiguity convergence must never be
+  // asked to resolve. Postgres treats NULLs as distinct, so the (many) PENDING rows are unaffected.
+  txHash             String? @unique
   error              String?
 
   expiresAt DateTime?
@@ -790,7 +818,12 @@ model RelayerTx {
   user        User            @relation(fields: [userId], references: [id])
   kind        WalletOpKind
   workflowKey String
-  txHash      String?
+  // The relayer transaction id, UNIQUE: workflowKey is the per-RUN id, so an idempotent relayer that
+  // returns the SAME transactionId for a re-submitted request used to land one confirmed money
+  // movement on two rows — and this table IS the 100/day budget ledger, which counts rows. Plain
+  // @unique is the "non-null only" index the fix needs (Postgres NULLs are distinct), and stays
+  // expressible in Prisma so the schema cannot drift from the database.
+  txHash      String?         @unique
   status      RelayerTxStatus @default(SUBMITTING)
   attempts    Int             @default(1)
   createdAt   DateTime        @default(now())
