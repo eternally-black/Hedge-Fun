@@ -85,16 +85,24 @@ export async function acceptSuggestion(userId: string, sid: string): Promise<Acc
   if (market.resolutionDeadline.getTime() <= Date.now() + DECK_MIN_LEAD_MS) {
     throw new HedgeMarketUnavailableError("market_expired");
   }
+  // Cash BEFORE the quote, so the book is asked about the stake that will actually be placed. The
+  // old order quoted the full proposed stake and threw market_untradable when the book could not
+  // absorb it — but the stake is clamped down to Cash a few lines later, so a user with $10 against
+  // a $500 suggestion was refused on a book that would have filled their $10 several times over.
+  // Quoting the smaller stake also makes the locked price the price of THAT walk rather than of a
+  // deeper one the user never takes.
+  const vbPre = await prisma.virtualBalance.findUnique({ where: { userId } });
+  const cashPre = vbPre ? vbPre.balanceCents - vbPre.lockedCents : 0;
+  const quotedStake = Math.min(s.proposedStakeCents, cashPre);
+  if (quotedStake < HEDGE_MIN_STAKE_CENTS) throw new InsufficientFundsError();
+
   let lockedPriceBp: number;
   if (!sourceHasClobBook(market.source)) {
     lockedPriceBp = s.side === "YES" ? market.yesPriceBp : market.noPriceBp;
   } else {
     const tokenId = s.side === "YES" ? market.yesTokenId : market.noTokenId;
     if (!tokenId) throw new HedgeMarketUnavailableError("market_untradable"); // no book handle -> not quotable
-    // Quote at the PROPOSED stake: a book that fills it also fills any Cash-clamped smaller stake,
-    // and VWAP is monotonic in stake, so a clamped accept locks a price no better than its own walk
-    // would get — the conservative direction (we never over-promise the payout).
-    const q = await requoteSideForLock(tokenId, s.proposedStakeCents);
+    const q = await requoteSideForLock(tokenId, quotedStake);
     if (q.kind === "unavailable") throw new HedgeBookUnavailableError();
     if (q.kind !== "ok") throw new HedgeMarketUnavailableError("market_untradable"); // filled===false: the book won't absorb the stake
     lockedPriceBp = q.effPriceBp;
@@ -110,9 +118,28 @@ export async function acceptSuggestion(userId: string, sid: string): Promise<Acc
   // The stake is CLAMPED DOWN to available Cash (min/max rule vs Cash); below the floor -> reject.
   try {
     return await runSerializable<AcceptResult>(async (tx) => {
+      // Re-read the market INSIDE the transaction. The tradability checks above run before it, and
+      // they write nothing, so a poller refresh that resolves or closes the market in between does
+      // not conflict with this transaction's writes (virtualBalance, bet) and Serializable has no
+      // reason to abort it — the bet would be created against a market that is no longer open. The
+      // re-read also puts the market row in this transaction's read set, so a concurrent write to it
+      // can now surface as a serialization failure instead of passing unnoticed.
+      const fresh = await tx.market.findUnique({
+        where: { id: marketId },
+        select: { status: true, resolutionDeadline: true },
+      });
+      if (!fresh || fresh.status !== "OPEN") throw new HedgeMarketUnavailableError("market not open");
+      if (fresh.resolutionDeadline.getTime() <= Date.now() + DECK_MIN_LEAD_MS) {
+        throw new HedgeMarketUnavailableError("market_expired");
+      }
+
       const vb = await tx.virtualBalance.findUnique({ where: { userId } });
       const cash = vb ? vb.balanceCents - vb.lockedCents : 0;
-      const stake = Math.min(s.proposedStakeCents, cash);
+      // Clamped to the QUOTED stake, never back up to the proposal: lockedPriceBp describes the walk
+      // for `quotedStake`, and placing more than that would book shares at a price the book was
+      // never asked about. Cash can only have fallen since, and a smaller stake fills at a price no
+      // worse than the quoted one, so clamping down stays conservative.
+      const stake = Math.min(quotedStake, cash);
       if (stake < HEDGE_MIN_STAKE_CENTS) throw new InsufficientFundsError();
 
       await tx.virtualBalance.update({ where: { userId }, data: { lockedCents: { increment: stake } } });

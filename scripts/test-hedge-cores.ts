@@ -10,6 +10,7 @@ import {
   normalize,
   scoreMatch,
   opposingSide,
+  backedSideForQuery,
   isNamedEntityShape,
   type S2Candidate,
 } from "../src/lib/hedge/s2match";
@@ -94,6 +95,16 @@ import {
   assert.strictEqual(bareMonth.parseOk, false, "strike but no real date -> not eligible");
   // Same month WITH a day IS a date (the tightening keeps every real form).
   assert.strictEqual(p("will-bitcoin-above-100000-on-may-3-2026").hasDate, true, "may-3 is a real date");
+
+  // F18 regression — negation blindness: the strike keywords carry no polarity, so "not-reach" used to
+  // parse as UP and inverted the hedge side. A negated market is REFUSED, never guessed.
+  const negated = p("will-bitcoin-not-reach-100k-by-december-31-2026");
+  assert.strictEqual(negated.direction, null, "'not reach' is not an UP strike");
+  assert.strictEqual(negated.strikeCents, null, "no strike from a negated claim");
+  assert.strictEqual(negated.parseOk, false, "negated market -> dropped, not inverted");
+  // The un-negated twin still parses — the guard costs no coverage.
+  const affirmed = p("will-bitcoin-reach-100k-by-december-31-2026");
+  assert.deepStrictEqual({ d: affirmed.direction, s: affirmed.strikeCents, ok: affirmed.parseOk }, { d: "UP", s: 10_000_000, ok: true }, "un-negated 'reach 100k' still UP");
 }
 
 // ─── exposure: majors (native SOL + wSOL merge, wrapped BTC/ETH) vs long-tail SPL aggregate ─────────
@@ -237,6 +248,32 @@ import {
 {
   assert.strictEqual(opposingSide("YES"), "NO", "support YES side -> hedge NO");
   assert.strictEqual(opposingSide("NO"), "YES", "support NO side -> hedge YES");
+
+  // F19 regression — polarity: naming an entity is not backing it. "Barcelona will not win" scores the
+  // same 0.85 substring as "Barcelona will win", so a blind opposingSide() gave BOTH the same position
+  // and doubled a negative user's risk. The backed side must follow the query's polarity.
+  assert.strictEqual(backedSideForQuery("Barcelona will win", "YES"), "YES", "positive query backs the named entity");
+  assert.strictEqual(backedSideForQuery("Barcelona will not win", "YES"), "NO", "negated query backs the OPPONENT -> hedge lands on Barcelona");
+  assert.strictEqual(opposingSide(backedSideForQuery("Barcelona will not win", "YES")), "YES", "…so the hedge side is the opposite of the positive query's");
+  // Allegiance carries polarity even with no result word in the sentence: "I don't support X" states
+  // the user backs the other side, and treating it as positive put the suggestion on the side they
+  // already hold. The two below must NOT flip, and are why the rule needs a stance verb rather than
+  // firing on any negation: one negates the PLAN, the other is a fixture, not a stance.
+  assert.strictEqual(backedSideForQuery("I don't support Barcelona", "YES"), "NO", "negated allegiance backs the opponent");
+  assert.strictEqual(backedSideForQuery("не болею за Барселону", "YES"), "NO", "…in Russian too");
+  assert.strictEqual(backedSideForQuery("I support Barcelona", "YES"), "YES", "plain allegiance is already the entity match");
+  assert.strictEqual(backedSideForQuery("I'm not going to the Barcelona game", "YES"), "YES", "negated PLAN never flips a side");
+  assert.strictEqual(backedSideForQuery("Barcelona against Madrid", "YES"), "YES", "'against' names a fixture, not a stance");
+  // Contractions reach the tokenizer with the apostrophe stripped, so the negation set must carry
+  // the CONTRACTED spelling. A missing auxiliary does not merely skip the rule — negation is XOR'd
+  // with the loss word, so "cant lose" collapsed into an unnegated loss claim and flipped the side.
+  assert.strictEqual(backedSideForQuery("Barcelona can't lose", "YES"), "YES", "can't lose is a positive claim");
+  assert.strictEqual(backedSideForQuery("Barcelona cannot lose", "YES"), "YES", "…spelled out too");
+  assert.strictEqual(backedSideForQuery("Реал не выиграет", "NO"), "YES", "RU negation flips too");
+  assert.strictEqual(backedSideForQuery("Barcelona will lose", "YES"), "NO", "a loss claim is negative on its own");
+  assert.strictEqual(backedSideForQuery("Barcelona will not lose", "YES"), "YES", "double negative is back to positive");
+  assert.strictEqual(backedSideForQuery("I'm not going to the Barcelona game", "YES"), "YES", "negating the PLAN, not the result, must not flip");
+  assert.strictEqual(backedSideForQuery("иду на матч Барсы", "YES"), "YES", "no result claim -> support, unchanged");
 
   assert.ok(isNamedEntityShape("Barcelona", "Real Madrid"), "team vs team is a named shape");
   assert.ok(!isNamedEntityShape("Over", "Under"), "Over/Under is NOT a hedgeable named shape");

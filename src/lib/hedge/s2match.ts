@@ -202,6 +202,60 @@ export function opposingSide(side: BetSide): BetSide {
   return side === "YES" ? "NO" : "YES";
 }
 
+// The matcher has no POLARITY (F19): "Barcelona will not win" and "Barcelona will win" both contain the
+// label and both score 0.85 substring, so running the winner straight through opposingSide() handed the
+// NEGATIVE query the SAME position as the positive one — DOUBLING the user's real-world risk instead of
+// hedging it. Polarity is read from the RAW text, never from normalize(): normalize deliberately drops
+// "win"/"vs"/"против" as noise, and those are exactly the words polarity needs.
+// A negation alone does NOT flip: "I'm not going to the Barcelona game" / "не могу пойти на матч Барсы"
+// negate the PLAN, not the result, and a false flip is as expensive as the bug. So a flip needs an
+// OUTCOME word present, and then negation XOR loss decides it ("not lose" is back to positive).
+// "against"/"против" are excluded on purpose — they name a fixture ("Barcelona against Real"), not a polarity.
+// Contractions arrive here with the apostrophe already stripped, so the set must hold "cant", not
+// "can't". Missing an auxiliary is worse than missing a whole rule, because negation is XOR'd with
+// LOSSES below: "Barcelona cant lose" then reads as an unnegated loss claim and flips the side, so
+// the user gets a hedge on the outcome they were already exposed to. parse.ts's own negation regex
+// already listed `cannot` — these two were the same fix and had drifted apart.
+const NEGATIONS = new Set([
+  "not", "never", "cant", "cannot", "wont", "isnt", "arent", "wasnt", "werent",
+  "dont", "doesnt", "didnt", "couldnt", "shouldnt", "wouldnt", "hasnt", "havent", "hadnt", "aint",
+  "не", "нет", "нельзя",
+]);
+const LOSSES = new Set(["lose", "loses", "losing", "lost", "проиграет", "проиграют", "проиграл"]);
+const OUTCOMES = new Set([
+  "win", "wins", "winning", "won", "beat", "beats",
+  "выиграет", "выиграют", "выиграл", "победит", "победят",
+  ...LOSSES,
+]);
+
+// Verbs of ALLEGIANCE, kept apart from OUTCOMES on purpose. "I don't support Barcelona" carries no
+// result claim, so the outcome gate below drops it — yet it is a plain statement that the user backs
+// the OTHER side, and the suggestion built from it lands on the side they already hold. Only the
+// NEGATED form counts: an unnegated "I support Barcelona" is already handled by the entity match,
+// and bare "against" is deliberately absent — "Barcelona against Madrid" is a fixture, not a stance,
+// and flipping on it would invert every ordinary match-up query.
+const STANCES = new Set(["support", "supporting", "back", "backing", "root", "rooting", "болею", "болеть", "фанат"]);
+
+function isNegatedQuery(text: string): boolean {
+  // Apostrophes stripped locally (never in normalize(), which feeds the entity regexes) so "won't"
+  // reads as the negation "wont" and not as the token "won".
+  const words = text.toLowerCase().replace(/['’]/g, "").split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  const negated = words.some((w) => NEGATIONS.has(w));
+  if (!words.some((w) => OUTCOMES.has(w))) {
+    // No result claim. A negated allegiance is still a polarity statement; anything else ("I'm not
+    // going to the Barcelona game") negates the PLAN, not the result, and must not flip.
+    return negated && words.some((w) => STANCES.has(w));
+  }
+  return negated !== words.some((w) => LOSSES.has(w));
+}
+
+// Which side the free text actually BACKS, given the side its matched entity sits on. The hedge is the
+// opposing side of THIS (buildS2Suggestion in s2.ts), so a negated query lands ON the named entity
+// instead of against it: "Barcelona will not win" means the user is exposed to Barcelona LOSING.
+export function backedSideForQuery(query: string, entitySide: BetSide): BetSide {
+  return isNegatedQuery(query) ? opposingSide(entitySide) : entitySide;
+}
+
 // The AGAINST hedge only makes sense for a NAMED entity-vs-entity market. Over/Under totals, Up/Down,
 // and bare Yes/No have no "opponent" outcome to bet, so the caller SKIPS them (spec §2 shape guard).
 export function isNamedEntityShape(yesLabel: string, noLabel: string): boolean {

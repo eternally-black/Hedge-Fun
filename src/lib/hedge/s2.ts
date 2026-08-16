@@ -17,6 +17,7 @@ import { deriveForUser, type DerivedSuggestion } from "./suggest";
 import {
   scoreMatch,
   opposingSide,
+  backedSideForQuery,
   isNamedEntityShape,
   type S2Candidate,
   type S2Match,
@@ -243,18 +244,23 @@ function buildMatchCandidates(rows: S2MarketRow[]): S2Candidate[] {
 
 // For a matched entity label, find its NEAREST upcoming market (soonest deadline) and build the
 // AGAINST suggestion. Handles the same team appearing in several upcoming markets.
-function buildNearestAgainst(rows: S2MarketRow[], entityLabel: string, confidence: number): HedgeSuggestion | null {
+// The naming a market entity does NOT mean backing it (F19): the side is decided by the QUERY's
+// polarity relative to that entity (backedSideForQuery), never by a blind inversion — "Barcelona will
+// not win" backs the opponent, so its hedge is Barcelona's own side. Without this a negative query got
+// the identical suggestion to "Barcelona will win" and doubled the user's exposure. `query` is the
+// user's ORIGINAL text even on the NLU re-query path: the extractor returns entities, not polarity.
+function buildNearestAgainst(rows: S2MarketRow[], entityLabel: string, confidence: number, query: string): HedgeSuggestion | null {
   const target = entityLabel.trim().toLowerCase();
-  let best: { row: S2MarketRow; supportedSide: BetSide } | null = null;
+  let best: { row: S2MarketRow; entitySide: BetSide } | null = null;
   for (const r of rows) {
-    let supportedSide: BetSide | null = null;
-    if (r.yesLabel.trim().toLowerCase() === target) supportedSide = "YES";
-    else if (r.noLabel.trim().toLowerCase() === target) supportedSide = "NO";
-    if (!supportedSide) continue;
-    if (!best || r.deadline.getTime() < best.row.deadline.getTime()) best = { row: r, supportedSide };
+    let entitySide: BetSide | null = null;
+    if (r.yesLabel.trim().toLowerCase() === target) entitySide = "YES";
+    else if (r.noLabel.trim().toLowerCase() === target) entitySide = "NO";
+    if (!entitySide) continue;
+    if (!best || r.deadline.getTime() < best.row.deadline.getTime()) best = { row: r, entitySide };
   }
   if (!best) return null;
-  return buildS2Suggestion(best.row, best.supportedSide, confidence);
+  return buildS2Suggestion(best.row, backedSideForQuery(query, best.entitySide), confidence);
 }
 
 export interface S2SearchOutcome {
@@ -293,7 +299,7 @@ export async function searchS2(query: string): Promise<S2SearchOutcome> {
   for (const m of matches) {
     const key = m.label.trim().toLowerCase();
     if (usedEntities.has(key)) continue;
-    const built = buildNearestAgainst(rows, m.label, m.score);
+    const built = buildNearestAgainst(rows, m.label, m.score, query);
     if (built) {
       suggestions.push(built);
       usedEntities.add(key);

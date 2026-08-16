@@ -35,6 +35,16 @@ const MAJOR_TAGS: { slug: string; tagId: number; asset: HedgeAsset }[] = [
 ];
 
 // league label -> stable grouping slug ("Dota 2" -> "dota-2", "NBA" -> "nba").
+// USD → cents for the RANKING columns only, saturated at the INT4 ceiling. Unclamped, a big
+// BTC/ETH strike market — exactly this indexer's universe — writes past 2_147_483_647 cents
+// ($21,474,836.47), Prisma throws a fit error, and because the majors loop has no per-item catch
+// the whole run dies; the same market reappears next run, so the indexer fails from then on.
+// Saturating keeps the only property these columns have: a $30M and a $25M market both rank top.
+// ponytail: saturates above $21.47M, widen both columns to BigInt if the ordering ever matters up there.
+function rankCents(usd: number | null | undefined): number | null {
+  return usd == null ? null : Math.min(Math.round(usd * 100), 2_147_483_647);
+}
+
 function slugify(label: string): string {
   return label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 }
@@ -162,8 +172,8 @@ export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
         strikeCents: parsed.strikeCents,
         direction: parsed.direction, // "UP" | "DOWN" | null (matches HedgeMarketDirection)
         parsedDeadline: new Date(m.resolutionDeadline),
-        liquidityCents: row.liquidityNum != null ? Math.round(row.liquidityNum * 100) : null,
-        volumeCents: row.volumeNum != null ? Math.round(row.volumeNum * 100) : null,
+        liquidityCents: rankCents(row.liquidityNum),
+        volumeCents: rankCents(row.volumeNum),
         parseOk: parsed.parseOk,
       };
       await prisma.marketMeta.upsert({
@@ -246,8 +256,8 @@ export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
       eventSlug: s.eventSlug,
       eventTicker: s.eventTicker,
       series: s.seriesTitle,
-      liquidityCents: s.liquidityNum != null ? Math.round(s.liquidityNum * 100) : null,
-      volumeCents: s.volumeNum != null ? Math.round(s.volumeNum * 100) : null,
+      liquidityCents: rankCents(s.liquidityNum),
+      volumeCents: rankCents(s.volumeNum),
       parsedDeadline: new Date(m.resolutionDeadline),
     };
     await prisma.marketMeta.upsert({

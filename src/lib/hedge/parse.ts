@@ -44,6 +44,20 @@ const ASSET_PATTERNS: [RegExp, HedgeAsset][] = [
 const UP_STRIKE = /(?:^|-)(?:above|over|exceeds?|reach(?:es)?|hits?|greater-than|at-least)(?:-to)?-(\d+(?:\.\d+)?)(k)?(?:-|$)/;
 const DOWN_STRIKE = /(?:^|-)(?:below|under|beneath|dips?|drops?|falls?|less-than)(?:-to)?-(\d+(?:\.\d+)?)(k)?(?:-|$)/;
 
+// The strike keywords carry no POLARITY (F18): "will-bitcoin-not-reach-100k" hit UP_STRIKE on
+// "-reach-100k" and parsed as UP — the exact inversion that hands the user a hedge on the WRONG side
+// of their own position. A negated market is REFUSED (no strike, no direction -> parseOk false, market
+// dropped) rather than guessed: dropping one market costs coverage, an inverted direction costs money.
+// Hyphen-bounded like the F17 pass, and deliberately WITHOUT a bare "no": the question fallback text
+// can end "...? Yes or No" and "no-later-than" / "november" must not kill a good market. The `n-?t`
+// arm covers the question path, where norm() turns "won't"/"doesn't" into "won-t"/"doesn-t".
+// Checked against every real Gamma slug this parser is verified on (live 2026-07-17) — none contains
+// a negation token: "bitcoin-above-62600-on-july-17-2026-2pm-et", "ethereum-above-1810-on-july-17-2026-2pm-et",
+// "will-solana-reach-100-on-july-17", "will-bitcoin-hit-150k-by-december-31-2026",
+// "will-bitcoin-dip-to-57k-on-july-17", "solana-below-90-on-july-20-2026", "btc-updown-5m-1784310300" —
+// so coverage is untouched.
+const NEGATION = /(?:^|-)(?:not|never|cannot|fails?|(?:wo|do|does|is|are|did)n-?t)(?:-|$)/;
+
 // A month token IMMEDIATELY FOLLOWED BY A NUMBER (day or year) = a machine-readable date is present.
 // Tightened (F17) from "any month token anywhere": a bare month word ("...-may-rally", "march-to-100k")
 // is an English word, not a date, and used to fake the gate. Requiring a trailing `-\d` matches every
@@ -64,6 +78,7 @@ function strikeToCents(num: string, kSuffix: string | undefined): number {
 }
 
 function directionStrike(text: string): { direction: ParsedDirection; strikeCents: number } | null {
+  if (NEGATION.test(text)) return null; // negated claim -> refuse to parse (see NEGATION above)
   const up = UP_STRIKE.exec(text);
   if (up) return { direction: "UP", strikeCents: strikeToCents(up[1], up[2]) };
   const down = DOWN_STRIKE.exec(text);
