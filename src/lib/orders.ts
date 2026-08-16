@@ -305,13 +305,14 @@ export async function bookEntryFills(
     // KILL and release in ONE transaction. Two statements meant a crash in between left the attempt
     // terminal with the slot still spent, and unrecoverably so: the retry's updateMany matches zero
     // rows, so nothing downstream can tell that the release still owes.
-    const killed = await prisma.$transaction(async (tx) => {
+    await prisma.$transaction(async (tx) => {
       const k = await tx.orderAttempt.updateMany({
         where: { id: attempt.id, state: { in: ["SUBMITTING", "POSTED"] } },
         data: { state: "KILLED" },
       });
+      // Gated on the update actually landing, so a replayed receipt against an already-KILLED
+      // attempt cannot release a second slot.
       if (k.count > 0) await releaseSwipeSlot(tx, attempt.userId, utcDayOf(attempt.createdAt));
-      return k;
     });
     return "KILLED";
   }

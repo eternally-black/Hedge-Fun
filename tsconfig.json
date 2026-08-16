@@ -36,6 +36,14 @@
     ".next/dev/types/**/*.ts"
   ],
   "exclude": [
-    "node_modules"
+    "node_modules",
+    // The Expo client is a SEPARATE package with its own tsconfig and its own dependencies. The
+    // root config globs **/*.tsx, so without this the web build type-checks mobile sources against
+    // the web's node_modules — locally that passes only because mobile/node_modules happens to be
+    // on disk, while the Docker image installs the root lockfile alone and fails on
+    // `Cannot find module '@privy-io/expo'`. Type-check the app with mobile/tsconfig.json.
+    "mobile",
+    // Gitignored scratchpad: packets, transcripts and vendored snippets pulled in for review.
+    ".scratch"
   ]
 }
