@@ -4,6 +4,7 @@ import { useCallback, useState } from "react";
 import { type Me, usd } from "../ui";
 import { usePredictionHistory } from "./usePredictionHistory";
 import { HistoryRow } from "./HistoryRow";
+import { RealDepositPanel } from "./RealDepositPanel";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
@@ -11,12 +12,13 @@ type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 // Top-Up button (free once, then 1 artifact), and the prediction history (same /api/history rows via
 // usePredictionHistory — shared with HistorySheet). All money is derived from `me` during render —
 // no mirrored server state.
-export function BalanceSheet({ me, api, onClose, onTopupDone, onToast }: {
+export function BalanceSheet({ me, api, realPusdMicro, onClose, onTopupDone, onToast }: {
   me: Me | null;
   api: Api;
   onClose: () => void;
   onTopupDone: () => void | Promise<void>;
   onToast: (msg: string) => void;
+  realPusdMicro?: string | null;
 }) {
   const { rows, pending, nowMs } = usePredictionHistory(api);
   const [busy, setBusy] = useState(false);
@@ -56,7 +58,13 @@ export function BalanceSheet({ me, api, onClose, onTopupDone, onToast }: {
       <div onClick={(e) => e.stopPropagation()} className="hf-scroll" style={{ background: "var(--bg2)", borderRadius: "28px 28px 0 0", borderTop: "1px solid var(--line)", padding: "8px 18px 22px", maxHeight: "82%", overflowY: "auto" }}>
         <div style={{ width: 42, height: 5, borderRadius: 4, background: "var(--line)", margin: "0 auto 14px" }} />
 
-        {/* Cash / Locked / Total split panel */}
+        {/* REAL mode replaces this panel outright rather than adding to it: "free top-up" sitting
+            next to "send real USDC" is a mis-tap waiting to happen, and in real mode the free path
+            grants play money that cannot be traded anyway. */}
+        {me?.real.mode === "REAL" ? (
+          <RealDepositPanel me={me} api={api} pusdMicro={realPusdMicro ?? null} onToast={onToast} />
+        ) : (
+        /* Cash / Locked / Total split panel */
         <div style={{ background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 18, padding: "16px 18px", marginBottom: 14 }}>
           <div style={{ fontSize: 10, letterSpacing: ".14em", color: "var(--muted)", textTransform: "uppercase" }}>Cash</div>
           <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 34, color: "var(--yes)", lineHeight: 1.05 }}>
@@ -68,6 +76,7 @@ export function BalanceSheet({ me, api, onClose, onTopupDone, onToast }: {
           </div>
           <TopupButton me={me} busy={busy} onTopup={doTopup} />
         </div>
+        )}
 
         <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 14 }}>
           <div style={{ fontFamily: "var(--df)", fontSize: 26 }}>Your predictions</div>

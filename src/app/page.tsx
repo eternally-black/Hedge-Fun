@@ -18,6 +18,8 @@ import { NotificationsScreen } from "./screens/NotificationsScreen";
 import { HedgeScreen } from "./screens/HedgeScreen";
 import { RevealOverlay } from "./screens/RevealOverlay";
 import { type Card, type Me, type Screen } from "./ui";
+import { useRealCtx } from "./useRealCtx";
+import { placeRealOrder } from "@/lib/real-client";
 import { DECK_MIN_LEAD_MS, QUOTE_POLL_MS } from "@/lib/config";
 import type { QuotesResponse, ResultRow, ResultsResponse, SwipeResponse } from "@/lib/api-types";
 
@@ -95,6 +97,35 @@ function App() {
   // the reveal plays. This prevents the deck flashing for a frame before the reveal floats up — the
   // very first content frame is already the right screen (reveal or deck), never an intermediate.
   const [booted, setBooted] = useState(false);
+  // REAL mode. `me.real.mode` is the server's answer and already accounts for missing or stale
+  // consent, so the client never has to re-derive eligibility — it just renders what it is told.
+  const realMode = me?.real.mode === "REAL";
+  const { ctx: realCtx } = useRealCtx(me);
+  // Refs, not values, for the same reason meRef exists here: the swipe callback must keep a stable
+  // identity across the frequent /api/me refreshes, or the keyed DeckCard is handed new props every
+  // refresh and re-mounts mid-gesture.
+  const realCtxRef = useRef(realCtx);
+  realCtxRef.current = realCtx;
+  const realModeRef = useRef(realMode);
+  realModeRef.current = realMode;
+  // Spendable pUSD, read from chain via /api/real/wallet. Only fetched in real mode: paper must not
+  // pay for an RPC round-trip it never shows.
+  const [realPusdMicro, setRealPusdMicro] = useState<string | null>(null);
+  const refreshRealBalance = useCallback(async () => {
+    try {
+      const r = (await api("/api/real/wallet")) as { pusdMicro?: string | null };
+      setRealPusdMicro(r.pusdMicro ?? null);
+    } catch {
+      setRealPusdMicro(null); // an RPC hiccup shows "—", never a misleading $0.00
+    }
+  }, [api]);
+
+  // Real balance follows the MODE, not the screen: the HUD shows it everywhere once real is on, so
+  // it is fetched when the mode turns on and after each real order. Paper mode never fetches.
+  useEffect(() => {
+    if (!realMode) { setRealPusdMicro(null); return; }
+    void refreshRealBalance();
+  }, [realMode, refreshRealBalance]);
   const ritualDone = useRef(false); // run the auth→reveal→gm sequence once per load, not on every refresh
   const topping = useRef(false);
   const popTimer = useRef<number | undefined>(undefined);
@@ -292,8 +323,15 @@ function App() {
       // meRef.current (not `me`) so this callback stays stable across the frequent /api/me refreshes
       // — otherwise act + handleAction would get a new identity every refresh and re-key the DeckCard.
       const m = meRef.current;
-      if (action !== "SKIP" && m && m.cashCents < m.stakeCents) {
+      // The cash gate is PAPER's. Real money is bounded on chain and by the server's own quote, and
+      // meRef carries virtual cents that say nothing about pUSD — applying it in real mode would
+      // block a funded account because its play balance ran out.
+      if (!realModeRef.current && action !== "SKIP" && m && m.cashCents < m.stakeCents) {
         flashToast("No free cash left");
+        return;
+      }
+      if (realModeRef.current && action !== "SKIP" && !realCtxRef.current?.depositWalletAddress) {
+        flashToast("Finish real-money setup in your profile first");
         return;
       }
       // OPTIMISTIC: advance the deck immediately so the next card rises in sync with the fly-out
@@ -306,22 +344,35 @@ function App() {
       // live book and, if it moved against them beyond tolerance, refuses instead of booking a worse
       // price silently (D10 Slice B). With the top card polling every few seconds this is normally
       // the same book the server reads, so the rejection path is a genuine-move edge, not routine.
-      const req = action === "SKIP"
-        ? api("/api/skip", { method: "POST" })
-        : api("/api/swipe", {
-            method: "POST",
-            body: JSON.stringify({
-              marketId: card.id,
-              side: action,
-              quotedPriceBp: action === "YES" ? card.yesPriceBp : card.noPriceBp,
-            }),
-          });
+      // A skip is a skip in both economies. A YES/NO in REAL mode goes through the two-phase order
+      // protocol instead of the paper ledger: intent (server derives the params) -> device signs
+      // exactly those -> submit. Same gesture, same optimistic advance; the money is the difference.
+      const quotedPriceBp = action === "YES" ? card.yesPriceBp : card.noPriceBp;
+      const req =
+        action === "SKIP"
+          ? api("/api/skip", { method: "POST" })
+          : realModeRef.current && realCtxRef.current
+            ? placeRealOrder(api, realCtxRef.current, {
+                marketId: card.id,
+                side: action,
+                dir: "ENTRY",
+                quotedPriceBp,
+              }).then((r) => {
+                void refreshRealBalance(); // the debit already happened on chain
+                return r as unknown;
+              })
+            : api("/api/swipe", {
+                method: "POST",
+                body: JSON.stringify({ marketId: card.id, side: action, quotedPriceBp }),
+              });
       req
         .then((r) => {
           refreshMe(); // stats only (points/shards/balance/skip counter); never the deck
           // The swipe that spends the LAST point swipe (count == cap, not over) is the moment we hand
           // off to the feed — arm the one-shot panel. (Skips don't count; dev never caps.)
-          if (action !== "SKIP") {
+          // The cap handoff is a PAPER concept: the swipe counter and the feed panel belong to the
+          // play economy, and the real path returns an order result with none of those fields.
+          if (action !== "SKIP" && !realModeRef.current) {
             const resp = r as SwipeResponse;
             const cap = meRef.current?.swipes.cap ?? 0;
             if (!resp.overCap && cap > 0 && resp.swipeCountToday >= cap) setJustExhausted(true);
@@ -357,7 +408,7 @@ function App() {
           else console.error(e);
         });
     },
-    [api, refreshMe, topUpIfLow, flashPop, flashToast],
+    [api, refreshMe, topUpIfLow, flashPop, flashToast, refreshRealBalance],
   );
 
   // Stable handlers for the keyed DeckCard so it isn't handed new function props each render.
@@ -492,8 +543,8 @@ function App() {
         </div>
       )}
       {historyOpen && <HistorySheet api={api} onClose={closeHistory} />}
-      {balanceOpen && <BalanceSheet me={me} api={api} onClose={closeBalance} onTopupDone={refreshMe} onToast={flashToast} />}
-      <Hud me={me} pop={pop} onShards={goVault} onGM={goGmScreen} onBalance={openBalance} onBell={goNotifs} />
+      {balanceOpen && <BalanceSheet me={me} api={api} realPusdMicro={realPusdMicro} onClose={closeBalance} onTopupDone={refreshMe} onToast={flashToast} />}
+      <Hud me={me} pop={pop} realPusdMicro={realPusdMicro} onShards={goVault} onGM={goGmScreen} onBalance={openBalance} onBell={goNotifs} />
 
       <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
         {effectiveScreen === "deck" && (

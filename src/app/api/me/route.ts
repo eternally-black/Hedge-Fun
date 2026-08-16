@@ -16,6 +16,7 @@ import {
 } from "@/lib/config";
 import { isDevUser } from "@/lib/dev";
 import type { MeResponse } from "@/lib/api-types";
+import { REAL_TERMS_VERSION } from "@/lib/real-terms";
 
 // Account snapshot: balance, points (multiplier-applied), today's swipe count, shards,
 // artifacts, streak, login state. Shape pinned by MeResponse (src/lib/api-types.ts).
@@ -94,6 +95,20 @@ export async function GET(req: Request) {
       windowStartWeekday: weekdayMon0(
         streakWindowStartDay(streak?.currentLevel ?? 0, streak?.lastQualifiedDay ?? null, day),
       ),
+    },
+    // The Paper/Real switch reads entirely from columns already on `user` — no extra query and no
+    // RPC, because /api/me is fetched on every screen. Real MODE is reported as PAPER whenever the
+    // consent behind it is missing or stale: a row can hold realMode=true from before a terms change,
+    // and rendering a real-money shell whose every action would 403 is worse than showing paper.
+    real: {
+      consentAt: user.realConsentAt?.toISOString() ?? null,
+      consentVersion: user.realConsentVersion ?? null,
+      termsVersion: REAL_TERMS_VERSION,
+      mode:
+        user.realMode && user.realConsentAt !== null && user.realConsentVersion === REAL_TERMS_VERSION
+          ? "REAL"
+          : "PAPER",
+      depositWallet: user.depositWalletAddress ?? null,
     },
     loginMarkedToday: !!loginMark,
     unreadResults,

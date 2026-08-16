@@ -11,8 +11,8 @@ import { prisma } from "@/lib/prisma";
 import { authUser, syncEmbeddedWallet, isEvmAddress } from "@/lib/privy";
 import { isRealMoneyEligible, hasRealConsent, sameOrigin } from "@/lib/real";
 import { captureToGlitchTip } from "@/lib/glitchtip";
+import { contractOwner, erc20BalanceOf, PUSD_ADDRESS } from "@/lib/polygon";
 import { polymarketPublic } from "@/lib/polymarket-sdk";
-import { contractOwner } from "@/lib/polygon";
 // Low-level actions live in the /actions subpath, not the root (same trap as fetchBalanceAllowance).
 import { isWalletDeployed } from "@polymarket/client/actions";
 import { WalletType } from "@polymarket/bindings/gamma";
@@ -130,6 +130,18 @@ export async function GET(req: Request) {
   const user = await authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
+  // Spendable balance, read from chain — the CLOB counts pUSD and nothing else, so this is the
+  // number the real-money HUD shows where paper shows Cash. Only read when a deposit wallet exists
+  // (nothing to ask about otherwise) and never fatal: an RPC hiccup returns null so the caller can
+  // render "—" instead of failing the whole screen. It lives here rather than on /api/me because
+  // that endpoint is fetched on every screen and must not carry an RPC round-trip.
+  let pusdMicro: string | null = null;
+  if (user.depositWalletAddress) {
+    pusdMicro = await erc20BalanceOf(PUSD_ADDRESS, user.depositWalletAddress)
+      .then((v) => v.toString())
+      .catch(() => null);
+  }
+
   // Deliberately ungated: this read is what TELLS the client whether consent exists, and it exposes
   // nothing about the account the user cannot already see.
   return NextResponse.json(
@@ -138,6 +150,7 @@ export async function GET(req: Request) {
       consented: hasRealConsent(user),
       embeddedWalletAddress: user.embeddedWalletAddress ?? null,
       depositWalletAddress: user.depositWalletAddress ?? null,
+      pusdMicro,
     },
     // A stale provisioning state would render a "Provision wallet" button for a wallet that exists.
     { headers: { "Cache-Control": "no-store" } },

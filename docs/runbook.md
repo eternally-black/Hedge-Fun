@@ -250,9 +250,10 @@ before the next deploy.
 ## Real-money console (`/real`) — alpha operating order
 
 The whole real-money surface is one page, `/real`, and it is invisible in the deck by design.
-Access needs the operator's email/X handle in `REAL_MONEY_EMAILS` / `REAL_MONEY_TWITTER` **and**
-consent recorded on the account; the recovery verbs (close, redeem, withdraw) deliberately survive a
-flipped allowlist, so removing someone from the list can never trap their funds.
+Access needs consent recorded on the account and nothing else — the `REAL_MONEY_EMAILS` /
+`REAL_MONEY_TWITTER` allowlist was the alpha gate and has been removed (src/lib/real.ts). The
+recovery verbs (close, redeem, withdraw) were already written to survive a flipped allowlist so a
+list change could never trap funds; that property costs nothing now and stays.
 
 Order of operations for a fresh account — each step's button stays visible until its state is real:
 

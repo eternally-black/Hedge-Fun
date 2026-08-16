@@ -6,7 +6,12 @@ import { type Me, num, usd } from "../ui";
 // Top HUD: points / streak / virtual-$ chips + the shard→artifact progress strip.
 // Ported from app design. Points pop animates on a +N event (pop prop). memo'd + stable
 // callbacks from the parent, so it only re-renders when me/pop actually change.
-export const Hud = memo(function Hud({ me, pop, onShards, onGM, onBalance, onBell }: { me: Me | null; pop: { amt: number; color: string } | null; onShards: () => void; onGM: () => void; onBalance: () => void; onBell: () => void }) {
+// realPusdMicro: on-chain spendable balance, passed in only when the account is in REAL mode. Kept
+// as a prop rather than read here so the HUD stays a pure render of state someone else owns — and so
+// paper mode costs no extra fetch. null = in real mode but the balance has not arrived (or the RPC
+// failed), which renders "—" rather than a misleading $0.00.
+export const Hud = memo(function Hud({ me, pop, realPusdMicro, onShards, onGM, onBalance, onBell }: { me: Me | null; pop: { amt: number; color: string } | null; realPusdMicro?: string | null; onShards: () => void; onGM: () => void; onBalance: () => void; onBell: () => void }) {
+  const isReal = me?.real.mode === "REAL";
   const shards = me?.shards ?? 0;
   const per = me?.shardsPerArtifact ?? 20;
   const shardPct = Math.round((shards / per) * 100);
@@ -31,11 +36,19 @@ export const Hud = memo(function Hud({ me, pop, onShards, onGM, onBalance, onBel
         </button>
 
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
-          <button type="button" onClick={onBalance} aria-label="Cash balance — open wallet" style={{ background: "var(--panel)", border: "1px solid var(--line)", margin: 0, font: "inherit", color: "inherit", display: "flex", alignItems: "center", gap: 7, padding: "6px 11px", borderRadius: 30, cursor: "pointer" }}>
+          <button type="button" onClick={onBalance} aria-label={isReal ? "Real balance — open wallet" : "Cash balance — open wallet"} style={{ background: "var(--panel)", border: "1px solid var(--line)", margin: 0, font: "inherit", color: "inherit", display: "flex", alignItems: "center", gap: 7, padding: "6px 11px", borderRadius: 30, cursor: "pointer" }}>
             <div style={{ lineHeight: 1, textAlign: "right" }}>
-              <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 14, color: "var(--yes)" }}>{me ? usd(me.cashCents) : "—"}</div>
+              <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 14, color: isReal ? "var(--gold)" : "var(--yes)" }}>
+                {isReal
+                  ? realPusdMicro == null
+                    ? "—"
+                    : `$${(Number(realPusdMicro) / 1e6).toFixed(2)}`
+                  : me
+                    ? usd(me.cashCents)
+                    : "—"}
+              </div>
               <div style={{ fontSize: 8, letterSpacing: ".14em", color: "var(--muted)", textTransform: "uppercase", marginTop: 1 }}>
-                {me && me.lockedCents > 0 ? `+ ${usd(me.lockedCents)} locked ›` : "Cash ›"}
+                {isReal ? "Real · pUSD ›" : me && me.lockedCents > 0 ? `+ ${usd(me.lockedCents)} locked ›` : "Cash ›"}
               </div>
             </div>
           </button>

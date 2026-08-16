@@ -1,30 +1,20 @@
-// Real-money outer gate (plan §2.7). Env allowlist is the OUTER gate; persisted consent is the
-// inner one; both re-checked on every money route. Mirrors the admin.ts pattern: comma-separated
-// env lists, parsed at module scope, unset ⇒ nobody (fail-closed). Two keys because not every
-// real-money user has an email — X-signup accounts have only a handle — so a user matches on
-// EITHER an exact email (REAL_MONEY_EMAILS) or an exact X handle (REAL_MONEY_TWITTER, leading @
-// optional). Both case- and whitespace-insensitive.
-
-const REAL_MONEY_EMAILS = new Set(
-  (process.env.REAL_MONEY_EMAILS ?? "")
-    .split(",")
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean),
-);
-
-const REAL_MONEY_TWITTER = new Set(
-  (process.env.REAL_MONEY_TWITTER ?? "")
-    .split(",")
-    .map((s) => s.trim().toLowerCase().replace(/^@/, ""))
-    .filter(Boolean),
-);
-
-export function isRealMoneyEligible(user: { email: string | null; twitterHandle: string | null }): boolean {
-  const email = (user.email ?? "").trim().toLowerCase();
-  if (email && REAL_MONEY_EMAILS.has(email)) return true;
-  const handle = (user.twitterHandle ?? "").trim().toLowerCase().replace(/^@/, "");
-  if (handle && REAL_MONEY_TWITTER.has(handle)) return true;
-  return false; // unset env or no match = nobody (prod-safe), like isAdmin
+// Real-money access. There USED to be an env allowlist here (REAL_MONEY_EMAILS /
+// REAL_MONEY_TWITTER) gating the alpha to a couple of hand-picked accounts while the money path was
+// being written against live Polymarket. That gate has served its purpose and is gone: real money is
+// open to anyone who explicitly opts in.
+//
+// What still gates spending, and why this is not simply "no checks":
+//   - CONSENT (below) is per-user, durable and explicit — nobody spends without having accepted.
+//   - GEO is browser-reported and, as /api/real/intent says in its own words, "policy, not proof";
+//     Polymarket's own IP rejection is the real barrier. That was tolerable when two accounts had
+//     access and is the weakest link now that anyone does — worth revisiting before a marketing push
+//     puts strangers on this path.
+//   - Every money route still re-checks consent and same-origin on each call.
+//
+// Kept as a function rather than deleting the call sites: it is the seam where a restriction goes
+// back if a closed test is ever wanted again, and it costs one inlined `true`.
+export function isRealMoneyEligible(_user: { email: string | null; twitterHandle: string | null }): boolean {
+  return true;
 }
 
 export function hasRealConsent(user: { realConsentAt: Date | null }): boolean {

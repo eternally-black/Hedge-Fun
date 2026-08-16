@@ -266,6 +266,18 @@ export interface MeResponse {
     todayWeekday: number; // 0=Mon..6=Sun — which GM-grid column is today
     windowStartWeekday: number; // 0=Mon..6=Sun — where this user's 7-day window starts
   };
+  // Everything the Paper/Real switch in the profile needs, and nothing that costs an RPC call:
+  // /api/me is read on every screen, so the on-chain pUSD balance deliberately lives on the real
+  // screen's own endpoints instead. `termsVersion` is the CURRENT text; when it differs from
+  // `consentVersion` the user has agreed to something older and must accept again before real mode
+  // will turn on, which is the whole reason the version is stored at all.
+  real: {
+    consentAt: string | null; // ISO-8601 — when they accepted, null if never
+    consentVersion: string | null; // which text they accepted
+    termsVersion: string; // which text they would be shown now
+    mode: "PAPER" | "REAL"; // which economy the app is currently rendering
+    depositWallet: string | null; // provisioned Polymarket deposit wallet, null until setup runs
+  };
   loginMarkedToday: boolean;
   unreadResults: number; // settled bets the user hasn't seen yet (seenAt IS NULL) — drives the HUD bell
   referrals: { joined: number; pointsEarned: number }; // invitees bound + REFERRAL points earned from them (invite screen)

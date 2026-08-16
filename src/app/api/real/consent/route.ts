@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { authUserStrict } from "@/lib/privy";
 import { isRealMoneyEligible, sameOrigin } from "@/lib/real";
+import { REAL_TERMS_VERSION } from "@/lib/real-terms";
 
 export async function POST(req: Request) {
   const auth = await authUserStrict(req);
@@ -23,17 +24,31 @@ export async function POST(req: Request) {
   } catch {
     return NextResponse.json({ error: "bad_json" }, { status: 400 });
   }
-  const { accept } = body as { accept?: unknown };
+  const { accept, version } = body as { accept?: unknown; version?: unknown };
   if (accept !== true) return NextResponse.json({ error: "accept_required" }, { status: 400 });
+  // The client must name the version it actually rendered. Accepting without it — or naming a stale
+  // one after the text changed — is not consent to THIS text, and recording it as such is exactly
+  // what the version column exists to prevent. The client re-reads the terms and asks again.
+  if (version !== REAL_TERMS_VERSION) {
+    return NextResponse.json({ error: "terms_version_mismatch", version: REAL_TERMS_VERSION }, { status: 409 });
+  }
 
-  // Idempotent: the first consent moment is preserved; re-consenting never moves the timestamp.
+  // Idempotent for the SAME version: the first acceptance of the current text keeps its moment. A
+  // user who accepted an OLDER version does not match this WHERE, so they get a fresh timestamp for
+  // what they have now agreed to — a re-consent, not a silent carry-over.
   await prisma.user.updateMany({
-    where: { id: user.id, realConsentAt: null },
-    data: { realConsentAt: new Date() },
+    where: { id: user.id, NOT: { realConsentVersion: REAL_TERMS_VERSION } },
+    data: { realConsentAt: new Date(), realConsentVersion: REAL_TERMS_VERSION },
   });
 
-  const updated = await prisma.user.findUnique({ where: { id: user.id }, select: { realConsentAt: true } });
-  return NextResponse.json({ consentAt: updated?.realConsentAt?.toISOString() ?? null });
+  const updated = await prisma.user.findUnique({
+    where: { id: user.id },
+    select: { realConsentAt: true, realConsentVersion: true },
+  });
+  return NextResponse.json({
+    consentAt: updated?.realConsentAt?.toISOString() ?? null,
+    version: updated?.realConsentVersion ?? null,
+  });
 }
 
 export async function DELETE(req: Request) {
@@ -48,6 +63,11 @@ export async function DELETE(req: Request) {
   if (!isRealMoneyEligible(user)) return NextResponse.json({ error: "real_disabled" }, { status: 403 });
   if (!sameOrigin(req)) return NextResponse.json({ error: "bad_origin" }, { status: 403 });
 
-  await prisma.user.update({ where: { id: user.id }, data: { realConsentAt: null } });
-  return NextResponse.json({ consentAt: null });
+  // Revoking clears the version AND drops the user out of real mode: leaving realMode true with
+  // consent gone renders a real-money shell whose every action 403s.
+  await prisma.user.update({
+    where: { id: user.id },
+    data: { realConsentAt: null, realConsentVersion: null, realMode: false },
+  });
+  return NextResponse.json({ consentAt: null, version: null });
 }

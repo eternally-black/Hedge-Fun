@@ -265,9 +265,12 @@ regenerated yields can never byte-match. Shipped design (`bb3ba15`):
   verdict, always allows EXIT intents (close-only tier, and a failed re-check must never trap a
   position). The verdict is policy, not proof — Polymarket's IP rejection is the barrier, which is
   why the posting locus (§1.3) matters.
-- Flag: env allowlist (`REAL_MONEY_EMAILS`/`REAL_MONEY_TWITTER`, unset = nobody) as the fail-closed
-  outer gate, **plus** a persisted per-user consent timestamp (Sol: env list ≠ user opt-in) —
-  consent UI is a small explicit "enable real money" step, not a silent flag.
+- Flag: a persisted per-user consent timestamp (Sol: env list ≠ user opt-in) — an explicit "enable
+  real money" step, never a silent flag. SUPERSEDED 2026-08-16: the env allowlist in front of it
+  (`REAL_MONEY_EMAILS`/`REAL_MONEY_TWITTER`, unset = nobody) was the alpha gate and is removed; with
+  no real users and no campaign running it only blocked the owner's own accounts. Consent is now the
+  only per-user gate, which puts more weight on the geo verdict directly above — still policy, not
+  proof.
 - Before the flag opens beyond the owner: CSP/security headers on the web app (none exist today),
   origin checks on money routes, creds never in `localStorage`, money routes distinguish
   auth-invalid from infra-failure instead of `authUser`'s single 401 path.

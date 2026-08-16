@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useLinkAccount, usePrivy } from "@privy-io/react-auth";
 import { type Me, num, usd } from "../ui";
 import { XIcon, TelegramIcon } from "../icons";
+import { RealModeCard } from "./RealModeCard";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
@@ -131,6 +132,8 @@ export function ProfileScreen({ me, api, onRefresh, onHistory, onLogout }: { me:
           </button>
         </div>
       )}
+
+      <RealModeCard me={me} api={api} onRefresh={onRefresh} />
 
       {/* Account / sign out. Shows who's signed in (email or @handle) + a logout action. */}
       <div style={{ marginTop: 22, fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700 }}>Account</div>

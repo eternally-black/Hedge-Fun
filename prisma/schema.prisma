@@ -195,6 +195,17 @@ model User {
   // The env allowlist is the outer gate; this is the durable per-user consent.
   depositWalletAddress  String?      @unique
   realConsentAt         DateTime?
+  // WHICH text they accepted. A timestamp alone records that someone clicked, not what they were
+  // shown; once the terms change, an old acceptance stops meaning the same thing. Nullable because
+  // rows that consented before versioning existed genuinely do not know — treated as "needs to
+  // re-accept" rather than silently backfilled to the current version.
+  realConsentVersion    String?
+  // Which economy the user is CURRENTLY looking at. Server-side rather than client state because
+  // the deck, the balance and the history all have to answer per-mode: a client-only flag would let
+  // a stale tab render paper positions under a real-money header. Turning it on requires the same
+  // two gates every money route re-checks (allowlist + consent), so this column can never be the
+  // thing that authorises spending — it only decides what is shown.
+  realMode              Boolean      @default(false)
 
   bets                  Bet[]
   pointsLedger          PointsLedger[]
