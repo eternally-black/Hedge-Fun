@@ -22,6 +22,11 @@ x-environment: &glitchtip-env
   # Upstream defaults this to True: without it anyone reaching the public ingress can self-register
   # on the monitoring host, mint a DSN and pump events into pg-data until VPS2's disk fills — the
   # host whose whole job is to still be standing when VPS1 is not.
+  # Wildcard is the upstream default and GlitchTip warns about it on every boot: with ALLOWED_HOSTS
+  # unset, Django serves any Host header, so the box answers to a name an attacker chose and any
+  # absolute URL it generates (password resets, links in alerts) can be pointed elsewhere. Pinned
+  # to the real ingress name; localhost stays for the container healthcheck and the SSH tunnel.
+  ALLOWED_HOSTS: "ingest.hedgeyour.fun,localhost,127.0.0.1"
   ENABLE_USER_REGISTRATION: "False"
   ENABLE_ADMIN: "False"
   ENABLE_OPENAPI: "False"
