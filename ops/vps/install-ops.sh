@@ -74,6 +74,14 @@ timedatectl set-ntp true 2>/dev/null || true
 # --- state/backup dirs -------------------------------------------------------
 mkdir -p /var/lib/hedgefun "$HEDGEFUN_DIR/backups"
 chmod 700 "$HEDGEFUN_DIR/backups"
+# /var/lib/hedgefun is shared: root writes the watchdog lock here from systemd, and deploy.sh writes
+# its in-progress marker here as the DEPLOY user over SSH from CI. This installer runs as root, so
+# without the chown the directory ends up root-owned and the next deploy dies on
+# `touch: Permission denied` — an install-time action breaking the deploy path, which is exactly the
+# kind of failure that looks like a CI problem and is not. Root ignores the mode, so handing it to
+# the deploy account costs nothing on the systemd side.
+chown "$(stat -c %U:%G "$HEDGEFUN_DIR")" /var/lib/hedgefun
+chmod 775 /var/lib/hedgefun
 
 # --- systemd units -----------------------------------------------------------
 changed=0

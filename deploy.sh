@@ -83,8 +83,22 @@ docker run --rm -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2-alpine \
   caddy validate --config /etc/caddy/Caddyfile
 
 STEP="install-ops"
-echo "[deploy] applying host hardening + ops units (idempotent)"
-bash ops/vps/install-ops.sh
+# Host hardening is a PROVISIONING step, not a per-deploy one: it writes sysctls, /etc/docker,
+# systemd units and /var/log, all of which need root. CI deploys as the unprivileged `deploy` user
+# (that is the point — a deploy key that can restart containers should not be able to rewrite the
+# host), so running it here failed the whole pipeline on `Permission denied` the moment ops/ landed
+# on the box. It is idempotent and changes rarely, so it runs when we actually have the rights and
+# is otherwise announced and skipped rather than taking the deploy down with it.
+if [ "$(id -u)" -eq 0 ]; then
+  echo "[deploy] applying host hardening + ops units (idempotent)"
+  bash ops/vps/install-ops.sh
+elif sudo -n true 2>/dev/null; then
+  echo "[deploy] applying host hardening + ops units via sudo (idempotent)"
+  sudo -n bash ops/vps/install-ops.sh
+else
+  echo "[deploy] SKIPPED host hardening — not root and no passwordless sudo."
+  echo "[deploy] run once as root after changing ops/: bash /opt/hedgefun/ops/vps/install-ops.sh"
+fi
 
 STEP="db up"
 echo "[deploy] ensuring database is up"
