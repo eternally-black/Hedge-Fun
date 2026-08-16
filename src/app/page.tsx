@@ -19,6 +19,7 @@ import { HedgeScreen } from "./screens/HedgeScreen";
 import { RevealOverlay } from "./screens/RevealOverlay";
 import { type Card, type Me, type Screen } from "./ui";
 import { useRealCtx } from "./useRealCtx";
+import { APP_SURFACE_ID } from "./appSurface";
 import { placeRealOrder } from "@/lib/real-client";
 import { DECK_MIN_LEAD_MS, QUOTE_POLL_MS } from "@/lib/config";
 import type { QuotesResponse, ResultRow, ResultsResponse, SwipeResponse } from "@/lib/api-types";
@@ -680,6 +681,7 @@ function Frame({ children }: { children: React.ReactNode }) {
     // Fullscreen app surface. Safe-area padding keeps the HUD/nav clear of notch + home bar.
     return (
       <div
+        id={APP_SURFACE_ID}
         style={{
           position: "fixed",
           inset: 0,
@@ -701,7 +703,7 @@ function Frame({ children }: { children: React.ReactNode }) {
       <div ref={deviceRef} style={{ position: "relative", width: 402, height: 872, borderRadius: 48, padding: 11, background: "linear-gradient(160deg,#23232e,#0c0c12)", boxShadow: "0 40px 120px -20px rgba(0,0,0,.8), 0 0 0 1px rgba(255,255,255,.05) inset", transformOrigin: "center" }}>
         <div style={{ position: "absolute", top: 18, left: "50%", transform: "translateX(-50%)", width: 108, height: 30, background: "#000", borderRadius: 18, zIndex: 60 }} />
         {/* paddingTop clears the mock notch — on mobile the safe-area inset on Frame does this. */}
-        <div style={{ position: "relative", width: "100%", height: "100%", borderRadius: 38, overflow: "hidden", background: "var(--bg)", display: "flex", flexDirection: "column", paddingTop: 30 }}>
+        <div id={APP_SURFACE_ID} style={{ position: "relative", width: "100%", height: "100%", borderRadius: 38, overflow: "hidden", background: "var(--bg)", display: "flex", flexDirection: "column", paddingTop: 30 }}>
           {children}
         </div>
       </div>

@@ -36,8 +36,16 @@ export async function POST(req: Request) {
   // Idempotent for the SAME version: the first acceptance of the current text keeps its moment. A
   // user who accepted an OLDER version does not match this WHERE, so they get a fresh timestamp for
   // what they have now agreed to — a re-consent, not a silent carry-over.
+  //
+  // The null arm is NOT redundant. `NOT (realConsentVersion = 'x')` is NULL — not true — for a row
+  // where the column IS NULL, which is every user who has never consented. Without it updateMany
+  // matched zero rows, consent silently never persisted, and the very next call to /api/real/mode
+  // answered 403 consent_required: the switch looked broken with no error anywhere on screen.
   await prisma.user.updateMany({
-    where: { id: user.id, NOT: { realConsentVersion: REAL_TERMS_VERSION } },
+    where: {
+      id: user.id,
+      OR: [{ realConsentVersion: null }, { NOT: { realConsentVersion: REAL_TERMS_VERSION } }],
+    },
     data: { realConsentAt: new Date(), realConsentVersion: REAL_TERMS_VERSION },
   });
 

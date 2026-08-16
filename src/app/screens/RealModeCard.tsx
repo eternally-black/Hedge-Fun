@@ -1,16 +1,17 @@
 "use client";
 
-// The Paper/Real switch, and the terms gate in front of it. Lives in the profile because that is
+// The Paper/Real switch, and the consent notice in front of it. Lives in the profile because that is
 // where a mode belongs — it is a property of the account, not of the screen you happen to be on.
 //
-// The switch is not a toggle over a boolean: turning it ON is the moment a user first accepts the
-// terms, so the control is deliberately two-step the first time and one tap thereafter. Turning it
-// OFF is never gated by anything — getting back to play money must always work.
-import { useState } from "react";
+// Consent is a ONE-TIME notice, not a gate the user re-reads on every flip: once the current terms
+// version is accepted the toggle moves freely in both directions. Turning it OFF is never gated by
+// anything at all — getting back to play money must always work.
+import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import type { Me } from "../ui";
 import { useRealCtx } from "../useRealCtx";
 import { provisionReal } from "@/lib/real-client";
-import { REAL_TERMS, REAL_TERMS_ACK, REAL_TERMS_INTRO, REAL_TERMS_TITLE } from "@/lib/real-terms";
+import { APP_SURFACE_ID } from "../appSurface";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
@@ -30,7 +31,7 @@ const LABEL = {
 const MUTED = { fontSize: 12, color: "var(--muted)" } as const;
 
 export function RealModeCard({ me, api, onRefresh }: { me: Me | null; api: Api; onRefresh: () => Promise<void> }) {
-  const [termsOpen, setTermsOpen] = useState(false);
+  const [noticeOpen, setNoticeOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { ctx } = useRealCtx(me);
@@ -39,10 +40,11 @@ export function RealModeCard({ me, api, onRefresh }: { me: Me | null; api: Api; 
   if (!real) return null; // pre-boot; the card appears with the first /api/me
 
   const isReal = real.mode === "REAL";
-  // Consented, but to an older text: they have to read the new one. Shown as a distinct state rather
-  // than silently re-opening the terms, so the difference between "never agreed" and "agreed to
-  // something we have since changed" is visible to the person it concerns.
-  const staleConsent = real.consentAt !== null && real.consentVersion !== real.termsVersion;
+  const consented = real.consentVersion === real.termsVersion;
+  // Consented, but to an older text: they see the notice once more. Surfaced as its own line rather
+  // than silently re-opening, so "never agreed" and "agreed to something we have since changed" do
+  // not look the same to the person they concern.
+  const staleConsent = real.consentAt !== null && !consented;
 
   const setMode = async (on: boolean) => {
     setBusy(true);
@@ -52,8 +54,8 @@ export function RealModeCard({ me, api, onRefresh }: { me: Me | null; api: Api; 
       await onRefresh();
     } catch (e) {
       const status = (e as { status?: number }).status;
-      // 403/409 here means consent is missing or stale — the terms sheet is the answer, not an error.
-      if (status === 403 || status === 409) setTermsOpen(true);
+      // 403/409 means consent is missing or stale — the notice is the answer, not an error message.
+      if (status === 403 || status === 409) setNoticeOpen(true);
       else setError("Couldn't switch mode. Try again.");
     } finally {
       setBusy(false);
@@ -78,17 +80,19 @@ export function RealModeCard({ me, api, onRefresh }: { me: Me | null; api: Api; 
     setBusy(true);
     setError(null);
     try {
-      // The version is sent back so the server can refuse consent to a text this client never
-      // rendered — a stale tab must not be able to accept on the user's behalf.
+      // The version goes back with the acceptance so the server can refuse consent to a text this
+      // client never rendered — a stale tab must not accept on the user's behalf.
       await api("/api/real/consent", {
         method: "POST",
         body: JSON.stringify({ accept: true, version: real.termsVersion }),
       });
       await api("/api/real/mode", { method: "POST", body: JSON.stringify({ real: true }) });
       await onRefresh();
-      setTermsOpen(false);
-    } catch {
-      setError("Couldn't enable real money. Try again.");
+      setNoticeOpen(false);
+    } catch (e) {
+      // Rendered INSIDE the modal. It used to live on the card behind it, so a failed accept looked
+      // like the button doing nothing at all.
+      setError((e as { body?: { error?: string } }).body?.error ?? "Couldn't enable real money. Try again.");
     } finally {
       setBusy(false);
     }
@@ -107,7 +111,7 @@ export function RealModeCard({ me, api, onRefresh }: { me: Me | null; api: Api; 
               {isReal
                 ? "Swipes place real orders and spend real funds."
                 : staleConsent
-                  ? "The terms changed since you agreed — read them again to switch."
+                  ? "The terms changed — one more tap to switch."
                   : "Play money. Nothing you swipe costs anything."}
             </div>
           </div>
@@ -115,11 +119,11 @@ export function RealModeCard({ me, api, onRefresh }: { me: Me | null; api: Api; 
             on={isReal}
             busy={busy}
             onChange={(next) => {
-              // OFF is unconditional. ON needs consent to the CURRENT text; without it the sheet
-              // opens instead of the request being fired and bounced.
+              // OFF is unconditional. ON shows the notice only until the CURRENT version is accepted;
+              // after that the switch just flips.
               if (!next) return void setMode(false);
-              if (real.consentVersion === real.termsVersion) return void setMode(true);
-              setTermsOpen(true);
+              if (consented) return void setMode(true);
+              setNoticeOpen(true);
             }}
           />
         </div>
@@ -132,11 +136,12 @@ export function RealModeCard({ me, api, onRefresh }: { me: Me | null; api: Api; 
             </div>
           </div>
         ) : null}
+
         {isReal && !real.depositWallet ? (
           <div style={{ marginTop: 10, borderTop: "1px solid var(--line)", paddingTop: 10 }}>
-            {/* Deliberately its own step, not folded into the first swipe: provisioning derives the
-                deposit wallet and the exchange credentials, which is several seconds and two device
-                signatures. Hiding that inside a gesture would make a swipe feel broken. */}
+            {/* Its own step, not folded into the first swipe: provisioning derives the deposit wallet
+                and the exchange credentials, which is several seconds and two device signatures.
+                Hiding that inside a gesture would make a swipe feel broken. */}
             <div style={MUTED}>One-time setup: create your trading wallet before you can place orders.</div>
             <button
               type="button"
@@ -162,10 +167,13 @@ export function RealModeCard({ me, api, onRefresh }: { me: Me | null; api: Api; 
             </button>
           </div>
         ) : null}
-        {error ? <div style={{ fontSize: 12, color: "var(--no)", marginTop: 8 }}>{error}</div> : null}
+
+        {error && !noticeOpen ? <div style={{ fontSize: 12, color: "var(--no)", marginTop: 8 }}>{error}</div> : null}
       </div>
 
-      {termsOpen ? <TermsSheet busy={busy} onAccept={accept} onClose={() => setTermsOpen(false)} /> : null}
+      {noticeOpen ? (
+        <ConsentModal busy={busy} error={error} onAccept={accept} onClose={() => setNoticeOpen(false)} />
+      ) : null}
     </>
   );
 }
@@ -210,58 +218,102 @@ function Switch({ on, busy, onChange }: { on: boolean; busy: boolean; onChange: 
   );
 }
 
-// Full-screen because it must be read, not dismissed past. Accept is the only way forward; the close
-// control is explicit and leaves the user in paper mode.
-function TermsSheet({ busy, onAccept, onClose }: { busy: boolean; onAccept: () => void; onClose: () => void }) {
-  const [ack, setAck] = useState(false);
-  return (
+// A SMALL notice, not a wall of text. The full terms live at /terms, where they can be read at your
+// own pace and linked to — a document that only ever appears as a sheet someone is trying to dismiss
+// is not a document anyone has read.
+//
+// Portalled onto the device surface and positioned ABSOLUTELY rather than fixed: on desktop the app
+// renders as a 402px phone mock centred in the page, and a fixed overlay spreads across the entire
+// monitor instead of covering the app.
+function ConsentModal({ busy, error, onAccept, onClose }: {
+  busy: boolean;
+  error: string | null;
+  onAccept: () => void;
+  onClose: () => void;
+}) {
+  const [host, setHost] = useState<HTMLElement | null>(null);
+  useEffect(() => setHost(document.getElementById(APP_SURFACE_ID)), []); // exists once Frame rendered
+  if (!host) return null;
+
+  return createPortal(
     <div
       style={{
-        position: "fixed",
+        position: "absolute",
         inset: 0,
         zIndex: 60,
-        background: "color-mix(in srgb,var(--bg) 92%,#000)",
+        background: "rgba(4,4,8,.66)",
+        backdropFilter: "blur(6px)",
         display: "flex",
-        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 18,
       }}
     >
-      <div style={{ padding: "18px 18px 10px", borderBottom: "1px solid var(--line)" }}>
-        <div style={{ fontFamily: "var(--df)", fontSize: 22, lineHeight: 1.15 }}>{REAL_TERMS_TITLE}</div>
-        <div style={{ ...MUTED, marginTop: 8 }}>{REAL_TERMS_INTRO}</div>
-      </div>
+      <div
+        style={{
+          width: "100%",
+          maxWidth: 330,
+          background: "var(--bg2)",
+          border: "1px solid var(--line)",
+          borderRadius: 20,
+          padding: "18px 18px 16px",
+          boxShadow: "0 24px 60px -12px rgba(0,0,0,.8)",
+        }}
+      >
+        <div style={{ fontFamily: "var(--df)", fontSize: 19, lineHeight: 1.2 }}>Switching to real money</div>
+        <div style={{ ...MUTED, marginTop: 8, lineHeight: 1.5 }}>
+          Swipes will place live orders with your own funds, and they spend immediately — there is no
+          confirmation step. You can lose everything you deposit.
+        </div>
+        <div style={{ ...MUTED, marginTop: 8, lineHeight: 1.5 }}>
+          By continuing you agree to the{" "}
+          <a
+            href="/terms"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: "var(--gold)", textDecoration: "underline" }}
+          >
+            real money terms
+          </a>
+          .
+        </div>
 
-      <div className="hf-scroll" style={{ flex: 1, overflowY: "auto", padding: "14px 18px" }}>
-        {REAL_TERMS.map((c) => (
-          <div key={c.title} style={{ marginBottom: 16 }}>
-            <div style={{ fontSize: 13, fontWeight: 700 }}>{c.title}</div>
-            <div style={{ ...MUTED, marginTop: 4, lineHeight: 1.5 }}>{c.body}</div>
-          </div>
-        ))}
-      </div>
+        {error ? <div style={{ fontSize: 12, color: "var(--no)", marginTop: 10 }}>{error}</div> : null}
 
-      <div style={{ padding: "12px 18px 18px", borderTop: "1px solid var(--line)", background: "var(--bg)" }}>
-        <label style={{ display: "flex", gap: 10, alignItems: "flex-start", cursor: "pointer" }}>
-          <input
-            type="checkbox"
-            checked={ack}
-            onChange={(e) => setAck(e.target.checked)}
-            style={{ marginTop: 2, width: 18, height: 18, flexShrink: 0, accentColor: "var(--gold)" }}
-          />
-          <span style={{ fontSize: 12, lineHeight: 1.45 }}>{REAL_TERMS_ACK}</span>
-        </label>
-        <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 16 }}>
           <button
             type="button"
-            onClick={onClose}
+            onClick={busy ? undefined : onAccept}
             disabled={busy}
             style={{
               margin: 0,
               font: "inherit",
-              flex: 1,
+              width: "100%",
               padding: "12px 16px",
               borderRadius: 12,
-              background: "var(--panel2)",
-              color: "var(--text)",
+              background: "var(--gold)",
+              color: "#1a1205",
+              border: "none",
+              fontWeight: 700,
+              fontSize: 13,
+              cursor: busy ? "default" : "pointer",
+              opacity: busy ? 0.6 : 1,
+            }}
+          >
+            {busy ? "Enabling…" : "I understand"}
+          </button>
+          <button
+            type="button"
+            onClick={busy ? undefined : onClose}
+            disabled={busy}
+            style={{
+              margin: 0,
+              font: "inherit",
+              width: "100%",
+              padding: "12px 16px",
+              borderRadius: 12,
+              background: "transparent",
+              color: "var(--muted)",
               border: "1px solid var(--line)",
               fontWeight: 700,
               fontSize: 13,
@@ -270,29 +322,9 @@ function TermsSheet({ busy, onAccept, onClose }: { busy: boolean; onAccept: () =
           >
             Stay on paper
           </button>
-          <button
-            type="button"
-            onClick={ack && !busy ? onAccept : undefined}
-            disabled={!ack || busy}
-            style={{
-              margin: 0,
-              font: "inherit",
-              flex: 1,
-              padding: "12px 16px",
-              borderRadius: 12,
-              background: "var(--gold)",
-              color: "#1a1205",
-              border: "none",
-              fontWeight: 700,
-              fontSize: 13,
-              cursor: ack && !busy ? "pointer" : "default",
-              opacity: ack && !busy ? 1 : 0.5,
-            }}
-          >
-            {busy ? "Enabling…" : "Enable real money"}
-          </button>
         </div>
       </div>
-    </div>
+    </div>,
+    host,
   );
 }
