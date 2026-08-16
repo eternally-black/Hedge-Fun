@@ -10,8 +10,11 @@ export async function GET(req: Request) {
   const user = await authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
+  // Follows the account's MODE: a real-money user opening their history wants their real positions,
+  // and showing paper bets under a real-money header is the same lie the mode flag exists to prevent.
+  const mode = user.realMode ? "REAL" : "PAPER";
   const bets = await prisma.bet.findMany({
-    where: { userId: user.id, mode: "PAPER" }, // real positions get their own surface (plan step 6)
+    where: { userId: user.id, mode },
     // Pending first (settlementStatus PENDING < SETTLED alphabetically is wrong, so order by a
     // computed flag): we sort in JS below. Pull a generous recent window.
     orderBy: { createdAt: "desc" },
@@ -26,13 +29,35 @@ export async function GET(req: Request) {
       pnlCents: true,
       createdAt: true,
       settledAt: true,
+      // REAL columns. A real position does not settle through the paper job — settlementStatus stays
+      // PENDING on it forever — so its status and P&L are derived from these instead (below).
+      filledSharesMicro: true,
+      closedSharesMicro: true,
+      realizedPnlMicro: true,
       market: {
         select: { question: true, outcomeYesLabel: true, outcomeNoLabel: true, resolutionDeadline: true },
       },
     },
   });
 
-  const rows: HistoryResponse["rows"] = bets.map((b) => ({
+  const rows: HistoryResponse["rows"] = bets.map((b) => {
+    // A REAL position is "open" while it still holds shares and "done" once the remainder is gone —
+    // whether that came from selling out or from redeeming a resolved market. Its outcome is the
+    // MONEY outcome, not the market's: exiting a position at a profit on a market that later
+    // resolves against you is a win for the person who took it, and the ledger already says so.
+    const filled = b.filledSharesMicro ?? 0n;
+    const remainder = filled - (b.closedSharesMicro ?? 0n);
+    const realizedMicro = b.realizedPnlMicro ?? 0n;
+    const realOpen = mode === "REAL" && (filled === 0n || remainder > 0n);
+    const realStatus: "PENDING" | "WIN" | "LOSS" | "PUSH" = realOpen
+      ? "PENDING"
+      : realizedMicro > 0n
+        ? "WIN"
+        : realizedMicro < 0n
+          ? "LOSS"
+          : "PUSH";
+
+    return {
     id: b.id,
     question: b.market.question,
     // The label of the side the user actually bet (YES = side A label, NO = side B label).
@@ -40,11 +65,13 @@ export async function GET(req: Request) {
     side: b.side, // "YES" | "NO" — drives the badge color
     stakeCents: b.stakeCents,
     lockedPriceBp: b.lockedPriceBp,
-    status: b.settlementStatus === "PENDING" ? "PENDING" : b.result, // PENDING | WIN | LOSS | PUSH
-    pnlCents: b.pnlCents,
+    status: mode === "REAL" ? realStatus : b.settlementStatus === "PENDING" ? "PENDING" : b.result,
+    // micro-USD → cents. Truncates sub-cent dust, which is display-only: the ledger keeps the micros.
+    pnlCents: mode === "REAL" ? Number(realizedMicro / 10_000n) : b.pnlCents,
     resolutionDeadline: b.market.resolutionDeadline.toISOString(),
     createdAt: b.createdAt.toISOString(),
-  }));
+    };
+  });
 
   // Pending first (most urgent / what the user wants to glance at), then settled by recency.
   rows.sort((a, b) => {

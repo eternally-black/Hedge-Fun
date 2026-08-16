@@ -5,7 +5,7 @@ import { authUser } from "@/lib/privy";
 import { categoryOf, gameOf, shuffleNoRun, isContextPoor, isVagueEsports, withinCategoryHorizon, DECK_FETCH_HORIZON_HOURS } from "@/lib/deck-mix";
 import { DECK_MIN_LEAD_MS } from "@/lib/config";
 import { priceIsContested } from "@/lib/polymarket";
-import { authoritativePrices } from "@/lib/depth";
+import { authoritativePrices, sourceHasClobBook } from "@/lib/depth";
 import type { DeckResponse } from "@/lib/api-types";
 
 // The blitz deck: cached OPEN binary markets, each kept only within ITS category's horizon
@@ -70,6 +70,9 @@ export async function GET(req: Request) {
       bookTsAt: true,
       source: true,
       resolutionDeadline: true,
+      // Only read for the REAL-mode filter below: an order needs a token to be placed against.
+      yesTokenId: true,
+      noTokenId: true,
     },
   });
 
@@ -82,8 +85,16 @@ export async function GET(req: Request) {
   //    because a market cached while tradable can collapse or lose its book between poller ticks.
   //    authoritativePrices returns nulls for a POLYMARKET row with no usable (fresh-enough) book
   //    read — never a mid — so those rows drop out here too.
+  // REAL mode narrows the deck to what can actually be TRADED. A bookless source has no exchange
+  // behind it, and a POLYMARKET row missing a token id has nothing to place an order against — both
+  // are perfectly good paper cards and both would fail at /api/real/intent. Filtering here means the
+  // user never sees a card that cannot be swiped, instead of learning it from a rejected order.
+  // Paper is untouched: those markets stay swipeable exactly as before.
   const nowMs = now.getTime();
-  const usable = candidates
+  const tradable = user.realMode
+    ? candidates.filter((c) => sourceHasClobBook(c.source) && !!c.yesTokenId && !!c.noTokenId)
+    : candidates;
+  const usable = tradable
     .filter(
       (c) => !isContextPoor(c) && !isVagueEsports(c) && withinCategoryHorizon(c, c.resolutionDeadline.getTime(), nowMs),
     )

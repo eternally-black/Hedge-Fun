@@ -13,8 +13,14 @@ export async function GET(req: Request) {
   // Count unread over the FULL set, not the windowed rows — otherwise a user with >100 settled
   // bets whose unseen ones fall outside the latest 100 would show a different badge here than in
   // /api/me (which counts unwindowed). Both must agree, so unreadCount is its own count().
-  // mode: PAPER — real positions get their own surface (plan step 6); an old mobile build
-  // receiving a REAL row would render real-money outcomes as paper Results.
+  // mode: PAPER, and deliberately NOT mode-following like /api/history is. This endpoint drives the
+  // reveal ritual and the unread bell, both of which are paper-economy mechanics: a real position
+  // never passes through the paper settle job, so settlementStatus stays PENDING on it and this
+  // query would return nothing for a real-mode user no matter what filter it used. Making it follow
+  // the mode would swap "your paper results" for a permanently empty screen — worse than showing the
+  // paper results that genuinely exist. Real outcomes surface in /api/history (money-derived status)
+  // and on the real console. Also: an old mobile build receiving a REAL row would render real-money
+  // outcomes as paper Results.
   const [bets, unreadCount] = await Promise.all([
     prisma.bet.findMany({
       where: { userId: user.id, mode: "PAPER", settlementStatus: { in: ["SETTLED", "VOID"] } },
