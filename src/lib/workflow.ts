@@ -72,6 +72,11 @@ export interface WorkflowSpec {
   // For an expired SUBMITTING row: did the operation verifiably NOT happen (safe to reset)?
   // Approvals are idempotent on-chain, so `true` is safe there even when ambiguous.
   definitelyNotDone: () => Promise<boolean>;
+  // Set when a SECOND submission would move money again rather than revert (BRIDGE_OUT: pUSD leaves
+  // for a single-purpose forwarding address, so twice means twice). For those specs the balance
+  // predicate is not enough to release the slot: a relayer transaction that is queued but not yet
+  // mined reads exactly like one that never left. They reset only on a definite relayer handle.
+  resetNeedsProof?: boolean;
 }
 
 const key = (userId: string, kind: WalletOpKind) => ({ userId_kind: { userId, kind } });
@@ -270,6 +275,25 @@ export async function startWorkflow(prisma: PrismaClient, spec: WorkflowSpec): P
     case "SUBMITTING": {
       if (await tryConverge(prisma, spec, row.runId!)) return { status: "done" };
       const expired = row.expiresAt !== null && row.expiresAt.getTime() < Date.now();
+      // A SUBMITTING row with no relayer handle is NOT "nothing was handed off yet" — park() rests a
+      // waiting run in PENDING_SIGNATURE, so this state is only reached at the fence, i.e. with a
+      // gen.next() that already ran. txHash null therefore means the advance threw or the process
+      // died mid-submit: the relayer may be holding a queued transaction right now. relayerVerdict
+      // answers "unknown" for a null handle, so runScoped falls back to the wallet-wide balance —
+      // and a queued-but-unmined withdrawal is indistinguishable from one that never left. For a
+      // resetNeedsProof spec, resetting on that guess sends the same money twice, so hold the slot
+      // instead. The idempotent kinds (a second wrap/redeem/approval reverts or no-ops) keep the
+      // old release-on-expiry behaviour — trapping them would cost availability for nothing.
+      if (expired && spec.resetNeedsProof && row.txHash === null) {
+        const msg = row.error ?? "submitted without a relayer handle — operator must resolve";
+        if (row.error !== msg) {
+          await prisma.walletWorkflow.updateMany({
+            where: { userId: spec.userId, kind: spec.kind, runId: row.runId, state: "SUBMITTING" },
+            data: { error: msg },
+          });
+        }
+        return { status: "submitting", runId: row.runId!, transactionId: null, error: msg };
+      }
       if (expired && (await spec.definitelyNotDone().catch(() => false))) {
         await prisma.relayerTx.updateMany({
           where: { userId: spec.userId, kind: spec.kind, workflowKey: row.runId!, status: "SUBMITTING" },
@@ -363,7 +387,16 @@ export function runScoped(spec: WorkflowSpec, verdict: () => Promise<TxVerdict>)
     },
     definitelyNotDone: async () => {
       const v = await ask();
-      return v === "unknown" ? spec.definitelyNotDone() : v === "failed";
+      if (v !== "unknown") return v === "failed";
+      // "unknown" means the probe could not answer — a handle we never persisted, or a relayer that
+      // is simply unreachable. Falling back to the wallet-wide balance is safe only where a second
+      // submission is harmless: for a resetNeedsProof spec (BRIDGE_OUT) the balance CANNOT tell a
+      // queued-but-unmined transfer from one that never left, both read as "still at baseline", and
+      // resetting on that guess pays the same withdrawal twice. Hold the slot instead. Returning
+      // false only PREVENTS a reset, so unlike the same change in verify() it cannot re-drive a run
+      // that already completed.
+      if (spec.resetNeedsProof) return false;
+      return spec.definitelyNotDone();
     },
   };
 }

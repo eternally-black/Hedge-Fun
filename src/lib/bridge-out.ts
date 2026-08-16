@@ -39,6 +39,11 @@ export function bridgeOutSpec(
         metadata: "HedgeFun bridge withdrawal",
       }) as Promise<WorkflowGen>,
     autoAnswer: (r: StepRequest) => (r.kind === "requestAddress" ? signerAddress : null),
+    // This is the one verb where a re-submission is a SECOND withdrawal: the bridge address forwards
+    // whatever lands on it, so two transfers are two payouts. The predicates below cannot see the
+    // difference between "queued at the relayer" and "never sent" — both leave the balance at the
+    // baseline — so the engine must not release this slot without a relayer handle to check.
+    resetNeedsProof: true,
     // The only thing this run owns is pUSD leaving the wallet, so a DROP from the run's own
     // baseline is the signal — and it is still wrapped in runScoped by the caller, because a
     // concurrent fill lowers pUSD too and would otherwise read as "the withdrawal landed".

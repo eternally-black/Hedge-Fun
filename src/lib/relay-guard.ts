@@ -6,6 +6,7 @@ import {
   buildApprovalCalls,
   buildWrapCalls,
   COLLATERAL_ADAPTER,
+  COLLATERAL_ONRAMP,
   CTF_EXCHANGE,
   NEGRISK_CTF_EXCHANGE,
   NEG_RISK_COLLATERAL_ADAPTER,
@@ -15,7 +16,12 @@ import {
 export type RelayKind = "APPROVALS" | "WRAP" | "REDEEM" | "WITHDRAW" | "BRIDGE_OUT";
 
 type RelayRequest = { kind?: unknown; payload?: unknown };
-type RelayContext = { depositWallet: string; chainId?: number; expectedRecipient?: string };
+type RelayContext = {
+  depositWallet: string;
+  chainId?: number;
+  expectedRecipient?: string;
+  expectedAmountMicro?: string; // BRIDGE_OUT: how much the user approved, not just where it goes
+};
 type CallRecord = Record<string, unknown>;
 
 export type TargetSelectorRule = { target: string; selector: string };
@@ -47,9 +53,15 @@ function numeric(value: unknown): bigint | null {
 // ERC-20 approve(spender,…) and ERC-1155 setApprovalForAll(operator,…) both carry the address we
 // care about in the FIRST word — a target/selector check alone still lets a forged payload approve
 // an attacker, so the argument itself is decoded.
-function firstAddressArg(data: string): string | null {
-  const word = data.slice(10, 74);
+function firstAddressArg(data: string, index = 0): string | null {
+  const word = data.slice(10 + index * 64, 74 + index * 64);
   return /^[0-9a-fA-F]{64}$/.test(word) ? `0x${word.slice(24).toLowerCase()}` : null;
+}
+
+// The same word, read as a uint — amounts live next to the addresses in every call this guard pins.
+function uintArg(data: string, index: number): bigint | null {
+  const word = data.slice(10 + index * 64, 74 + index * 64);
+  return /^[0-9a-fA-F]{64}$/.test(word) ? BigInt(`0x${word}`) : null;
 }
 
 const rule = (call: { to: string; data: string }): TargetSelectorRule => ({
@@ -152,9 +164,47 @@ export function assertRelayPayload(kind: RelayKind, request: RelayRequest, ctx: 
     case "APPROVALS":
       assertAgainst(calls, APPROVAL_ALLOWLIST, true);
       break;
-    case "WRAP":
+    case "WRAP": {
       assertAgainst(calls, WRAP_ALLOWLIST, false);
+      // Target+selector alone is NOT enough here, and this arm used to stop there: both wrap calls
+      // carry an address ARGUMENT the allowlist never reads. Unpinned, a forged WRAP passes the
+      // identical shape while approving an attacker as spender of the wallet's USDC.e, or wrapping
+      // the user's USDC.e into somebody else's pUSD. The APPROVALS arm already pins its spender —
+      // this is that same check for the two arguments the wrap recipe actually carries.
+      let approved: bigint | null = null;
+      let wrapped: bigint | null = null;
+      for (const call of calls) {
+        const data = String(call.data);
+        const selector = data.slice(0, 10).toLowerCase();
+        if (selector === "0x095ea7b3") {
+          const spender = firstAddressArg(data);
+          if (spender !== COLLATERAL_ONRAMP.toLowerCase()) {
+            throw new Error(`spender_not_allowed: ${spender ?? "unreadable"}`);
+          }
+          approved = uintArg(data, 1); // approve(spender, amount)
+        } else {
+          // wrap(token, wallet, amount): the credited wallet is the SECOND word, and it is the only
+          // thing standing between "wrap my own USDC.e" and "mint pUSD to the attacker".
+          const credited = firstAddressArg(data, 1);
+          if (credited !== wallet) throw new Error(`recipient_not_allowed: ${credited ?? "unreadable"}`);
+          wrapped = uintArg(data, 2); // wrap(token, wallet, amount)
+        }
+      }
+      // The allowance must be spent by the wrap it pays for, exactly. wallet-ops states the rule the
+      // recipe was built on — "Approving the EXACT amount (never max) is deliberate — no standing
+      // allowance, same as the frontend" — and target/selector/spender checks cannot see it: a batch
+      // approving MAX_UINT while wrapping a dollar passes all of them and leaves the on-ramp with a
+      // permanent claim on the wallet's USDC.e. Equality is checkable from the payload alone, which
+      // is what makes it worth having here.
+      // CEILING: this pins the two amounts to EACH OTHER, not to the user's intent. The device has
+      // no RPC of its own, so it cannot know the wallet's true USDC.e balance, and an expected value
+      // taken from the same server that built the payload would only catch a buggy one. A server
+      // that wraps more of the user's own USDC.e than the funding attempt observed is still possible
+      // — the funds stay in the user's own wallet as pUSD, which is why this is the drawn line.
+      if (approved === null || wrapped === null) throw new Error("bad_call_shape: WRAP needs approve + wrap");
+      if (approved !== wrapped) throw new Error(`amount_not_allowed: approve ${approved} != wrap ${wrapped}`);
       break;
+    }
     case "REDEEM": {
       // Target only, and NOT the conditional-tokens contract: the SDK builds redemption as
       // ctfRedeemPositionsCall(adapterAddress, …) where the adapter is the normal-market or the
@@ -176,6 +226,15 @@ export function assertRelayPayload(kind: RelayKind, request: RelayRequest, ctx: 
       // address is single-purpose, so the device can demand an exact pUSD transfer to exactly it.
       const recipient = address(ctx.expectedRecipient);
       if (!recipient) throw new Error("recipient_unknown: no bridge address to verify against");
+      const expected = ctx.expectedAmountMicro === undefined ? null : numeric(ctx.expectedAmountMicro);
+      if (ctx.expectedAmountMicro !== undefined && expected === null) {
+        throw new Error(`amount_unreadable: ${String(ctx.expectedAmountMicro)}`);
+      }
+      // EXACTLY one transfer. Pinning target, selector, recipient and amount PER CALL is not enough
+      // on its own: the shape check above admits up to 8 calls, so eight copies of the very transfer
+      // the user approved each pass every per-call test and the Batch debits 8× the approved amount.
+      // bridgeOutSpec builds a single call, so anything else is not our plan.
+      if (calls.length !== 1) throw new Error(`bad_call_shape: BRIDGE_OUT is one transfer, got ${calls.length}`);
       for (const call of calls) {
         const target = String(call.target).toLowerCase();
         if (target !== PUSD_ADDRESS.toLowerCase()) throw new Error(`target_not_allowed: ${target}`);
@@ -183,6 +242,17 @@ export function assertRelayPayload(kind: RelayKind, request: RelayRequest, ctx: 
         if (selector !== "0xa9059cbb") throw new Error(`selector_not_allowed: ${selector}`);
         const decoded = firstAddressArg(String(call.data));
         if (!decoded || decoded !== recipient) throw new Error(`recipient_not_allowed: ${decoded ?? "unreadable"}`);
+        // WHERE was pinned above; this pins HOW MUCH. transfer(to, amount) carries the recipient in
+        // word 0 and the amount in word 1, and the guard used to stop at word 0 — so a run approved
+        // for $25 of a $100 balance could be handed transfer(bridge, 100e6) and the device would
+        // sign it. Convergence cannot catch that either: bridge-out's verify is "balance dropped by
+        // at LEAST amount", which a bigger debit satisfies too. Skipped when the caller supplies no
+        // expectation, so the recipient-only contexts in the tests keep meaning what they meant.
+        if (expected !== null) {
+          const word1 = String(call.data).slice(74, 138);
+          const amount = /^[0-9a-fA-F]{64}$/.test(word1) ? BigInt(`0x${word1}`) : null;
+          if (amount !== expected) throw new Error(`amount_not_allowed: ${amount ?? "unreadable"}`);
+        }
       }
       break;
     }

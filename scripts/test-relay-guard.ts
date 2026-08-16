@@ -7,6 +7,7 @@ import {
   buildPusdTransferCall,
   buildWrapCalls,
   COLLATERAL_ADAPTER,
+  COLLATERAL_ONRAMP,
   CONDITIONAL_TOKENS,
   PUSD_ADDRESS,
 } from "../src/lib/wallet-ops";
@@ -146,6 +147,63 @@ async function main() {
         bridgeCtx,
       ),
     /selector_not_allowed/,
+  );
+
+  // 19+20 — THE wrap attack, the mirror of 16: both wrap calls pass the target+selector allowlist
+  // no matter what ADDRESS they carry, because the allowlist is derived from a zero-address probe.
+  // Unpinned, one routine "top up your balance" prompt either hands the attacker an allowance on the
+  // wallet's USDC.e, or wraps the user's USDC.e straight into the attacker's pUSD.
+  const stolenApproval = { target: wraps[0].to, data: `0x095ea7b3${word(ATTACKER)}${word("0xf4240")}` };
+  assert.throws(
+    () => assertRelayPayload("WRAP", req(payload([stolenApproval, ...asCalls([wraps[1]])])), ctx),
+    /spender_not_allowed/,
+  );
+  const stolenWrap = asCalls(buildWrapCalls(ATTACKER, 1_000_000n))[1];
+  assert.throws(
+    () => assertRelayPayload("WRAP", req(payload([...asCalls([wraps[0]]), stolenWrap])), ctx),
+    /recipient_not_allowed/,
+  );
+
+  // 21-23 — the bridge AMOUNT attack, the other half of 16: same approved destination, wrong number.
+  // The recipient check cannot see word 1, and bridge-out's convergence ("balance dropped by at
+  // least amount") is satisfied by a bigger debit too, so an unpinned amount meant a run approved
+  // for $1 could sign away $100. Omitting the expectation must stay permissive — the cases above
+  // pass no amount and must keep testing exactly what they tested before.
+  const amountCtx = { ...bridgeCtx, expectedAmountMicro: "1000000" };
+  assert.doesNotThrow(() =>
+    assertRelayPayload("BRIDGE_OUT", req(payload([{ target: good.to, data: good.data }])), amountCtx),
+  );
+  const drain = buildPusdTransferCall(BRIDGE, 100_000_000n);
+  assert.throws(
+    () => assertRelayPayload("BRIDGE_OUT", req(payload([{ target: drain.to, data: drain.data }])), amountCtx),
+    /amount_not_allowed/,
+  );
+  assert.doesNotThrow(
+    () => assertRelayPayload("BRIDGE_OUT", req(payload([{ target: drain.to, data: drain.data }])), bridgeCtx),
+    "no expectation supplied -> the amount is not pinned",
+  );
+
+  // 24 — the batch-multiplier: eight copies of the EXACT approved transfer. Every per-call check
+  // (target, selector, recipient, amount) passes on each one, so only a count check catches it —
+  // otherwise a $25 approval signs away $200.
+  assert.throws(
+    () =>
+      assertRelayPayload(
+        "BRIDGE_OUT",
+        req(payload(Array.from({ length: 8 }, () => ({ target: good.to, data: good.data })))),
+        amountCtx,
+      ),
+    /bad_call_shape/,
+  );
+
+  // 25 — the standing-allowance wrap: approve MAX_UINT, wrap one dollar. Target, selector, spender
+  // and credited wallet are all the real ones, so every other WRAP check passes; only pinning the
+  // two amounts to each other catches it. wallet-ops approves the EXACT amount precisely so no
+  // allowance survives the batch.
+  const wrapMax = { target: wraps[0].to, data: `0x095ea7b3${word(COLLATERAL_ONRAMP)}${"f".repeat(64)}` };
+  assert.throws(
+    () => assertRelayPayload("WRAP", req(payload([wrapMax, ...asCalls([wraps[1]])])), ctx),
+    /amount_not_allowed/,
   );
 
   console.log("test-relay-guard: OK");

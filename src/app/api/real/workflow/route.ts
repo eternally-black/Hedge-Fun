@@ -40,14 +40,21 @@ const EVM_SIG = /^0x[0-9a-fA-F]{130}$/; // validate BEFORE the fence — the SDK
 // basis is fee-inclusive and prorated. One transaction with the re-read INSIDE it — the previous
 // read-then-update could double-book under two concurrent runs. Idempotent: a consumed position
 // has no remainder left, and false says "nothing was left to consume".
-async function consumeResolvedPosition(betId: string, won: boolean): Promise<boolean> {
+// CANCELED is not an ordinary win. It is this codebase's INVALID resolution (scripts/settle.ts
+// writes status CANCELED with resolvedOutcome INVALID), and an invalid binary CTF market carries
+// payout numerators [1,1]: every share of EITHER side redeems $0.50, not $1.00. Booking it 1:1
+// overstated proceeds and realized PnL by rem/2 — 100 shares on a $61.68 basis showed +$38.32
+// realized where the wallet actually received $50.00, a −$11.68 outcome. `rem / 2n` floors, so an
+// odd remainder drops 1 micro-dollar; that matches the on-chain division rather than inventing
+// collateral that never lands.
+async function consumeResolvedPosition(betId: string, won: boolean, canceled: boolean): Promise<boolean> {
   return prisma.$transaction(async (tx) => {
     const b = await tx.bet.findUnique({ where: { id: betId } });
     if (!b) return false;
     const filled = b.filledSharesMicro ?? 0n;
     const rem = filled - (b.closedSharesMicro ?? 0n);
     if (rem <= 0n) return false;
-    const proceeds = won ? rem : 0n; // winning shares redeem 1:1 to micro-USD
+    const proceeds = won ? (canceled ? rem / 2n : rem) : 0n; // winner $1/share, CANCELED $0.50/share
     const basis = filled > 0n ? (((b.spendMicro ?? 0n) + (b.feeMicro ?? 0n)) * rem) / filled : 0n;
     await tx.bet.update({
       where: { id: b.id },
@@ -177,6 +184,7 @@ export async function POST(req: Request) {
       pusdBaseline: string;
       betId: string;
       won: boolean;
+      canceled?: boolean; // absent on rows persisted before the CANCELED $0.50/share fix
       remainderMicro: string;
     };
     // Pick what to bind. `won`: CANCELED = push (collateral returns, converge like a win); else
@@ -192,7 +200,7 @@ export async function POST(req: Request) {
     // it imports the SDK); here we only ACT on the plan.
     const plan = active ? { bind: null, losses: [] } : planRedeem(candidates);
     let lossesBooked = 0;
-    for (const l of plan.losses) if (await consumeResolvedPosition(l.id, false)) lossesBooked++;
+    for (const l of plan.losses) if (await consumeResolvedPosition(l.id, false, false)) lossesBooked++;
     const boundBet = plan.bind ? candidates.find((c) => c.id === plan.bind!.id) ?? null : null;
     // Mirror the WRAP pattern: an ACTIVE run drives on its own persisted inputs; a DONE row with
     // nothing new to redeem answers idempotent done; otherwise require a redeemable position.
@@ -205,6 +213,7 @@ export async function POST(req: Request) {
             pusdBaseline: (await erc20BalanceOf(PUSD_ADDRESS, wallet)).toString(),
             betId: boundBet.id,
             won: true, // bound candidates are winners by construction — losers were booked above
+            canceled: boundBet.market.status === "CANCELED", // a push redeems $0.50/share, not $1.00
             remainderMicro: ((boundBet.filledSharesMicro ?? 0n) - (boundBet.closedSharesMicro ?? 0n)).toString(),
           }
         : row?.state === "DONE"
@@ -218,7 +227,19 @@ export async function POST(req: Request) {
     // Consume the position on convergence (K3 HIGH-1.4): without this the same bet rebinds on
     // every poll — a fresh signature prompt and a burned relayer submission per cycle.
     onDone = async () => {
-      await consumeResolvedPosition(runInputs.betId, runInputs.won);
+      // `canceled` arrived with the INVALID-payout fix, so a run persisted BEFORE it carries only
+      // `won`. Defaulting that to false would quietly restore the very bug the flag exists to kill:
+      // an in-flight pre-fix run on a canceled market books $1.00/share against a payout that pays
+      // $0.50. Re-derive from the market instead — it is the same source planRedeem classifies from.
+      const canceled =
+        runInputs.canceled ??
+        (
+          await prisma.bet.findUnique({
+            where: { id: runInputs.betId },
+            select: { market: { select: { status: true } } },
+          })
+        )?.market.status === "CANCELED";
+      await consumeResolvedPosition(runInputs.betId, runInputs.won, canceled);
     };
     spec = {
       userId: user.id,

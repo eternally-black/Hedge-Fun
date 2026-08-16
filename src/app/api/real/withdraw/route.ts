@@ -9,7 +9,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 import { hasRealConsent, sameOrigin } from "@/lib/real";
-import { captureToGlitchTip } from "@/lib/glitchtip";
+import { captureToGlitchTip, sendOpsTelegram } from "@/lib/glitchtip";
 import { serverSecureClient } from "@/lib/polymarket-server";
 import { createWithdrawal, fetchSupportedAssets, fetchWithdrawalStatus } from "@/lib/bridge";
 import { bridgeOutSpec, type BridgeOutInputs } from "@/lib/bridge-out";
@@ -60,6 +60,17 @@ export async function POST(req: Request) {
   }
   if (!asset) return NextResponse.json({ error: "unsupported_asset" }, { status: 400 });
 
+  // Address-family check, SERVER side. The browser disables its own button on a mismatch
+  // (RealWithdrawCard `wrongFamily`), but that guard is one fetch away from being skipped, and the
+  // bridge address it protects is single-purpose: it forwards whatever lands on it to the recipient
+  // it was minted for. An EVM address accepted for a Solana withdrawal is money nobody can recover
+  // on either chain. The family comes from the asset row rather than a pinned chain id — a bridge
+  // tokenAddress is 0x-hex on exactly the EVM chains (bridge.ts BridgeAsset) — so a new chain in
+  // the bridge's list is classified without touching this code.
+  if (/^0x[0-9a-fA-F]{40}$/.test(asset.tokenAddress) !== /^0x[0-9a-fA-F]{40}$/.test(recipient.trim())) {
+    return NextResponse.json({ error: "wrong_chain_recipient", chainName: asset.chainName }, { status: 400 });
+  }
+
   const pusd = await erc20BalanceOf(PUSD_ADDRESS, wallet);
   let amount = pusd;
   if (typeof amountMicro === "string") {
@@ -82,18 +93,39 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "withdrawal_in_flight" }, { status: 409 });
   }
 
+  // REUSE before minting. A bridge address is a live one-shot forwarder: it takes whatever lands on
+  // it and pushes it to the recipient it was created for, so every extra one is a loose end nobody
+  // is watching. The mint is an external side effect with no durable record in front of it — the
+  // run's row only appears inside startWorkflow below — so a failure anywhere after it (factory
+  // throw, relayer hiccup, the user simply pressing the button again) used to mint a SECOND live
+  // address for the same withdrawal. A terminal run whose destination matches exactly already has
+  // one, and it is still valid because nothing was ever sent to it.
+  const prior = existing?.inputs as BridgeOutInputs | null;
+  const reusable =
+    prior?.bridgeAddress &&
+    prior.chainId === chainId &&
+    prior.tokenAddress === tokenAddress &&
+    prior.recipient === recipient &&
+    existing?.state === "FAILED"
+      ? prior.bridgeAddress
+      : null;
+
   let bridgeAddress: string;
-  try {
-    ({ evmAddress: bridgeAddress } = await createWithdrawal({
-      wallet,
-      toChainId: chainId,
-      toTokenAddress: tokenAddress,
-      recipientAddr: recipient,
-    }));
-  } catch (e) {
-    await captureToGlitchTip(e, { route: "real/withdraw", stage: "bridge-create" });
-    if (isBridgeError(e)) return NextResponse.json({ error: "bridge_unavailable" }, { status: 502 });
-    throw e;
+  if (reusable) {
+    bridgeAddress = reusable;
+  } else {
+    try {
+      ({ evmAddress: bridgeAddress } = await createWithdrawal({
+        wallet,
+        toChainId: chainId,
+        toTokenAddress: tokenAddress,
+        recipientAddr: recipient,
+      }));
+    } catch (e) {
+      await captureToGlitchTip(e, { route: "real/withdraw", stage: "bridge-create" });
+      if (isBridgeError(e)) return NextResponse.json({ error: "bridge_unavailable" }, { status: 502 });
+      throw e;
+    }
   }
 
   const inputs: BridgeOutInputs = {
@@ -111,9 +143,29 @@ export async function POST(req: Request) {
 
   try {
     const result = await startWorkflow(prisma, spec);
+    // "stale" means another request claimed the BRIDGE_OUT slot between the read at the top and
+    // this call — two devices posting at once both pass that read, and both reach the mint. The
+    // loser's address is live and about to belong to no run at all, which is the one outcome the
+    // route's own header warns about. It cannot be un-minted and the bridge offers no lookup by
+    // destination, so the only honest handling is to make sure a human learns the address instead
+    // of it disappearing with the response. Nothing was sent to it, so there is no loss to recover
+    // — just a forwarder to retire.
+    if (result.status === "stale" && !reusable) {
+      await sendOpsTelegram(
+        `[withdraw] orphan bridge address ${bridgeAddress} minted for user ${user.id} ` +
+          `(${chainId}/${tokenAddress} -> ${recipient}) but another run claimed the slot; nothing was sent to it`,
+      ).catch(() => {});
+      await captureToGlitchTip(new Error("orphan bridge address"), {
+        route: "real/withdraw",
+        stage: "start-stale",
+        bridgeAddress,
+      });
+    }
     return NextResponse.json({ bridgeAddress, amountMicro: amount.toString(), ...result });
   } catch (e) {
-    await captureToGlitchTip(e, { route: "real/withdraw", stage: "start" });
+    // Same loose end, different exit: the row may never have been written, so name the address in
+    // the capture rather than leaving it only in a response nobody kept.
+    await captureToGlitchTip(e, { route: "real/withdraw", stage: "start", bridgeAddress });
     throw e;
   }
 }

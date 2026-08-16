@@ -83,6 +83,11 @@ export function RealWithdrawCard({ api, ctx }: { api: Api; ctx: RealCtx }) {
   const [note, setNote] = useState("");
   const [error, setError] = useState("");
   const [connected, setConnected] = useState<Connected>({ evm: null, solana: null });
+  // Withdrawing used to be ONE click straight into the signature prompt, with the destination only
+  // ever rendered truncated and only AFTER the run existed. This is the read-back step: the exact
+  // terms are shown, and the run starts on a second, deliberate click. Any edit below clears it, so
+  // a confirmation can never belong to different terms than the ones it was granted for.
+  const [confirming, setConfirming] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -124,6 +129,8 @@ export function RealWithdrawCard({ api, ctx }: { api: Api; ctx: RealCtx }) {
       ? recipient.trim().startsWith("0x")
       : !/^0x[0-9a-fA-F]{40}$/.test(recipient.trim()));
 
+  // First click validates and asks; the second one spends. Kept as one handler so the checks a user
+  // sees before confirming are the same checks that run before the money moves.
   const submit = async () => {
     const dest = recipient.trim();
     if (!chosen || !dest) {
@@ -135,6 +142,13 @@ export function RealWithdrawCard({ api, ctx }: { api: Api; ctx: RealCtx }) {
       setError("enter a positive amount, or leave it empty to send everything");
       return;
     }
+    if (!confirming) {
+      setError("");
+      setNote("");
+      setConfirming(true);
+      return;
+    }
+    setConfirming(false);
     setBusy(true);
     setError("");
     setNote("");
@@ -169,7 +183,7 @@ export function RealWithdrawCard({ api, ctx }: { api: Api; ctx: RealCtx }) {
       </div>
 
       <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
-        <select value={chainId} onChange={(e) => setChainId(e.target.value)} style={{ ...FIELD, flex: 1, minWidth: 130 }}>
+        <select value={chainId} onChange={(e) => { setConfirming(false); setChainId(e.target.value); }} style={{ ...FIELD, flex: 1, minWidth: 130 }}>
           {chains.length === 0 ? <option value={SOLANA}>Solana</option> : null}
           {chains.map(([id, name]) => (
             <option key={id} value={id}>
@@ -179,7 +193,7 @@ export function RealWithdrawCard({ api, ctx }: { api: Api; ctx: RealCtx }) {
         </select>
         <select
           value={chosen?.tokenAddress ?? ""}
-          onChange={(e) => setTokenAddress(e.target.value)}
+          onChange={(e) => { setConfirming(false); setTokenAddress(e.target.value); }}
           style={{ ...FIELD, flex: 1, minWidth: 110 }}
         >
           {tokens.map((t) => (
@@ -194,7 +208,7 @@ export function RealWithdrawCard({ api, ctx }: { api: Api; ctx: RealCtx }) {
         <input
           type="text"
           value={recipient}
-          onChange={(e) => setRecipient(e.target.value)}
+          onChange={(e) => { setConfirming(false); setRecipient(e.target.value); }}
           // The destination lives on the CHOSEN chain — pasting an EVM address for a Solana
           // withdrawal is the one mistake that cannot be undone.
           placeholder={chainId === SOLANA ? "your Solana address" : "your address on the chosen chain"}
@@ -202,7 +216,7 @@ export function RealWithdrawCard({ api, ctx }: { api: Api; ctx: RealCtx }) {
         />
         <button
           type="button"
-          onClick={() => setRecipient(connectedAddress ?? "")}
+          onClick={() => { setConfirming(false); setRecipient(connectedAddress ?? ""); }}
           disabled={!connectedAddress}
           style={{ ...SMALL, ...(connectedAddress ? {} : OFF) }}
         >
@@ -219,7 +233,7 @@ export function RealWithdrawCard({ api, ctx }: { api: Api; ctx: RealCtx }) {
           type="text"
           inputMode="decimal"
           value={dollars}
-          onChange={(e) => setDollars(e.target.value)}
+          onChange={(e) => { setConfirming(false); setDollars(e.target.value); }}
           placeholder="all"
           style={{ ...FIELD, width: 110 }}
         />
@@ -229,9 +243,30 @@ export function RealWithdrawCard({ api, ctx }: { api: Api; ctx: RealCtx }) {
           disabled={busy || wrongFamily}
           style={{ ...PRIMARY, ...(busy || wrongFamily ? OFF : {}) }}
         >
-          {busy ? "…" : "Withdraw"}
+          {busy ? "…" : confirming ? "Confirm send" : "Withdraw"}
         </button>
+        {confirming ? (
+          <button type="button" onClick={() => setConfirming(false)} style={SMALL}>
+            Cancel
+          </button>
+        ) : null}
       </div>
+
+      {confirming ? (
+        <div style={{ marginTop: 10, borderTop: "1px solid var(--line)", paddingTop: 10 }}>
+          <div style={LABEL}>Check before sending</div>
+          {/* The address is rendered IN FULL and wrapped — a truncated one hides exactly the middle
+              characters an address-swapping clipboard attack changes. This is irreversible. */}
+          <div style={{ fontSize: 13, marginTop: 4, wordBreak: "break-all", fontFamily: "monospace" }}>
+            {recipient.trim()}
+          </div>
+          <div style={{ ...MUTED, marginTop: 4 }}>
+            {dollars.trim() === "" ? "entire pUSD balance" : `$${dollars.trim()}`} as {chosen?.symbol ?? "?"} on{" "}
+            {chosen?.chainName ?? "?"}
+          </div>
+          <div style={MUTED}>this cannot be undone or recalled</div>
+        </div>
+      ) : null}
 
       {note ? <div style={{ marginTop: 10, fontSize: 12 }}>{note}</div> : null}
       {error ? <div style={ERR}>{error}</div> : null}
