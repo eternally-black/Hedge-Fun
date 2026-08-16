@@ -114,7 +114,7 @@ function selfTest() {
     attachments: [
       {
         title: "High CPU on web",
-        title_link: "https://glitchtip.hedgeyour.fun/organizations/ops/issues/42/",
+        title_link: "https://ingest.hedgeyour.fun/organizations/ops/issues/42/",
         text: "web has been above 90% CPU for 5 minutes.",
         color: "danger",
       },

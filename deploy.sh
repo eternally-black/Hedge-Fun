@@ -36,6 +36,11 @@ if [ "${1:-}" = "rollback" ]; then
   docker pull "$IMG:$TARGET"
   docker tag "$IMG:$TARGET" "$IMG:latest"
   docker compose up -d --remove-orphans --wait --wait-timeout 180
+  # Record what is live NOW. The normal path writes this at the end, but rollback exits before it,
+  # so the file kept naming the build we just rolled AWAY from — read during an incident, per the
+  # contract at the top of this file, that points the next on-call straight back at the bad sha.
+  # The tag format is :sha-<git-short>, which is what the normal path writes, so the two compare.
+  echo "${TARGET#sha-}" > .deployed_sha
   echo "[rollback] done — live: $TARGET"
   notify OK "rollback done — live: $TARGET"
   docker compose ps

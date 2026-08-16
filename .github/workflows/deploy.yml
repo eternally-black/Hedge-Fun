@@ -3,8 +3,9 @@ on:
   push:
     branches: [main]
   # Build (not deploy) is reachable from a feature branch for PoC measurement.
-  # The deploy job is hard-gated to main via `if:` below, so a manual run here
-  # only builds + pushes to GHCR — it never touches prod.
+  # Two gates keep such a run away from prod: the deploy job is hard-gated to main
+  # via `if:` below, AND only main publishes the mutable `:latest` tag that deploy.sh
+  # pulls — a feature build pushes `:sha-<short>` only, so it cannot be picked up.
   workflow_dispatch:
 
 # Never let two deploys overlap; don't cancel an in-flight one mid-build.
@@ -75,9 +76,11 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/eternally-black/hedge-fun
+          # `latest` is the mutable tag deploy.sh pulls, i.e. production itself. Only main
+          # may move it — otherwise a manual feature-branch build repoints prod's next pull.
           tags: |
-            type=raw,value=latest
-            type=sha,format=short     # :sha-<short> — rollback handle
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,format=short     # :sha-<short> — rollback handle, built on every branch
 
       - name: Build and push
         uses: docker/build-push-action@v6

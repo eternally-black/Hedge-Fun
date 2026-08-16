@@ -34,6 +34,12 @@ INSTANCE_ID="$(envval CONTABO_INSTANCE_ID)"
 notify() { bash "$NOTIFY" "$1" "$2" || true; }
 now() { date +%s; }
 
+# Secrets (Contabo credentials, the bearer token, the push URL) go to curl through a config
+# file on stdin — never argv, which is world-readable via /proc/<pid>/cmdline. Config values
+# are quoted, so backslash and double quote have to be escaped for curl's parser.
+cfgesc() { local v=$1; v=${v//\\/\\\\}; v=${v//\"/\\\"}; printf '%s' "$v"; }
+hc_ping() { printf 'url = "%s"\n' "$1" | curl -fsS --max-time 10 -o /dev/null -K - || true; }
+
 DOWN_F="$STATE_DIR/guard.down_since"
 ALERT_F="$STATE_DIR/guard.last_alert"
 LATCH_F="$STATE_DIR/guard.last_reboot"
@@ -74,26 +80,30 @@ else
       CID="$(envval CONTABO_CLIENT_ID)"; CSEC="$(envval CONTABO_CLIENT_SECRET)"
       CUSER="$(envval CONTABO_API_USER)"; CPASS="$(envval CONTABO_API_PASSWORD)"
       if [ -n "$CID" ] && [ -n "$CSEC" ] && [ -n "$CUSER" ] && [ -n "$CPASS" ]; then
-        token=$(curl -sS --max-time 15 -X POST \
-          "https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token" \
-          -d "grant_type=password" -d "client_id=$CID" -d "client_secret=$CSEC" \
-          --data-urlencode "username=$CUSER" --data-urlencode "password=$CPASS" \
+        # data-urlencode (not data) for every field: curl still does the percent-encoding,
+        # so a password with &, = or spaces survives the round trip intact.
+        token=$(printf 'url = "%s"\ndata = "grant_type=password"\ndata-urlencode = "client_id=%s"\ndata-urlencode = "client_secret=%s"\ndata-urlencode = "username=%s"\ndata-urlencode = "password=%s"\n' \
+            "https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token" \
+            "$(cfgesc "$CID")" "$(cfgesc "$CSEC")" "$(cfgesc "$CUSER")" "$(cfgesc "$CPASS")" \
+          | curl -sS --max-time 15 -X POST -K - \
           | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4) || token=""
         if [ -z "$token" ]; then
           notify CRIT "AUTO_REBOOT: Contabo auth FAILED — cannot reboot VPS1"
         else
-          state=$(curl -sS --max-time 15 -H "Authorization: Bearer $token" \
-            -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
-            "https://api.contabo.com/v1/compute/instances/$INSTANCE_ID" \
+          # The bearer is a live instance-control credential — same stdin treatment.
+          state=$(printf 'url = "%s"\nheader = "Authorization: Bearer %s"\n' \
+              "https://api.contabo.com/v1/compute/instances/$INSTANCE_ID" "$(cfgesc "$token")" \
+            | curl -sS --max-time 15 -K - \
+              -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
             | grep -o '"status" *: *"[^"]*"' | head -1 | cut -d'"' -f4) || state=""
           if [ "$state" != "running" ]; then
             notify WARN "AUTO_REBOOT: instance state is '${state:-unknown}', not 'running' — leaving it alone"
           else
             echo "$t" > "$LATCH_F"   # latch BEFORE the action
-            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 -X POST \
-              -H "Authorization: Bearer $token" \
-              -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
-              "https://api.contabo.com/v1/compute/instances/$INSTANCE_ID/actions/restart") || code=000
+            code=$(printf 'url = "%s"\nheader = "Authorization: Bearer %s"\n' \
+                "https://api.contabo.com/v1/compute/instances/$INSTANCE_ID/actions/restart" "$(cfgesc "$token")" \
+              | curl -sS -o /dev/null -w '%{http_code}' --max-time 15 -X POST -K - \
+                -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)") || code=000
             if [ "$code" = "201" ]; then
               notify CRIT "AUTO_REBOOT: Contabo restart of VPS1 requested (201 = accepted, not yet recovered). Next auto-reboot no sooner than 6h."
             else
@@ -108,6 +118,7 @@ else
   fi
 fi
 
-# Dead-man for the guard itself (Kuma push monitor / healthchecks URL).
-if [ -n "$GUARD_HC_URL" ]; then curl -fsS --max-time 10 -o /dev/null "$GUARD_HC_URL" || true; fi
+# Dead-man for the guard itself (Kuma push monitor / healthchecks URL). The push URL IS the
+# credential — leak it and an attacker can fake "guard alive" while it is dead, so hc_ping.
+if [ -n "$GUARD_HC_URL" ]; then hc_ping "$GUARD_HC_URL"; fi
 exit 0

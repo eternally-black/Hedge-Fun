@@ -43,6 +43,10 @@ HC_URL="$(envval WATCHDOG_HC_URL)"
 notify() { bash "$NOTIFY" "$1" "$2" || true; }
 now() { date +%s; }
 
+# The push URL is a bearer secret (whoever has it can fake "watchdog alive"), so it goes to
+# curl via a config file on stdin — argv is world-readable through /proc/<pid>/cmdline.
+hc_ping() { printf 'url = "%s"\n' "$1" | curl -fsS --max-time 10 -o /dev/null -K - || true; }
+
 # --- deduped alert state: absent file = ok; contents = "<first_break> <last_alert>" ---
 REALERT_SECS=1800
 report_broken() { # report_broken <key> <message>
@@ -180,5 +184,5 @@ else
 fi
 
 # --- dead-man ping: this run completed ---
-if [ -n "$HC_URL" ]; then curl -fsS --max-time 10 -o /dev/null "$HC_URL" || true; fi
+if [ -n "$HC_URL" ]; then hc_ping "$HC_URL"; fi
 exit 0

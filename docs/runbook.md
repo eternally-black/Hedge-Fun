@@ -27,9 +27,10 @@ Push to `main` → `.github/workflows/deploy.yml`:
 
 1. **test gate** — `npm run lint` + `npm test` (DB-free units) + `npm run test:db:run`
    (DB-backed money/economy). Build `needs: test`, so a logic regression can't ship.
-2. **build** — build image on the runner, push to GHCR as `:latest` and `:sha-<short>`
-   (the rollback handle). `linux/amd64`, `provenance: false` (avoids a multi-arch index
-   plain `docker pull`/compose chokes on).
+2. **build** — build image on the runner, push to GHCR as `:sha-<short>` (the rollback
+   handle) plus `:latest` **only when the ref is `main`** — `latest` is the tag `deploy.sh`
+   pulls, so a feature-branch build must never move it. `linux/amd64`, `provenance: false`
+   (avoids a multi-arch index plain `docker pull`/compose chokes on).
 3. **deploy** — gated to `main`; SSHes the VPS and runs `bash deploy.sh`.
 
 What `deploy.sh` does (idempotent):
@@ -41,8 +42,9 @@ What `deploy.sh` does (idempotent):
 - `docker compose up -d --remove-orphans` → `docker image prune -f`.
 - Records the live SHA in `.deployed_sha`.
 
-A feature-branch / manual `workflow_dispatch` run only builds + pushes — the deploy job is
-hard-gated to `main` and never touches prod.
+A feature-branch / manual `workflow_dispatch` run only builds + pushes `:sha-<short>` — the
+deploy job is hard-gated to `main`, and `latest` (the tag prod pulls) is published from
+`main` alone, so such a run cannot reach prod even on the next unrelated deploy.
 
 ## Rollback
 
@@ -85,8 +87,9 @@ re-deploys. No-op on every subsequent deploy and on a fresh DB.
   (root + password) as fallback; re-enable/repair `ssh.service`, then re-add the CI key.
   Full path: see team memory (rescue runbook).
 - **DB concerns** — nightly verified dumps at `/opt/hedgefun/backups` (7 daily + 4
-  weekly, sha256-verified, offsite via rclone `offsite:`); `deploy.sh` takes a
-  `predeploy` snapshot before migrations automatically. See **Backup & restore**.
+  weekly, encrypted, sha256-verified, weekly real-restore drill, offsite by VPS2 pull);
+  `deploy.sh` takes a `predeploy` snapshot before migrations automatically. See
+  **Backup & restore**.
 
 ## Monitoring & alerting
 
@@ -99,7 +102,7 @@ What fires when:
   crash-loop/unhealthy → `docker restart` (flap-guarded; **DB max 1 attempt** then
   alert-only); dockerd dead → `systemctl restart docker`; disk ≥85/95%, RAM <5% free,
   swap >70% → WARN/CRIT. Observe-mode ships first: alerts without restarting.
-- **GlitchTip** (`glitchtip.hedgeyour.fun`, `SENTRY_DSN`) — app exceptions captured via
+- **GlitchTip** (`ingest.hedgeyour.fun`, `SENTRY_DSN`) — app exceptions captured via
   the zero-dep Sentry envelope sender; alerts fan out to Telegram through the `tg-bridge`.
   Hosted on **VPS2** (`ops/vps2/`) — error tracking must not share VPS1's failure domain.
 - **Poller direct** — 3 consecutive failures of one subsystem (settle / deck refresh /
@@ -109,10 +112,14 @@ What fires when:
   `deploy.sh` notifies start/success/failure itself.
 - **Externals (VPS2, `ops/vps2/`)** — **Uptime Kuma** holds the HTTP monitor on
   `/api/health` and the push dead-men (poller / backup / watchdog / guard / pull), all
-  with native Telegram; **uptime-guard** probes VPS1 at network level every 2 min and is
+  with native Telegram. Its UI is **not public** (an unclaimed Kuma admin page on the
+  internet is a free monitoring host): Caddy proxies only `/api/push/*` and 403s the rest,
+  so open the dashboard through `ssh -L 3001:127.0.0.1:3001 root@<vps2>` →
+  `http://127.0.0.1:3001`. **uptime-guard** probes VPS1 at network level every 2 min and is
   the PRIMARY reboot lever (Contabo API, 6 h latch, `AUTO_REBOOT=0` until drilled — any
   HTTP response, 503 included, means "alive, don't reboot"). One free UptimeRobot monitor
-  watches Kuma itself (watcher-of-the-watcher); the CF worker
+  watches `ingest.hedgeyour.fun` — VPS2's only public 200 — as the
+  watcher-of-the-watcher; the CF worker
   (`ops/cloudflare-uptime/`) is an optional third layer; healthchecks.io is an optional
   substitute for Kuma push monitors.
 
@@ -123,20 +130,53 @@ flip to `0` in `/opt/hedgefun/.env`. `AUTO_REBOOT` (VPS2 `/opt/ops/.env`) is arm
 ## Backup & restore
 
 Nightly 03:30 `backup.sh` dumps the hedgefun db to `/opt/hedgefun/backups/` (mode 600):
-`pg_dump -Fc`, verified with `pg_restore --list` + a minimum-size floor, sha256 recorded
-next to each dump. Retention 7 daily + 4 weekly. **Offsite = VPS2 pulls the dumps at
-04:15 over a read-only restricted key** (`ops/vps2/backup-pull.sh`, append-only,
-28-day retention, checksum-verified — a compromised VPS1 cannot touch the copies); set
+`pg_dump -Fc`, verified with `pg_restore --list` + a minimum-size floor, **encrypted**, then
+sha256 recorded next to the final artifact. Retention 7 daily + 4 weekly. **Offsite = VPS2
+pulls the dumps at 04:15 over a read-only restricted key** (`ops/vps2/backup-pull.sh`,
+append-only, 28-day retention, checksum-verified — a compromised VPS1 cannot touch the
+copies; a copy that fails its checksum is quarantined as `*.corrupt` and re-pulled
+automatically, instead of being alerted about forever). Set
 `BACKUP_OFFSITE_PULL=1` in `/opt/hedgefun/.env` once the pull is verified. rclone
 `offsite:` (R2) remains an optional second leg. `deploy.sh` takes a `predeploy` snapshot
 before migrations. GlitchTip/Kuma data on VPS2 is documented-expendable (diagnostics).
 
-Restore:
+**Every Sunday the backup also runs a real restore drill**: the finished artifact is
+decrypted and restored into a disposable `hedgefun_restore_check` database on the same
+Postgres, asserted to contain tables and a non-zero `users` row count, then dropped. A
+failed drill is a failed backup — CRIT to Telegram and no dead-man ping. `pg_restore --list`
+stays as the cheap nightly gate; it only parses the archive TOC and exits 0 on a dump whose
+DATA section is corrupt, which is why the weekly drill exists.
+
+### Encryption (operator step, one time)
+
+Dumps contain user emails, balances and the encrypted CLOB-credential blobs, and they leave
+the host every night. Generate a passphrase and put it in `/opt/hedgefun/.env`:
 
 ```bash
-sha256sum -c /opt/hedgefun/backups/<dump>.dump.sha256
-docker compose exec -T db pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists < /opt/hedgefun/backups/<dump>.dump
+openssl rand -base64 48          # -> BACKUP_ENC_PASSPHRASE=... in /opt/hedgefun/.env (chmod 600)
 ```
+
+Store the **only other copy in the password manager**. Never put it on VPS2 or in the
+offsite bucket — the copies would then decrypt themselves. Until it is set, `backup.sh`
+WARNs to Telegram every night and dumps stay plaintext (it never fails hard on this).
+Encrypted dumps are named `<name>.dump.enc`; rotating the passphrase does **not** re-encrypt
+old dumps, so keep the previous value until the last dump encrypted with it has aged out.
+
+Restore (drop `openssl enc -d ... |` for a legacy plaintext `.dump`):
+
+```bash
+cd /opt/hedgefun/backups
+echo "$(cat <dump>.dump.enc.sha256)  <dump>.dump.enc" | sha256sum -c -   # the file holds the bare hash
+export BACKUP_ENC_PASSPHRASE='...'                                       # from the password manager
+cd /opt/hedgefun
+openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:BACKUP_ENC_PASSPHRASE \
+  -in backups/<dump>.dump.enc \
+  | docker compose exec -T db pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+      --clean --if-exists --exit-on-error
+```
+
+`BACKUP_ENC_PASSPHRASE` must be exported in the restoring shell. `--exit-on-error` is not
+optional: without it `pg_restore` prints errors, counts them, and still exits 0.
 
 **Pre-launch requirement: run the restore drill once against a throwaway database — an
 untested backup is a rumor.** RPO: nightly = up to 24 h loss accepted for alpha; move to
@@ -156,7 +196,11 @@ WAL/PITR before scale.
 - `SENTRY_DSN` — GlitchTip project DSN (org → project → DSN settings).
 - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` — **BotFather** bot + chat id via `getUpdates`.
 - `WATCHDOG_HC_URL`, `POLLER_HC_URL`, `BACKUP_HC_URL`, `WATCHDOG_OBSERVE` — healthchecks.io
-  ping URLs (created per check) + the observe flag.
+  ping URLs (created per check) + the observe flag. **Each ping URL is a bearer secret** —
+  whoever has one can fake a healthy check and mute its dead-man; that is why every script
+  feeds them to `curl` on stdin rather than argv.
+- `BACKUP_ENC_PASSPHRASE` — `openssl rand -base64 48`, generated once. **Losing it loses
+  every `.dump.enc`**; keep a copy in the password manager, and nowhere on VPS2.
 
 VPS2 `/opt/glitchtip/.env` (generated by `ops/vps2/install-vps2.sh`):
 
@@ -178,7 +222,8 @@ Optional CF worker secrets (third layer): `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_I
 Notes:
 
 - `pg_isready` only proves the server answers, not that the data is intact — a failed
-  `pg_dump` is the real corruption detector (hence the `pg_restore --list` verify).
+  `pg_dump` is the real corruption detector (hence the `pg_restore --list` verify, and the
+  Sunday restore drill for the DATA section that `--list` never reads).
 - Rollback arg is `sha-<short>` exactly as CI tags it: `bash deploy.sh rollback <sha-short>`.
 - `docker compose pull` also refreshes mutable base tags (postgres/caddy) — pin by digest
   only if that ever bites.

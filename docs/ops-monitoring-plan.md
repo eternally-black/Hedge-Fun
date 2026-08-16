@@ -156,7 +156,7 @@ advisors insisted). **[DS]** = DS Flash v4 from a packet, root line-reviewed bef
   sendMessage. `--self-test` asserts formatting from a bundled sample payload. Webhook URL
   to configure in GlitchTip is exactly **`http://tg-bridge:8080`** (documented verbatim).
 - **[DS]** `env.example` — SECRET_KEY, POSTGRES_PASSWORD, DATABASE_URL, VALKEY_URL,
-  `GLITCHTIP_DOMAIN=https://glitchtip.hedgeyour.fun`, `EMAIL_URL=consolemail://`,
+  `GLITCHTIP_DOMAIN=https://ingest.hedgeyour.fun`, `EMAIL_URL=consolemail://`,
   DEFAULT_FROM_EMAIL, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID.
 - **[DS]** `install.sh` — one-shot idempotent: `docker network create glitchtip-shared`
   (if absent), mkdir `/opt/glitchtip`, copy files, generate SECRET_KEY + POSTGRES_PASSWORD
@@ -210,7 +210,7 @@ must never leave infra pointing at a route that doesn't exist — both advisors)
   recreated — K3); poller healthcheck: guard against **negative heartbeat age** (clock
   jump, Sol); pass through `SENTRY_DSN`, `TELEGRAM_*`, `POLLER_HC_URL`; declare
   `glitchtip-shared` as external network.
-- **[DS]** `Caddyfile` — `glitchtip.hedgeyour.fun { reverse_proxy glitchtip-web:8000 }`.
+- **[DS]** `Caddyfile` — `ingest.hedgeyour.fun { reverse_proxy glitchtip-web:8000 }`.
 - **[DS]** `package.json` — add `@sentry/node` (app only; poller stays SDK-free).
 
 ### S4 — external probes & docs
@@ -260,7 +260,7 @@ must never leave infra pointing at a route that doesn't exist — both advisors)
 
 1. **Telegram**: BotFather bot → `TELEGRAM_BOT_TOKEN`; message it once; chat id via
    `getUpdates`. → `/opt/hedgefun/.env`, `/opt/glitchtip/.env`, GH secrets, CF Worker secrets.
-2. **DNS**: A record `glitchtip.hedgeyour.fun` → 84.247.169.158.
+2. **DNS**: A record `ingest.hedgeyour.fun` → 84.247.169.158.
 3. **GlitchTip**: run printed `createsuperuser`; org+project; DSN → `SENTRY_DSN` in
    `/opt/hedgefun/.env`; alert rule → webhook `http://tg-bridge:8080`.
 4. **UptimeRobot** (free): monitors on `/api/health` + glitchtip subdomain; TG **and email**.

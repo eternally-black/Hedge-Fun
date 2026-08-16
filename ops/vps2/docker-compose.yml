@@ -19,6 +19,10 @@ x-environment: &glitchtip-env
   GLITCHTIP_DOMAIN: ${GLITCHTIP_DOMAIN}
   DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL}
   GLITCHTIP_MAX_EVENT_LIFE_DAYS: "30"
+  # Upstream defaults this to True: without it anyone reaching the public ingress can self-register
+  # on the monitoring host, mint a DSN and pump events into pg-data until VPS2's disk fills — the
+  # host whose whole job is to still be standing when VPS1 is not.
+  ENABLE_USER_REGISTRATION: "False"
   ENABLE_ADMIN: "False"
   ENABLE_OPENAPI: "False"
 
@@ -118,6 +122,13 @@ services:
     # PUSH monitors — their /api/push/<token> URLs are what VPS1 pastes into
     # POLLER_HC_URL / BACKUP_HC_URL / WATCHDOG_HC_URL. The image ships its own healthcheck.
     image: louislam/uptime-kuma:1
+    # Loopback-only publish. Kuma has no admin until someone creates one, so a UI reachable
+    # from the internet is an unclaimed root account on the monitoring host; Caddy therefore
+    # proxies only /api/push/*. Reach the UI with `ssh -L 3001:127.0.0.1:3001 <vps2>`.
+    # 127.0.0.1 in the mapping is load-bearing — a bare "3001:3001" would have docker punch
+    # its own iptables hole straight past ufw.
+    ports:
+      - "127.0.0.1:3001:3001"
     restart: unless-stopped
     volumes:
       - kuma-data:/app/data

@@ -56,9 +56,13 @@ if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
   exit 0
 fi
 
-if curl -sS --max-time 10 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-  --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-  --data-urlencode "text=${MESSAGE}" >/dev/null; then
+# The bot token must never reach argv: /proc/<pid>/cmdline is world-readable, so any local
+# process could scrape it out of a running curl. curl takes the URL from a config file on
+# stdin instead; chat_id/text stay as args (not secrets) so encoding remains curl's job.
+if printf 'url = "%s"\n' "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+  | curl -sS --max-time 10 -X POST -K - \
+    --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+    --data-urlencode "text=${MESSAGE}" >/dev/null; then
   log SENT
 else
   log FAIL

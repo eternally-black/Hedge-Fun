@@ -67,11 +67,13 @@ fi
 
 echo
 echo "Next steps:"
-echo "  1. DNS: glitchtip.hedgeyour.fun AND kuma.hedgeyour.fun -> this host."
+echo "  1. DNS: ingest.hedgeyour.fun AND push.hedgeyour.fun -> this host."
 echo "  2. GlitchTip admin:  cd $STACK && docker compose exec web ./manage.py createsuperuser"
 echo "     Then: org + project -> DSN -> SENTRY_DSN in VPS1:/opt/hedgefun/.env;"
 echo "     alert rule -> webhook -> http://tg-bridge:8080"
-echo "  3. Kuma: open https://kuma.hedgeyour.fun, create admin, add monitors:"
+echo "  3. Kuma UI is NOT public (first visitor would claim the admin account). From your"
+echo "     laptop: ssh -L 3001:127.0.0.1:3001 root@<vps2>  then open http://127.0.0.1:3001"
+echo "     Create the admin there, then add monitors:"
 echo "     - HTTP https://app.hedgeyour.fun/api/health (keyword/status 200)"
 echo "     - PUSH monitors for poller/backup/watchdog -> paste their /api/push/... URLs"
 echo "       into VPS1:/opt/hedgefun/.env as POLLER_HC_URL / BACKUP_HC_URL / WATCHDOG_HC_URL"

@@ -22,7 +22,17 @@ this host). Then follow the printed next steps. Layout on the host:
   `uptime-guard.sh`, `backup-pull.sh`, and `.env` (from `ops-env.example`).
 - `/opt/backups/hedgefun` — pulled dumps; `/var/lib/hedgefun` — watchdog/guard state.
 
-## Kuma monitors to create (UI at https://kuma.hedgeyour.fun)
+## Kuma monitors to create
+
+The UI is **not** on the public internet: Kuma has no admin until someone creates one, so
+the first visitor to `push.hedgeyour.fun` would have owned this host. Caddy publishes only
+`/api/push/*` (the dead-man endpoint VPS1 pings); everything else answers 403. Reach the UI
+through the loopback publish instead:
+
+```bash
+ssh -L 3001:127.0.0.1:3001 root@<vps2>   # then open http://127.0.0.1:3001
+```
+
 
 1. HTTP `https://app.hedgeyour.fun/api/health` — 60 s interval, alert on non-200.
 2. **Push** monitors (dead-men) for: poller (grace 5 min), VPS1 backup (grace 6 h),
@@ -33,8 +43,10 @@ this host). Then follow the printed next steps. Layout on the host:
 3. Telegram notification channel (bot token + chat id), attached to every monitor.
 
 **Who watches the watcher:** point one free UptimeRobot monitor (Telegram + email) at
-`https://kuma.hedgeyour.fun` — if VPS2 dies, that is the alert that still fires. The
-optional CF worker (`ops/cloudflare-uptime/`) is a third, Cloudflare-hosted layer.
+`https://ingest.hedgeyour.fun` — VPS2's only public 200, and if VPS2 dies that is the
+alert that still fires. (`push.hedgeyour.fun` answers 403 by design now, so it is not a
+usable monitor target.) The optional CF worker (`ops/cloudflare-uptime/`) is a third,
+Cloudflare-hosted layer.
 
 ## The reboot lever (uptime-guard)
 
