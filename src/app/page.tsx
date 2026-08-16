@@ -6,8 +6,6 @@ import { usePrivy } from "@privy-io/react-auth";
 import { useApi } from "./useApi";
 import { DeckCard, CardPreview, type SwipeAction } from "./DeckCard";
 import { Hud } from "./screens/Hud";
-import { Ticker } from "./screens/Ticker";
-import { FootballScreen } from "./screens/FootballScreen";
 import { BottomNav } from "./screens/BottomNav";
 import { Onboarding } from "./screens/Onboarding";
 import { GmScreen } from "./screens/GmScreen";
@@ -17,10 +15,11 @@ import { ProfileScreen } from "./screens/ProfileScreen";
 import { HistorySheet } from "./screens/HistorySheet";
 import { BalanceSheet } from "./screens/BalanceSheet";
 import { NotificationsScreen } from "./screens/NotificationsScreen";
+import { HedgeScreen } from "./screens/HedgeScreen";
 import { RevealOverlay } from "./screens/RevealOverlay";
 import { type Card, type Me, type Screen } from "./ui";
-import { DECK_MIN_LEAD_MS } from "@/lib/config";
-import type { ResultRow, ResultsResponse, SwipeResponse, TickerRow } from "@/lib/api-types";
+import { DECK_MIN_LEAD_MS, QUOTE_POLL_MS } from "@/lib/config";
+import type { QuotesResponse, ResultRow, ResultsResponse, SwipeResponse } from "@/lib/api-types";
 
 const PRIVY_ON = !!process.env.NEXT_PUBLIC_PRIVY_APP_ID;
 
@@ -72,13 +71,6 @@ function App() {
   const [me, setMe] = useState<Me | null>(null);
   const [deck, setDeck] = useState<Card[]>([]);
   const [screen, setScreen] = useState<Screen>("deck");
-  // Which football match is open (its markets), lifted here so the global ticker can open one
-  // directly. null = the match list. Cleared on bottom-nav so tapping "World Cup" shows the list.
-  const [footballMatch, setFootballMatch] = useState<TickerRow | null>(null);
-  // Where a ticker-opened match should go "Back" to. null = opened from the Football list (button
-  // reads "All matches"); a Screen = jumped in via the global ticker from elsewhere (button "Back").
-  const [matchBackTo, setMatchBackTo] = useState<Screen | null>(null);
-  const screenRef = useRef<Screen>("deck"); // mirrors effectiveScreen so the stable openMatch can read the origin
   // One-shot: true only for the moment the user JUST spent their last swipe this session. Gates the
   // "Deck's done → Feed" hand-off panel so it shows exactly once; every other time the deck is locked
   // (relogin, post-reveal, tapping a disabled Deck tab) we route straight to the feed, no panel.
@@ -224,6 +216,51 @@ function App() {
     return () => window.clearInterval(id);
   }, [topUpIfLow]);
 
+  // Live quote on the TOP card (D10 Slice B). A CLOB book churns roughly every 5s, so the price a
+  // card was dealt with is stale within seconds — and the scenario that matters is exactly the one
+  // where the user sits on a card deliberating. We re-poll only the card they can act on: a
+  // next-up card's price is irrelevant until it surfaces, and it gets a live quote the moment it
+  // does (this effect re-arms on topId). Paused when the tab is hidden — no radio spend on a deck
+  // nobody is looking at, and the first poll on return re-syncs before any swipe can land.
+  const topId = deck[0]?.id;
+  useEffect(() => {
+    if (!topId || screen !== "deck") return;
+    let alive = true;
+    const poll = async () => {
+      if (document.hidden) return;
+      // Cap spent -> the deck view is swapped for the feed, so the top card isn't on screen. Read it
+      // from meRef so this effect doesn't re-arm on every /api/me refresh (which would restart the
+      // interval and, with it, the cadence the user is watching).
+      const m = meRef.current;
+      if (m && !m.dev && m.swipes.used >= m.swipes.cap) return;
+      try {
+        const r = (await api(`/api/quotes?ids=${encodeURIComponent(topId)}`)) as QuotesResponse;
+        const q = r.quotes.find((x) => x.marketId === topId);
+        if (!alive || !q || q.yesPriceBp == null || q.noPriceBp == null) return;
+        // Patch prices in place — never reorder or drop, or the card would move under the thumb.
+        setDeck((d) =>
+          d.map((c) =>
+            c.id === topId && (c.yesPriceBp !== q.yesPriceBp || c.noPriceBp !== q.noPriceBp)
+              ? { ...c, yesPriceBp: q.yesPriceBp!, noPriceBp: q.noPriceBp! }
+              : c,
+          ),
+        );
+      } catch {
+        // A failed poll is a no-op: keep showing the last real price. The swipe re-quotes anyway,
+        // and the seen-vs-executed guard catches anything that drifted while we were blind.
+      }
+    };
+    void poll();
+    const id = window.setInterval(() => void poll(), QUOTE_POLL_MS);
+    const onVis = () => { if (!document.hidden) void poll(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [topId, screen, api]);
+
   const flashPop = useCallback((amt: number, color: string) => {
     setPop({ amt, color });
     window.clearTimeout(popTimer.current);
@@ -265,9 +302,20 @@ function App() {
       advance();
       flashPop(action === "SKIP" ? 0 : 1, action === "SKIP" ? "var(--skip)" : action === "YES" ? "var(--yes)" : "var(--no)");
 
+      // Echo the price the user was LOOKING AT for the side they picked. The server re-quotes the
+      // live book and, if it moved against them beyond tolerance, refuses instead of booking a worse
+      // price silently (D10 Slice B). With the top card polling every few seconds this is normally
+      // the same book the server reads, so the rejection path is a genuine-move edge, not routine.
       const req = action === "SKIP"
         ? api("/api/skip", { method: "POST" })
-        : api("/api/swipe", { method: "POST", body: JSON.stringify({ marketId: card.id, side: action }) });
+        : api("/api/swipe", {
+            method: "POST",
+            body: JSON.stringify({
+              marketId: card.id,
+              side: action,
+              quotedPriceBp: action === "YES" ? card.yesPriceBp : card.noPriceBp,
+            }),
+          });
       req
         .then((r) => {
           refreshMe(); // stats only (points/shards/balance/skip counter); never the deck
@@ -288,7 +336,25 @@ function App() {
           // back (no bet row), so the market re-enters a future deck — the card isn't lost. Skips
           // never 402 anymore (always free).
           else if (status === 402) { flashToast("No free cash left"); void refreshMe(); }
-          else if (status !== 409) console.error(e);
+          // 409 price_moved = the book moved against the user between the quote they saw and the
+          // re-quote at lock time. Nothing was stored, so UNDO the optimistic advance: put the card
+          // back on top carrying the FRESH price, and let them decide again at the honest number.
+          // Every other 409 (already bet / expired / untradable) is terminal — the card stays gone.
+          else if (status === 409) {
+            const body = (e as { body?: { error?: string; freshPriceBp?: number } }).body;
+            if (body?.error === "price_moved" && typeof body.freshPriceBp === "number") {
+              const fresh = body.freshPriceBp;
+              setDeck((d) => {
+                if (d.some((c) => c.id === card.id)) return d; // already back (double-tap race)
+                const restored: Card = action === "YES"
+                  ? { ...card, yesPriceBp: fresh }
+                  : { ...card, noPriceBp: fresh };
+                return [restored, ...d];
+              });
+              flashToast("Price moved — swipe again to confirm");
+            }
+          }
+          else console.error(e);
         });
     },
     [api, refreshMe, topUpIfLow, flashPop, flashToast],
@@ -339,24 +405,7 @@ function App() {
   const goNotifs = useCallback(() => setScreen("notifications"), []);
   // Nav from the bottom bar: consume the one-shot hand-off, so after the first time the deck is
   // locked every further navigation lands on the feed (never the panel again).
-  const navTo = useCallback((s: Screen) => { setJustExhausted(false); setFootballMatch(null); setMatchBackTo(null); setScreen(s); }, []);
-  // Ticker section tap: jump straight to that match's markets (screen + selection in one go). Remember
-  // the origin so MatchDetail can offer "Back". But if you're already in the football context (list or
-  // a ticker-opened match) keep the existing origin: a click from the list stays "All matches" (prev
-  // null), and hopping ticker→ticker preserves the first origin instead of pinning it to "football".
-  const openMatch = useCallback((row: TickerRow) => {
-    setMatchBackTo((prev) => (screenRef.current === "football" ? prev : screenRef.current));
-    setFootballMatch(row);
-    setScreen("football");
-  }, []);
-  // Football list tap: open the match with no back-origin → the button reads "All matches".
-  const selectMatch = useCallback((row: TickerRow | null) => { setMatchBackTo(null); setFootballMatch(row); }, []);
-  // MatchDetail back: clear the selection, and if we jumped in via the ticker, return to that screen.
-  const backFromMatch = useCallback(() => { setFootballMatch(null); setMatchBackTo(null); if (matchBackTo) setScreen(matchBackTo); }, [matchBackTo]);
-  // Mirror the current screen into a ref (in an effect, not during render) so the stable openMatch can
-  // read the ticker-tap origin without taking `screen` as a dep — keeps it identity-stable for the
-  // memoized ticker items. Raw `screen` (not effectiveScreen) so Back re-derives the deck/feed view.
-  useEffect(() => { screenRef.current = screen; }, [screen]);
+  const navTo = useCallback((s: Screen) => { setJustExhausted(false); setScreen(s); }, []);
   // The hand-off panel's CTA: into the feed, one-shot consumed.
   const enterFeedFromCap = useCallback(() => { setJustExhausted(false); setScreen("feed"); }, []);
 
@@ -445,7 +494,6 @@ function App() {
       {historyOpen && <HistorySheet api={api} onClose={closeHistory} />}
       {balanceOpen && <BalanceSheet me={me} api={api} onClose={closeBalance} onTopupDone={refreshMe} onToast={flashToast} />}
       <Hud me={me} pop={pop} onShards={goVault} onGM={goGmScreen} onBalance={openBalance} onBell={goNotifs} />
-      <Ticker api={api} onOpenMatch={openMatch} />
 
       <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
         {effectiveScreen === "deck" && (
@@ -497,8 +545,8 @@ function App() {
           </div>
         )}
 
-        {effectiveScreen === "football" && <FootballScreen api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openBalance} selected={footballMatch} onSelect={selectMatch} backTo={matchBackTo} onBack={backFromMatch} />}
         {effectiveScreen === "feed" && <FeedScreen api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openBalance} />}
+        {effectiveScreen === "hedge" && <HedgeScreen api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openBalance} />}
         {effectiveScreen === "gm" && <GmScreen me={me} busy={busy} onGM={gm} onEnterDeck={goDeck} onRevive={revive} />}
         {effectiveScreen === "vault" && <VaultScreen me={me} api={api} onRefresh={refresh} previewCard={top ?? next} />}
         {effectiveScreen === "invite" && <InviteScreen me={me} />}

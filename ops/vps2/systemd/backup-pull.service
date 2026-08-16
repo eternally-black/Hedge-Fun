@@ -1,0 +1,8 @@
+[Unit]
+Description=Pull VPS1's verified dumps to VPS2 (append-only offsite copies)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash /opt/ops/ops/backup-pull.sh

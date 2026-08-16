@@ -4,3 +4,6 @@
 app.hedgeyour.fun {
 	reverse_proxy app:3000
 }
+
+# GlitchTip + Uptime Kuma live on VPS2 (ops/vps2/) with their own Caddy — monitoring must
+# not share VPS1's failure domain. No monitoring ingress here on purpose.

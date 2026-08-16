@@ -37,7 +37,7 @@ async function main() {
     stopped = e instanceof SwipeCapReachedError;
   }
   assert.ok(stopped, "over-cap swipe throws SwipeCapReachedError");
-  const bet = await prisma.bet.findUnique({ where: { userId_marketId: { userId: user.id, marketId: over.id } } });
+  const bet = await prisma.bet.findUnique({ where: { userId_marketId_mode: { userId: user.id, marketId: over.id, mode: "PAPER" } } });
   assert.strictEqual(bet, null, "no bet stored when hard-stopped");
 
   // Dev (capBypass) swipes PAST the cap — admin reset / testing relies on this.

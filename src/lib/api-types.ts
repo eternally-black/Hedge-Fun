@@ -37,10 +37,23 @@ export interface ErrorResponse {
 export interface DeckCard {
   id: string;
   question: string;
+  // SERVER-DERIVED (deck-mix categoryOf), not Gamma's own field. Gamma leaves `category` null on
+  // every live market — measured 0 of 1600 on 2026-08-03 — so passing it through meant the RN
+  // client, which has no classifier and keys its badge off this string, rendered a grey "Market"
+  // chip on literally every card. One of: crypto|esports|sports|overunder|politics|weather|other.
   category: string | null;
+  // The specific league or game when one is recognised ("NBA", "Soccer", "CS2"), else null. Same
+  // source as `category`. Additive and optional: web derives it locally, RN cannot (it deliberately
+  // does not port the classifier) and shows the generic category label when this is absent.
+  league?: string | null;
   outcomeYesLabel: string;
   outcomeNoLabel: string;
-  yesPriceBp: number; // basis points (5150 = 51.5¢). Sides need NOT sum to 10000 (real spread).
+  // Basis points (5150 = 51.5¢). The price this side COSTS: for a Polymarket market the book-walked
+  // VWAP for a $10 stake (D10) — NEVER the Gamma mid; a Polymarket row with no fresh-enough book
+  // read is simply not served. A bookless-source row serves its stored odds instead (authoritative
+  // there, not a fallback). Sides need NOT sum to 10000 (real spread). The bet-lock path re-quotes live — treat
+  // these as display prices.
+  yesPriceBp: number;
   noPriceBp: number;
   resolutionDeadline: string; // ISO-8601
 }
@@ -48,29 +61,28 @@ export interface DeckResponse {
   cards: DeckCard[];
 }
 
-// ─── GET /api/football/ticker ──────────────────────────────────────────────────────────────────
-// Auth: Bearer. Live World Cup ticker rows from TxLine (server-cached, read-only display). Ordered
-// live first, then upcoming (nearest kickoff), then recently ended. homeGoals/awayGoals null pre-match;
-// over25Pct = demarginalized Over-2.5-goals probability % (null if not offered / quarter line);
-// homeWinPct/awayWinPct = demarginalized 1X2 win probability % (null if not offered); phase:
-// "1H" | "HT" | "2H" | "FT" | "" (upcoming).
-export interface TickerRow {
-  fixtureId: string;
-  competition: string;
-  home: string;
-  away: string;
-  homeGoals: number | null;
-  awayGoals: number | null;
+// ─── GET /api/quotes?ids=<marketId,...>&stake=<cents> ─────────────────────────────────────────────
+// Auth: Bearer. Live executable prices for the card(s) the user is LOOKING AT (D10 Slice B). Books
+// churn every ~5s, so a card sitting under a deliberating thumb goes stale within seconds of being
+// dealt; the client re-polls the TOP card and re-renders its payout from this.
+// `ids` is capped server-side and `stake` is clamped — quoting is CPU-trivial off a shared book
+// cache, so the caps are about abuse, not cost. Rate-limited per user.
+// Errors: 400 (no ids), 401, 429 (rate_limited).
+export interface QuoteRow {
+  marketId: string;
+  // Same units and meaning as DeckCard.yesPriceBp: what this side COSTS at the requested stake.
+  // null = not buyable right now at that stake (dead/thin book, or CLOB unreachable with nothing
+  // cached). The client should disable that side rather than show a stale number.
+  yesPriceBp: number | null;
+  noPriceBp: number | null;
+  asOfMs: number | null; // when the book behind the pair was read (older of the two sides)
+  // false = the row has no CLOB book at all and answered from its stored odds — NOT a degraded or
+  // stale read. Kept in the contract (both clients bind to it) even though every live market is now
+  // book-backed; deprecate it on its own, not folded into an unrelated change.
   live: boolean;
-  ended: boolean;
-  phase: string;
-  kickoff: string; // ISO-8601
-  over25Pct: number | null;
-  homeWinPct: number | null;
-  awayWinPct: number | null;
 }
-export interface TickerResponse {
-  rows: TickerRow[];
+export interface QuotesResponse {
+  quotes: QuoteRow[];
 }
 
 // ─── GET /api/feed ─────────────────────────────────────────────────────────────────────────────
@@ -86,37 +98,38 @@ export interface FeedResponse {
 // ─── POST /api/feed/bet ────────────────────────────────────────────────────────────────────────
 // Auth: Bearer. Body: FeedBetRequest. Paper bet on a feed market — same $10 stake/cash-hold as a
 // swipe, but NO points and NO daily cap (shards still accrue on a win, uncapped). NOT gated by the
-// swipe cap (the feed is what you get AFTER the cap). Errors: 400 (bad body), 402 (insufficient Cash —
-// { error: "insufficient_funds" }), 409 (market not open / already bet / market_expired).
+// swipe cap (the feed is what you get AFTER the cap). Locks the side's EXECUTABLE price (live CLOB
+// re-quote; a bookless source keeps its stored odds). Errors: 400 (bad body), 402 (insufficient
+// Cash — { error: "insufficient_funds" }), 409 (market not open / already bet / market_expired /
+// market_untradable — the book cannot fill the stake), 502 (book_unavailable — CLOB book missing
+// or older than the freshness policy; retry, never a mid fallback).
 export interface FeedBetRequest {
   marketId: string;
   side: BetSide;
+  quotedPriceBp?: number; // seen-vs-executed guard — see SwipeRequest.quotedPriceBp
 }
 export interface FeedBetResponse {
   betId: string;
 }
 
-// ─── GET /api/football/match ─────────────────────────────────────────────────────────────────────
-// Auth: Bearer. Query ?fixtureId=<id>. The relevant binary markets for ONE World Cup fixture —
-// "{team} to win?" (from 1X2) + Over/Under total goals (1.5/2.5/3.5) — read from the cached TXODDS
-// Market rows (the same store the deck/feed read; NOT band-filtered, so favorites show too). Cards
-// reuse DeckCard; placedSide = the side the user already bet on that market (null if none), so the
-// detail view shows it locked. Bet via POST /api/feed/bet (these are ordinary Market rows). Empty
-// cards = no odds offered for this fixture yet (O/U coverage is bursty). 400 if fixtureId is missing.
-export interface FootballMarketCard extends DeckCard {
-  placedSide?: BetSide | null;
-}
-export interface FootballMatchResponse {
-  cards: FootballMarketCard[];
-}
-
 // ─── POST /api/swipe ───────────────────────────────────────────────────────────────────────────
-// Auth: Bearer. Body: SwipeRequest. Paper bet Yes/No on a deck market; locks the bought side's price.
-// Errors: 400 (bad body), 409 (market not open / already swiped this market), 403 (daily cap reached),
-//         402 (insufficient Cash for stake — body { error: "insufficient_funds" }).
+// Auth: Bearer. Body: SwipeRequest. Paper bet Yes/No on a deck market; locks the bought side's
+// EXECUTABLE price (live CLOB re-quote; a bookless source keeps its stored odds).
+// Errors: 400 (bad body), 409 (market not open / already swiped this market / market_expired /
+//         market_untradable — the book cannot fill the stake / price_moved — the live book moved
+//         against the quote the client displayed; body carries { freshPriceBp } so the card can
+//         re-render at the true price and wait for a deliberate re-swipe), 403 (daily cap reached),
+//         402 (insufficient Cash for stake — body { error: "insufficient_funds" }),
+//         502 (book_unavailable — CLOB book missing or older than the freshness policy).
 export interface SwipeRequest {
   marketId: string;
   side: BetSide;
+  // The price the user was actually LOOKING AT for `side` when they swiped (D10 Slice B). Optional:
+  // a client that doesn't send it (an older build) locks the fresh executable price silently, which
+  // is still strictly better than the mid it used to lock. When present, the server rejects with 409
+  // { error: "price_moved", freshPriceBp } if the live book moved AGAINST the user beyond tolerance —
+  // a move in their favour always executes.
+  quotedPriceBp?: number;
 }
 export interface SwipeResponse {
   betId: string;
@@ -183,7 +196,8 @@ export interface HistoryResponse {
 export interface ResultRow {
   id: string;
   question: string;
-  category: string | null;
+  category: string | null; // server-derived, see DeckCard.category
+  league?: string | null; // server-derived, see DeckCard.league
   side: BetSide;
   sideLabel: string; // label of the side the user bet (team / Over / Up / Yes)
   status: "WIN" | "LOSS" | "PUSH";
@@ -193,9 +207,12 @@ export interface ResultRow {
   shards: number; // shards granted for this bet (0 or 1)
   settledAt: string; // ISO-8601
   seen: boolean; // seenAt != null
-  // Verifiable settlement: true when the bet settled on Solana-anchored data (TxLINE World Cup —
-  // scores are committed to a Solana Merkle root). Absent/false for Polymarket. onchainRef = Solscan
-  // link. Optional (additive field) so stale clients / older RN builds stay forward-compatible.
+  // DEPRECATED (2026-08-03). Marked a settlement made on Solana-anchored data — only ever true for
+  // the TxOdds World Cup integration, which is gone. The server now always sends false/null and no
+  // client renders anything for them, so the badge has already disappeared everywhere, including
+  // Android builds already in the wild. Kept in the shape because removing a field in place is a
+  // breaking change (see RULES at the top) and mobile does not deploy with the server. Retire them
+  // in a v2, or reuse them if a verifiable source ever returns.
   verified?: boolean;
   onchainRef?: string | null;
 }
@@ -297,4 +314,141 @@ export interface AdminLeaderboardRow {
 export interface AdminLeaderboardResponse {
   rows: AdminLeaderboardRow[];
   generatedAt: string; // ISO-8601
+}
+
+// ─── HEDGE ENGINE (phase 2, workstream A) ────────────────────────────────────────────────────────
+// The S1 wallet-hedge surface. Suggestions are DETERMINISTIC and re-derivable server-side (D1 — no
+// LLM in the loop), settle as standard paper Bet rows through the existing poller (D6), and carry a
+// VARIABLE stake (D8). Every shape here is the contract the web + Android clients render.
+
+// Which hedge a suggestion is. "S1-major" = a direct hedge on a major holding (SOL / wrapped BTC or
+// ETH). "S1-proxy" = the long-tail SPL aggregate hedged via a SOL short (BASIS RISK — the client MUST
+// label it a proxy, never a hedge). "S2" = a life-event hedge (bet AGAINST a team you support).
+// "fallback" = a discovery card (NOT a hedge — client MUST label it discovery; see isDiscovery).
+export type HedgeSuggestionKind = "S1-major" | "S1-proxy" | "S2" | "fallback";
+
+// ─── POST /api/hedge/wallet ──────────────────────────────────────────────────────────────────────
+// Auth: Bearer. Body: HedgeWalletRequest. Validates the base58 Solana address, links it (read-only —
+// keys are NEVER requested), builds/refreshes the cached WalletSnapshot, and returns the exposure
+// summary. Errors: 400 (missing/invalid base58 address), 502 (balances/prices upstream unavailable —
+// { error: "exposure_unavailable" }).
+export interface HedgeWalletRequest {
+  address: string; // base58 Solana address
+}
+export interface HedgeExposureAsset {
+  asset: string; // "SOL" | "BTC" | "ETH" for majors; token symbol / short mint for SPL
+  mint: string | null; // null = native SOL
+  amount: string; // UI token amount as a decimal STRING (avoids float drift on the wire)
+  notionalCents: number; // current USD value (D3 = market value), integer cents
+  isMajor: boolean; // directly hedgeable (SOL / wrapped BTC / wrapped ETH)
+  avgBuyCostCents: number | null; // Birdeye avg buy cost per token; null when unavailable (graceful)
+}
+export interface HedgeWalletResponse {
+  address: string;
+  totalNotionalCents: number;
+  majors: HedgeExposureAsset[]; // SOL / BTC / ETH exposure, biggest first
+  splAggregateCents: number; // Σ long-tail SPL notional (the proxy-hedge basis)
+  snapshotFetchedAt: string; // ISO-8601 (cache freshness)
+  pnlAvailable: boolean; // false => Birdeye degraded => no avg-cost narrative lines
+}
+
+// ─── GET /api/hedge/wallet ─────────────────────────────────────────────────────────────────────────
+// Auth: Bearer. Returning-user state (F18a): the caller's linked-wallet status + the CACHED exposure
+// summary of their primary (most-recently-linked) wallet, so a returning user sees their exposure panel
+// without re-pasting the address. CACHE-ONLY — never triggers a Helius/Jupiter/Birdeye call: when no
+// snapshot has been built yet `exposure` is null and `stale` is true. `stale` is also true when the
+// cached snapshot is older than the freshness window (the client may offer a refresh). Never errors on
+// upstream outage (it does no upstream work); the paste form stays reachable regardless.
+export interface HedgeWalletStateResponse {
+  walletLinked: boolean; // true => the caller has at least one linked wallet
+  exposure: HedgeWalletResponse | null; // primary wallet's CACHED summary; null when unlinked or never snapshotted
+  stale: boolean; // true => exposure is null OR its snapshot is past the freshness window (offer a refresh)
+}
+
+// ─── GET /api/hedge/suggestions ──────────────────────────────────────────────────────────────────
+// Auth: Bearer. Deterministic S1 suggestions for the caller's linked wallet(s). Each card reuses the
+// DeckCard field family + hedge metadata. `suggestionId` is a stable content hash (re-derivable) so
+// POST /accept is idempotent. `walletLinked` is false when the user has linked no wallet yet.
+// Price semantics (D10 follow-up): yesPriceBp/noPriceBp are the live CLOB VWAP at the card's OWN
+// proposedStakeCents — the exact quote /accept honours — never the Gamma mid; a market that won't
+// quote both sides at that stake is dropped rather than shown at an approximated price.
+export interface HedgeSuggestion extends DeckCard {
+  suggestionId: string; // deterministic; pass to /accept and /event
+  kind: HedgeSuggestionKind; // "S1-major" | "S1-proxy" | "S2" | "fallback"
+  side: BetSide; // the side that hedges the holding (benefits if the price falls)
+  sideLabel: string; // display label of that side (e.g. "No")
+  proposedStakeCents: number; // sized 5–10% majors / ~3% SPL-proxy, clamped (D8); fixed for S2/fallback. For S1 the card's prices are quoted at THIS stake; S2/fallback prices are the persisted eff VWAP at the fixed $10 stake
+  hedgedAsset: string; // "SOL" | "BTC" | "ETH" ("SOL" is the shorting instrument for a proxy); "" for S2/fallback
+  hedgedNotionalCents: number; // the exposure being hedged; 0 for S2/fallback (no position notional)
+  isProxy: boolean; // true => S1-proxy => UI must show the basis-risk / "proxy, not a hedge" label
+  avgBuyCostNarrative: string | null; // "You bought SOL at ~$X" — null when Birdeye unavailable / non-S1
+  // ── S2 / fallback extras (optional; absent/neutral on S1 so stale clients stay compatible) ──
+  isDiscovery?: boolean; // true => a fallback discovery card, NOT a hedge (client MUST label it so)
+  matchedEntity?: string | null; // the team/entity the user supports (we bet AGAINST it); null on fallback
+  league?: string | null; // league/competition label for an S2 card (e.g. "NBA"); null if unknown/non-S2
+  matchConfidence?: number; // 0..1 free-text match confidence (S2 search only; omitted on accept re-derivation)
+}
+export interface HedgeSuggestionsResponse {
+  suggestions: HedgeSuggestion[];
+  walletLinked: boolean; // false => prompt the user to link a wallet first
+}
+
+// ─── GET /api/hedge/pickers ────────────────────────────────────────────────────────────────────────
+// Auth: Bearer. The PRIMARY S2 UX (spec §2): structured team/league pickers built from Polymarket's
+// own sports/esports metadata, restricted to entities that actually have an OPEN, upcoming market
+// (so a pick always resolves to a live hedge). Churns with the poller cadence (never a static list);
+// server-side in-process TTL cache keeps it cheap. `teams` are the side labels under that league.
+export interface HedgePickerLeague {
+  slug: string; // "nba" | "cs2" | "soccer" ... (stable grouping key)
+  label: string; // display label ("NBA", "CS2")
+  teams: string[]; // distinct team/entity labels with an open market, sorted
+}
+export interface HedgePickersResponse {
+  leagues: HedgePickerLeague[];
+}
+
+// ─── POST /api/hedge/search ──────────────────────────────────────────────────────────────────────
+// Auth: Bearer. Body: HedgeSearchRequest. The SECONDARY S2 UX: free text ("я болею за Реал", "иду на
+// фильм X") -> deterministic alias/FTS match -> (below threshold + NLU_API_KEY set) ONE NLU
+// call -> re-run -> still nothing => discovery fallback. A team you SUPPORT yields an AGAINST
+// suggestion on its nearest upcoming market. `isDiscovery` is true ONLY on the fallback (3 random
+// contested markets, honestly flagged as discovery, never a hedge). Errors: 400 (empty / too-long text).
+export interface HedgeSearchRequest {
+  text: string; // free text; trimmed, max 200 chars
+}
+export interface HedgeSearchResponse {
+  suggestions: HedgeSuggestion[]; // S2 against-hedges (isDiscovery=false) OR fallback cards (isDiscovery=true)
+  isDiscovery: boolean; // true => the fallback discovery path; the client MUST label the cards discovery
+  matchedEntity: string | null; // the entity we matched the text to (null on fallback)
+  usedNlu: boolean; // true => the NLU edge was invoked (below-threshold + key present)
+}
+
+// ─── POST /api/hedge/accept ──────────────────────────────────────────────────────────────────────
+// Auth: Bearer. Body: HedgeAcceptRequest. Re-derives the suggestion server-side from the id (never
+// trusts client market/side/stake), then creates a STANDARD paper Bet with the variable stake,
+// locking it against Cash exactly like a swipe (atomic guard). The locked price is the side's
+// EXECUTABLE price (live CLOB re-quote for Polymarket). Idempotent: re-accepting the same
+// suggestion returns the existing bet (alreadyAccepted:true). Errors: 400 (bad body), 402
+// (insufficient Cash — { error: "insufficient_funds" }), 404 (suggestion not found / stale — client
+// should refetch suggestions), 409 (market not open / already bet this market / market_untradable),
+// 502 (book_unavailable — CLOB book missing or too stale to lock against).
+export interface HedgeAcceptRequest {
+  suggestionId: string;
+}
+export interface HedgeAcceptResponse {
+  betId: string;
+  stakeCents: number; // the ACTUAL locked stake (may be clamped down to available Cash)
+  alreadyAccepted: boolean; // true => idempotent replay, returns the pre-existing bet
+}
+
+// ─── POST /api/hedge/event ───────────────────────────────────────────────────────────────────────
+// Auth: Bearer. Body: HedgeEventRequest. Suggestion telemetry (impression / dismiss; accept is
+// recorded by /accept). Idempotent per (user, suggestion, event). Errors: 400 (bad body), 404
+// (suggestion not derivable for the user's wallet — stale).
+export interface HedgeEventRequest {
+  suggestionId: string;
+  event: "impression" | "dismiss";
+}
+export interface HedgeEventResponse {
+  ok: true;
 }

@@ -21,11 +21,28 @@ const CRYPTO = /\b(bitcoin|btc|ethereum|eth|solana|sol|xrp|bnb|dogecoin|doge|hyp
 // Sports: leagues + the "type" words that head named-binary sports markets (spread, handicap,
 // innings, sets, totals, moneyline, who wins). The label-vs-label "Team A / Team B" shape lands
 // here via these heads even when the question names no league.
-const SPORTS = /\b(nba|nfl|mlb|nhl|soccer|football|baseball|basketball|hockey|tennis|atp|wta|ufc|mma|boxing|cricket|f1|formula|golf|nascar|premier league|la liga|serie a|bundesliga|ligue 1|champions league|world cup|grand prix|spread|handicap|innings?|moneyline|to win|set \d|game \d|\bvs\.?\b|\bv\.\b| at )\b/i;
+// "exact score" earns its place: "Exact Score: A 3 - 0 B?" names no league and has no "vs", so it
+// used to fall through to "other" — a match market on a 48h horizon wearing a generic badge.
+const SPORTS = /\b(nba|nfl|mlb|nhl|soccer|football|baseball|basketball|hockey|tennis|atp|wta|ufc|mma|boxing|cricket|f1|formula|golf|nascar|premier league|la liga|serie a|bundesliga|ligue 1|champions league|world cup|grand prix|spread|handicap|innings?|moneyline|to win|exact score|set \d|game \d|\bvs\.?\b|\bv\.\b| at )\b/i;
 // Politics / macro.
 const POLITICS = /\b(election|president|senate|congress|fed\b|fomc|rate (cut|hike)|nominee|impeach|prime minister|parliament|referendum|vote|poll)\b/i;
 // Weather.
 const WEATHER = /\b(temperature|°f|°c|degrees|rain|snow|hurricane|storm|weather|high of|inches of)\b/i;
+
+// The text every rule below reads: question + both side labels (a named binary carries the signal in
+// its labels, not its question).
+//
+// Quoted spans are dropped first. Polymarket runs a whole genre of "mention" markets — `Will X say
+// "World Cup" during the earnings call?` — where the quote is the phrase somebody utters, not the
+// subject of the bet. Left in, it is indistinguishable from a topic signal: that example classifies
+// sports and earns a football pitch. Same trap for `"Bitcoin"` in a quote landing on crypto.
+// Measured 2026-08-03: ZERO markets inside either live window (deck 72h, hedge index 240h) contain a
+// quoted span at all, so this changes nothing today. It is the guard, not the fix — those markets
+// exist further out and drift into range on their own.
+function signalText(m: { question: string; outcomeYesLabel: string; outcomeNoLabel: string }): string {
+  const q = m.question.replace(/["“][^"”]*["”]/g, " ");
+  return `${q} ${m.outcomeYesLabel} ${m.outcomeNoLabel}`;
+}
 
 export function categoryOf(m: {
   question: string;
@@ -35,8 +52,7 @@ export function categoryOf(m: {
 }): Category {
   const y = m.outcomeYesLabel.toLowerCase();
   const n = m.outcomeNoLabel.toLowerCase();
-  // The full text signal: question + both side labels (named-binary carries the signal in labels).
-  const text = `${m.question} ${m.outcomeYesLabel} ${m.outcomeNoLabel}`;
+  const text = signalText(m);
 
   // 1) Up/Down is an unambiguous crypto shape — keep it first.
   if (y === "up" && n === "down") return "crypto"; // Up/Down markets are ~always crypto minutes
@@ -101,10 +117,33 @@ const SPORT_GAMES: [RegExp, string][] = [
   [/\bboxing\b/i, "Boxing"],
   [/\b(f1|formula\s*1|grand prix|nascar)\b/i, "F1"],
   [/\b(tennis|atp|wta|grand slam|wimbledon|us open|roland garros|australian open)\b/i, "Tennis"],
-  [/\bcricket\b/i, "Cricket"],
+  // T20/ODI/wickets are here so cricket is claimed BEFORE the soccer row can grab it on the word
+  // "premier league": "Kuwait Kerala Premier League T20" is cricket, and used to badge as Soccer.
+  [/\b(cricket|t20|odi|test match|wickets?|ipl)\b/i, "Cricket"],
   [/\b(golf|pga|masters)\b/i, "Golf"],
   // Soccer last among sports — its league names are many; the generic word catches the rest.
-  [/\b(soccer|football|premier league|la liga|serie a|bundesliga|ligue 1|champions league|world cup|epl|ucl)\b/i, "Soccer"],
+  //
+  // Real Polymarket soccer names NO league: the question is "FSK Bukovyna Chernivtsi vs. FK LNZ
+  // Cherkasy: O/U 9.5 Total Corners" and the league lives only in the slug (ukr1-…), which the
+  // Market cache does not carry. Measured live 2026-08-03: the league words alone matched 0 of 600
+  // soccer markets resolving inside the deck's 72h window, so soccer cards were badging as a
+  // generic "Sports" and never got the pitch art (see ui.isFootball -> skins.tsx).
+  //
+  // So we also match the bet VOCABULARY, which is soccer-exclusive (corners, both teams to score,
+  // clean sheet, own goal, draws — no other sport here has a draw), plus the match-shape words.
+  // Being the LAST row is what makes that safe: anything reaching here already failed NBA / NFL /
+  // MLB / NHL / UFC / Boxing / F1 / Tennis / Cricket / Golf.
+  //
+  // A bare "A vs. B: O/U 2.5" is deliberately NOT claimed. It was, briefly, at a "plausible goal
+  // line" (<=4.5) — which bought ~40 points of recall and quietly badged tennis, esports and any
+  // other discipline missing from this table: "Alcaraz vs. Sinner: O/U 3.5" got a football pitch.
+  // A bare total names no sport, and no line bound can invent one; the earlier NBA/NFL/MLB/NHL
+  // measurement simply didn't cover the disciplines that aren't in this table at all. Missing a
+  // badge is invisible; a pitch on a tennis card is a visible lie. So: only vocabulary that is
+  // soccer-exclusive counts.
+  // ponytail: costs recall (~90% -> ~50% of soccer named). The honest way to win it back is a
+  // league signal in the data — Gamma's slug carries it (ukr1-…) but Market doesn't store it.
+  [/\b(soccer|football|premier league|la liga|serie a|bundesliga|ligue 1|champions league|world cup|epl|ucl|corners?|both teams to score|btts|clean sheet|own goal|end in a draw|exact score)\b/i, "Soccer"],
 ];
 const ESPORT_GAMES: [RegExp, string][] = [
   [/\b(dota\s*2?|dota)\b/i, "Dota 2"],
@@ -127,7 +166,7 @@ export function gameOf(
   cat: Category = categoryOf(m),
 ): string | null {
   if (cat !== "sports" && cat !== "esports") return null;
-  const text = `${m.question} ${m.outcomeYesLabel} ${m.outcomeNoLabel}`;
+  const text = signalText(m); // same quoted-span rule as categoryOf — see signalText
   const table = cat === "esports" ? ESPORT_GAMES : SPORT_GAMES;
   for (const [re, name] of table) if (re.test(text)) return name;
   return null;

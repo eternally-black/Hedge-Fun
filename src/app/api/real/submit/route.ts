@@ -1,0 +1,250 @@
+// POST /api/real/submit — phase 2 of the two-phase order protocol (plan §2.1): validate the
+// SIGNED order against the durable intent (the envelope is never trusted), claim the attempt via
+// CAS, post (or accept the browser's post receipt — the locus is a Gate-0 outcome; both arms
+// funnel through the same validation and booking), persist the authoritative response verbatim,
+// book fills. Zero fill → KILLED → the market slot frees for a retry.
+// Branches on attempt.dir: ENTRY → BUY validation + bookEntryFills; EXIT → SELL validation +
+// bookExitFills. Everything else (CAS claim, posting arms, POSTED persist, ambiguity rule) is
+// identical for both directions.
+import { NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
+import { authUser } from "@/lib/privy";
+import { isRealMoneyEligible, hasRealConsent, sameOrigin } from "@/lib/real";
+import { captureToGlitchTip } from "@/lib/glitchtip";
+import { serverSecureClient } from "@/lib/polymarket-server";
+import {
+  validateSignedOrder,
+  validateSignedSellOrder,
+  hashSignedOrder,
+  classifyPostResponse,
+  bookEntryFills,
+  bookExitFills,
+  type SignedOrderWire,
+} from "@/lib/orders";
+import { postOrder } from "@polymarket/client/actions";
+import { SWIPE_CAP } from "@/lib/config";
+import { utcDay } from "@/lib/time";
+import { releaseSwipeSlot } from "@/lib/orders";
+
+// Thrown INSIDE the claim transaction so the rollback undoes the CAS as well — the cap must never
+// be able to reject a submit that has already moved the attempt out of ISSUED.
+class CapReachedError extends Error {}
+
+export async function POST(req: Request) {
+  const user = await authUser(req);
+  if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  if (!isRealMoneyEligible(user)) return NextResponse.json({ error: "real_disabled" }, { status: 403 });
+  if (!hasRealConsent(user)) return NextResponse.json({ error: "consent_required" }, { status: 403 });
+  if (!sameOrigin(req)) return NextResponse.json({ error: "bad_origin" }, { status: 403 });
+  const depositWallet = user.depositWalletAddress;
+  const embeddedWallet = user.embeddedWalletAddress;
+  if (!depositWallet || !embeddedWallet) return NextResponse.json({ error: "no_deposit_wallet" }, { status: 409 });
+
+  let intentId: unknown, signedOrder: unknown, postResponse: unknown;
+  try {
+    ({ intentId, signedOrder, postResponse } = await req.json());
+  } catch {
+    return NextResponse.json({ error: "bad_json" }, { status: 400 });
+  }
+  if (typeof intentId !== "string" || !signedOrder || typeof signedOrder !== "object") {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+  // Client-supplied receipts are REFUSED (S6 review critical: a fabricated receipt would book
+  // fills, points and counters the exchange never saw). The server posts; the browser-posting
+  // locus returns only with a verified-receipt design at Gate-0.
+  if (postResponse !== undefined && postResponse !== null) {
+    return NextResponse.json({ error: "receipts_not_accepted" }, { status: 400 });
+  }
+  const signed = signedOrder as SignedOrderWire;
+
+  const attempt = await prisma.orderAttempt.findUnique({ where: { id: intentId } });
+  if (!attempt || attempt.userId !== user.id) return NextResponse.json({ error: "unknown_intent" }, { status: 404 });
+  if (attempt.state === "FILLED" || attempt.state === "PARTIAL" || attempt.state === "KILLED") {
+    return NextResponse.json({ status: attempt.state.toLowerCase() }); // idempotent re-report
+  }
+  if (attempt.state === "SUBMITTING" || attempt.state === "POSTED") {
+    return NextResponse.json({ status: "submitting" });
+  }
+  // The intent's OWN ten-minute lifetime, enforced on this side too. validateCommon checks the
+  // freshness of the SIGNATURE, never of the intent, so an ISSUED attempt could be signed days
+  // later and still fill against a price bound frozen from a book that was 30s old at intent time —
+  // exactly the invariant D9 states. The bound caps the worst case either way, but the slot could
+  // otherwise sit ISSUED indefinitely: the intent route's expiry only runs when another intent
+  // happens to arrive on the same market. FAILED here frees it deterministically, and nothing was
+  // posted, so there is no ambiguity to preserve.
+  if (Date.now() - attempt.createdAt.getTime() > 10 * 60_000) {
+    await prisma.orderAttempt.updateMany({
+      where: { id: attempt.id, state: "ISSUED" },
+      data: { state: "FAILED", error: "intent_expired" },
+    });
+    return NextResponse.json({ error: "intent_expired" }, { status: 409 });
+  }
+
+  // Validate the signed order against the durable intent — the validator depends on the direction.
+  const ctx = {
+    depositWallet,
+    embeddedWallet,
+    builderCode: process.env.POLYMARKET_BUILDER_CODE ?? null,
+  };
+  let err: string | null;
+  if (attempt.dir === "EXIT") {
+    const params = attempt.approvedParams as { tokenId?: string; sharesMicro?: string; minPriceBp?: number } | null;
+    err = validateSignedSellOrder(
+      signed,
+      {
+        tokenId: attempt.tokenId,
+        sharesMicro: BigInt(params?.sharesMicro ?? "0"),
+        minPriceBp: params?.minPriceBp ?? attempt.maxPriceBp, // maxPriceBp column holds minPriceBp for EXIT
+      },
+      ctx,
+    );
+  } else {
+    err = validateSignedOrder(
+      signed,
+      {
+        tokenId: attempt.tokenId,
+        side: "BUY",
+        allInCapMicro: attempt.allInCapMicro,
+        maxPriceBp: attempt.maxPriceBp,
+      },
+      ctx,
+    );
+  }
+  if (err) return NextResponse.json({ error: err }, { status: 422 });
+
+  // CAS claim: ISSUED → SUBMITTING with the signed-order hash (unique = replay guard). A losing
+  // concurrent submit sees count 0 and reports the in-flight state instead of double-posting.
+  //
+  // The daily cap is RESERVED in the same transaction, and the increment itself is the gate — the
+  // paper path's proven shape (swipe.ts): bump, then throw if the post-increment value went over,
+  // so the rollback undoes the claim too. It used to be a bare read at intent time with the
+  // increment minutes later at fill, which failed twice over: N parallel intents all read the same
+  // value and all passed (9/10 used + five parallel entries = 14 on a 10-cap day, $2k past the
+  // throttle at max stake), and a re-entry after a full EXIT hit the `!priorBet` guard at fill and
+  // never incremented at all, so one market could be churned forever on a single slot.
+  // Reserved HERE and not at intent because an abandoned intent must stay free: the user who opens
+  // a card and walks away should not burn a swipe, and between CAS and fill the window is
+  // milliseconds instead of the intent's ten minutes. EXIT is not a swipe, so it reserves nothing.
+  const orderHash = hashSignedOrder(signed);
+  // Keyed to the ATTEMPT's creation day, not to now. Reserve and release must name the same row, and
+  // the release happens deep in the booker, which only has the attempt — deriving the day from an
+  // immutable field of the attempt is what makes the two agree by construction. `utcDay()` here
+  // instead would drift whenever an intent is created before midnight and submitted after it (the
+  // intent lifetime is ten minutes, so that window is real): the reservation would land on D2 while
+  // every release path computed D1, leaking a real slot and handing back a paper one.
+  const capDay = utcDay(attempt.createdAt);
+  let claimed: { count: number };
+  try {
+    claimed = await prisma.$transaction(async (tx) => {
+      const cas = await tx.orderAttempt.updateMany({
+        where: { id: attempt.id, state: "ISSUED" },
+        // The payload is persisted HERE, before the post that may or may not reach the exchange. An
+        // attempt that dies in that window has no externalOrderId, and every reconcile scan filters
+        // on that being non-null — so the row is invisible to reconciliation and wedges the market
+        // slot forever. Recovery is still manual (the SDK exports no helper to derive the exchange
+        // order id from a signed order), but with this an operator can at least see what was signed.
+        data: { state: "SUBMITTING", signedOrderHash: orderHash, signedOrder: signed as never },
+      });
+      if (cas.count === 0 || attempt.dir === "EXIT") return cas;
+      const counter = await tx.dailyCounter.upsert({
+        where: { userId_utcDay: { userId: user.id, utcDay: capDay } },
+        create: { userId: user.id, utcDay: capDay, swipeCount: 1 },
+        update: { swipeCount: { increment: 1 } },
+      });
+      if (counter.swipeCount > SWIPE_CAP) throw new CapReachedError();
+      return cas;
+    });
+  } catch (e) {
+    if (e instanceof CapReachedError) {
+      return NextResponse.json({ error: "daily swipe limit reached" }, { status: 403 });
+    }
+    // signedOrderHash unique: the SAME signed order replayed against a NEW intent — a clean
+    // duplicate response, not a raw 500 (K3 S6/S7 M2 edge).
+    if ((e as { code?: string }).code === "P2002") {
+      return NextResponse.json({ error: "duplicate_order" }, { status: 409 });
+    }
+    throw e;
+  }
+  if (claimed.count === 0) return NextResponse.json({ status: "submitting" });
+
+  // Server posts — the response is the authoritative receipt. Forward the signed payload VERBATIM.
+  const client = await serverSecureClient(prisma, user);
+  if (!client) {
+    // Nothing was posted and the attempt goes back to ISSUED, so the slot this claim reserved is
+    // returned — in the SAME transaction as the rollback, because two statements meant a crash in
+    // between left the attempt retryable with the slot still spent, and no later pass could tell.
+    // Gated on the update actually landing so a concurrent path cannot release it twice.
+    await prisma.$transaction(async (tx) => {
+      const rolledBack = await tx.orderAttempt.updateMany({
+        where: { id: attempt.id, state: "SUBMITTING" },
+        data: { state: "ISSUED", signedOrderHash: null, error: "real_not_configured" },
+      });
+      if (rolledBack.count > 0 && attempt.dir !== "EXIT") await releaseSwipeSlot(tx, user.id, capDay);
+    });
+    return NextResponse.json({ error: "real_not_configured" }, { status: 503 });
+  }
+  let response: unknown;
+  try {
+    response = await postOrder(client)(signed as never); // 0.6.0: curried (client)(order)
+  } catch (e) {
+    // Whether the CLOB accepted it is unknown — keep SUBMITTING for reconciliation, never
+    // silently retry with a fresh signature (plan §2.1 biggest-risk rule).
+    await captureToGlitchTip(e, { route: "real/submit", stage: "post" });
+    await prisma.orderAttempt.updateMany({
+      where: { id: attempt.id, state: "SUBMITTING" },
+      data: { error: `post failed: ${(e as Error).message}` },
+    });
+    return NextResponse.json({ status: "submitting", error: "post_ambiguous" });
+  }
+
+  const rr = response as Record<string, unknown> | null;
+  const externalOrderId = rr && typeof rr.orderId === "string" ? rr.orderId : null;
+  await prisma.orderAttempt.updateMany({
+    where: { id: attempt.id, state: "SUBMITTING" },
+    data: { state: "POSTED", postResponse: (response ?? undefined) as never, externalOrderId },
+  });
+
+  // Classify BEFORE booking (S6 review critical: the real matched response carries scalar
+  // making/taking amounts, not a fills array — a shape-guess parser read it as zero-fill and
+  // KILLED attempts whose money was spent). Only a POSITIVE terminal signal books; everything
+  // ambiguous stays POSTED for reconciliation (the stuck-attempt watcher alerts on it).
+  const params = attempt.approvedParams as
+    | { betSide?: "YES" | "NO"; sharesMicro?: string; feeRateBp?: number; feeExpMilli?: number }
+    | null;
+  const fee =
+    typeof params?.feeRateBp === "number" && typeof params?.feeExpMilli === "number"
+      ? { rateBp: params.feeRateBp, expMilli: params.feeExpMilli }
+      : null;
+  const outcome = classifyPostResponse(response, attempt.dir === "EXIT" ? "EXIT" : "ENTRY", attempt.id, fee);
+
+  if (outcome.kind === "pending" || outcome.kind === "unknown") {
+    return NextResponse.json({ status: "posted", outcome: outcome.kind });
+  }
+  const fills = outcome.kind === "matched" ? outcome.fills : []; // rejected → zero-fill KILLED path
+  // The receipt carries the ORDER's cumulative matched totals — the booker subtracts what this
+  // attempt already holds, so a re-delivered or grown receipt neither double-books nor drops fills.
+  const bookOpts = { cumulative: outcome.kind === "matched" };
+  // FILLED/PARTIAL is judged against the size actually SIGNED, not the intent's PREDICTED
+  // sharesMicro. The SDK re-sizes and decimal-caps the order before signing (maker collateral is
+  // floored to the tick's amount decimals), so the signed size sits systematically below the
+  // prediction and a FAK that matched every share of itself still booked cumulative < predicted and
+  // reported PARTIAL — real trace: predicted 18_605_546, signed 18_596_200, fully matched, labelled
+  // partial. This value feeds fillLabel and nothing else (orders.ts:314/321/481/487), so it moves
+  // the label without touching a booked amount. BUY: takerAmount is shares. SELL: makerAmount is.
+  const signedSharesMicro = attempt.dir === "EXIT" ? BigInt(signed.makerAmount) : BigInt(signed.takerAmount);
+  const finalState =
+    attempt.dir === "EXIT"
+      ? await bookExitFills(prisma, attempt, signedSharesMicro, fills, bookOpts)
+      : await bookEntryFills(
+          prisma,
+          attempt,
+          params?.betSide === "NO" ? "NO" : "YES",
+          signedSharesMicro,
+          fills,
+          bookOpts,
+        );
+  return NextResponse.json({
+    status: finalState.toLowerCase(),
+    filledSharesMicro: fills.reduce((s, f) => s + f.sharesMicro, 0n).toString(),
+  });
+}

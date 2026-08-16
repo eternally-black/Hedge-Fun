@@ -1,0 +1,8 @@
+[Unit]
+Description=Probe VPS1 at network level; Contabo reboot lever (latched, flag-gated)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash /opt/ops/ops/uptime-guard.sh

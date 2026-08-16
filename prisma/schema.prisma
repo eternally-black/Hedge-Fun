@@ -42,7 +42,11 @@ enum MarketOutcome {
 
 enum MarketSource {
   POLYMARKET // cached from Polymarket Gamma; polymarketId = conditionId; settled via fetchResolution
-  TXODDS // TxOdds TxLINE football (World Cup); polymarketId = "txline:{fixtureId}:{kind}"; settled from scores
+  // DEAD as a live source: the TxOdds TxLINE World Cup integration was removed 2026-08-03 (see
+  // docs/archive/). Kept because dropping an enum value means recreating the type in Postgres for no
+  // gain, the historical rows below still reference it, and four DB test suites seed it as their
+  // "no CLOB book" fixture. Nothing writes new TXODDS rows.
+  TXODDS
 }
 
 enum SettlementStatus {
@@ -61,6 +65,31 @@ enum BetResult {
 enum BetSource {
   DECK // the daily swipe deck: earns points (capped) + capped shards
   FEED // the post-cap feed: NO points, shards UNCAPPED
+  HEDGE // an accepted hedge suggestion (wallet/life-event): VARIABLE stake, NO points, NO daily cap; settles via the SAME poller as a standard bet (D6/D8)
+}
+
+// Hedge suggestion kind (spec §2/§5). S1_* ship in this packet; S2/FALLBACK are reserved for the
+// life-event packet (kept in the enum so the telemetry table doesn't need a later migration).
+enum HedgeSuggestionKind {
+  S1_MAJOR // direct hedge on a major holding (SOL / wrapped BTC / wrapped ETH)
+  S1_PROXY // long-tail SPL aggregate -> SOL-short proxy (basis risk)
+  S2 // reserved: life-event hedge
+  FALLBACK // reserved: discovery fallback (never presented as a hedge)
+}
+
+// The parsed direction of a strike market = which side (YES / outcome index 0) benefits from an
+// UP move. "Bitcoin above 62,600" / "reach"/"hit" => UP (YES wins on a rise); "dip to"/"below" =>
+// DOWN (YES wins on a fall). Hedging a LONG holding picks the opposite side of an UP market.
+enum HedgeMarketDirection {
+  UP
+  DOWN
+}
+
+// Telemetry lifecycle for a suggestion (advisor consensus: "without this we learn nothing").
+enum HedgeEventType {
+  IMPRESSION
+  ACCEPT
+  DISMISS
 }
 
 enum PointsType {
@@ -91,6 +120,57 @@ enum ReferralEventType {
   INVITER_ACCRUAL
 }
 
+// ------------------------------------------------------------ real-money enums (plan §2.2)
+
+enum BetMode {
+  PAPER
+  REAL
+}
+
+enum OrderDir {
+  ENTRY // BUY into a position
+  EXIT // SELL out of it
+}
+
+enum OrderAttemptState {
+  ISSUED // intent created, server-approved params returned for signing
+  SIGNED // signed order received and validated against the intent
+  SUBMITTING // claimed for posting; external call may be in flight (crash fence)
+  POSTED // exchange accepted; awaiting fill resolution
+  FILLED // fully matched
+  PARTIAL // matched below requested size, FAK cancelled the remainder
+  KILLED // zero fill — no position, the market slot frees for a retry
+  FAILED // rejected or errored before/at post
+}
+
+enum WalletOpKind {
+  DEPLOY
+  APPROVALS
+  WRAP
+  REDEEM // burn resolved outcome tokens -> pUSD (S7)
+  WITHDRAW // collateral-return: positions back into pUSD inside the wallet (S7, owner Q2)
+  BRIDGE_OUT // the money-out leg: pUSD transfer to a single-purpose bridge address (S10)
+}
+
+enum WalletWorkflowState {
+  PENDING_SIGNATURE
+  SUBMITTING
+  DONE
+  FAILED
+}
+
+enum RelayerTxStatus {
+  SUBMITTING
+  CONFIRMED
+  FAILED
+}
+
+enum FundingState {
+  AWAITING // declared, nothing on chain yet
+  DETECTED // USDC.e delta seen — wrap needed
+  FUNDED // pUSD delta seen — spendable collateral
+}
+
 // ============================================================ USER
 
 model User {
@@ -110,18 +190,30 @@ model User {
   // REFERRAL_HASH_SECRET stay null, and the guard skips a user whose signup device is unknown.
   signupIpHash          Bytes?
   signupUaHash          Bytes?
+  // Real-money (plan §2.2/§2.3): the user's Polymarket Deposit Wallet (deterministic from the
+  // embedded signer; persisted because reading beats re-deriving) and the explicit opt-in moment.
+  // The env allowlist is the outer gate; this is the durable per-user consent.
+  depositWalletAddress  String?      @unique
+  realConsentAt         DateTime?
 
-  bets               Bet[]
-  pointsLedger       PointsLedger[]
-  virtualBalance     VirtualBalance?
-  collectibleBalance CollectibleBalance?
-  shardGrants        ShardGrant[]
-  dailyCounters      DailyCounter[]
-  loginMarks         LoginMark[]
-  streak             Streak?
-  streakEvents       StreakEvent[]
-  referralsMade      Referral[]          @relation("Inviter")
-  referralReceived   Referral?           @relation("Invitee")
+  bets                  Bet[]
+  pointsLedger          PointsLedger[]
+  virtualBalance        VirtualBalance?
+  collectibleBalance    CollectibleBalance?
+  shardGrants           ShardGrant[]
+  dailyCounters         DailyCounter[]
+  loginMarks            LoginMark[]
+  streak                Streak?
+  streakEvents          StreakEvent[]
+  referralsMade         Referral[]             @relation("Inviter")
+  referralReceived      Referral?              @relation("Invitee")
+  hedgeWallets          HedgeWallet[]
+  hedgeSuggestionEvents HedgeSuggestionEvent[]
+  orderAttempts         OrderAttempt[]
+  walletWorkflows       WalletWorkflow[]
+  fundingAttempts       FundingAttempt[]
+  relayerTxs            RelayerTx[]
+  clobCredential        ClobCredential?
 
   @@index([createdAt])
   @@map("users")
@@ -130,17 +222,19 @@ model User {
 // ============================================================ MARKET (cached from Polymarket)
 
 model Market {
-  id           String  @id @default(cuid())
-  // External market id + unique upsert key. POLYMARKET: the Gamma conditionId. TXODDS: a synthetic
-  // "txline:{fixtureId}:{kind}" (kind = OU15|OU25|OU35) — reusing this key avoids a nullable migration.
-  polymarketId String  @unique
+  id           String       @id @default(cuid())
+  // External market id + unique upsert key. POLYMARKET: the Gamma conditionId. Historical TXODDS
+  // rows carry a synthetic "txline:{fixtureId}:{kind}" here (see the enum note above).
+  polymarketId String       @unique
   source       MarketSource @default(POLYMARKET)
   question     String
   category     String? // usually null on Gamma; derived/optional
   imageUrl     String?
 
-  // Verifiable settlement (TXODDS): the score the bet settled on is anchored to a Solana Merkle root
-  // (TxLINE daily_scores_roots). Drives the "⛓ Solana-anchored" badge on settled football results.
+  // Verifiable settlement. Was set by the TxOdds integration (scores anchored to a Solana Merkle
+  // root) and drove a "⛓ Solana-anchored" badge. Nothing writes these anymore and no client reads
+  // them; kept so the 7 historical settled rows stay truthful and a future verifiable source needs
+  // no migration. /api/results still emits the keys as false/null — see src/lib/api-types.ts.
   verifiedOnChain Boolean @default(false)
   onchainRef      String? // Solscan-able link/ref to the on-chain anchor (TxLINE program / daily root)
 
@@ -151,8 +245,33 @@ model Market {
   outcomeNoLabel  String @default("No")
 
   // Snapshot pricing in basis points (0..10000). Per-bet price locked on Bet.
+  // yesPriceBp/noPriceBp are the Gamma MID (reference/display fallback) — NOT touched by D10.
   yesPriceBp Int?
   noPriceBp  Int?
+
+  // Depth-aware executable pricing (D10 Slice A). yesTokenId/noTokenId are the CLOB token ids
+  // (Gamma clobTokenIds[0/1]). The four eff/max numbers come from walking the live book: per side,
+  // the VWAP to BUY STAKE_CENTS of that token and the stake the book absorbs within the eligibility
+  // slippage cap (src/lib/depth.ts), anchored to bookTsAt = when the book behind them was read.
+  // NULL for bookless-source rows (no CLOB book — their stored odds stay authoritative) and for
+  // POLYMARKET rows whose book read failed. Additive only — nothing above is renamed or dropped.
+  yesTokenId       String?
+  noTokenId        String?
+  yesEffPriceBp    Int?
+  noEffPriceBp     Int?
+  yesMaxStakeCents Int?
+  noMaxStakeCents  Int?
+  bookTsAt         DateTime?
+
+  // Real-money fee cache (plan §2.6): per-market platform taker fee, fee = rate × (p(1−p))^exp
+  // per share (proven against a real fill 2026-08-13 — predicted == charged to the micro-cent).
+  // Source: fetchMarketInfo via the credential-free public client, refreshed at INTENT time on a
+  // 24h TTL (fees.ts). rateBp = rate×10⁴, expMilli = exponent×10³ — integers per house rule.
+  // negRisk from the same call: neg-risk markets are EXCLUDED from real mode (third approval unset).
+  feeRateBp    Int?
+  feeExpMilli  Int?
+  feeUpdatedAt DateTime?
+  negRisk      Boolean?
 
   startsAt           DateTime? // from startDate (sports/esports kickoff); null for crypto/Yes-No. Gates "not started yet" in the deck.
   resolutionDeadline DateTime // from endDate; powers <=24h blitz filter
@@ -164,11 +283,14 @@ model Market {
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
-  bets Bet[]
+  bets          Bet[]
+  meta          MarketMeta?
+  hedgeEvents   HedgeSuggestionEvent[]
+  orderAttempts OrderAttempt[]
 
   @@index([status, resolutionDeadline]) // deck assembly
   @@index([status, resolvedAt]) // settlement scan
-  @@index([source, status, resolutionDeadline]) // football-only deck filter (?sport=football)
+  @@index([source, status, resolutionDeadline]) // per-source scans (the ?sport= filter it was added for is gone)
   @@map("markets")
 }
 
@@ -184,12 +306,17 @@ model Bet {
   side          BetSide
   stakeCents    Int // 10000 == $100.00 (config STAKE_CENTS)
   lockedPriceBp Int // price of the BOUGHT side in bp at swipe time (yes-bet -> yes price, no-bet -> no price)
-  utcDay        String  @db.VarChar(10)
-  earnedPoint   Boolean @default(false) // over-cap swipes = false
+  utcDay        String    @db.VarChar(10)
+  earnedPoint   Boolean   @default(false) // over-cap swipes = false
   // Where this bet came from. DECK = the daily swipe deck (points + capped shards).
   // FEED = the post-cap feed (no points; shards UNCAPPED — see awardShard bypassCap).
   // Default DECK so every pre-feed row backfills correctly (non-breaking migration).
   source        BetSource @default(DECK)
+
+  // Hedge provenance (D6/D8): the DETERMINISTIC suggestion id this bet was accepted from
+  // (src/lib/hedge/id.ts — hash of address+marketId+kind+sizing). Null for deck/feed bets. Powers
+  // idempotent accept (re-accepting a suggestion returns this bet, never a duplicate) + telemetry.
+  hedgeSuggestionId String?
 
   settlementStatus SettlementStatus @default(PENDING)
   result           BetResult        @default(PENDING)
@@ -197,19 +324,44 @@ model Bet {
   pnlCents         Int?
   resolvedYes      Boolean?
 
+  // PAPER = virtual-dollar game (everything above). REAL = a Polymarket position aggregate: the row
+  // is created ON FILL (never at swipe), stakeCents keeps the swiped all-in intent, and the fields
+  // below carry actuals from Fill rows in exchange atomic units (micro-USD / micro-shares, BigInt —
+  // aggregate cents discard fill precision). Paper settlement/holds/points paths MUST filter on
+  // mode; real P&L derives from these, never from stakeCents/lockedPriceBp.
+  mode              BetMode @default(PAPER)
+  filledSharesMicro BigInt?
+  spendMicro        BigInt?
+  feeMicro          BigInt?
+  vwapBp            Int?
+  closedSharesMicro BigInt?
+  proceedsMicro     BigInt?
+  closeFeeMicro     BigInt?
+  realizedPnlMicro  BigInt?
+
+  // Which LOT the fill fields above describe. A fully-closed REAL position is re-enterable, and the
+  // re-entry reuses this row with the counters reset (orders.ts bookEntryFills), so "filled/closed"
+  // stop describing the attempt that produced them. Every OrderAttempt records the lotSeq it booked
+  // into; a late fee true-up compares the two and refuses to restate a lot it no longer belongs to.
+  lotSeq            Int       @default(0)
+
   createdAt DateTime  @default(now())
   settledAt DateTime?
   seenAt    DateTime? // null = result not yet revealed to the user (inbox/reveal). Drives unread count.
 
-  shardGrant ShardGrant?
+  shardGrant    ShardGrant?
+  pointsLedger  PointsLedger? // back-relation of the SWIPE point credit's FK (PointsLedger.betId)
+  orderAttempts OrderAttempt[]
 
-  // One bet per market per user (C1): a card is swiped once. Kills the
-  // "farm the daily cap against a single market" exploit.
-  @@unique([userId, marketId])
+  // One bet per market per user PER MODE (C1): a card is swiped once. Kills the
+  // "farm the daily cap against a single market" exploit; the mode split keeps a
+  // paper bet from blocking a real position on the same market (and vice versa).
+  @@unique([userId, marketId, mode])
   @@index([settlementStatus])
   @@index([marketId, settlementStatus])
   @@index([userId, utcDay])
   @@index([userId, settlementStatus, seenAt]) // unread-results scan (/api/me unreadResults, /api/results/seen)
+  @@index([userId, hedgeSuggestionId]) // idempotent hedge-accept lookup (re-accept -> existing bet)
   @@map("bets")
 }
 
@@ -223,7 +375,14 @@ model PointsLedger {
   amount Int // RAW points, never pre-multiplied
   utcDay String     @db.VarChar(10)
 
-  betId      String? @unique // SWIPE provenance + idempotency (1 pt/bet)
+  // SWIPE provenance + idempotency (1 pt/bet). The unique alone was NOT enough: with no FK a credit
+  // could name a bet that never existed (or another user's), and nothing in the DB objected —
+  // ShardGrant.betId has had a real FK since 0_init. ON DELETE SET NULL (the Prisma default for an
+  // optional relation) keeps awarded points and drops only the link. The FK is added NOT VALID in
+  // 20260815210000_ledger_integrity: the table has live rows, so legacy orphans are left for ops to
+  // clear + VALIDATE, while every new write is already constrained.
+  betId      String?  @unique
+  bet        Bet?     @relation(fields: [betId], references: [id])
   referralId String? // REFERRAL provenance
   metadata   Json?
   createdAt  DateTime @default(now())
@@ -256,10 +415,10 @@ model VirtualBalance {
 // ============================================================ COLLECTIBLES
 
 model CollectibleBalance {
-  userId    String   @id
-  user      User     @relation(fields: [userId], references: [id])
-  shards    Int      @default(0) // remainder after artifact conversion (0..19)
-  artifacts Int      @default(0)
+  userId       String   @id
+  user         User     @relation(fields: [userId], references: [id])
+  shards       Int      @default(0) // remainder after artifact conversion (0..19)
+  artifacts    Int      @default(0)
   // Card-skins cosmetics: ids from the in-code catalog (src/lib/skins.ts). Everyone owns "classic"
   // for free; premium skins are bought with artifacts (unlock pushes the id here + equips it).
   ownedSkins   String[] @default(["classic"])
@@ -410,4 +569,282 @@ model LeaderboardSnapshot {
   @@unique([utcDay, userId])
   @@index([utcDay, rank])
   @@map("leaderboard_snapshots")
+}
+
+// ============================================================ HEDGE ENGINE (phase 2, workstream A)
+
+// A read-only Solana address the user linked for wallet-hedge suggestions (S1). We never ask for
+// keys. Multiple addresses per user are allowed later; unique per (user, address) for now.
+model HedgeWallet {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  address   String // base58 Solana address (validated at link time)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, address])
+  @@index([address])
+  @@map("hedge_wallets")
+}
+
+// Cached exposure + Birdeye PnL for one address, keyed by ADDRESS (shared across users who link the
+// same wallet). exposure/avgCost are DERIVED JSON blobs (re-buildable from Helius+Jupiter+Birdeye),
+// so no relational modelling — the snapshot is a TTL cache, not a source of truth. Birdeye wallet
+// APIs are beta-capped (5 rps / 75 rpm, D4) so pnlFetchedAt gates a SEPARATE, slower refresh: the
+// exposure half can refresh without paying a Birdeye call every time.
+model WalletSnapshot {
+  address            String    @id // base58 address is the cache key
+  exposure           Json // ExposureResult: per-asset balances × prices × notional (see src/lib/hedge/exposure.ts)
+  avgCost            Json? // { <mint>: avgBuyCostCents } from Birdeye; null when Birdeye degraded (graceful)
+  totalNotionalCents Int       @default(0)
+  fetchedAt          DateTime  @default(now()) // exposure TTL anchor (WALLET_SNAPSHOT_TTL_MS)
+  pnlFetchedAt       DateTime? // Birdeye avg-cost TTL anchor (separate, rate-capped)
+
+  @@map("wallet_snapshots")
+}
+
+// Enrichment layer over the Market cache for hedge matching. One row per cached Market. Populated by
+// scripts/refresh-hedge-index.ts from Gamma tag discovery + deterministic slug/question parsing.
+// parseOk = strike + date + direction ALL machine-parsed -> the market qualifies for S1 matching.
+model MarketMeta {
+  id       String @id @default(cuid())
+  marketId String @unique
+  market   Market @relation(fields: [marketId], references: [id])
+
+  asset          String? // "BTC" | "ETH" | "SOL" (the underlying major), null if not a major
+  tagSlug        String? // gamma tag slug the market was discovered under (bitcoin/ethereum/solana)
+  eventSlug      String? // gamma event slug (context)
+  eventTicker    String? // gamma event ticker (context)
+  series         String? // gamma series title (context)
+  strikeCents    Int? // parsed strike in integer cents ($62,600 -> 6_260_000)
+  direction      HedgeMarketDirection? // UP (above/reach/hit) | DOWN (dip/below/under)
+  parsedDeadline DateTime? // canonical resolution instant (Gamma endDate)
+  liquidityCents Int? // ranking only, SATURATES at the INT4 ceiling (~$21.47M) — see rankCents()
+  volumeCents    Int? // ranking only, SATURATES at the INT4 ceiling (~$21.47M) — see rankCents()
+  parseOk        Boolean               @default(false) // strike + date + direction all parsed -> S1-eligible
+
+  // S2 (life-event hedge) enrichment. A NAMED sports/esports (later: entertainment) market whose
+  // side labels are the entities a user might support. Populated by scripts/refresh-hedge-index.ts
+  // from Gamma discovery + deck-mix league classification. s2Eligible gates the pickers/matcher;
+  // the two side labels live on Market (outcomeYesLabel/outcomeNoLabel), startsAt on Market too.
+  s2Eligible  Boolean @default(false) // NAMED, contested, upcoming -> usable for S2 pickers + matching
+  leagueSlug  String? // slugified league/competition (e.g. "nba", "cs2", "soccer") for grouping
+  leagueLabel String? // display league/competition (e.g. "NBA", "CS2") from deck-mix gameOf; null if unknown
+  sportKind   String? // "sports" | "esports" | "entertainment" (from deck-mix categoryOf)
+
+  updatedAt DateTime @updatedAt
+
+  @@index([asset, parseOk])
+  @@index([s2Eligible])
+  @@map("market_meta")
+}
+
+// Append-only telemetry: one row per (user, suggestion, event). Deduped per event type so re-sending
+// an impression / accept / dismiss is idempotent (upsert on the unique key). betId set on ACCEPT.
+model HedgeSuggestionEvent {
+  id                 String              @id @default(cuid())
+  suggestionId       String // deterministic id (src/lib/hedge/id.ts) — stable across re-derivation
+  userId             String
+  user               User                @relation(fields: [userId], references: [id])
+  address            String // the hedged wallet address
+  marketId           String
+  market             Market              @relation(fields: [marketId], references: [id])
+  kind               HedgeSuggestionKind
+  side               BetSide // the side that hedges the holding (down-benefit)
+  proposedStakeCents Int // the SIZED stake we OFFERED (before the per-user Cash clamp)
+  // The stake actually LOCKED on ACCEPT — equals proposedStakeCents unless it was clamped down to
+  // available Cash (D8). Null on IMPRESSION/DISMISS (no bet). Funnel analytics must read THIS for the
+  // real accepted notional; proposedStakeCents overstates it whenever a clamp fired (F16).
+  actualStakeCents   Int?
+  event              HedgeEventType
+  betId              String? // set on ACCEPT (the Bet created)
+  createdAt          DateTime            @default(now())
+
+  @@unique([userId, suggestionId, event]) // idempotent telemetry (one impression/accept/dismiss per user per suggestion)
+  @@index([suggestionId])
+  @@index([userId, createdAt])
+  @@map("hedge_suggestion_events")
+}
+
+// ============================================================ REAL MONEY (plan §2.2)
+// Append-only execution ledger under the Bet aggregate. Durable intent BEFORE every external call;
+// idempotency by unique constraints, never app logic (house rule above).
+
+// One order attempt = one two-phase intent (ISSUED with server-approved params → client signs →
+// SUBMITTING fence → posted → resolved from fills). A retry NEVER reuses a non-terminal attempt.
+model OrderAttempt {
+  id       String  @id @default(cuid())
+  userId   String
+  user     User    @relation(fields: [userId], references: [id])
+  marketId String
+  market   Market  @relation(fields: [marketId], references: [id])
+  betId    String? // set when fills materialize/update the position row
+  bet      Bet?    @relation(fields: [betId], references: [id], onDelete: Restrict) // never silently detach the ledger from its position
+
+  dir            OrderDir
+  side           BetSide
+  tokenId        String
+  idempotencyKey String   @unique // server-issued at intent time; the client echoes it back
+  approvedParams Json // the exact params the client must sign; submit validates the signed order against THIS
+  allInCapMicro  BigInt // the user's all-in debit cap (maxSpend), micro-USD
+  maxPriceBp     Int // marginal-ask bound, tick-rounded (up for BUY, down for SELL)
+
+  state           OrderAttemptState @default(ISSUED)
+  signedOrderHash String?           @unique // replay guard
+  // The signed order VERBATIM, persisted at CAS time — before the post that may or may not reach the
+  // exchange. An attempt that crashes between postOrder and the POSTED write is invisible to every
+  // reconcile scan (they filter on a non-null externalOrderId) and wedges the market slot forever;
+  // without the payload nobody can even work out which exchange order it became. Recovery is still a
+  // human with this row, not an automatic path — the SDK exports no order-hash helper to derive the
+  // id from it — but "a human can" beats "nobody can".
+  signedOrder     Json?
+  // The Bet lot this attempt's fills landed in; null on attempts that never booked. See Bet.lotSeq.
+  lotSeq          Int?
+  externalOrderId String?           @unique
+  postResponse    Json? // authoritative receipt, persisted verbatim at post time
+  error           String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  fills     Fill[]
+
+  // Single in-flight per (user, market) is a PARTIAL unique index over non-terminal states —
+  // Prisma can't express it, so it lives as raw SQL in the migration:
+  //   CREATE UNIQUE INDEX "order_attempts_one_inflight" ON "order_attempts"("userId","marketId")
+  //   WHERE "state" IN ('ISSUED','SIGNED','SUBMITTING','POSTED');
+  @@index([userId, marketId, state])
+  @@index([state, updatedAt]) // poller: reconcile stuck SUBMITTING/POSTED
+  @@map("order_attempts")
+}
+
+// One exchange fill. Source of truth for real position math — exchange atomic units only.
+model Fill {
+  id             String       @id @default(cuid())
+  attemptId      String
+  attempt        OrderAttempt @relation(fields: [attemptId], references: [id])
+  externalFillId String       @unique
+  sharesMicro    BigInt
+  amountMicro    BigInt // spend (ENTRY) or proceeds (EXIT)
+  feeMicro       BigInt
+  priceBp        Int
+  ts             DateTime
+  createdAt      DateTime     @default(now())
+
+  @@index([attemptId])
+  @@map("fills")
+}
+
+// Durable state machine for relayer-driven gasless workflows (approvals, wrap): the generator is
+// rebuilt from `inputs` per request, replayed, and each regenerated yield must byte-match
+// pendingRequestHash. ONE row per (user, kind) IS the single-flight guard — the row is reused as a
+// state machine across runs (wrap runs once per deposit); submission history lives in RelayerTx.
+// Ambiguous submissions converge from CHAIN state (allowance/pUSD present), never blind resubmit.
+model WalletWorkflow {
+  id     String              @id @default(cuid())
+  userId String
+  user   User                @relation(fields: [userId], references: [id])
+  kind   WalletOpKind
+  state  WalletWorkflowState @default(PENDING_SIGNATURE)
+
+  // v2 (S4 rework): the generator lives IN MEMORY per run (the SDK generator is non-deterministic
+  // — fresh nonce+deadline per build — so cross-request rebuild-and-replay cannot work). runId
+  // keys the live session and the per-run RelayerTx budget row; the DB row is the single-flight
+  // slot + submit fence + observability.
+  runId              String?
+  stepIndex          Int     @default(0)
+  inputs             Json // immutable inputs of the CURRENT run (observability + convergence params)
+  answers            Json    @default("[]") // ordered accepted answers [{requestHash, signature}] — audit transcript
+  pendingRequest     Json? // the yielded signature request awaiting the device
+  pendingRequestHash String?
+  // Relayer transactionId (NOT a chain hash). UNIQUE for the same reason as RelayerTx.txHash below,
+  // and it is free here: freshRun() resets this row's txHash to NULL before every run, so a re-run
+  // rewrites its OWN row and can never collide with itself. A collision across two rows would mean one
+  // relayer submission is bound to two state machines — the exact ambiguity convergence must never be
+  // asked to resolve. Postgres treats NULLs as distinct, so the (many) PENDING rows are unaffected.
+  txHash             String? @unique
+  error              String?
+
+  expiresAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@unique([userId, kind])
+  @@map("wallet_workflows")
+}
+
+// One declared deposit. Balance-DELTA detection (never nonzero-balance — residuals lie): baselines
+// snapshot at declare time; the poller's watcher advances state and NEVER gives up on user money
+// (below-floor deposits park indefinitely and release on top-up — spec §6.2). Bridge /status is
+// a hint at most, nowhere in this state machine.
+model FundingAttempt {
+  id     String       @id @default(cuid())
+  userId String
+  user   User         @relation(fields: [userId], references: [id])
+  state  FundingState @default(AWAITING)
+
+  baselineUsdceMicro BigInt @default(0)
+  baselinePusdMicro  BigInt @default(0)
+  latestUsdceMicro   BigInt @default(0)
+  latestPusdMicro    BigInt @default(0)
+
+  // Deposit ATTRIBUTION (§2.5): the Transfer-log cursor and what it has attributed so far. A
+  // balance delta is an inference — an outflow masks it, any inflow fires it; a log names the tx.
+  scanBlock     BigInt? // last finalized block scanned, inclusive; null = never scanned (delta fallback)
+  inUsdceMicro  BigInt  @default(0)
+  inPusdMicro   BigInt  @default(0)
+  lastDepositTx String? // the transaction that carried the most recent attributed transfer
+
+  declaredAt    DateTime  @default(now())
+  lastCheckedAt DateTime?
+  fundedAt      DateTime?
+  alertedAt     DateTime? // parked-deposit ops alert sent once, never repeated
+
+  // One ACTIVE attempt per user is a PARTIAL unique (raw SQL in the migration):
+  //   CREATE UNIQUE INDEX "funding_attempts_one_active" ON "funding_attempts"("userId")
+  //   WHERE "state" <> 'FUNDED';
+  @@index([state, lastCheckedAt]) // watcher due-scan
+  @@index([userId, declaredAt])
+  @@map("funding_attempts")
+}
+
+// Every relayer OPERATION, written (SUBMITTING) BEFORE the external call — closes the
+// crash-between-call-and-record window and is the 100/day Unverified-tier budget ledger.
+// workflowKey is deterministic per operation so a retry storm collapses into one row per op;
+// `attempts` increments per SUBMISSION, so retry spend stays countable (onboarding spend =
+// rows, retry spend = Σ(attempts−1)) without giving retries their own rows.
+model RelayerTx {
+  id          String          @id @default(cuid())
+  userId      String
+  user        User            @relation(fields: [userId], references: [id])
+  kind        WalletOpKind
+  workflowKey String
+  // The relayer transaction id, UNIQUE: workflowKey is the per-RUN id, so an idempotent relayer that
+  // returns the SAME transactionId for a re-submitted request used to land one confirmed money
+  // movement on two rows — and this table IS the 100/day budget ledger, which counts rows. Plain
+  // @unique is the "non-null only" index the fix needs (Postgres NULLs are distinct), and stays
+  // expressible in Prisma so the schema cannot drift from the database.
+  txHash      String?         @unique
+  status      RelayerTxStatus @default(SUBMITTING)
+  attempts    Int             @default(1)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  @@unique([userId, kind, workflowKey])
+  @@index([createdAt]) // daily budget counter + onboarding-vs-retry split
+  @@map("relayer_txs")
+}
+
+// Derived L2 CLOB API creds (read/cancel only — NOT signing keys; D5 intact), encrypted at rest
+// (AES-256-GCM). The encryption key lives in env, outside DB backups. Owner decision Q4 2026-08-13.
+model ClobCredential {
+  userId     String    @id
+  user       User      @relation(fields: [userId], references: [id])
+  ciphertext Bytes
+  nonce      Bytes
+  keyVersion Int       @default(1)
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@map("clob_credentials")
 }

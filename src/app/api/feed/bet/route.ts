@@ -3,7 +3,9 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 import { recordSwipe, InsufficientFundsError } from "@/lib/swipe";
-import { DECK_MIN_LEAD_MS } from "@/lib/config";
+import { DECK_MIN_LEAD_MS, STAKE_CENTS } from "@/lib/config";
+import { requoteSideForLock, quoteMovedAgainstUser, sourceHasClobBook } from "@/lib/depth";
+import { captureToGlitchTip } from "@/lib/glitchtip";
 import type { FeedBetRequest, FeedBetResponse } from "@/lib/api-types";
 
 // Feed bet = a paper bet on a FEED market (the post-cap "лента"). Same $10 stake/cash-hold as a
@@ -27,13 +29,37 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "market not open" }, { status: 409 });
   }
   // Freshness guard: reject a bet within DECK_MIN_LEAD_MS of resolution (stale, near-decided call).
-  // EXEMPT TXODDS football: its resolutionDeadline is a synthetic kickoff+150min settle mark, not a
+  // EXEMPT a bookless source: its resolutionDeadline is a synthetic settle mark, not a
   // real close, so live in-play betting must stay open while the market is OPEN (status enforces that).
-  if (market.source !== "TXODDS" && market.resolutionDeadline.getTime() <= Date.now() + DECK_MIN_LEAD_MS) {
+  if (sourceHasClobBook(market.source) && market.resolutionDeadline.getTime() <= Date.now() + DECK_MIN_LEAD_MS) {
     return NextResponse.json({ error: "market_expired" }, { status: 409 });
   }
 
-  const lockedPriceBp = body.side === "YES" ? market.yesPriceBp : market.noPriceBp;
+  // Lock the bought side's price (D10). A bookless source keeps its stored odds; POLYMARKET re-quotes the
+  // side LIVE against the CLOB book (never the Gamma mid). The feed is a second betting surface, so
+  // it gets the same treatment as the deck swipe.
+  let lockedPriceBp: number;
+  if (!sourceHasClobBook(market.source)) {
+    lockedPriceBp = body.side === "YES" ? market.yesPriceBp : market.noPriceBp;
+  } else {
+    const tokenId = body.side === "YES" ? market.yesTokenId : market.noTokenId;
+    if (!tokenId) {
+      return NextResponse.json({ error: "market_untradable" }, { status: 409 });
+    }
+    const q = await requoteSideForLock(tokenId, STAKE_CENTS);
+    if (q.kind === "unavailable") {
+      void captureToGlitchTip(new Error("clob book unavailable"), { route: "feed-bet" });
+      return NextResponse.json({ error: "book_unavailable" }, { status: 502 });
+    }
+    if (q.kind !== "ok") {
+      return NextResponse.json({ error: "market_untradable" }, { status: 409 });
+    }
+    // Seen-vs-executed guard — same rule as /api/swipe (see quoteMovedAgainstUser).
+    if (typeof body.quotedPriceBp === "number" && quoteMovedAgainstUser(body.quotedPriceBp, q.effPriceBp)) {
+      return NextResponse.json({ error: "price_moved", freshPriceBp: q.effPriceBp }, { status: 409 });
+    }
+    lockedPriceBp = q.effPriceBp;
+  }
 
   try {
     const { betId } = await recordSwipe({

@@ -1,0 +1,10 @@
+[Unit]
+Description=VPS2 monitoring-stack watchdog (same script as VPS1, repointed dirs)
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+Environment=HEDGEFUN_DIR=/opt/ops
+Environment=GLITCHTIP_DIR=/opt/glitchtip
+ExecStart=/usr/bin/bash /opt/ops/ops/vps/hedgefun-watchdog.sh

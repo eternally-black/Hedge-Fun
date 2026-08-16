@@ -1,0 +1,8 @@
+[Unit]
+Description=HedgeFun container/host watchdog (restart unhealthy, alert, dead-man ping)
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash /opt/hedgefun/ops/vps/hedgefun-watchdog.sh

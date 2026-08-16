@@ -1,0 +1,146 @@
+# VPS2 — the monitoring host. Everything that must SURVIVE VPS1 dying lives here:
+# GlitchTip (error tracking), Uptime Kuma (uptime checks + push dead-men + Telegram),
+# tg-bridge (GlitchTip webhook -> Telegram), and this host's own Caddy ingress.
+# Deployed to /opt/glitchtip on VPS2 by ops/vps2/install-vps2.sh (the dir name keeps the
+# compose project name "glitchtip", which the shared watchdog script already knows).
+# Inside GlitchTip, set the alert webhook URL to exactly:  http://tg-bridge:8080
+
+x-logging: &bounded-logs
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-environment: &glitchtip-env
+  DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
+  VALKEY_URL: redis://valkey:6379
+  SECRET_KEY: ${SECRET_KEY}
+  EMAIL_URL: consolemail://
+  GLITCHTIP_DOMAIN: ${GLITCHTIP_DOMAIN}
+  DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL}
+  GLITCHTIP_MAX_EVENT_LIFE_DAYS: "30"
+  # Upstream defaults this to True: without it anyone reaching the public ingress can self-register
+  # on the monitoring host, mint a DSN and pump events into pg-data until VPS2's disk fills — the
+  # host whose whole job is to still be standing when VPS1 is not.
+  ENABLE_USER_REGISTRATION: "False"
+  ENABLE_ADMIN: "False"
+  ENABLE_OPENAPI: "False"
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+    logging: *bounded-logs
+
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pg-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    logging: *bounded-logs
+
+  valkey:
+    image: valkey/valkey:9
+    # Unbounded by default — this cap is mandatory.
+    command: ["valkey-server", "--maxmemory", "48mb", "--maxmemory-policy", "allkeys-lru"]
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 64m
+    logging: *bounded-logs
+
+  web:
+    image: glitchtip/glitchtip:6
+    environment:
+      <<: *glitchtip-env
+      SERVER_ROLE: all_in_one
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_started
+    volumes:
+      - uploads:/code/uploads
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    logging: *bounded-logs
+
+  tg-bridge:
+    image: node:22-alpine
+    command: ["node", "/srv/tg-bridge.mjs"]
+    volumes:
+      - ./tg-bridge.mjs:/srv/tg-bridge.mjs:ro
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 64m
+    logging: *bounded-logs
+
+  kuma:
+    # Uptime Kuma: HTTP monitors on VPS1 (app + /api/health) with native Telegram, plus
+    # PUSH monitors — their /api/push/<token> URLs are what VPS1 pastes into
+    # POLLER_HC_URL / BACKUP_HC_URL / WATCHDOG_HC_URL. The image ships its own healthcheck.
+    image: louislam/uptime-kuma:1
+    # Loopback-only publish. Kuma has no admin until someone creates one, so a UI reachable
+    # from the internet is an unclaimed root account on the monitoring host; Caddy therefore
+    # proxies only /api/push/*. Reach the UI with `ssh -L 3001:127.0.0.1:3001 <vps2>`.
+    # 127.0.0.1 in the mapping is load-bearing — a bare "3001:3001" would have docker punch
+    # its own iptables hole straight past ufw.
+    ports:
+      - "127.0.0.1:3001:3001"
+    restart: unless-stopped
+    volumes:
+      - kuma-data:/app/data
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    logging: *bounded-logs
+
+volumes:
+  caddy_data:
+  caddy_config:
+  pg-data:
+  uploads:
+  kuma-data:

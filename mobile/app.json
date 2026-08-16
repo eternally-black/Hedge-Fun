@@ -1,0 +1,32 @@
+{
+  "expo": {
+    "name": "Hedge Fun",
+    "slug": "hedge-fun",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "hedgefun",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0a0a0f",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "fun.hedgeyour.app"
+    },
+    "android": {
+      "package": "fun.hedgeyour.app",
+      "adaptiveIcon": {
+        "backgroundColor": "#0a0a0f",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "plugins": [
+      "./plugins/withShareQueries"
+    ],
+    "web": {
+      "favicon": "./assets/favicon.png"
+    }
+  }
+}

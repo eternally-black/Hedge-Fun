@@ -1,8 +1,9 @@
 import type { Prisma } from "@prisma/client";
 import type { ResultRow } from "./api-types";
+import { categoryOf, gameOf } from "./deck-mix";
 
-// Shared select + mapper for a settled bet -> ResultRow. /api/results uses it; /api/history
-// reuses the same select shape so the two views never drift on what a "bet row" is.
+// Shared select + mapper for a settled bet -> ResultRow. Used by /api/results. (/api/history has
+// its OWN inline select — the two are not shared, despite what this comment used to claim.)
 //
 // outcome is built purely from data (resolvedOutcome + side labels) — no LLM:
 //   RESOLVED YES  -> "Resolved <outcomeYesLabel>"
@@ -23,8 +24,6 @@ export const resultBetSelect = {
       outcomeYesLabel: true,
       outcomeNoLabel: true,
       resolvedOutcome: true,
-      verifiedOnChain: true,
-      onchainRef: true,
     },
   },
   shardGrant: { select: { counted: true } },
@@ -43,7 +42,17 @@ export function toResultRow(b: ResultBet): ResultRow {
   return {
     id: b.id,
     question: b.market.question,
-    category: b.market.category,
+    // Derived, like the deck's — Gamma's own `category` is null on every market, so passing it
+    // through left the RN inbox showing a grey "Market" chip on every settled row.
+    ...(() => {
+      const m = {
+        question: b.market.question,
+        outcomeYesLabel: b.market.outcomeYesLabel,
+        outcomeNoLabel: b.market.outcomeNoLabel,
+      };
+      const cat = categoryOf(m);
+      return { category: cat, league: gameOf(m, cat) };
+    })(),
     side: b.side,
     sideLabel: b.side === "YES" ? b.market.outcomeYesLabel : b.market.outcomeNoLabel,
     status: b.result === "WIN" ? "WIN" : b.result === "LOSS" ? "LOSS" : "PUSH",
@@ -54,7 +63,11 @@ export function toResultRow(b: ResultBet): ResultRow {
     shards: b.shardGrant?.counted ? 1 : 0,
     settledAt: (b.settledAt ?? new Date(0)).toISOString(), // settled rows always have settledAt; fallback is defensive
     seen: b.seenAt != null,
-    verified: b.market.verifiedOnChain, // true only for TXODDS (football) settlements
-    onchainRef: b.market.onchainRef,
+    // Deprecated v1 keys. The only verifiable source (TxOdds, Solana-anchored scores) is gone and
+    // neither client renders the badge anymore, but the contract rule is "don't remove/rename in
+    // place" (src/lib/api-types.ts) — mobile does not deploy atomically with the server. So they are
+    // emitted as constants rather than dropped, and the columns keep the historical truth.
+    verified: false,
+    onchainRef: null,
   };
 }

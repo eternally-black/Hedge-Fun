@@ -3,8 +3,9 @@ on:
   push:
     branches: [main]
   # Build (not deploy) is reachable from a feature branch for PoC measurement.
-  # The deploy job is hard-gated to main via `if:` below, so a manual run here
-  # only builds + pushes to GHCR — it never touches prod.
+  # Two gates keep such a run away from prod: the deploy job is hard-gated to main
+  # via `if:` below, AND only main publishes the mutable `:latest` tag that deploy.sh
+  # pulls — a feature build pushes `:sha-<short>` only, so it cannot be picked up.
   workflow_dispatch:
 
 # Never let two deploys overlap; don't cancel an in-flight one mid-build.
@@ -41,7 +42,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
       - run: npm ci                 # strict install from lockfile (postinstall = prisma generate)
       - run: npm run lint
@@ -75,9 +76,11 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/eternally-black/hedge-fun
+          # `latest` is the mutable tag deploy.sh pulls, i.e. production itself. Only main
+          # may move it — otherwise a manual feature-branch build repoints prod's next pull.
           tags: |
-            type=raw,value=latest
-            type=sha,format=short     # :sha-<short> — rollback handle
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,format=short     # :sha-<short> — rollback handle, built on every branch
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -116,3 +119,20 @@ jobs:
           # Pull + up only now (no build on the box) — 10m is plenty.
           command_timeout: 10m
           script: cd /opt/hedgefun && bash deploy.sh
+
+  # ---------------------------------------------------------------------------
+  # Failure alert. A failed upstream job SKIPS dependent jobs, so an in-job failure
+  # step would never run — this separate `always()` job is the only shape that
+  # reports whichever of the three gates actually failed. Also covers test/build
+  # failures on a feature-branch workflow_dispatch (deploy is skipped there, not failed).
+  # ---------------------------------------------------------------------------
+  notify:
+    needs: [test, build, deploy]
+    if: always() && (needs.test.result == 'failure' || needs.build.result == 'failure' || needs.deploy.result == 'failure')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Telegram alert on pipeline failure
+        run: |
+          curl -sS --max-time 10 -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            --data-urlencode "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            --data-urlencode "text=🚨 CI: deploy pipeline failed (test=${{ needs.test.result }} build=${{ needs.build.result }} deploy=${{ needs.deploy.result }}) — ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

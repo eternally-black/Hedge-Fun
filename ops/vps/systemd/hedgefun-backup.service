@@ -1,0 +1,8 @@
+[Unit]
+Description=HedgeFun nightly Postgres backups (both stacks, verified, offsite)
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash /opt/hedgefun/ops/vps/backup.sh

@@ -4,8 +4,10 @@ import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 import { recordSwipe, isOverCap, SwipeCapReachedError, InsufficientFundsError } from "@/lib/swipe";
 import { maybeQualifyReferralOnSwipe } from "@/lib/referral";
-import { DECK_MIN_LEAD_MS } from "@/lib/config";
+import { DECK_MIN_LEAD_MS, STAKE_CENTS } from "@/lib/config";
+import { requoteSideForLock, quoteMovedAgainstUser, sourceHasClobBook } from "@/lib/depth";
 import { isDevUser } from "@/lib/dev";
+import { captureToGlitchTip } from "@/lib/glitchtip";
 import type { SwipeRequest, SwipeResponse } from "@/lib/api-types";
 
 // Swipe = paper bet Yes/No on a deck market. Locks the BOUGHT side's price for P&L.
@@ -40,9 +42,39 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "market_expired" }, { status: 409 });
   }
 
-  // Lock the price of the side the user actually bought (Polymarket yes+no don't sum to
-  // exactly 1, so the NO price is its own number, not 10000-yes).
-  const lockedPriceBp = body.side === "YES" ? market.yesPriceBp : market.noPriceBp;
+  // Lock the price of the side the user actually bought (D10).
+  let lockedPriceBp: number;
+  if (!sourceHasClobBook(market.source)) {
+    // Bookless source: no CLOB book exists, so its stored odds ARE the price (see src/lib/depth.ts).
+    lockedPriceBp = body.side === "YES" ? market.yesPriceBp : market.noPriceBp;
+  } else {
+    // POLYMARKET: re-quote the bought side LIVE against the CLOB book and lock the VWAP the book
+    // can actually deliver — never the Gamma mid (that is the 2x lie D10 exists to kill). A market
+    // without token ids is not quotable. No client quote echo in this slice: a request without a
+    // displayed quote locks the fresh effective price silently — strictly better than today's mid,
+    // and it keeps old RN builds working.
+    const tokenId = body.side === "YES" ? market.yesTokenId : market.noTokenId;
+    if (!tokenId) {
+      return NextResponse.json({ error: "market_untradable" }, { status: 409 });
+    }
+    const q = await requoteSideForLock(tokenId, STAKE_CENTS);
+    if (q.kind === "unavailable") {
+      void captureToGlitchTip(new Error("clob book unavailable"), { route: "swipe" });
+      return NextResponse.json({ error: "book_unavailable" }, { status: 502 });
+    }
+    if (q.kind !== "ok") {
+      return NextResponse.json({ error: "market_untradable" }, { status: 409 });
+    }
+    // Seen-vs-executed guard (D10 Slice B). The client polls the top card every few seconds, so the
+    // usual case is that this re-quote hits the very book the user was looking at and nothing fires.
+    // When the book HAS moved against them beyond tolerance, refuse rather than book a worse price
+    // silently — and hand back the fresh price so the card re-renders honestly and waits for a
+    // deliberate re-swipe. A move in the user's favour executes without comment.
+    if (typeof body.quotedPriceBp === "number" && quoteMovedAgainstUser(body.quotedPriceBp, q.effPriceBp)) {
+      return NextResponse.json({ error: "price_moved", freshPriceBp: q.effPriceBp }, { status: 409 });
+    }
+    lockedPriceBp = q.effPriceBp;
+  }
 
   try {
     const result = await recordSwipe({
@@ -56,9 +88,10 @@ export async function POST(req: Request) {
     // inviter's 20%. Counts lifetime bets itself — result.swipeCountToday is per-DAY, not the
     // gate. Called here (not in swipe.ts) to avoid a swipe<->referral circular import. Best-
     // effort: a failure here must not fail the swipe the user already made, so swallow + log.
-    await maybeQualifyReferralOnSwipe(user.id).catch((e) =>
-      console.error("referral qualify/accrue failed", e),
-    );
+    await maybeQualifyReferralOnSwipe(user.id).catch((e) => {
+      console.error("referral qualify/accrue failed", e);
+      void captureToGlitchTip(e, { route: "swipe", subsystem: "referral" });
+    });
     const res: SwipeResponse = result;
     return NextResponse.json(res);
   } catch (e) {
@@ -70,7 +103,7 @@ export async function POST(req: Request) {
     if (e instanceof InsufficientFundsError) {
       return NextResponse.json({ error: "insufficient_funds" }, { status: 402 });
     }
-    // P2002 on [userId, marketId] = already bet this market (one bet per card).
+    // P2002 on [userId, marketId, mode] = already bet this market (one bet per card per mode).
     if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
       return NextResponse.json({ error: "already swiped this market" }, { status: 409 });
     }

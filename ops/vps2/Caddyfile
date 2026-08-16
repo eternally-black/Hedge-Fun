@@ -1,0 +1,25 @@
+# VPS2 ingress. Both A records must point at VPS2 before first `up` (ACME HTTP challenge).
+ingest.hedgeyour.fun {
+	reverse_proxy web:8000
+}
+
+push.hedgeyour.fun {
+	# Uptime Kuma ships with NO admin account: the FIRST visitor to the setup page claims it
+	# and inherits the Telegram bot token plus every push-monitor URL. That window opened the
+	# moment DNS went live and closed only when the operator remembered step 3 of the
+	# installer. So the public surface here is the push endpoint and nothing else — VPS1's
+	# dead-man pings (POST /api/push/<token>) are the only thing that must reach Kuma from
+	# the internet. The UI is bound to 127.0.0.1 on VPS2 (see docker-compose.yml) and is
+	# reached over an SSH tunnel; see docs/runbook.md.
+	@push path /api/push/*
+	handle @push {
+		reverse_proxy kuma:3001
+	}
+	handle {
+		# Body says nothing about what runs here. The hostnames were renamed off the product
+		# names so a CT-log scrape cannot select this box by software; naming the software in
+		# the 403 would hand back exactly what the rename removed. Operators get the tunnel
+		# command from docs/runbook.md, not from a public endpoint.
+		respond "not public" 403
+	}
+}

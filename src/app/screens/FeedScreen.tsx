@@ -34,8 +34,7 @@ export function FeedScreen({
   const [items, setItems] = useState<Card[]>([]);
   const [loading, setLoading] = useState(false);
   const [done, setDone] = useState(false);
-  // The points-off bet flow (optimistic lock + cash gate + 402/409 handling) is shared with the
-  // football match view — see useMarketBet.
+  // The points-off bet flow: optimistic lock + cash gate + 402/409 handling — see useMarketBet.
   const { placed, placeBet } = useMarketBet({ api, me, onRefreshMe, onToast, onTopup });
   // One shared, gently-ticked clock for all cards' countdowns — 15s is plenty for a scroll feed (the
   // deck ticks per-second because it's a single focused card). Avoids N per-card timers AND keeps

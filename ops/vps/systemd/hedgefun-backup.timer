@@ -1,0 +1,9 @@
+[Unit]
+Description=Nightly HedgeFun backup at 03:30 UTC
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -47,12 +47,73 @@ assert.strictEqual(gameOf(mk("NBA: Lakers @ Celtics", "Lakers", "Celtics")), "NB
 assert.strictEqual(gameOf(mk("UFC 300: Jones vs Aspinall", "Jones", "Aspinall")), "UFC");
 assert.strictEqual(gameOf(mk("Soccer: Bosnia vs. Qatar", "Bosnia", "Qatar")), "Soccer", "soccer word -> Soccer");
 assert.strictEqual(gameOf(mk("Premier League: Arsenal vs Spurs", "Arsenal", "Spurs")), "Soccer", "league name -> Soccer");
+
+// Real Polymarket soccer names no league at all — the league is only in the slug, which we never see.
+// These are verbatim live questions (2026-08-03); before the bet-vocabulary rule every one of them
+// badged as a generic "Sports" and lost the pitch art. Keep them REAL: a paraphrase would pass while
+// the actual feed still failed.
+const soccer = (q: string, y = "Over", n = "Under") =>
+  assert.strictEqual(gameOf(mk(q, y, n)), "Soccer", `live soccer shape -> Soccer: ${q}`);
+soccer("FSK Bukovyna Chernivtsi vs. FK LNZ Cherkasy: O/U 9.5 Total Corners");
+soccer("Celtic FC vs. Dundee FC: Dundee FC O/U 3.5 Corners");
+soccer("FK Auda Riga vs. Ogre United: Both Teams to Score in First Half", "Yes", "No");
+soccer("Will FK Auda Riga vs. Ogre United end in a draw?", "Yes", "No");
+soccer("Exact Score: FK Shakhtar Donetsk 3 - 0 FK Kudrivka?", "Yes", "No");
+
+// The reverse bug this fixes: cricket used to be claimed by the soccer row's "premier league" token.
+assert.strictEqual(
+  gameOf(mk("Kuwait Kerala Premier League T20: Palakad Patriots vs Blasters Cochin", "Palakad Patriots", "Blasters Cochin")),
+  "Cricket",
+  "T20 is cricket, even though the name contains 'Premier League'",
+);
+
+// ---- what the soccer row must NOT claim ----
+// A bare "A vs. B: O/U n" names no sport. It was briefly admitted at a "plausible goal line" (<=4.5),
+// which bought recall and badged everything missing from SPORT_GAMES: tennis, esports, chess. Being
+// the last row means unlisted disciplines land here, so only soccer-EXCLUSIVE vocabulary may match.
+// A missing badge is invisible; a football pitch on a tennis card is a visible lie.
+const notSoccer = (q: string, y = "Over", n = "Under") =>
+  assert.strictEqual(gameOf(mk(q, y, n)), null, `must not be claimed as soccer: ${q}`);
+notSoccer("Alcaraz vs. Sinner: O/U 3.5"); // tennis sets — no sport word anywhere
+notSoccer("NAVI vs. FaZe: O/U 2.5"); // esports without a game token
+notSoccer("Panthers vs. Cardinals: O/U 32.5"); // NFL
+notSoccer("Lakers @ Celtics: Total Points O/U 210.5"); // NBA
+notSoccer("Yankees vs. Red Sox: O/U 8.5"); // MLB
+notSoccer("Rangers vs. Bruins: O/U 5.5"); // NHL
+notSoccer("Carlsen vs. Nepo: Draw?", "Yes", "No"); // chess: a bare "draw" is not football
+notSoccer("Boston Celtics leading at halftime?", "Yes", "No"); // NBA has halves too
+notSoccer("Kansas City Chiefs to score first vs. Buffalo Bills?", "Yes", "No"); // so does the NFL
+// The cost of that strictness, stated so nobody "fixes" it back: real soccer whose question carries
+// no exclusive word loses the badge. This is the deliberate trade, not an oversight.
+notSoccer("FK Kudrivka vs. FK Shakhtar Donetsk: Second half draw?", "Yes", "No");
+notSoccer("Seinajoen JK vs. HJK Helsinki: HJK Helsinki O/U 2.5");
 // recognized sport but no specific league word -> null (caller shows generic "Sports")
 assert.strictEqual(gameOf(mk("Spread: Team A (-1.5)", "Team A", "Team B")), null, "bare spread, no league -> null");
 assert.strictEqual(gameOf(mk("Bosnia vs. Qatar match", "Bosnia", "Qatar")), null, "bare match, no league word -> null (falls back to Sports)");
 // non sports/esports categories never name a game
 assert.strictEqual(gameOf(mk("Bitcoin Up or Down", "Up", "Down")), null, "crypto -> null");
 assert.strictEqual(gameOf(mk("Will the Fed cut rates?", "Yes", "No")), null, "politics -> null");
+
+// ---- a quoted phrase is what someone SAYS, not what the market is about ----
+// Polymarket's "mention" markets put a topic word in quotes. Read as a signal it makes an earnings
+// call a football match, pitch art and all.
+assert.strictEqual(
+  categoryOf(mk('Will Spotify say "World Cup" during the earnings call?', "Yes", "No")),
+  "other",
+  "quoted phrase is not a topic signal",
+);
+assert.strictEqual(gameOf(mk('Will Trump post "World Cup" on Truth Social this week?', "Yes", "No")), null, "…and names no league");
+assert.strictEqual(
+  categoryOf(mk('Will the Fed chair say "Bitcoin" at the press conference?', "Yes", "No")),
+  "politics",
+  "quoted ticker does not make it a crypto market; the real subject still wins",
+);
+// The quote rule must not eat a real signal that happens to sit next to one.
+assert.strictEqual(
+  categoryOf(mk('Premier League: Arsenal vs Spurs — will anyone say "hello"?', "Yes", "No")),
+  "sports",
+  "unquoted league word outside the quote still counts",
+);
 
 // helper: longest run of equal categories in a sequence
 function longestRun(cats: string[]): number {

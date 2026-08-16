@@ -1,0 +1,32 @@
+# Cloudflare Worker — hedgefun-uptime. External uptime probe + last-resort reboot lever.
+# See README.md in this directory for deploy steps and secrets.
+
+name = "hedgefun-uptime"
+main = "worker.js"
+compatibility_date = "2026-08-01"
+
+# Probe every 5 minutes.
+[triggers]
+crons = ["*/5 * * * *"]
+
+# KV namespace holding outage state. Create it once, then paste the returned id here:
+#   npx wrangler kv namespace create STATE
+# (pick the "Workers KV" production namespace id — not the preview one).
+[[kv_namespaces]]
+binding = "STATE"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+# Vars are non-secret; secrets are set via `npx wrangler secret put`.
+[vars]
+HEALTH_URL = "https://app.hedgeyour.fun/api/health"
+AUTO_REBOOT = "false"          # staged rollout: keep false until the failure drill passes
+CONTABO_INSTANCE_ID = ""       # set to the Contabo instance id once AUTO_REBOOT is enabled
+
+# Secrets (set with `npx wrangler secret put <NAME>` — values are not stored in this file):
+#   TELEGRAM_BOT_TOKEN      # BotFather bot for outage/degraded/recovery/reboot alerts
+#   TELEGRAM_CHAT_ID
+#   HC_PING_URL             # this worker's own healthchecks.io dead-man ping
+#   CONTABO_CLIENT_ID       # Contabo Customer Panel -> Settings -> API
+#   CONTABO_CLIENT_SECRET
+#   CONTABO_API_USER
+#   CONTABO_API_PASSWORD

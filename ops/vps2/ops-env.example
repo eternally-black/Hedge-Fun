@@ -1,0 +1,28 @@
+# /opt/ops/.env on VPS2 — read by notify.sh, the watchdog, uptime-guard and backup-pull.
+# Telegram bot (same bot as VPS1 or a dedicated one)
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+
+# --- uptime-guard (the VPS1 rebooter) ---
+# Probe target; any HTTP answer (even 503) = host alive, only network failure counts as down
+GUARD_HEALTH_URL=https://app.hedgeyour.fun/api/health
+# 0 = alert-only (KEEP 0 until a staged failure drill passes); 1 arms the Contabo reboot
+AUTO_REBOOT=0
+# Contabo Customer Panel -> Settings -> API
+CONTABO_CLIENT_ID=
+CONTABO_CLIENT_SECRET=
+CONTABO_API_USER=
+CONTABO_API_PASSWORD=
+CONTABO_INSTANCE_ID=
+# Kuma push URL (or healthchecks.io) proving the guard itself runs
+GUARD_HC_URL=
+
+# --- backup-pull ---
+# e.g. root@84.247.169.158 (VPS1); key at /root/.ssh/backup_pull, restricted on VPS1
+BACKUP_PULL_SOURCE=
+BACKUP_PULL_PORT=49222
+BACKUP_PULL_HC_URL=
+
+# --- vps2 watchdog ---
+WATCHDOG_OBSERVE=1
+WATCHDOG_HC_URL=

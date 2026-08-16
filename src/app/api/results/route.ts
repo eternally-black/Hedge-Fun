@@ -13,15 +13,17 @@ export async function GET(req: Request) {
   // Count unread over the FULL set, not the windowed rows — otherwise a user with >100 settled
   // bets whose unseen ones fall outside the latest 100 would show a different badge here than in
   // /api/me (which counts unwindowed). Both must agree, so unreadCount is its own count().
+  // mode: PAPER — real positions get their own surface (plan step 6); an old mobile build
+  // receiving a REAL row would render real-money outcomes as paper Results.
   const [bets, unreadCount] = await Promise.all([
     prisma.bet.findMany({
-      where: { userId: user.id, settlementStatus: { in: ["SETTLED", "VOID"] } },
+      where: { userId: user.id, mode: "PAPER", settlementStatus: { in: ["SETTLED", "VOID"] } },
       orderBy: { settledAt: "desc" },
       take: 100,
       select: resultBetSelect,
     }),
     prisma.bet.count({
-      where: { userId: user.id, settlementStatus: { in: ["SETTLED", "VOID"] }, seenAt: null },
+      where: { userId: user.id, mode: "PAPER", settlementStatus: { in: ["SETTLED", "VOID"] }, seenAt: null },
     }),
   ]);
 

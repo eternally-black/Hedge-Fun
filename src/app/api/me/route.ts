@@ -35,7 +35,7 @@ export async function GET(req: Request) {
     prisma.dailyCounter.findUnique({ where: { userId_utcDay: { userId: user.id, utcDay: day } } }),
     prisma.loginMark.findUnique({ where: { userId_utcDay: { userId: user.id, utcDay: day } } }),
     prisma.bet.count({
-      where: { userId: user.id, settlementStatus: { in: ["SETTLED", "VOID"] }, seenAt: null },
+      where: { userId: user.id, mode: "PAPER", settlementStatus: { in: ["SETTLED", "VOID"] }, seenAt: null },
     }),
     getReferralStats(user.id),
   ]);

@@ -1,6 +1,8 @@
 // Boot-time env validation. Next runs register() ONCE at server startup (runtime) — NOT during
 // `next build` — so this fails a misconfigured deploy fast & loud instead of silently 401ing every
 // request (missing PRIVY secret) or silently disabling fraud signals (missing referral secret).
+import { captureToGlitchTip } from "@/lib/glitchtip";
+
 export async function register() {
   // Node runtime only (skip the edge/middleware runtime, which lacks these server secrets).
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
@@ -10,6 +12,10 @@ export async function register() {
   const required = ["NEXT_PUBLIC_PRIVY_APP_ID", "PRIVY_APP_SECRET", "DATABASE_URL"];
   const missing = required.filter((k) => !process.env[k]);
   if (missing.length) {
+    // A missing-secret boot failure must reach error tracking when a DSN is configured.
+    await captureToGlitchTip(new Error(`[boot] missing required env in production: ${missing.join(", ")}`), {
+      boot: "env-check",
+    });
     throw new Error(`[boot] missing required env in production: ${missing.join(", ")}`);
   }
 
@@ -21,4 +27,27 @@ export async function register() {
       "[boot] REFERRAL_HASH_SECRET unset — referral device anti-fraud and cross-browser attribution are DISABLED",
     );
   }
+
+  // Soft: without the builder code the bridge deposit proxy silently drops X-Builder-Code and
+  // deposit attribution vanishes with zero signal (K3, S3 review). Only matters once real-money
+  // routes are in use, hence a warn, not a throw.
+  if (!process.env.POLYMARKET_BUILDER_CODE) {
+    console.warn("[boot] POLYMARKET_BUILDER_CODE unset — bridge deposits will not be builder-attributed");
+  }
+}
+
+// Next 16 request-error hook: ships unhandled route errors to GlitchTip. Whitelisted fields ONLY —
+// never spread request (headers/URL can carry auth/PII).
+export async function onRequestError(
+  err: unknown,
+  request: { method: string },
+  context: { routerKind: string; routePath: string; routeType: string },
+): Promise<void> {
+  if (process.env.NEXT_RUNTIME !== "nodejs") return;
+  await captureToGlitchTip(err, {
+    method: request.method,
+    routerKind: context.routerKind,
+    routePath: context.routePath,
+    routeType: context.routeType,
+  });
 }

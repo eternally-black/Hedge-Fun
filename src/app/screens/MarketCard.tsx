@@ -19,11 +19,10 @@ import { STAKE_CENTS, DECK_MIN_LEAD_MS } from "@/lib/config";
 import type { BetSide } from "@/lib/api-types";
 
 // ============================================================================
-// Shared market block — the tappable near-50% binary card used by BOTH the post-cap feed (лента)
-// and the football match-detail view. It's just the rounded panel (gradient + question + odds +
-// tap-to-bet); the caller sizes the box around it (a 50%-viewport snap section in the feed, a fixed
-// block in the football view). Memoized on primitive-ish props so a /api/me refresh or a bet on a
-// sibling card never re-renders this one. Betting flows through useMarketBet (below).
+// Shared market block — the tappable near-50% binary card used by the post-cap feed (лента). It's
+// just the rounded panel (gradient + question + odds + tap-to-bet); the caller sizes the box around
+// it (a 50%-viewport snap section). Memoized on primitive-ish props so a /api/me refresh or a bet on
+// a sibling card never re-renders this one. Betting flows through useMarketBet (below).
 // ============================================================================
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
@@ -32,22 +31,17 @@ export const MarketCard = memo(function MarketCard({
   placedSide,
   nowMs,
   onBet,
-  liveBetting = false,
 }: {
   card: Card;
   placedSide: BetSide | undefined;
   nowMs: number; // shared clock (ticks ~15s) — keeps Date.now() out of render
   onBet: (card: Card, side: BetSide) => void;
-  // Football live markets: their resolutionDeadline is a synthetic kickoff+150min settle mark, NOT a
-  // real close — so the deck/feed lead-time gate would wrongly disable in-play betting. When true, the
-  // time gate is skipped (the market is bettable as long as it's OPEN, which the server enforces).
-  liveBetting?: boolean;
 }) {
   const cat = catOf(card);
   const labels = sideLabels(card);
   const hint = marketHint(card);
   const cd = countdown(card.resolutionDeadline, nowMs);
-  const expired = !liveBetting && new Date(card.resolutionDeadline).getTime() - nowMs <= DECK_MIN_LEAD_MS;
+  const expired = new Date(card.resolutionDeadline).getTime() - nowMs <= DECK_MIN_LEAD_MS;
 
   return (
     <div style={{ position: "relative", width: "100%", height: "100%", borderRadius: 22, overflow: "hidden", background: "var(--panel2)", border: "1px solid var(--line)", boxShadow: "0 18px 40px -20px rgba(0,0,0,.7)" }}>
@@ -135,10 +129,9 @@ function LockedBanner({ card, side, labels }: { card: Card; side: BetSide; label
 }
 
 // ============================================================================
-// useMarketBet — the points-FREE bet flow shared by the feed and the football match view. Optimistic
-// (lock the card, then POST /api/feed/bet), with the deck's cash gate + 402/409 handling. Reads
-// me/placed via refs so placeBet stays stable across the frequent /api/me refreshes. seedPlaced lets
-// a caller pre-mark markets the user already bet (the football view loads them from the server).
+// useMarketBet — the points-FREE bet flow behind the feed. Optimistic (lock the card, then POST
+// /api/feed/bet), with the deck's cash gate + 402/409 handling. Reads me/placed via refs so placeBet
+// stays stable across the frequent /api/me refreshes.
 // ============================================================================
 export function useMarketBet({
   api,
@@ -155,7 +148,6 @@ export function useMarketBet({
 }): {
   placed: Map<string, BetSide>;
   placeBet: (card: Card, side: BetSide) => void;
-  seedPlaced: (entries: Iterable<readonly [string, BetSide]>) => void;
 } {
   const [placed, setPlaced] = useState<Map<string, BetSide>>(new Map());
   const meRef = useRef<Me | null>(me);
@@ -186,13 +178,5 @@ export function useMarketBet({
     [api, onRefreshMe, onToast, onTopup],
   );
 
-  const seedPlaced = useCallback((entries: Iterable<readonly [string, BetSide]>) => {
-    setPlaced((prev) => {
-      const n = new Map(prev);
-      for (const [k, v] of entries) n.set(k, v);
-      return n;
-    });
-  }, []);
-
-  return { placed, placeBet, seedPlaced };
+  return { placed, placeBet };
 }

@@ -8,10 +8,18 @@
 // Bet -> Market foreign key would refuse the delete anyway.
 //
 // FOREIGN KEYS ARE THE MAINTENANCE HAZARD HERE. Every table that references Market must be cleared
-// (or proven empty) before the row goes, or the DELETE fails with P2003 — which is the safe failure,
-// but a failure nonetheless. On this branch Bet is the only referrer. The phase-2 hedge work adds
-// MarketMeta and HedgeSuggestionEvent, and this function MUST grow to handle them when that merges;
-// it was verified to fail loudly against a phase-2 schema rather than orphan anything.
+// (or proven empty) before the row goes, or the DELETE fails with P2003 — the safe failure, but a
+// failure nonetheless. Three referrers, handled three different ways on purpose:
+//   Bet                  -> EXCLUDE the market. History, results and settlement all read through it.
+//   HedgeSuggestionEvent -> EXCLUDE the market. Append-only funnel telemetry; deleting the market
+//                           would orphan impression/dismiss rows and break any join that explains
+//                           them. This set is small by construction (only markets ever SUGGESTED),
+//                           so it cannot grow into the backlog this GC exists to clear.
+//   MarketMeta           -> DELETE it alongside. Pure derived cache (strike/direction/league parse),
+//                           rebuilt from Gamma by refresh-hedge-index; nothing is lost.
+//   OrderAttempt         -> EXCLUDE the market. Real-money execution ledger (append-only, audit);
+//                           a zero-fill attempt leaves NO Bet row, so without this anti-join the
+//                           delete would P2003 on order_attempts_marketId_fkey every tick.
 //
 // Run: npm run prune-markets   (also called by the poller on a slow cadence)
 import { PrismaClient } from "@prisma/client";
@@ -37,10 +45,10 @@ export async function pruneMarkets(opts: { olderThanDays?: number; maxRows?: num
   const maxRows = opts.maxRows ?? PRUNE_MAX_ROWS;
   const cutoff = new Date(Date.now() - days * 86_400_000);
 
-  // `bets: { none: {} }` is an anti-join (NOT EXISTS) — one query, and it rides the Bet
-  // @@unique([userId, marketId]) index instead of pulling every bet id into an IN-list.
+  // `none: {}` is an anti-join (NOT EXISTS) — one query, riding the existing indexes instead of
+  // pulling every bet/event id into an IN-list.
   const doomed = await prisma.market.findMany({
-    where: { resolutionDeadline: { lt: cutoff }, bets: { none: {} } },
+    where: { resolutionDeadline: { lt: cutoff }, bets: { none: {} }, hedgeEvents: { none: {} }, orderAttempts: { none: {} } },
     select: { id: true },
     take: maxRows,
   });
@@ -49,10 +57,15 @@ export async function pruneMarkets(opts: { olderThanDays?: number; maxRows?: num
   let deleted = 0;
   for (let i = 0; i < doomed.length; i += DELETE_CHUNK) {
     const chunk = doomed.slice(i, i + DELETE_CHUNK).map((m) => m.id);
-    // Re-assert "no bets" inside the DELETE, not just in the SELECT above: a user could have
-    // swiped one of these ids between the two statements. Without this the delete would either
-    // fail on the foreign key or (worse, on a cascade) take their bet with it.
-    const r = await prisma.market.deleteMany({ where: { id: { in: chunk }, bets: { none: {} } } });
+    // Derived cache first — it has no independent value and its FK would block the market delete.
+    await prisma.marketMeta.deleteMany({ where: { marketId: { in: chunk } } });
+    // Re-assert the anti-joins inside the DELETE, not just in the SELECT above: a user can swipe
+    // one of these ids, or a suggestion can log an impression against it, between the two
+    // statements. Without the re-check the delete would fail on the foreign key — or, on a
+    // cascade, silently take their bet or telemetry with it.
+    const r = await prisma.market.deleteMany({
+      where: { id: { in: chunk }, bets: { none: {} }, hedgeEvents: { none: {} }, orderAttempts: { none: {} } },
+    });
     deleted += r.count;
   }
   return { deleted, more: doomed.length >= maxRows };

@@ -70,14 +70,19 @@ export async function settleMarket(
 
   return prisma.$transaction(
     async (tx) => {
+      // mode: PAPER — this whole path is virtual-dollar math. A REAL bet here would be credited
+      // virtual winnings for a real position; real bets settle from chain/fills (plan §2.2).
       const bets = await tx.bet.findMany({
-        where: { marketId, settlementStatus: "PENDING" },
+        where: { marketId, settlementStatus: "PENDING", mode: "PAPER" },
       });
 
-      // Update the cached market status at first resolution only. PENDING bets exist only on the
-      // first settle; on repeat/duplicate calls bets.length === 0, so we skip the write — otherwise
-      // resolvedAt (= new Date()) would drift forward on every re-call of an already-settled market.
-      if (bets.length > 0) {
+      // Update the cached market status at first TERMINAL transition, gated on the market's own
+      // status — NOT on paper-bet count (K3 S6/S7 HIGH-1: a market holding only REAL positions has
+      // zero paper bets, so the old bets.length gate left it OPEN forever and REDEEM could never
+      // bind — winnings redeemable on-chain but unreachable in-app). The status gate also keeps
+      // resolvedAt from drifting on repeat calls, which is all the old gate was for.
+      const marketRow = await tx.market.findUnique({ where: { id: marketId }, select: { status: true } });
+      if (marketRow && marketRow.status !== "RESOLVED" && marketRow.status !== "CANCELED") {
         await tx.market.update({
           where: { id: marketId },
           data:

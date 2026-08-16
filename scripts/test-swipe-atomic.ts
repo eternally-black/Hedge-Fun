@@ -69,7 +69,7 @@ async function main() {
     where: { userId_utcDay: { userId: user.id, utcDay: new Date().toISOString().slice(0, 10) } },
   })).swipeCount;
   assert.strictEqual(after, before, "throw rolled back the counter increment (no phantom count)");
-  const overBet = await prisma.bet.findUnique({ where: { userId_marketId: { userId: user.id, marketId: overMkt.id } } });
+  const overBet = await prisma.bet.findUnique({ where: { userId_marketId_mode: { userId: user.id, marketId: overMkt.id, mode: "PAPER" } } });
   assert.strictEqual(overBet, null, "throw stored no bet");
   const pointsAfter = await prisma.pointsLedger.count({ where: { userId: user.id, type: "SWIPE" } });
   assert.strictEqual(pointsAfter, SWIPE_CAP, "throw wrote no point");

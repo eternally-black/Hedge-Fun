@@ -7,7 +7,7 @@
 ############################
 # 1. deps — full install incl. devDeps (build needs typescript/@types; poller needs tsx)
 ############################
-FROM node:22-bookworm-slim AS deps
+FROM node:24-bookworm-slim AS deps
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -19,7 +19,7 @@ RUN npm ci
 ############################
 # 2. build — compile Next standalone
 ############################
-FROM node:22-bookworm-slim AS build
+FROM node:24-bookworm-slim AS build
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends openssl \
     && rm -rf /var/lib/apt/lists/*
@@ -43,7 +43,7 @@ RUN npm run build:poller
 # We only add what's not traced: the bundled poller + @prisma/client/.prisma (engine + client)
 # + the prisma CLI for the migrate service's `prisma db push`.
 ############################
-FROM node:22-bookworm-slim AS runtime
+FROM node:24-bookworm-slim AS runtime
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends openssl curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*

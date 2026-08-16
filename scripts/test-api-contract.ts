@@ -47,6 +47,7 @@ async function main() {
   const results = await import("../src/app/api/results/route");
   const resultsSeen = await import("../src/app/api/results/seen/route");
   const captureRef = await import("../src/app/api/capture-ref/route");
+  const quotes = await import("../src/app/api/quotes/route");
 
   // Provision the test user via /me (which calls authUser -> ensureUser).
   const meRes = await me.GET(authed("http://x/api/me"));
@@ -54,9 +55,12 @@ async function main() {
   const user = await prisma.user.findUniqueOrThrow({ where: { privyId: STUB_DID } });
 
   // Seed one OPEN, tradable, in-window market so /deck returns a card and /swipe can hit it.
+  // source: TXODDS keeps the seed on the SYNTHETIC price-lock path (D10) — a POLYMARKET row now
+  // re-quotes the live CLOB book at swipe time, and a hermetic DB test has no book to quote.
   const market = await prisma.market.create({
     data: {
       polymarketId: `apitest-${process.pid}-mkt`, question: "Contract test market?", status: "OPEN",
+      source: "TXODDS",
       yesPriceBp: 5000, noPriceBp: 5000, resolutionDeadline: new Date(Date.now() + 3_600_000),
       outcomeYesLabel: "Yes", outcomeNoLabel: "No",
     },
@@ -74,6 +78,7 @@ async function main() {
   await expect401(results.GET, "http://x/api/results");
   await expect401(resultsSeen.POST, "http://x/api/results/seen", { method: "POST" });
   await expect401(captureRef.POST, "http://x/api/capture-ref", { method: "POST" });
+  await expect401(quotes.GET, "http://x/api/quotes?ids=x");
 
   // ---- (b) authed 200 + EXACT top-level key contract (Android binds to these) ----
   const meBody = await (await me.GET(authed("http://x/api/me"))).json();
@@ -93,9 +98,28 @@ async function main() {
   assert.ok(Array.isArray(deckBody.cards), "/deck cards is an array");
   if (deckBody.cards.length) {
     assert.deepStrictEqual(Object.keys(deckBody.cards[0]).sort(),
-      ["category","id","noPriceBp","outcomeNoLabel","outcomeYesLabel","question","resolutionDeadline","yesPriceBp"],
+      ["category","id","league","noPriceBp","outcomeNoLabel","outcomeYesLabel","question","resolutionDeadline","yesPriceBp"],
       "/deck card keys");
   }
+
+  // /quotes: the live card-poll contract (D10 Slice B). The seeded market is TXODDS, so it answers
+  // off its synthetic odds with live:false — which is exactly the branch a hermetic test can pin
+  // (a POLYMARKET row would need a real CLOB book). Missing ids -> 400, not a silent empty list.
+  const quotesRes = await quotes.GET(authed(`http://x/api/quotes?ids=${market.id}`));
+  assert.strictEqual(quotesRes.status, 200, "authed /quotes -> 200");
+  const quotesBody = await quotesRes.json();
+  assert.deepStrictEqual(keysOf(quotesBody), ["quotes"], "/quotes top-level keys");
+  assert.strictEqual(quotesBody.quotes.length, 1, "/quotes returns the requested market");
+  assert.deepStrictEqual(Object.keys(quotesBody.quotes[0]).sort(),
+    ["asOfMs", "live", "marketId", "noPriceBp", "yesPriceBp"],
+    "/quotes row keys");
+  assert.strictEqual(quotesBody.quotes[0].live, false, "/quotes marks a TXODDS row as not book-backed");
+  assert.strictEqual(quotesBody.quotes[0].yesPriceBp, 5000, "/quotes echoes the synthetic odds for TXODDS");
+  assert.strictEqual(
+    (await quotes.GET(authed("http://x/api/quotes"))).status,
+    400,
+    "/quotes without ids -> 400",
+  );
 
   const histBody = await (await history.GET(authed("http://x/api/history"))).json();
   assert.deepStrictEqual(keysOf(histBody), ["pendingCount","rows"], "/history top-level keys");
@@ -152,7 +176,7 @@ async function main() {
   assert.strictEqual(resBody.rows.length, 1, "/results one settled bet -> one row");
   assert.strictEqual(resBody.unreadCount, 1, "/results unread before seen = 1");
   assert.deepStrictEqual(Object.keys(resBody.rows[0]).sort(),
-    ["category","deltaCents","id","onchainRef","outcome","pnlCents","question","seen","settledAt","shards","side","sideLabel","status","verified"],
+    ["category","deltaCents","id","league","onchainRef","outcome","pnlCents","question","seen","settledAt","shards","side","sideLabel","status","verified"],
     "/results row keys");
   assert.strictEqual(resBody.rows[0].verified, false, "/results Polymarket row verified=false");
   assert.strictEqual(resBody.rows[0].onchainRef, null, "/results Polymarket row onchainRef=null");

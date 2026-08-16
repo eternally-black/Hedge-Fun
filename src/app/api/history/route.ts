@@ -11,7 +11,7 @@ export async function GET(req: Request) {
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
   const bets = await prisma.bet.findMany({
-    where: { userId: user.id },
+    where: { userId: user.id, mode: "PAPER" }, // real positions get their own surface (plan step 6)
     // Pending first (settlementStatus PENDING < SETTLED alphabetically is wrong, so order by a
     // computed flag): we sort in JS below. Pull a generous recent window.
     orderBy: { createdAt: "desc" },

@@ -11,6 +11,10 @@ const base: MarketCache = {
   polymarketId: "0xtest", question: "q?", category: null,
   outcomeYesLabel: "Yes", outcomeNoLabel: "No",
   yesPriceBp: 5000, noPriceBp: 5000,
+  // D10 depth fields: irrelevant to resolution mapping (settlement never quotes), all null.
+  yesTokenId: null, noTokenId: null, bestAskBp: null,
+  yesEffPriceBp: null, noEffPriceBp: null,
+  yesMaxStakeCents: null, noMaxStakeCents: null, bookTsAt: null,
   startsAt: null, resolutionDeadline: new Date().toISOString(),
   status: "OPEN", resolvedOutcome: null,
 };

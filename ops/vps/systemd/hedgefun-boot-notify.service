@@ -1,0 +1,11 @@
+[Unit]
+Description=Telegram notification on VPS boot (unexpected unless a reboot was planned)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash /opt/hedgefun/ops/vps/hedgefun-boot-notify.sh
+
+[Install]
+WantedBy=multi-user.target

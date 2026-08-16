@@ -1,0 +1,9 @@
+[Unit]
+Description=Run the VPS2 watchdog every 2 minutes
+
+[Timer]
+OnCalendar=*:0/2
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

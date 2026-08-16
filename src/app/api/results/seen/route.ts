@@ -11,7 +11,7 @@ export async function POST(req: Request) {
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
   const { count } = await prisma.bet.updateMany({
-    where: { userId: user.id, settlementStatus: { in: ["SETTLED", "VOID"] }, seenAt: null },
+    where: { userId: user.id, mode: "PAPER", settlementStatus: { in: ["SETTLED", "VOID"] }, seenAt: null },
     data: { seenAt: new Date() },
   });
   const body: SeenResponse = { markedSeen: count };
