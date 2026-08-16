@@ -272,7 +272,22 @@ async function tick() {
   const overdue = await prisma.bet.findFirst({
     where: {
       settlementStatus: "PENDING",
-      mode: "PAPER",
+      // PAPER: settlement is simply late. REAL is a different failure and used to be excluded
+      // outright, which made it silent: a market that resolves WITHOUT a clean 1/0 price print
+      // (a UMA invalid, say) never leaves OPEN here — mapMarket refuses to call it terminal and
+      // toResolution keeps returning "open" — so REDEEM can never bind it (redeem.ts requires a
+      // terminal market) and the position is stranded in-app while still redeemable on chain.
+      // The qualifier is what keeps this honest: a PENDING real bet on an already-terminal market
+      // is the ordinary "waiting for the user to press redeem" state and must NOT page anyone.
+      OR: [
+        { mode: "PAPER" },
+        // Non-terminal covers TWO shapes, not one. A market can sit in OPEN forever (mapMarket
+        // refuses to call a non-clean price print terminal), and it can sit in RESOLVED with a NULL
+        // outcome — which redeem.ts treats as undecided for exactly the same reason, and which is
+        // just as unredeemable. Matching only OPEN left the second one as silent as before.
+        { mode: "REAL", market: { status: "OPEN" } },
+        { mode: "REAL", market: { status: "RESOLVED", resolvedOutcome: null } },
+      ],
       market: { resolutionDeadline: { lt: new Date(Date.now() - 6 * 3_600_000) } },
     },
     orderBy: { market: { resolutionDeadline: "asc" } },

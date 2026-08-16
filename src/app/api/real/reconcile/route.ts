@@ -14,6 +14,9 @@ import { fetchOrder, listAccountTrades } from "@polymarket/client/actions";
 // A terminal verdict is what KILLS an attempt, so the terminal set is explicit and everything
 // unrecognized reads as still-matchable (fail-safe).
 const TERMINAL_STATUS = new Set(["matched", "canceled", "cancelled", "expired"]);
+// Paging is bounded so a pathological account cannot pin this request open; the short-set guard
+// below turns an exhausted budget into "unknown" (retry next pass), never into a partial booking.
+const MAX_TRADE_PAGES = 20;
 
 export async function POST(req: Request) {
   const secret = process.env.REAL_RECONCILE_SECRET;
@@ -57,10 +60,43 @@ export async function POST(req: Request) {
 
       const trades: TradeRecord[] = [];
       if (matchedSharesMicro > 0n) {
-        const rows = await listAccountTrades(client as never, { tokenId: attempt.tokenId })
-          .firstPage()
-          .then((p) => (p as { data?: unknown[] }).data ?? [])
-          .catch(() => [] as unknown[]); // unreachable trades read as "no records" → unknown, retried
+        // Two bugs lived on the line this replaces. It read `.data` off the page, but the SDK's
+        // Page<T> carries `items` — so `rows` was ALWAYS empty, collectedMicro was always 0, the
+        // short-set guard below always fired, and no POSTED attempt was ever reconciled or had its
+        // estimated fee trued up. And it took only firstPage(), so an order whose fills span pages
+        // could never satisfy that guard even once the field name was right: every pass would re-read
+        // the same page and return unknown again. Nothing caught it — scripts/test-reconcile.ts
+        // injects its own probe and never exercises this decoding.
+        const rows: unknown[] = [];
+        try {
+          const paginator = listAccountTrades(client as never, { tokenId: attempt.tokenId });
+          const first = await paginator.firstPage();
+          rows.push(...first.items);
+          if (first.hasMore && first.nextCursor) {
+            let pages = 1;
+            let more = false;
+            for await (const page of paginator.from(first.nextCursor)) {
+              rows.push(...page.items);
+              more = page.hasMore;
+              if (++pages >= MAX_TRADE_PAGES) break;
+            }
+            // Hitting the cap is NOT a transient miss that the next pass fixes: there is no resume
+            // cursor, so every pass re-reads these same pages, comes up short of matchedShares, and
+            // returns unknown again — forever, silently. Rare (it needs one order's fills to span
+            // MAX_TRADE_PAGES) but unrecoverable without a human, so it is surfaced rather than
+            // absorbed. A persisted cursor on the attempt is the real fix if this ever fires.
+            if (more && pages >= MAX_TRADE_PAGES) {
+              await captureToGlitchTip(new Error("reconcile trade paging exhausted"), {
+                route: "real/reconcile",
+                attemptId: attempt.id,
+                tokenId: attempt.tokenId,
+                pages: String(pages),
+              });
+            }
+          }
+        } catch {
+          rows.length = 0; // unreachable trades read as "no records" → unknown, retried
+        }
         const associated = Array.isArray(order.associateTrades) ? (order.associateTrades as unknown[]).map(String) : [];
         for (const raw of rows) {
           const t = raw as Record<string, unknown>;
@@ -84,11 +120,23 @@ export async function POST(req: Request) {
             ts: Number.isNaN(ts.getTime()) ? new Date() : ts,
           });
         }
-        // A short trade set is indistinguishable from a paging cut or a dropped malformed record,
-        // and booking it would mark the attempt terminal with money missing from the ledger — treat
-        // it as unknown instead: write nothing, let the next pass retry.
-        const collectedMicro = trades.reduce((sum, t) => sum + t.sizeMicro, 0n);
-        if (collectedMicro < matchedSharesMicro) return null;
+        // The collected set must account for EXACTLY what the exchange says matched. Short is the
+        // obvious hazard — a paging cut or a dropped malformed record would mark the attempt
+        // terminal with money missing from the ledger. But long is a hazard too, and the guard used
+        // to allow it: `associateTrades` and the taker-order-id filter can both name the same trade,
+        // and any duplicate row inflates the booked size above what actually matched — 100 shares
+        // reported, 200 booked, value invented on a money ledger. Either way write nothing and let
+        // the next pass retry; a stalled reconcile is recoverable, a wrong one is not.
+        // De-duplicate by trade id FIRST. A trade can be reached twice — once because its
+        // takerOrderId is ours and once because the order's `associateTrades` names it — and the
+        // paging loop above can also re-serve a row if the cursor overlaps. That duplication is the
+        // actual mechanism behind an inflated size; collapsing it is the fix, and the equality check
+        // below is then a genuine consistency assertion rather than a filter doing the real work.
+        const unique = [...new Map(trades.map((t) => [t.id, t])).values()];
+        const collectedMicro = unique.reduce((sum, t) => sum + t.sizeMicro, 0n);
+        if (collectedMicro !== matchedSharesMicro) return null;
+        trades.length = 0;
+        trades.push(...unique);
       }
       return { terminal, matchedSharesMicro, trades };
     } catch {

@@ -41,6 +41,9 @@ export type ChainProbe = { head: ChainHead; incoming: IncomingReader };
 const MAX_SCAN_BLOCKS = 9_000n;
 // ~1h of Polygon blocks: a deposit sent just before the user declared must still be attributable,
 // mirroring the existing min(live, previous FUNDED close) baseline rule (K3 S3 HIGH).
+// Used only for a FIRST-EVER attempt, which has no prior cursor to carry forward. Later attempts
+// continue from the previous one's scanBlock and are never floored to a recent block — flooring
+// skips blocks nobody scanned, i.e. deposits that then never arrive (see the funding route).
 const INITIAL_LOOKBACK_BLOCKS = 2_000n;
 
 // Check one funding attempt. Returns the transition taken.
@@ -110,20 +113,31 @@ export async function checkFundingAttempt(
 
   const refresh = { latestUsdceMicro: usdce, latestPusdMicro: pusd, lastCheckedAt: now, ...cursorData };
 
+  // Every write below is compare-and-swap on the cursor and state this pass actually read. Plain
+  // `update({ where: { id } })` is last-writer-wins, and the cursor only ever moves FORWARD in a
+  // correct pass — so a slower overlapping pass, having scanned a shorter window, could land after
+  // a faster one and rewind scanBlock and the accumulated totals to its own older values. The state
+  // would stay FUNDED (the plain refresh carries no state) while the cursor pointed back before the
+  // deposit that funded it, and the NEXT attempt, seeded from that rewound cursor, would re-scan the
+  // very same Transfer log and fund itself with no new money. Count 0 means someone else already
+  // advanced it: drop this pass's writes, the next tick re-reads. Today only the poller calls this
+  // and it is sequential, so the guard costs nothing and stops a second instance from being a
+  // double-credit bug rather than merely a duplicated poll.
+  const casWhere = { id: attempt.id, state: attempt.state, scanBlock: attempt.scanBlock };
+  const commit = async (data: Record<string, unknown>) =>
+    (await prisma.fundingAttempt.updateMany({ where: casWhere, data })).count > 0;
+
   // pUSD arrived → FUNDED. pUSD is the only "spendable" signal — the CLOB counts 0 on raw USDC.e.
   if (sawPusd) {
-    await prisma.fundingAttempt.update({
-      where: { id: attempt.id },
-      data: { ...refresh, state: "FUNDED", fundedAt: now },
-    });
+    if (!(await commit({ ...refresh, state: "FUNDED", fundedAt: now }))) return "none";
     return "funded";
   }
   // USDC.e arrived → DETECTED (wrap needed; §6.1 — our app owns the wrap step).
   if (sawUsdce && attempt.state === "AWAITING") {
-    await prisma.fundingAttempt.update({ where: { id: attempt.id }, data: { ...refresh, state: "DETECTED" } });
+    if (!(await commit({ ...refresh, state: "DETECTED" }))) return "none";
     return "detected";
   }
-  await prisma.fundingAttempt.update({ where: { id: attempt.id }, data: refresh });
+  if (!(await commit(refresh))) return "none";
 
   // Parked-deposit ops alert, once: this is exactly the §6.2 below-floor scenario — to the user it
   // looks like theft, so ops hears about it while the UI shows "check amount (≥$5) and address".

@@ -35,6 +35,18 @@ const lost = (id: string) =>
   assert.deepStrictEqual(plan.losses.map((l) => l.id), ["l1"]);
 }
 
+// 3b. An UNDECIDED market is neither a win nor a loss. `side === resolvedOutcome` is false against a
+// null outcome, so without the terminal guard this position would be booked as a loss and consumed
+// with no run — destroying a position the market has not settled. Covers both an OPEN row reaching
+// the planner and a RESOLVED row whose outcome has not been written yet.
+{
+  for (const status of ["OPEN", "RESOLVED"]) {
+    const plan = planRedeem([cand({ id: "u1", market: { status, resolvedOutcome: null, negRisk: false } })]);
+    assert.strictEqual(plan.bind, null, `${status} without an outcome never binds`);
+    assert.strictEqual(plan.losses.length, 0, `${status} without an outcome is NOT a loss`);
+  }
+}
+
 // 4. CANCELED is a PUSH: it binds even with a null resolvedOutcome (collateral returns).
 {
   const plan = planRedeem([cand({ id: "p1", market: { status: "CANCELED", resolvedOutcome: null, negRisk: false } })]);
