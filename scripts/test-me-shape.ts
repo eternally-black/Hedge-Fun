@@ -20,10 +20,14 @@ async function main() {
 
   const body = await (await me.GET(authed("http://x/api/me"))).json();
 
-  // Top-level key set must include the new Cash/Locked/topup fields + cosmetics (skins).
+  // Top-level key set must include the Cash/Locked/topup fields, cosmetics (skins) and the
+  // Paper/Real block the profile switch binds to.
   assert.deepStrictEqual(Object.keys(body).sort(),
-    ["artifacts","balanceCents","cashCents","dev","isNewUser","lockedCents","loginMarkedToday","points","referrals","shards","shardsPerArtifact","skins","skips","stakeCents","streak","swipes","topup","unreadResults","user"],
-    "/me top-level keys include cashCents/lockedCents/stakeCents/topup/skins");
+    ["artifacts","balanceCents","cashCents","dev","isNewUser","lockedCents","loginMarkedToday","points","real","referrals","shards","shardsPerArtifact","skins","skips","stakeCents","streak","swipes","topup","unreadResults","user"],
+    "/me top-level keys include cashCents/lockedCents/stakeCents/topup/skins/real");
+  assert.deepStrictEqual(Object.keys(body.real).sort(),
+    ["consentAt","consentVersion","depositWallet","mode","termsVersion"],
+    "/me real sub-keys");
   assert.deepStrictEqual(Object.keys(body.topup).sort(),
     ["artifactCashGateCents","artifactCost","artifactTopupAvailable","freeTopupAvailable","freeTopupUsed","grantCents"],
     "/me topup sub-keys");
