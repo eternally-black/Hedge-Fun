@@ -187,13 +187,31 @@ export async function POST(req: Request) {
   try {
     response = await postOrder(client)(signed as never); // 0.6.0: curried (client)(order)
   } catch (e) {
-    // Whether the CLOB accepted it is unknown — keep SUBMITTING for reconciliation, never
-    // silently retry with a fresh signature (plan §2.1 biggest-risk rule).
     await captureToGlitchTip(e, { route: "real/submit", stage: "post" });
+    const message = (e as Error).message;
+
+    // A REJECTION is not an ambiguity. When the exchange answers and refuses — geoblock, bad
+    // parameters, a rate limit — no order was created, so there is nothing to reconcile against and
+    // the attempt is terminal. Leaving it SUBMITTING instead was a real trap: reconcile scans filter
+    // on a non-null externalOrderId, so an attempt that never got one is invisible to them, and the
+    // partial unique index (one in-flight per user+market) then blocks that market for that user
+    // FOREVER. Three attempts were wedged exactly this way by Polymarket's regional block.
+    //
+    // Matched on the SDK's error NAME rather than instanceof: the class travels through a lazily
+    // imported barrel, and an identity check across module instances is the kind of thing that
+    // silently stops matching. Anything NOT on this list keeps the old behaviour — a timeout or a
+    // dropped connection genuinely does leave "did it arrive?" unanswered, and there the only safe
+    // answer is to stay SUBMITTING and never re-sign (plan §2.1 biggest-risk rule).
+    const REFUSED_BY_EXCHANGE = new Set(["RequestRejectedError", "UserInputError", "RateLimitError"]);
+    const terminal = REFUSED_BY_EXCHANGE.has((e as Error).name);
+
     await prisma.orderAttempt.updateMany({
       where: { id: attempt.id, state: "SUBMITTING" },
-      data: { error: `post failed: ${(e as Error).message}` },
+      data: terminal
+        ? { state: "FAILED", error: `post rejected: ${message}` }
+        : { error: `post failed: ${message}` },
     });
+    if (terminal) return NextResponse.json({ status: "failed", error: "post_rejected", detail: message }, { status: 409 });
     return NextResponse.json({ status: "submitting", error: "post_ambiguous" });
   }
 
