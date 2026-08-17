@@ -60,7 +60,36 @@ assert.strictEqual(q4.allInPriceBp, q4.vwapBp);
 assert.strictEqual(quoteBuyAllIn([], 10_000_000n, 700, 1000), null);
 assert.strictEqual(quoteBuyAllIn(flat, 0n, 700, 1000), null);
 
+// ---- 7b. feeOnTop (owner, 2026-08-17): the budget bounds the NOTIONAL and the fee rides on top.
+// The all-in reading shrank a $1 stake into a $0.96 order, and the exchange refuses anything under
+// its own $1 minimum for a marketable BUY — so the product's minimum stake was unbuyable.
+const t1 = quoteBuyAllIn(flat, 10_000_000n, 700, 1000, { feeOnTop: true });
+if (!t1) throw new Error("unreachable");
+assert.strictEqual(t1.spendMicro, 10_000_000n, "the whole budget becomes the ORDER");
+assert.strictEqual(t1.sharesMicro, 20_000_000n, "$10 / $0.50 = 20 shares, fee no longer competes for the budget");
+// The fee is the same convex per-share number, charged on the shares actually taken.
+assert.strictEqual(t1.feeMicro, (BigInt(feePerShareMicro(5000, 700, 1000)) * t1.sharesMicro) / 1_000_000n);
+assert.strictEqual(t1.feeMicro, 350_000n, "20 × $0.0175 = $0.35 on top");
+assert.ok(t1.spendMicro + t1.feeMicro > 10_000_000n, "the debit exceeds the budget — that is the point");
+assert.ok(q1.spendMicro < t1.spendMicro && q1.sharesMicro < t1.sharesMicro, "the all-in mode buys strictly less");
+// The card's number is unchanged in meaning: still (spend + fee) per share.
+assert.strictEqual(t1.allInPriceBp, 5175, "all-in price per share is still 51.75¢");
+assert.strictEqual(t1.vwapBp, 5000, "and the book price is still the book price");
+// The case that failed live: $1 in, $1 order out.
+const t2 = quoteBuyAllIn(flat, 1_000_000n, 700, 1000, { feeOnTop: true });
+const t3 = quoteBuyAllIn(flat, 1_000_000n, 700, 1000);
+if (!t2 || !t3) throw new Error("unreachable");
+assert.strictEqual(t2.spendMicro, 1_000_000n, "a $1 stake posts a $1 order — exactly the exchange minimum");
+assert.ok(t3.spendMicro < 1_000_000n, `the old mode posts under the minimum (${t3.spendMicro}) and is refused`);
+// With no fee there is nothing to move, so the two modes must agree exactly.
+const t4 = quoteBuyAllIn(flat, 10_000_000n, 0, 1000, { feeOnTop: true });
+if (!t4 || !q4) throw new Error("unreachable");
+assert.strictEqual(t4.spendMicro, q4.spendMicro, "zero fee: same spend");
+assert.strictEqual(t4.sharesMicro, q4.sharesMicro, "zero fee: same shares");
+assert.strictEqual(t4.feeMicro, 0n);
+
 console.log("OK: fee math pinned to the measured fill; all-in solver honors the cap, surfaces shortfalls");
+console.log("OK: feeOnTop puts the whole stake on the exchange and charges the fee above it");
 
 // ---- 8. Sell-side all-in: flat bid book, exact math.
 const sellFlat = [{ priceBp: 5000, size: 1000 }];

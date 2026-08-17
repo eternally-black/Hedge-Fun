@@ -99,12 +99,19 @@ export async function POST(req: Request) {
       ctx,
     );
   } else {
+    // The ceiling on makerAmount is the ORDER's own amount, not the debit cap. Since the fee moved
+    // on top of the stake (owner, 2026-08-17) the two differ: allInCapMicro is stake + fee, so
+    // validating against it would admit a signed order whose notional had eaten the fee headroom —
+    // and the exchange would then charge its fee on top of THAT, past the cap the user approved.
+    // Older attempts have no amountMicro and fall back to the cap, which is what they were quoted
+    // against.
+    const params = attempt.approvedParams as { amountMicro?: string } | null;
     err = validateSignedOrder(
       signed,
       {
         tokenId: attempt.tokenId,
         side: "BUY",
-        allInCapMicro: attempt.allInCapMicro,
+        allInCapMicro: params?.amountMicro ? BigInt(params.amountMicro) : attempt.allInCapMicro,
         maxPriceBp: attempt.maxPriceBp,
       },
       ctx,

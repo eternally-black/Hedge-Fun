@@ -220,7 +220,14 @@ export async function withdrawViaBridge(
 }
 
 type IntentParams =
-  | { side: "BUY"; tokenId: string; allInCapMicro: string; maxPriceBp: number; quote: { feeMicro: string } }
+  | {
+      side: "BUY";
+      tokenId: string;
+      allInCapMicro: string;
+      amountMicro: string;
+      maxPriceBp: number;
+      quote: { feeMicro: string };
+    }
   | { side: "SELL"; tokenId: string; sharesMicro: string; minPriceBp: number };
 
 // /api/real/intent REQUIRES a browser-side geo verdict (plan §2.7 — policy, not proof; Polymarket's
@@ -287,18 +294,19 @@ export async function placeRealOrder(
           tokenId: intent.params.tokenId,
           side: OrderSide.BUY,
           // Micro-USD → dollars. `amount` is FEE-EXCLUSIVE — the SDK's own words: "Leave [maxSpend]
-          // unset to pay fees on top of amount". Omitting maxSpend therefore debits more than the
-          // user approved and still passes the server's makerAmount check, so the cap must be in it.
-          // But the cap must NOT also be `amount`: the SDK's resize reserves the fee at the order's
-          // BOUND price, and the fee curve rate·(p(1−p))^exp PEAKS at p=0.5, so fills nearer the
-          // middle than the bound pay more than it reserved. Asks [0.50×50, 0.99×50] on a $60 stake
-          // bound at 0.99 reserve almost nothing and debit ~$60.85. `amount` is instead the server's
-          // OWN exact per-level quote — cap minus its quoted fee, which quoteBuyAllIn guarantees is
-          // exactly spendMicro — so the resize can only ever tighten it.
-          // CEILING: this does not fully close the gap. The exchange never sees maxSpend, and the
-          // fee is still charged at fill prices, so a fill far from the bound can still exceed the
-          // quote by the difference between the two fee points.
-          amount: Number(BigInt(intent.params.allInCapMicro) - BigInt(intent.params.quote.feeMicro)) / 1e6,
+          // unset to pay fees on top of amount" — and it is now the user's STAKE itself: the fee
+          // rides on top, out of the free balance (owner, 2026-08-17), because taking it out of the
+          // stake posted $0.96 on a $1 swipe and the exchange refuses anything under its own $1
+          // minimum. Both numbers come from the server: `amountMicro` is the order, `allInCapMicro`
+          // is the debit ceiling (stake + the worse of the two fee readings). Deriving `amount` here
+          // as cap-minus-fee, as this line used to, stops meaning "the stake" the moment those two
+          // readings differ.
+          // maxSpend still matters: the SDK's resize reserves the fee at the order's BOUND price
+          // and the curve rate·(p(1−p))^exp peaks at p=0.5, so without a ceiling a fill nearer the
+          // middle debits more than the user approved. CEILING, unchanged: the exchange never sees
+          // maxSpend, so the true charge can still differ from the quote by the gap between the two
+          // fee points — the cap is a client-side bound on what we will sign, not an exchange rule.
+          amount: Number(BigInt(intent.params.amountMicro)) / 1e6,
           maxSpend: Number(intent.params.allInCapMicro) / 1e6,
           maxPrice: (intent.params.maxPriceBp / 10_000).toFixed(4),
           ...builder,

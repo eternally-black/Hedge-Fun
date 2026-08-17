@@ -49,7 +49,11 @@ export interface SignedOrderWire {
 export interface IntentParams {
   tokenId: string;
   side: "BUY" | "SELL";
-  allInCapMicro: bigint; // the user's all-in debit cap — makerAmount must not exceed it (BUY)
+  // The ceiling on makerAmount, i.e. on the ORDER's own collateral. Under the fee-on-top rule
+  // (owner, 2026-08-17) that is the quoted amount, NOT the debit cap — the cap carries the fee too,
+  // and validating against it would let a signed order spend the fee headroom on notional and then
+  // be charged the fee on top of that, past what the user approved.
+  allInCapMicro: bigint;
   maxPriceBp: number; // marginal-ask bound, tick-rounded
 }
 
@@ -358,6 +362,18 @@ function fillLabel(cumulativeShares: bigint, requestedSharesMicro: bigint): "FIL
   return cumulativeShares >= requestedSharesMicro ? "FILLED" : "PARTIAL";
 }
 
+// What the user actually SWIPED, in cents. Since the platform fee moved on top of the stake
+// (owner, 2026-08-17) `allInCapMicro` is the debit CEILING — stake + fee — so reading the stake off
+// it would show a $1 swipe as $1.04 everywhere the position is displayed. The intent stores the
+// chosen number; the cap is the fallback for rows written before the change, where the two were
+// the same thing by definition.
+function swipedStakeCents(attempt: OrderAttempt): number {
+  const p = attempt.approvedParams as { stakeCents?: unknown } | null;
+  return typeof p?.stakeCents === "number" && p.stakeCents > 0
+    ? p.stakeCents
+    : Number(attempt.allInCapMicro / 10_000n);
+}
+
 // Book fills for an ENTRY attempt: Fill rows (idempotent on externalFillId), the REAL Bet
 // aggregate (created ON FILL — a zero-fill leaves no position and frees the slot, plan §2.1),
 // and the paper-game participation per owner decision Q1 (point + swipe counter AT FILL TIME;
@@ -474,7 +490,7 @@ export async function bookEntryFills(
         userId: attempt.userId,
         marketId: attempt.marketId,
         side: betSide,
-        stakeCents: Number(attempt.allInCapMicro / 10_000n), // micro-USD → cents
+        stakeCents: swipedStakeCents(attempt),
         lockedPriceBp: vwapBp,
         utcDay,
         mode: "REAL",
@@ -490,7 +506,7 @@ export async function bookEntryFills(
             // bought. The close-side counters go back to zero or the next EXIT would think part of
             // this lot is already sold.
             side: betSide,
-            stakeCents: Number(attempt.allInCapMicro / 10_000n),
+            stakeCents: swipedStakeCents(attempt),
             utcDay,
             // New lot, new number. Every attempt stamps the lot it booked into, so a late fee
             // true-up for the PREVIOUS lot can tell that the counters it wants to prorate against

@@ -13,8 +13,15 @@ import { captureToGlitchTip } from "@/lib/glitchtip";
 import { getMarketFee } from "@/lib/fees";
 import { getBook } from "@/lib/clob";
 import { quoteMovedAgainstUser } from "@/lib/depth";
-import { quoteBuyAllIn, quoteSellAllIn } from "@/lib/quote";
-import { REAL_MIN_STAKE_CENTS, REAL_MAX_STAKE_CENTS, SWIPE_CAP, DECK_MIN_LEAD_MS, BOOK_MAX_STALE_MS } from "@/lib/config";
+import { quoteBuyAllIn, quoteSellAllIn, feePerShareMicro } from "@/lib/quote";
+import {
+  REAL_MIN_STAKE_CENTS,
+  REAL_MAX_STAKE_CENTS,
+  REAL_MIN_ORDER_MICRO,
+  SWIPE_CAP,
+  DECK_MIN_LEAD_MS,
+  BOOK_MAX_STALE_MS,
+} from "@/lib/config";
 
 export async function POST(req: Request) {
   const user = await authUser(req);
@@ -131,7 +138,11 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "bad_stake" }, { status: 400 });
     }
     const budgetMicro = BigInt(stake) * 10_000n; // cents → micro-USD
-    const q = quoteBuyAllIn(book.asks, budgetMicro, fee.rateBp, fee.expMilli);
+    // feeOnTop (owner, 2026-08-17): the stake is what the ORDER is worth, and the platform fee is
+    // paid on top of it out of the free balance. The old all-in reading made a $1 swipe post a
+    // $0.96 order, which the exchange refuses outright — its own minimum for a marketable BUY is
+    // $1, so the product's minimum stake was unbuyable by construction.
+    const q = quoteBuyAllIn(book.asks, budgetMicro, fee.rateBp, fee.expMilli, { feeOnTop: true });
     if (!q) return NextResponse.json({ error: "no_liquidity" }, { status: 409 });
 
     // Seen-vs-executed, the same rule /api/swipe and /api/feed/bet apply to PAPER stakes — the real
@@ -154,6 +165,18 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "price_moved", freshPriceBp: q.vwapBp }, { status: 409 });
     }
 
+    // The exchange's DOLLAR minimum on a marketable BUY, checked on the amount we are about to ask
+    // a device to sign. With the fee on top the walk normally spends the whole stake, so this only
+    // fires when the book itself cannot absorb it (a ladder that runs out leaves the notional
+    // short). Refusing here costs a 409; not refusing costs a device prompt, a claimed market slot
+    // and a rejection from the exchange — which is exactly what happened live on 2026-08-17.
+    if (q.spendMicro < REAL_MIN_ORDER_MICRO) {
+      return NextResponse.json(
+        { error: "stake_too_small", minOrderMicro: REAL_MIN_ORDER_MICRO.toString(), orderMicro: q.spendMicro.toString() },
+        { status: 409 },
+      );
+    }
+
     // NO share-minimum gate on a BUY. Books advertise min_order_size 5 uniformly, but Polymarket's
     // own ticket fills a $1 market buy on a 99.7c side (~1.003 shares), so that field does not bind
     // a taker buy — enforcing it here would reject a $1 stake on most of a contested deck, which is
@@ -172,14 +195,29 @@ export async function POST(req: Request) {
     // maxPrice = MARGINAL ask (never VWAP), tick-rounded UP for a BUY (rounding down makes the
     // protection unfillable — trap list), clamped inside [tick, 1-tick].
     maxPriceBp = Math.min(Math.ceil(q.marginalAskBp / tickBp) * tickBp, 10_000 - tickBp);
-    allInCapMicro = budgetMicro;
+
+    // The debit ceiling is now stake + fee, and the fee it carries is the WORST of two readings:
+    // our own per-level quote, and the fee at the bound price. The SDK reserves the fee at the
+    // order's bound when it honours maxSpend, and the fee curve peaks at p=0.5, so a bound reading
+    // can exceed our per-level one — with the cap set to the smaller number the SDK would shrink
+    // `amount` to fit, pushing the order back under the exchange's $1 minimum and re-creating the
+    // very refusal this change removes. Taking the max costs the user nothing they can actually be
+    // charged (the exchange charges the fee it charges) and keeps the cap a true ceiling.
+    const feeAtBoundMicro =
+      (BigInt(feePerShareMicro(maxPriceBp, fee.rateBp, fee.expMilli)) * q.sharesMicro + 999_999n) / 1_000_000n;
+    const capFeeMicro = feeAtBoundMicro > q.feeMicro ? feeAtBoundMicro : q.feeMicro;
+    allInCapMicro = q.spendMicro + capFeeMicro;
 
     approvedParams = {
       side: "BUY",
       tokenId,
       betSide: side,
       stakeCents: stake,
-      allInCapMicro: budgetMicro.toString(),
+      allInCapMicro: allInCapMicro.toString(),
+      // The order's OWN amount, stated by the server rather than re-derived by the client from
+      // cap-minus-fee: with two different fee readings in play (quote vs bound) that subtraction
+      // silently stopped meaning "the stake".
+      amountMicro: q.spendMicro.toString(),
       sharesMicro: q.sharesMicro.toString(),
       maxPriceBp,
       feeRateBp: fee.rateBp,

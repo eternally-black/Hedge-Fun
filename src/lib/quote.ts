@@ -194,14 +194,24 @@ export interface AllInQuote {
   exhaustedBook: boolean; // the ladder ran out before the budget did
 }
 
-// Walk `asks` spending at most `budgetMicro` ALL-IN (notional + fee). The user's stake is the
-// all-in debit cap (owner rule: the card shows what they actually pay); shares are the derived
-// quantity. Returns null when nothing is buyable.
+// Walk `asks` spending at most `budgetMicro`; shares are the derived quantity. Returns null when
+// nothing is buyable. What the budget BOUNDS depends on the mode:
+//   - feeOnTop absent/false: the budget is the ALL-IN debit cap (notional + fee) — the original
+//     owner rule, where a $1 swipe puts a $0.96 order on the exchange and the fee comes out of the
+//     same dollar.
+//   - feeOnTop true: the budget bounds the NOTIONAL only. A $1 swipe puts a $1 ORDER up and the
+//     platform fee is paid on top, out of the free balance (owner decision 2026-08-17, reversing
+//     the rule above). It exists because the exchange refused the old shape live: "invalid amount
+//     for a marketable BUY order ($0.96), min size: 1" — the fee-shrunk order fell under
+//     Polymarket's own $1 minimum, so the product's minimum stake was unbuyable by construction.
+// The fee accumulates per level identically in both modes, so feeMicro is the same convex number
+// for the shares actually taken.
 export function quoteBuyAllIn(
   asks: BookLevel[],
   budgetMicro: bigint,
   feeRateBp: number,
   feeExpMilli: number,
+  opts?: { feeOnTop?: boolean },
 ): AllInQuote | null {
   const ladder = normalizeAsks(asks);
   if (ladder.length === 0 || budgetMicro <= 0n) return null;
@@ -219,7 +229,9 @@ export function quoteBuyAllIn(
   for (const l of ladder) {
     const p = l.priceBp / 10_000;
     const fps = feePerShareExact(l.priceBp, feeRateBp, feeExpMilli); // unrounded — ceil ONCE at the end
-    const costPerShare = p + fps;
+    // What a share costs AGAINST THE BUDGET. feeOnTop puts the fee outside the budget, so only the
+    // notional competes for it; the fee is still accumulated below, it just does not shrink the order.
+    const costPerShare = opts?.feeOnTop ? p : p + fps;
     const affordable = remaining / costPerShare;
     const take = Math.min(l.size, affordable);
     // Sub-micro-share takes are not representable: taking one would move marginalAsk (and thus
@@ -244,8 +256,10 @@ export function quoteBuyAllIn(
   let spendMicro = ceilEps(spend * 1_000_000);
   const feeMicro = ceilEps(fee * 1_000_000); // the single aggregate-boundary ceil (Sol S5 #2)
   // Rounding both halves UP can overshoot an exactly-exhausted budget by micro-dollar dust; the
-  // cap is the binding contract (it becomes the order's maxSpend), so the dust comes off notional.
-  const over = spendMicro + feeMicro - Number(budgetMicro);
+  // budget is the binding contract, so the dust comes off notional. WHICH sum overshoots depends on
+  // the mode: all-in bounds spend+fee, feeOnTop bounds the notional alone and must NOT shave the
+  // fee into the order (that is exactly the shrink this mode exists to stop).
+  const over = opts?.feeOnTop ? spendMicro - Number(budgetMicro) : spendMicro + feeMicro - Number(budgetMicro);
   if (over > 0) spendMicro -= over;
   // Prices derive from the INTEGER outputs so every returned field describes the same transaction
   // (float-derived prices next to integer amounts drifted on degenerate inputs; Sol S5 #5).
@@ -258,7 +272,10 @@ export function quoteBuyAllIn(
     allInPriceBp: ceilDiv((BigInt(spendMicro) + BigInt(feeMicro)) * 10_000n, sharesMicro),
     marginalAskBp,
     // True only when the LADDER ran out with budget left — exact simultaneous exhaustion is a
-    // full fill, not a liquidity shortfall (Sol S5 #10).
+    // full fill, not a liquidity shortfall (Sol S5 #10). `remaining` carries the budget's own
+    // units (all-in dollars, or notional under feeOnTop), and one micro-share of NOTIONAL at the
+    // marginal price is the right threshold either way — the fee on a single micro-share is
+    // sub-micro-dollar, i.e. below the resolution of every integer this function returns.
     exhaustedBook: bookRanOut && remaining > (MICRO_SHARE * marginalAskBp) / 10_000,
   };
 }

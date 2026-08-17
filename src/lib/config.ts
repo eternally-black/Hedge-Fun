@@ -19,6 +19,13 @@ export const DEPOSIT_FLOOR_USD = 5;
 // slightly fewer than stake/price. Paper keeps its own fixed STAKE_CENTS above; the two are
 // deliberately separate numbers because one is a game rule and the other is somebody's money.
 export const REAL_MIN_STAKE_CENTS = 100; // $1.00 floor — Polymarket takes a $1 market buy at any price
+// The exchange's OWN floor on a marketable BUY, in micro-USD, and it applies to the order's own
+// amount — not to what the user set aside. Learned from a live refusal on 2026-08-17: a $1 stake
+// with the fee taken out of it posted $0.96 and came back "invalid amount for a marketable BUY
+// order ($0.96), min size: 1". The fee now rides on top of the stake, so the order is the whole
+// dollar; this constant is the belt that stops a thin book (which can leave the walk short of the
+// stake) from sending an unpostable amount to a device that has to sign it first.
+export const REAL_MIN_ORDER_MICRO = 1_000_000n;
 export const REAL_MAX_STAKE_CENTS = 100_000; // $1,000 — a fat-finger bound, not a policy limit
 export const REAL_DEFAULT_STAKE_CENTS = 100; // $1.00
 // The quick choices in the stake sheet. They SET the amount rather than adding to it — four values
