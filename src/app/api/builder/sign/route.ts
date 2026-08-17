@@ -11,7 +11,7 @@
 // post orders for an account this session does not own (S9 review, both reviewers).
 import { NextResponse } from "next/server";
 import { buildHmacSignature } from "@polymarket/client";
-import { authUser } from "@/lib/privy";
+import { authUser, syncEmbeddedWallet } from "@/lib/privy";
 import { isRealMoneyEligible, hasRealConsent, sameOrigin } from "@/lib/real";
 import { captureToGlitchTip } from "@/lib/glitchtip";
 
@@ -97,8 +97,23 @@ export async function POST(req: Request) {
     if (route === "/submit") {
       // Relayer envelope: `from` is the EOA that signed it; deposit-wallet batches also name the
       // wallet they execute on. Both must be this user's.
+      //
+      // The column is NULL for every account created before it existed, and the ONLY thing that
+      // backfills it is /api/real/wallet — which provisionReal does not call until AFTER
+      // deployDepositWallet has already come through here. So the very first real-money action an
+      // existing user takes refused itself as not_your_wallet, which is what "Set up failed" was.
+      // Backfilled here rather than in authUser because this route also serves every CLOB read
+      // (240/min); gating the sync on NULL keeps it to one Privy call, once, per legacy account.
+      let signerAddress = user.embeddedWalletAddress;
+      if (!signerAddress) {
+        try {
+          signerAddress = await syncEmbeddedWallet(user);
+        } catch {
+          return refuse(); // address already bound to another account — never sign for it
+        }
+      }
       const envelope = asRecord(parsed);
-      if (!envelope || !sameAddress(envelope.from, user.embeddedWalletAddress)) return refuse();
+      if (!envelope || !sameAddress(envelope.from, signerAddress)) return refuse();
       const wallet = asRecord(envelope.depositWalletParams)?.depositWallet;
       if (wallet !== undefined && !sameAddress(wallet, user.depositWalletAddress)) return refuse();
     } else if (route === "/order" || route === "/orders") {
