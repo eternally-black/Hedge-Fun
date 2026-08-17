@@ -2,7 +2,7 @@
 
 import { useCallback, useState } from "react";
 import { type Me, usd } from "../ui";
-import { usePredictionHistory } from "./usePredictionHistory";
+import { usePredictionHistory, useClosePosition } from "./usePredictionHistory";
 import { HistoryRow } from "./HistoryRow";
 import { RealDepositPanel } from "./RealDepositPanel";
 
@@ -20,7 +20,8 @@ export function BalanceSheet({ me, api, realPusdMicro, onClose, onTopupDone, onT
   onToast: (msg: string) => void;
   realPusdMicro?: string | null;
 }) {
-  const { rows, pending, nowMs } = usePredictionHistory(api);
+  const { rows, pending, nowMs, refresh } = usePredictionHistory(api);
+  const { close, closing } = useClosePosition(api, me, onToast, refresh);
   const [busy, setBusy] = useState(false);
 
   const doTopup = useCallback(async (kind: "free" | "artifact") => {
@@ -90,7 +91,7 @@ export function BalanceSheet({ me, api, realPusdMicro, onClose, onTopupDone, onT
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {rows.map((r) => (
-              <HistoryRow key={r.id} row={r} nowMs={nowMs} />
+              <HistoryRow key={r.id} row={r} nowMs={nowMs} onClosePosition={close} closing={closing === r.id} />
             ))}
           </div>
         )}

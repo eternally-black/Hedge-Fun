@@ -175,6 +175,7 @@ export interface LoginMarkResponse {
 // Auth: Bearer. The user's bets + market info. PENDING first, then settled by recency.
 export interface HistoryRow {
   id: string;
+  marketId: string; // an EXIT is placed against the market — the sheet's Close button needs it
   question: string;
   sideLabel: string; // the label of the side the user bet (team / Over / Up / Yes)
   side: BetSide; // drives badge color
@@ -184,6 +185,9 @@ export interface HistoryRow {
   pnlCents: number | null; // null while PENDING
   resolutionDeadline: string; // ISO-8601
   createdAt: string; // ISO-8601
+  // REAL positions only: there is a remainder the signer can actually sell (it works in 4-decimal
+  // shares, so a sub-tick remnant is unsellable and must not be offered as closable).
+  closable?: boolean;
 }
 export interface HistoryResponse {
   rows: HistoryRow[];

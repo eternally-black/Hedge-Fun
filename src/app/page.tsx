@@ -606,7 +606,7 @@ function App() {
           onToast={flashToast}
         />
       )}
-      {historyOpen && <HistorySheet api={api} onClose={closeHistory} />}
+      {historyOpen && <HistorySheet me={me} api={api} onClose={closeHistory} onToast={flashToast} />}
       {balanceOpen && <BalanceSheet me={me} api={api} realPusdMicro={realPusdMicro} onClose={closeBalance} onTopupDone={refreshMe} onToast={flashToast} />}
       <Hud me={me} pop={pop} realPusdMicro={realPusdMicro} onShards={goVault} onGM={goGmScreen} onBalance={openBalance} onBell={goNotifs} />
 

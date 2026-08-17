@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 import type { HistoryResponse } from "@/lib/api-types";
+import { SHARE_TICK_MICRO } from "@/lib/config";
 
 // Prediction history: the user's bets joined with market info. PENDING (awaiting resolution)
 // first, then most-recently-settled. Returns the REAL side label the user picked (team/Over/Up/
@@ -21,6 +22,7 @@ export async function GET(req: Request) {
     take: 100,
     select: {
       id: true,
+      marketId: true, // the EXIT intent is placed against the market, not the bet
       side: true,
       stakeCents: true,
       lockedPriceBp: true,
@@ -57,8 +59,15 @@ export async function GET(req: Request) {
           ? "LOSS"
           : "PUSH";
 
+    // Can the user close this from the history sheet? Only a REAL position with something the
+    // signer can actually sell: it works in 4-decimal shares, so a sub-tick remnant is unsellable
+    // by construction and offering a button for it would produce nothing but a refusal.
+    const closable = mode === "REAL" && remainder >= SHARE_TICK_MICRO;
+
     return {
     id: b.id,
+    marketId: b.marketId,
+    closable,
     question: b.market.question,
     // The label of the side the user actually bet (YES = side A label, NO = side B label).
     sideLabel: b.side === "YES" ? b.market.outcomeYesLabel : b.market.outcomeNoLabel,

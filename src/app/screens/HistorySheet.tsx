@@ -1,6 +1,7 @@
 "use client";
 
-import { usePredictionHistory } from "./usePredictionHistory";
+import type { Me } from "../ui";
+import { usePredictionHistory, useClosePosition } from "./usePredictionHistory";
 import { HistoryRow } from "./HistoryRow";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
@@ -9,8 +10,9 @@ type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 // open predictions (PENDING, awaiting resolution) first, then settled ones with P&L. Reads
 // /api/history (via usePredictionHistory — shared with BalanceSheet). Visual matches the design's
 // history rows.
-export function HistorySheet({ api, onClose }: { api: Api; onClose: () => void }) {
-  const { rows, pending, nowMs } = usePredictionHistory(api);
+export function HistorySheet({ me, api, onClose, onToast }: { me: Me | null; api: Api; onClose: () => void; onToast: (msg: string) => void }) {
+  const { rows, pending, nowMs, refresh } = usePredictionHistory(api);
+  const { close, closing } = useClosePosition(api, me, onToast, refresh);
 
   return (
     // Backdrop is a real button: click/Enter/Escape closes (matches the overlay-click-to-close).
@@ -42,7 +44,7 @@ export function HistorySheet({ api, onClose }: { api: Api; onClose: () => void }
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {rows.map((r) => (
-              <HistoryRow key={r.id} row={r} nowMs={nowMs} />
+              <HistoryRow key={r.id} row={r} nowMs={nowMs} onClosePosition={close} closing={closing === r.id} />
             ))}
           </div>
         )}

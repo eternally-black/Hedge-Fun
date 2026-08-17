@@ -1,12 +1,28 @@
 "use client";
 
+import { useState } from "react";
 import { cents, usd, countdown } from "../ui";
 import type { HistoryRowData } from "./usePredictionHistory";
 
 // One prediction-history row. Was verbatim-duplicated in HistorySheet + BalanceSheet; extracted to a
 // single shared component (visuals unchanged). Right column: status + delta — PENDING shows the live
 // countdown (or "Awaiting result" once the deadline passes); settled shows WON/LOST/PUSH + P&L.
-export function HistoryRow({ row, nowMs }: { row: HistoryRowData; nowMs: number }) {
+export function HistoryRow({
+  row,
+  nowMs,
+  onClosePosition,
+  closing,
+}: {
+  row: HistoryRowData;
+  nowMs: number;
+  // Present only where a REAL position can be sold (the two history sheets). Absent = display only.
+  onClosePosition?: (row: HistoryRowData) => void | Promise<void>;
+  closing?: boolean;
+}) {
+  // Two taps, not one. A swipe is a deliberate gesture and spends without confirmation by design;
+  // a button in a list is not, and this one sells a position at market. The arm resets itself so a
+  // half-pressed row does not sit primed under someone's thumb.
+  const [armed, setArmed] = useState(false);
   const sideColor = row.side === "YES" ? "var(--yes)" : "var(--no)";
   const sideBg = row.side === "YES" ? "color-mix(in srgb,var(--yes) 18%,transparent)" : "color-mix(in srgb,var(--no) 18%,transparent)";
 
@@ -54,6 +70,41 @@ export function HistoryRow({ row, nowMs }: { row: HistoryRowData; nowMs: number 
         <div style={{ fontSize: 11, fontWeight: 700, color: statusColor, textTransform: "uppercase" }}>{statusText}</div>
         <div style={{ fontFamily: "var(--nf)", fontSize: 12, color: statusColor }}>{delta}</div>
       </div>
+      {/* Selling out is the other half of owning a position, and until now it existed only in the
+          developer console — the app showed a real position with no way to leave it. */}
+      {onClosePosition && row.closable ? (
+        <button
+          type="button"
+          disabled={closing}
+          onClick={() => {
+            if (closing) return;
+            if (!armed) {
+              setArmed(true);
+              window.setTimeout(() => setArmed(false), 4000);
+              return;
+            }
+            setArmed(false);
+            void onClosePosition(row);
+          }}
+          style={{
+            margin: 0,
+            font: "inherit",
+            flexShrink: 0,
+            padding: "7px 10px",
+            borderRadius: 10,
+            background: armed ? "var(--gold)" : "transparent",
+            color: armed ? "#1a1205" : "var(--muted)",
+            border: "1px solid " + (armed ? "var(--gold)" : "var(--line)"),
+            fontWeight: 700,
+            fontSize: 11,
+            cursor: closing ? "default" : "pointer",
+            opacity: closing ? 0.5 : 1,
+            whiteSpace: "nowrap",
+          }}
+        >
+          {closing ? "Selling…" : armed ? "Sell now?" : "Close"}
+        </button>
+      ) : null}
     </div>
   );
 }
