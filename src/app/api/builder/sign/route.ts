@@ -27,6 +27,15 @@ const ALLOWED_POST_PATHS = new Set(["/submit", "/order", "/orders", "/auth/api-k
 // wide, and a wrong refusal breaks the console — Gate-0 supplies the evidence to make it strict.
 const DENIED_GET_PATHS = new Set(["/auth/builder-api-key", "/auth/api-keys"]);
 
+// Every refusal, in the log, always. The only reporter this route had was GlitchTip, which returns
+// immediately when SENTRY_DSN is unset — so a 403 here was invisible on the server and showed up in
+// the browser as a bare "Remote signer rejected request with status 403" with no way to tell WHICH
+// of the five refusals fired. Addresses are public on-chain identifiers, not secrets, and this is
+// the one place that can say why we would not sign.
+function refused(reason: string, detail: Record<string, unknown>): void {
+  console.warn(`[builder/sign] refused ${reason}`, JSON.stringify(detail));
+}
+
 const sameAddress = (value: unknown, expected: string | null | undefined) =>
   typeof value === "string" && typeof expected === "string" && value.toLowerCase() === expected.toLowerCase();
 
@@ -36,9 +45,18 @@ const asRecord = (v: unknown): Record<string, unknown> | null =>
 export async function POST(req: Request) {
   const user = await authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  if (!isRealMoneyEligible(user)) return NextResponse.json({ error: "real_disabled" }, { status: 403 });
-  if (!hasRealConsent(user)) return NextResponse.json({ error: "consent_required" }, { status: 403 });
-  if (!sameOrigin(req)) return NextResponse.json({ error: "bad_origin" }, { status: 403 });
+  if (!isRealMoneyEligible(user)) {
+    refused("real_disabled", { userId: user.id });
+    return NextResponse.json({ error: "real_disabled" }, { status: 403 });
+  }
+  if (!hasRealConsent(user)) {
+    refused("consent_required", { userId: user.id });
+    return NextResponse.json({ error: "consent_required" }, { status: 403 });
+  }
+  if (!sameOrigin(req)) {
+    refused("bad_origin", { origin: req.headers.get("origin"), expected: process.env.APP_ORIGIN });
+    return NextResponse.json({ error: "bad_origin" }, { status: 403 });
+  }
 
   let raw: unknown;
   try {
@@ -76,6 +94,7 @@ export async function POST(req: Request) {
       path: route,
       userId: user.id,
     });
+    refused("path_not_allowed", { verb, route });
     return NextResponse.json({ error: "path_not_allowed" }, { status: 403 });
   }
 
@@ -85,13 +104,20 @@ export async function POST(req: Request) {
   // L1-authed, so it already binds to the signer's own address.
   if (verb === "POST" && route !== "/auth/api-key") {
     let parsed: unknown;
-    if (typeof body !== "string") return NextResponse.json({ error: "unbound_body" }, { status: 400 });
+    if (typeof body !== "string") {
+      refused("unbound_body", { route, reason: "no body" });
+      return NextResponse.json({ error: "unbound_body" }, { status: 400 });
+    }
     try {
       parsed = JSON.parse(body);
     } catch {
+      refused("unbound_body", { route, reason: "not json" });
       return NextResponse.json({ error: "unbound_body" }, { status: 400 });
     }
-    const refuse = () => NextResponse.json({ error: "not_your_wallet" }, { status: 403 });
+    const refuse = (detail: Record<string, unknown>) => {
+      refused("not_your_wallet", { route, ...detail });
+      return NextResponse.json({ error: "not_your_wallet" }, { status: 403 });
+    };
 
     if (route === "/submit") {
       // Relayer envelope: `from` is the EOA that signed it; deposit-wallet batches also name the
@@ -108,21 +134,36 @@ export async function POST(req: Request) {
         try {
           signerAddress = await syncEmbeddedWallet(user);
         } catch {
-          return refuse(); // address already bound to another account — never sign for it
+          // address already bound to another account — never sign for it
+          return refuse({ field: "signer", reason: "wallet sync failed" });
         }
       }
       const envelope = asRecord(parsed);
-      if (!envelope || !sameAddress(envelope.from, signerAddress)) return refuse();
+      if (!envelope || !sameAddress(envelope.from, signerAddress)) {
+        return refuse({ field: "from", got: envelope?.from ?? null, expected: signerAddress });
+      }
       const wallet = asRecord(envelope.depositWalletParams)?.depositWallet;
-      if (wallet !== undefined && !sameAddress(wallet, user.depositWalletAddress)) return refuse();
+      if (wallet !== undefined && !sameAddress(wallet, user.depositWalletAddress)) {
+        return refuse({ field: "depositWallet", got: wallet, expected: user.depositWalletAddress });
+      }
     } else if (route === "/order" || route === "/orders") {
       // `{deferExec, order}` for one, an array of those for a batch. The maker is the funding
       // account, so binding it stops a session from trading for anyone else under our attribution.
       const payloads = route === "/orders" ? parsed : [parsed];
-      if (!Array.isArray(payloads)) return refuse();
+      if (!Array.isArray(payloads)) return refuse({ field: "payloads", got: typeof parsed });
       for (const entry of payloads) {
         const order = asRecord(asRecord(entry)?.order);
-        if (!order || !sameAddress(order.maker, user.depositWalletAddress)) return refuse();
+        if (!order || !sameAddress(order.maker, user.depositWalletAddress)) {
+          // `keys` is here because the binding depends on the SDK calling this field `maker`; if a
+          // version renames it (signer/funder), the refusal is indistinguishable from a genuine
+          // mismatch without seeing what the payload actually contained.
+          return refuse({
+            field: "maker",
+            got: order?.maker ?? null,
+            expected: user.depositWalletAddress,
+            keys: order ? Object.keys(order) : null,
+          });
+        }
       }
     }
   }
