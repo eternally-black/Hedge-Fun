@@ -31,11 +31,12 @@ const LABEL = {
 } as const;
 const MUTED = { fontSize: 12, color: "var(--muted)" } as const;
 
-export function RealModeCard({ me, api, onRefresh, onToast }: {
+export function RealModeCard({ me, api, onRefresh, onToast, onFunded }: {
   me: Me | null;
   api: Api;
   onRefresh: () => Promise<void>;
   onToast: (msg: string) => void;
+  onFunded: () => void | Promise<void>;
 }) {
   const [noticeOpen, setNoticeOpen] = useState(false);
   const [depositOpen, setDepositOpen] = useState(false);
@@ -213,7 +214,7 @@ export function RealModeCard({ me, api, onRefresh, onToast }: {
         <ConsentModal busy={busy} error={error} onAccept={accept} onClose={() => setNoticeOpen(false)} />
       ) : null}
       {depositOpen ? (
-        <DepositSheet api={api} onClose={() => setDepositOpen(false)} onToast={onToast} />
+        <DepositSheet api={api} onClose={() => setDepositOpen(false)} onToast={onToast} onFunded={onFunded} />
       ) : null}
     </>
   );

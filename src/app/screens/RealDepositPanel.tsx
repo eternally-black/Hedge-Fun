@@ -15,11 +15,12 @@ type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
 const MUTED = { fontSize: 12, color: "var(--muted)" } as const;
 
-export function RealDepositPanel({ me, api, pusdMicro, onToast }: {
+export function RealDepositPanel({ me, api, pusdMicro, onToast, onFunded }: {
   me: Me | null;
   api: Api;
   pusdMicro: string | null;
   onToast: (m: string) => void;
+  onFunded: () => void | Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
   const wallet = me?.real.depositWallet ?? null;
@@ -60,7 +61,7 @@ export function RealDepositPanel({ me, api, pusdMicro, onToast }: {
         </button>
       )}
 
-      {open ? <DepositSheet api={api} onClose={() => setOpen(false)} onToast={onToast} /> : null}
+      {open ? <DepositSheet api={api} onClose={() => setOpen(false)} onToast={onToast} onFunded={onFunded} /> : null}
     </div>
   );
 }

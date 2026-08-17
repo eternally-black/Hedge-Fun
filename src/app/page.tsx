@@ -134,6 +134,17 @@ function App() {
   useEffect(() => {
     if (!realMode) { setRealPusdMicro(null); return; }
     void refreshRealBalance();
+    // Re-read when the tab comes back, and nothing in between. This is the cheap half of keeping the
+    // balance honest: no timer runs while someone plays, but coming back from a wallet or an
+    // exchange — which is exactly how a deposit gets made — lands on a fresh number instead of a
+    // stale one that only a manual reload would fix. The DepositSheet owns the attentive watch.
+    const onVis = () => { if (!document.hidden) void refreshRealBalance(); };
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("focus", onVis);
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("focus", onVis);
+    };
   }, [realMode, refreshRealBalance]);
   const ritualDone = useRef(false); // run the auth→reveal→gm sequence once per load, not on every refresh
   const topping = useRef(false);
@@ -563,7 +574,7 @@ function App() {
         />
       )}
       {historyOpen && <HistorySheet api={api} onClose={closeHistory} />}
-      {balanceOpen && <BalanceSheet me={me} api={api} realPusdMicro={realPusdMicro} onClose={closeBalance} onTopupDone={refreshMe} onToast={flashToast} />}
+      {balanceOpen && <BalanceSheet me={me} api={api} realPusdMicro={realPusdMicro} onClose={closeBalance} onTopupDone={refreshMe} onToast={flashToast} onFunded={refreshRealBalance} />}
       <Hud me={me} pop={pop} realPusdMicro={realPusdMicro} onShards={goVault} onGM={goGmScreen} onBalance={openBalance} onBell={goNotifs} />
 
       <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
@@ -630,7 +641,7 @@ function App() {
         {effectiveScreen === "gm" && <GmScreen me={me} busy={busy} onGM={gm} onEnterDeck={goDeck} onRevive={revive} />}
         {effectiveScreen === "vault" && <VaultScreen me={me} api={api} onRefresh={refresh} previewCard={top ?? next} />}
         {effectiveScreen === "invite" && <InviteScreen me={me} />}
-        {effectiveScreen === "you" && <ProfileScreen me={me} api={api} onRefresh={refresh} onHistory={openHistory} onLogout={doLogout} onToast={flashToast} />}
+        {effectiveScreen === "you" && <ProfileScreen me={me} api={api} onRefresh={refresh} onHistory={openHistory} onLogout={doLogout} onToast={flashToast} onFunded={refreshRealBalance} />}
         {effectiveScreen === "notifications" && <NotificationsScreen api={api} onSeen={markResultsSeen} onReplay={replayReveal} />}
       </div>
 

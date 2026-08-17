@@ -23,6 +23,13 @@ export type DepositChain = {
   stables: string[];
 };
 
+// Deposit-watch cadence. Bounded on purpose: this is a real RPC read each time, and a sheet left
+// open on a forgotten tab must not keep asking the chain about a deposit nobody is sending.
+const WATCH_FAST_MS = 4_000;
+const WATCH_FAST_FOR_MS = 3 * 60_000;
+const WATCH_SLOW_MS = 20_000;
+const WATCH_STOP_MS = 15 * 60_000;
+
 const MUTED = { fontSize: 12, color: "var(--muted)" } as const;
 const CAPS = {
   fontSize: 10,
@@ -32,15 +39,17 @@ const CAPS = {
   fontWeight: 700,
 } as const;
 
-export function DepositSheet({ api, onClose, onToast }: {
+export function DepositSheet({ api, onClose, onToast, onFunded }: {
   api: Api;
   onClose: () => void;
   onToast: (msg: string) => void;
+  onFunded?: () => void | Promise<void>;
 }) {
   const [host, setHost] = useState<HTMLElement | null>(null);
   const [chains, setChains] = useState<DepositChain[] | null>(null);
   const [picked, setPicked] = useState<DepositChain | null>(null);
   const [failed, setFailed] = useState(false);
+  const [landed, setLanded] = useState(false);
 
   useEffect(() => setHost(document.getElementById(APP_SURFACE_ID)), []);
 
@@ -61,6 +70,57 @@ export function DepositSheet({ api, onClose, onToast }: {
       live = false;
     };
   }, [api]);
+
+  // Watch for the deposit ONLY while this sheet is open.
+  //
+  // A balance moves in exactly two situations: a deposit arrives, or an order fills — and the order
+  // path already refreshes explicitly. So there is nothing to gain from a background timer during
+  // normal play, and every tick of one is an RPC read per user for a number that did not change.
+  // Someone staring at this sheet is the one moment a deposit is expected, so the watch lives here
+  // and dies with the sheet. Elsewhere, the far cheaper focus trigger in page.tsx covers it.
+  useEffect(() => {
+    let alive = true;
+    let timer: number | undefined;
+    let baseline: bigint | null = null;
+    const startedAt = Date.now();
+
+    const read = async () => {
+      if (!alive) return;
+      try {
+        const r = (await api("/api/real/wallet")) as { pusdMicro?: string | null };
+        const now = r.pusdMicro == null ? null : BigInt(r.pusdMicro);
+        if (now !== null) {
+          // First successful read is the baseline, not a deposit — otherwise opening the sheet with
+          // a funded balance would announce money that arrived days ago.
+          if (baseline === null) baseline = now;
+          else if (now > baseline) {
+            baseline = now;
+            if (alive) {
+              setLanded(true);
+              onToast("Deposit received");
+              void onFunded?.();
+            }
+            return; // stop watching: the thing being waited for happened
+          }
+        }
+      } catch {
+        // An RPC hiccup is not worth surfacing here — the next pass re-reads, and the balance shown
+        // everywhere else is unaffected.
+      }
+      if (!alive) return;
+      // Attentive early, then back off: a bridged deposit usually lands inside a couple of minutes,
+      // and after that the person is no longer watching a clock.
+      const elapsed = Date.now() - startedAt;
+      if (elapsed > WATCH_STOP_MS) return;
+      timer = window.setTimeout(() => void read(), elapsed < WATCH_FAST_FOR_MS ? WATCH_FAST_MS : WATCH_SLOW_MS);
+    };
+
+    void read();
+    return () => {
+      alive = false;
+      window.clearTimeout(timer);
+    };
+  }, [api, onToast, onFunded]);
 
   if (!host) return null;
 
@@ -165,6 +225,18 @@ export function DepositSheet({ api, onClose, onToast }: {
               Anything you send is bridged to Polygon and converted to pUSD, the collateral Polymarket
               trades in. It shows up as your real balance once the network confirms — usually a minute
               or two.
+            </div>
+            <div
+              style={{
+                marginTop: 12,
+                paddingTop: 10,
+                borderTop: "1px solid var(--line)",
+                fontSize: 12,
+                fontWeight: 700,
+                color: landed ? "var(--yes)" : "var(--muted)",
+              }}
+            >
+              {landed ? "Deposit received — your balance is updated." : "Watching for your deposit…"}
             </div>
           </>
         ) : (
