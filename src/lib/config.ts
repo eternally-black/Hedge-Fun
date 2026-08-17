@@ -171,3 +171,9 @@ export const BOOK_MAX_DISPLAY_STALE_MS = 10 * 60_000; // drop a POLYMARKET card 
 export const QUOTE_POLL_MS = 3_000; // top-card cadence; books churn ~every 5s, so this tracks them
 export const QUOTES_MAX_IDS = 4; // per request — the visible card plus headroom, not a bulk feed
 export const QUOTES_RATE_PER_MIN = 60; // 3s polling = 20/min; the rest is headroom for other surfaces
+
+// Real-money balance refresh. The HUD states this number on every screen, so it has to become
+// true without a reload — a deposit that only appears after F5 reads as a deposit that never
+// arrived. One RPC read per interval per VISIBLE tab and none at all for a hidden one; a bridged
+// deposit lands in a minute or two, so anything tighter would just re-read the same number.
+export const REAL_BALANCE_POLL_MS = 15_000;

@@ -12,13 +12,12 @@ type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 // Top-Up button (free once, then 1 artifact), and the prediction history (same /api/history rows via
 // usePredictionHistory — shared with HistorySheet). All money is derived from `me` during render —
 // no mirrored server state.
-export function BalanceSheet({ me, api, realPusdMicro, onClose, onTopupDone, onToast, onFunded }: {
+export function BalanceSheet({ me, api, realPusdMicro, onClose, onTopupDone, onToast }: {
   me: Me | null;
   api: Api;
   onClose: () => void;
   onTopupDone: () => void | Promise<void>;
   onToast: (msg: string) => void;
-  onFunded: () => void | Promise<void>;
   realPusdMicro?: string | null;
 }) {
   const { rows, pending, nowMs } = usePredictionHistory(api);
@@ -63,7 +62,7 @@ export function BalanceSheet({ me, api, realPusdMicro, onClose, onTopupDone, onT
             next to "send real USDC" is a mis-tap waiting to happen, and in real mode the free path
             grants play money that cannot be traded anyway. */}
         {me?.real.mode === "REAL" ? (
-          <RealDepositPanel me={me} api={api} pusdMicro={realPusdMicro ?? null} onToast={onToast} onFunded={onFunded} />
+          <RealDepositPanel me={me} api={api} pusdMicro={realPusdMicro ?? null} onToast={onToast} />
         ) : (
         /* Cash / Locked / Total split panel */
         <div style={{ background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 18, padding: "16px 18px", marginBottom: 14 }}>

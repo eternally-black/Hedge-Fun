@@ -22,7 +22,7 @@ import { type Card, type Me, type Screen } from "./ui";
 import { useRealCtx } from "./useRealCtx";
 import { APP_SURFACE_ID } from "./appSurface";
 import { placeRealOrder } from "@/lib/real-client";
-import { DECK_MIN_LEAD_MS, QUOTE_POLL_MS, STAKE_CENTS } from "@/lib/config";
+import { DECK_MIN_LEAD_MS, QUOTE_POLL_MS, STAKE_CENTS, REAL_BALANCE_POLL_MS } from "@/lib/config";
 import type { QuotesResponse, ResultRow, ResultsResponse, SwipeResponse } from "@/lib/api-types";
 
 const PRIVY_ON = !!process.env.NEXT_PUBLIC_PRIVY_APP_ID;
@@ -134,18 +134,45 @@ function App() {
   useEffect(() => {
     if (!realMode) { setRealPusdMicro(null); return; }
     void refreshRealBalance();
-    // Re-read when the tab comes back, and nothing in between. This is the cheap half of keeping the
-    // balance honest: no timer runs while someone plays, but coming back from a wallet or an
-    // exchange — which is exactly how a deposit gets made — lands on a fresh number instead of a
-    // stale one that only a manual reload would fix. The DepositSheet owns the attentive watch.
-    const onVis = () => { if (!document.hidden) void refreshRealBalance(); };
+    // The HUD states this number on every screen, so it has to become true on its own — a deposit
+    // that only appears after a manual reload reads as a deposit that did not arrive. One poller,
+    // here, rather than one per screen that happens to care.
+    //
+    // Gated on visibility: a hidden tab is an RPC read per interval for a number nobody is looking
+    // at. Coming back re-reads immediately, which is also the exact moment someone returns from the
+    // wallet or exchange they just sent from.
+    let timer: number | undefined;
+    const stop = () => window.clearInterval(timer);
+    const start = () => {
+      stop();
+      timer = window.setInterval(() => void refreshRealBalance(), REAL_BALANCE_POLL_MS);
+    };
+    const onVis = () => {
+      if (document.hidden) return stop();
+      void refreshRealBalance();
+      start();
+    };
+    if (!document.hidden) start();
     document.addEventListener("visibilitychange", onVis);
     window.addEventListener("focus", onVis);
     return () => {
+      stop();
       document.removeEventListener("visibilitychange", onVis);
       window.removeEventListener("focus", onVis);
     };
   }, [realMode, refreshRealBalance]);
+  // Every card id this session has already put in front of the user. The refill dedupes against
+  // THIS, not against the current deck: a skipped card is gone from the deck, so dedupe-by-deck let
+  // the server hand it straight back — and it does hand it back, because /api/skip records only a
+  // daily counter, not WHICH market was skipped. Harmless in paper (the pool is ~67k markets, so a
+  // repeat is a coincidence); in real mode the deck is limited to markets with a fresh CLOB book,
+  // which is ~90 at a time, so the same card returned within seconds, repeatedly.
+  // Session-scoped on purpose: a skip is "not now", not "never again" — a reload may re-serve it.
+  const served = useRef<Set<string>>(new Set());
+  const remember = useCallback((cards: Card[]) => {
+    for (const c of cards) served.current.add(c.id);
+    return cards;
+  }, []);
   const ritualDone = useRef(false); // run the auth→reveal→gm sequence once per load, not on every refresh
   const topping = useRef(false);
   const popTimer = useRef<number | undefined>(undefined);
@@ -159,8 +186,8 @@ function App() {
   const refresh = useCallback(async () => {
     const [m, d] = await Promise.all([api("/api/me"), api("/api/deck")]);
     setMe(m);
-    setDeck(d.cards as Card[]);
-  }, [api]);
+    setDeck(remember(d.cards as Card[]));
+  }, [api, remember]);
 
   // Stats only — never touches the deck. After a swipe we must NOT re-fetch /api/deck: it's
   // re-shuffled with a fresh seed each call, so replacing the deck would make a DIFFERENT card
@@ -208,7 +235,7 @@ function App() {
 
     // Deck loads in the background — NOT awaited by the gate (a user with unseen results watches the
     // reveal while the deck arrives; a user without results waits on the spinner the deck-fetch fills).
-    api("/api/deck").then((d) => setDeck((d as { cards: Card[] }).cards)).catch(console.error);
+    api("/api/deck").then((d) => setDeck(remember((d as { cards: Card[] }).cards))).catch(console.error);
 
     // Gate: me + results in parallel. Decide the daily-open ritual, set state, THEN unspin — so the
     // first frame is the right screen, no flash. Ritual (matches Android once it ships the same flags):
@@ -227,7 +254,7 @@ function App() {
       })
       .catch(console.error)
       .finally(() => setBooted(true));
-  }, [authenticated, api]);
+  }, [authenticated, api, remember]);
 
   // Preload-ahead: refill well before the deck runs dry (threshold 8, not 1), so a fresh card is
   // always buffered behind the current one. `topping` dedupes so only one fetch is in flight.
@@ -237,17 +264,14 @@ function App() {
       topping.current = true;
       try {
         const d: { cards: Card[] } = await api("/api/deck");
-        setDeck((cur) => {
-          const have = new Set(cur.map((c) => c.id));
-          return [...cur, ...d.cards.filter((c) => !have.has(c.id))];
-        });
+        setDeck((cur) => [...cur, ...remember(d.cards.filter((c) => !served.current.has(c.id)))]);
       } catch (e) {
         console.error(e);
       } finally {
         topping.current = false;
       }
     },
-    [api],
+    [api, remember],
   );
 
   // Live freshness prune: every few seconds drop cards that aged within the lead buffer, so a card
@@ -492,6 +516,7 @@ function App() {
   const doLogout = useCallback(async () => {
     setMe(null);
     setDeck([]);
+    served.current.clear(); // a reset re-deals every market; keeping the memory would hide them all
     setReveal(null);
     setScreen("deck");
     setBooted(false);
@@ -574,7 +599,7 @@ function App() {
         />
       )}
       {historyOpen && <HistorySheet api={api} onClose={closeHistory} />}
-      {balanceOpen && <BalanceSheet me={me} api={api} realPusdMicro={realPusdMicro} onClose={closeBalance} onTopupDone={refreshMe} onToast={flashToast} onFunded={refreshRealBalance} />}
+      {balanceOpen && <BalanceSheet me={me} api={api} realPusdMicro={realPusdMicro} onClose={closeBalance} onTopupDone={refreshMe} onToast={flashToast} />}
       <Hud me={me} pop={pop} realPusdMicro={realPusdMicro} onShards={goVault} onGM={goGmScreen} onBalance={openBalance} onBell={goNotifs} />
 
       <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
@@ -641,7 +666,7 @@ function App() {
         {effectiveScreen === "gm" && <GmScreen me={me} busy={busy} onGM={gm} onEnterDeck={goDeck} onRevive={revive} />}
         {effectiveScreen === "vault" && <VaultScreen me={me} api={api} onRefresh={refresh} previewCard={top ?? next} />}
         {effectiveScreen === "invite" && <InviteScreen me={me} />}
-        {effectiveScreen === "you" && <ProfileScreen me={me} api={api} onRefresh={refresh} onHistory={openHistory} onLogout={doLogout} onToast={flashToast} onFunded={refreshRealBalance} />}
+        {effectiveScreen === "you" && <ProfileScreen me={me} api={api} onRefresh={refresh} onHistory={openHistory} onLogout={doLogout} onToast={flashToast} pusdMicro={realPusdMicro} />}
         {effectiveScreen === "notifications" && <NotificationsScreen api={api} onSeen={markResultsSeen} onReplay={replayReveal} />}
       </div>
 
