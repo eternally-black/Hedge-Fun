@@ -31,7 +31,10 @@ export function RealDepositPanel({ me, api, pusdMicro, onToast }: {
     setLoading(true);
     setFailed(false);
     try {
-      const r = (await api("/api/real/deposit-address")) as {
+      // POST, not GET: the route only exports POST (it calls the bridge and caches per wallet), so
+      // the default GET came back 405 and rendered as "deposit addresses are unavailable" — an
+      // outage message for what was really a client-side method mismatch.
+      const r = (await api("/api/real/deposit-address", { method: "POST" })) as {
         minUsd?: number;
         addresses?: Record<string, unknown>;
       };

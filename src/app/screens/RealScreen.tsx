@@ -113,7 +113,11 @@ export function RealScreen({ api }: { api: Api }) {
 
   const loadDepositAddresses = useCallback(async () => {
     try {
-      const res = (await api("/api/real/deposit-address")) as { minUsd: number; addresses: Record<string, unknown> };
+      // POST — the route exports only POST; the default GET 405s. Same bug as RealDepositPanel.
+      const res = (await api("/api/real/deposit-address", { method: "POST" })) as {
+        minUsd: number;
+        addresses: Record<string, unknown>;
+      };
       setMinUsd(res.minUsd);
       setAddresses(
         Object.fromEntries(Object.entries(res.addresses).filter((e): e is [string, string] => typeof e[1] === "string")),

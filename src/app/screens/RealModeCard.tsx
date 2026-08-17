@@ -12,6 +12,7 @@ import type { Me } from "../ui";
 import { useRealCtx } from "../useRealCtx";
 import { provisionReal } from "@/lib/real-client";
 import { APP_SURFACE_ID } from "../appSurface";
+import { MIN_DEPOSIT_USD } from "@/lib/config";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
@@ -30,7 +31,12 @@ const LABEL = {
 } as const;
 const MUTED = { fontSize: 12, color: "var(--muted)" } as const;
 
-export function RealModeCard({ me, api, onRefresh }: { me: Me | null; api: Api; onRefresh: () => Promise<void> }) {
+export function RealModeCard({ me, api, onRefresh, onToast }: {
+  me: Me | null;
+  api: Api;
+  onRefresh: () => Promise<void>;
+  onToast: (msg: string) => void;
+}) {
   const [noticeOpen, setNoticeOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -73,6 +79,18 @@ export function RealModeCard({ me, api, onRefresh }: { me: Me | null; api: Api; 
       setError((e as { body?: { error?: string } }).body?.error ?? "Setup failed. Try again.");
     } finally {
       setBusy(false);
+    }
+  };
+
+  // Native clipboard; the toast is the app's own, so a copy here reads the same as a copy anywhere
+  // else. Failure is reported rather than swallowed — a silent no-op on an address someone is about
+  // to paste into an exchange withdrawal is the worst outcome available.
+  const copy = async (value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      onToast("Copied to clipboard");
+    } catch {
+      onToast("Couldn't copy — select it manually");
     }
   };
 
@@ -130,9 +148,40 @@ export function RealModeCard({ me, api, onRefresh }: { me: Me | null; api: Api; 
 
         {isReal && real.depositWallet ? (
           <div style={{ marginTop: 10, borderTop: "1px solid var(--line)", paddingTop: 10 }}>
-            <div style={{ ...MUTED, fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase" }}>Wallet</div>
-            <div style={{ fontSize: 12, fontFamily: "monospace", wordBreak: "break-all", marginTop: 2 }}>
-              {real.depositWallet}
+            <button
+              type="button"
+              onClick={() => copy(real.depositWallet as string)}
+              style={{
+                margin: 0,
+                font: "inherit",
+                display: "block",
+                width: "100%",
+                textAlign: "left",
+                background: "var(--panel2)",
+                border: "1px solid var(--line)",
+                borderRadius: 12,
+                padding: "8px 10px",
+                cursor: "pointer",
+                color: "var(--text)",
+              }}
+            >
+              <div style={{ ...MUTED, fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase" }}>
+                Deposit wallet · Polygon · tap to copy
+              </div>
+              <div style={{ fontSize: 12, fontFamily: "monospace", wordBreak: "break-all", marginTop: 2 }}>
+                {real.depositWallet}
+              </div>
+            </button>
+            {/* Which token on which chain is not a detail — it is the difference between a deposit
+                and money sitting somewhere nobody is watching. The funding watcher scans exactly two
+                contracts on Polygon (USDC.e and pUSD, src/lib/funding.ts), so NATIVE Polygon USDC —
+                what most exchanges now send when you pick "USDC / Polygon" — lands in the wallet and
+                is never credited. Other chains are the bridge's job, not this address's. */}
+            <div style={{ ...MUTED, marginTop: 8, lineHeight: 1.45 }}>
+              Send <strong style={{ color: "var(--text)" }}>USDC.e</strong> (bridged USDC) or pUSD, on{" "}
+              <strong style={{ color: "var(--text)" }}>Polygon only</strong>. Minimum ${MIN_DEPOSIT_USD}. Native
+              Polygon USDC and other networks are not credited here — for those, use Top-Up, which issues a
+              bridge address per chain.
             </div>
           </div>
         ) : null}

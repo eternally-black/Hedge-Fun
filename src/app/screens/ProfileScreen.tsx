@@ -17,7 +17,7 @@ const SUPPORT_CONTACTS = [
 
 // Profile / "You" (ported from app design). Real stats from /api/me. Prediction history is a
 // placeholder until /api/history. (No user-facing leaderboard — ranking is admin-only.)
-export function ProfileScreen({ me, api, onRefresh, onHistory, onLogout }: { me: Me | null; api: Api; onRefresh: () => Promise<void>; onHistory: () => void; onLogout: () => void }) {
+export function ProfileScreen({ me, api, onRefresh, onHistory, onLogout, onToast }: { me: Me | null; api: Api; onRefresh: () => Promise<void>; onHistory: () => void; onLogout: () => void; onToast: (msg: string) => void }) {
   const handle = me?.user.twitter ?? (me?.user.email ? me.user.email.split("@")[0] : "degen");
   const initials = handle.slice(0, 2).toUpperCase();
   const [resetting, setResetting] = useState(false);
@@ -133,7 +133,7 @@ export function ProfileScreen({ me, api, onRefresh, onHistory, onLogout }: { me:
         </div>
       )}
 
-      <RealModeCard me={me} api={api} onRefresh={onRefresh} />
+      <RealModeCard me={me} api={api} onRefresh={onRefresh} onToast={onToast} />
 
       {/* Account / sign out. Shows who's signed in (email or @handle) + a logout action. */}
       <div style={{ marginTop: 22, fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700 }}>Account</div>
