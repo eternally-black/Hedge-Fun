@@ -94,6 +94,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           build-args: |
             NEXT_PUBLIC_PRIVY_APP_ID=${{ secrets.NEXT_PUBLIC_PRIVY_APP_ID }}
+            NEXT_PUBLIC_POLYMARKET_BUILDER_CODE=${{ secrets.NEXT_PUBLIC_POLYMARKET_BUILDER_CODE }}
           # scope pins the cache key so a feature-branch build and the main build
           # SHARE one cache (type=gha otherwise scopes per git ref → the warm-build
           # measurement on the branch wouldn't carry to main).

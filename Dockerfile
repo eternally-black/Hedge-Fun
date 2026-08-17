@@ -27,9 +27,14 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 # Regenerate against the in-tree schema (safety; deps already generated once).
 RUN npx prisma generate
-# Build-time public env: inlined into the client bundle by Next.
+# Build-time public env: inlined into the client bundle by Next. Setting these in the VPS .env does
+# NOTHING for the browser — NEXT_PUBLIC_* is substituted at build time, so anything the client reads
+# has to arrive here as a build arg or it is `undefined` in production no matter what the host says.
 ARG NEXT_PUBLIC_PRIVY_APP_ID
 ENV NEXT_PUBLIC_PRIVY_APP_ID=${NEXT_PUBLIC_PRIVY_APP_ID}
+# Public builder code (attribution tag, not a secret). Absent = orders sign unattributed.
+ARG NEXT_PUBLIC_POLYMARKET_BUILDER_CODE
+ENV NEXT_PUBLIC_POLYMARKET_BUILDER_CODE=${NEXT_PUBLIC_POLYMARKET_BUILDER_CODE}
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
