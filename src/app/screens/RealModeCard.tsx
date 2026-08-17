@@ -6,11 +6,11 @@
 // Consent is a ONE-TIME notice, not a gate the user re-reads on every flip: once the current terms
 // version is accepted the toggle moves freely in both directions. Turning it OFF is never gated by
 // anything at all — getting back to play money must always work.
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import type { Me } from "../ui";
 import { useRealCtx } from "../useRealCtx";
-import { provisionReal } from "@/lib/real-client";
+import { provisionReal, runRealWorkflow } from "@/lib/real-client";
 import { APP_SURFACE_ID } from "../appSurface";
 import { DepositSheet } from "./DepositSheet";
 
@@ -43,6 +43,36 @@ export function RealModeCard({ me, api, onRefresh, onToast, pusdMicro }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { ctx } = useRealCtx(me);
+
+  // Trading readiness. A deposit wallet holds money the moment it exists and still cannot trade:
+  // the exchange refuses every order until the on-chain permissions are signed. So the card asks
+  // the server instead of letting the user discover it halfway through a swipe. `null` means "not
+  // asked, or the chain could not be read" — never a blocker, because an RPC hiccup must not
+  // accuse a perfectly good wallet. These hooks sit ABOVE the early return below and read `me`
+  // defensively for that reason: hook order cannot depend on a conditional return.
+  const [ready, setReady] = useState<boolean | null>(null);
+  const [activating, setActivating] = useState(false);
+  const realOn = me?.real?.mode === "REAL";
+  const hasWallet = Boolean(me?.real?.depositWallet);
+  const readReady = useCallback(
+    async (force?: boolean): Promise<boolean | null> => {
+      try {
+        // Unforced on mount: the server's verdict is cached, so this costs nothing. Forced right
+        // after the activation batch, when the cached "no" is exactly the answer we must not trust.
+        const r = (await api(`/api/real/wallet${force ? "?verify=1" : ""}`)) as { tradingReady?: boolean | null };
+        const value = typeof r.tradingReady === "boolean" ? r.tradingReady : null;
+        setReady(value);
+        return value;
+      } catch {
+        setReady(null);
+        return null;
+      }
+    },
+    [api],
+  );
+  useEffect(() => {
+    if (realOn && hasWallet) void readReady();
+  }, [realOn, hasWallet, readReady]);
 
   const real = me?.real;
   if (!real) return null; // pre-boot; the card appears with the first /api/me
@@ -81,6 +111,32 @@ export function RealModeCard({ me, api, onRefresh, onToast, pusdMicro }: {
       setError((e as { body?: { error?: string } }).body?.error ?? "Setup failed. Try again.");
     } finally {
       setBusy(false);
+    }
+  };
+
+  // One batch, one device signature: allowances for both exchanges and both collateral adapters,
+  // plus the operator right that lets a won market pay out by itself instead of leaving the money
+  // as a position nobody redeems.
+  const activate = async () => {
+    if (!ctx) return;
+    setActivating(true);
+    setError(null);
+    try {
+      const outcome = await runRealWorkflow(api, ctx, "APPROVALS");
+      if (outcome.status === "failed") setError("Couldn't activate trading. Try again.");
+      // The relayer confirms a beat after it accepts the batch, so the first answer is usually
+      // still "not granted". Poll briefly rather than leaving a blocker over a wallet that is
+      // already good — and bounded, so a batch that never lands ends as a visible blocker rather
+      // than a spinner that never stops.
+      for (let i = 0; i < 10; i++) {
+        if ((await readReady(true)) === true) break;
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+      }
+      await onRefresh();
+    } catch (e) {
+      setError((e as { body?: { error?: string } }).body?.error ?? "Couldn't activate trading. Try again.");
+    } finally {
+      setActivating(false);
     }
   };
 
@@ -203,6 +259,42 @@ export function RealModeCard({ me, api, onRefresh, onToast, pusdMicro }: {
               }}
             >
               {busy ? "Setting up…" : ctx ? "Set up trading wallet" : "Waiting for wallet…"}
+            </button>
+          </div>
+        ) : null}
+
+        {/* The wallet exists but cannot trade yet. Deliberately its own step in front of the first
+            swipe: the permissions are what let the exchange move the user's funds, and asking for
+            that inside a gesture — or worse, letting the exchange refuse the order and calling it
+            an error — is how a person ends up not trusting the thing holding their money. */}
+        {isReal && real.depositWallet && ready === false ? (
+          <div style={{ marginTop: 10, borderTop: "1px solid var(--line)", paddingTop: 10 }}>
+            <div style={MUTED}>
+              Trading isn&apos;t active yet. One signature lets the exchange move your funds when you
+              trade, and lets winnings return to you automatically when a market resolves. Orders
+              can&apos;t be placed until it&apos;s done.
+            </div>
+            <button
+              type="button"
+              onClick={activating || !ctx ? undefined : activate}
+              disabled={activating || !ctx}
+              style={{
+                margin: 0,
+                font: "inherit",
+                width: "100%",
+                marginTop: 8,
+                padding: "10px 16px",
+                borderRadius: 12,
+                background: "var(--gold)",
+                color: "#1a1205",
+                border: "none",
+                fontWeight: 700,
+                fontSize: 13,
+                cursor: activating || !ctx ? "default" : "pointer",
+                opacity: activating || !ctx ? 0.5 : 1,
+              }}
+            >
+              {activating ? "Activating…" : ctx ? "Activate trading" : "Waiting for wallet…"}
             </button>
           </div>
         ) : null}

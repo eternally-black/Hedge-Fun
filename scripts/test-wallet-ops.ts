@@ -8,11 +8,13 @@ import {
   buildWrapCalls,
   buildApprovalCalls,
   COLLATERAL_ONRAMP,
+  AUTO_REDEEM_OPERATOR,
   CTF_EXCHANGE,
   NEGRISK_CTF_EXCHANGE,
   CONDITIONAL_TOKENS,
 } from "../src/lib/wallet-ops";
 import { USDCE_ADDRESS, PUSD_ADDRESS } from "../src/lib/polygon";
+import { REQUIRED_APPROVALS } from "../src/lib/trading-ready";
 
 async function main() {
   const wallet = "0x0b699a09e593bff83ec0d9b97291a75b400bf2a9";
@@ -44,11 +46,11 @@ async function main() {
   assert.ok(zeroCalls[1].data.endsWith("0".repeat(64)), "wrap amount word zero");
   assert.strictEqual(zeroCalls[1].data.slice(0, 10 + 128), calls[1].data.slice(0, 10 + 128), "wrap selector+addresses intact");
 
-  // Approval set: byte-pin the EXACT eight calls (the higher-blast-radius output — a wrong ABI or
+  // Approval set: byte-pin the EXACT nine calls (the higher-blast-radius output — a wrong ABI or
   // address here surfaces as MAX_UINT granted to the wrong contract). Exchange addresses were
   // externally verified against PolygonScan labels in the S4 review round; the two collateral adapters (normal and neg-risk) come from the SDK's own production environment config and is what PERFORMS a redemption.
   const approvals = buildApprovalCalls();
-  assert.strictEqual(approvals.length, 8, "exactly eight calls, nothing more");
+  assert.strictEqual(approvals.length, 9, "exactly nine calls, nothing more");
   const MAX = "f".repeat(64);
   const pad = (a: string) => a.toLowerCase().replace(/^0x/, "").padStart(64, "0");
   assert.deepStrictEqual(
@@ -62,9 +64,20 @@ async function main() {
       [CONDITIONAL_TOKENS, "0xa22cb465" + pad(COLLATERAL_ADAPTER) + "1".padStart(64, "0")],
       [PUSD_ADDRESS, "0x095ea7b3" + pad(NEG_RISK_COLLATERAL_ADAPTER) + MAX],
       [CONDITIONAL_TOKENS, "0xa22cb465" + pad(NEG_RISK_COLLATERAL_ADAPTER) + "1".padStart(64, "0")],
+      // The auto-redeemer: without this operator right a won market leaves the payout sitting as
+      // an unredeemed position. It is in Polymarket's own required set and rides the same batch.
+      [CONDITIONAL_TOKENS, "0xa22cb465" + pad(AUTO_REDEEM_OPERATOR) + "1".padStart(64, "0")],
     ],
     "approval calldata pinned byte for byte",
   );
+
+  // The readiness gate and the batch must describe the SAME nine grants. A gate that checks less
+  // calls a half-approved wallet ready and hands the exchange an order it will refuse; a gate that
+  // checks more blocks trading on a grant nothing ever makes. Comparing (token, target) pairs is
+  // what keeps the two files honest — they are edited months apart, by different reasons.
+  const granted = approvals.map((c) => [c.to.toLowerCase(), "0x" + c.data.slice(34, 74)].join("|")).sort();
+  const checked = REQUIRED_APPROVALS.map((a) => [a.token.toLowerCase(), a.target.toLowerCase()].join("|")).sort();
+  assert.deepStrictEqual(checked, granted, "the readiness check covers exactly what the batch grants");
 
   console.log("OK: wallet-ops calldata matches the recorded production fixture byte for byte");
 }

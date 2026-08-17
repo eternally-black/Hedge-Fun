@@ -14,6 +14,7 @@ import { getMarketFee } from "@/lib/fees";
 import { getBook } from "@/lib/clob";
 import { quoteMovedAgainstUser } from "@/lib/depth";
 import { quoteBuyAllIn, quoteSellAllIn, feePerShareMicro } from "@/lib/quote";
+import { isTradingReady } from "@/lib/trading-ready";
 import {
   REAL_MIN_STAKE_CENTS,
   REAL_MAX_STAKE_CENTS,
@@ -126,6 +127,16 @@ export async function POST(req: Request) {
   let maxPriceBp: number;
 
   if (direction === "ENTRY") {
+    // Trading approvals, checked BEFORE anything is quoted or signed. A deposit wallet without them
+    // holds money and cannot trade: the exchange answers "the allowance is not enough -> spender:
+    // 0xE111…, allowance: 0" — after the device signed and after the market slot was claimed. The
+    // answer names what is missing so the client can send the user to the one-signature activation
+    // instead of showing them an exchange error. ENTRY only: closing a position, redeeming and
+    // withdrawing must never be gated on a grant the user can revoke, or a wallet could be trapped.
+    const readiness = await isTradingReady(user.depositWalletAddress);
+    if (!readiness.ready) {
+      return NextResponse.json({ error: "approvals_required", missing: readiness.missing }, { status: 409 });
+    }
     if (stakeCents !== undefined && (typeof stakeCents !== "number" || !Number.isInteger(stakeCents))) {
       return NextResponse.json({ error: "bad_stake" }, { status: 400 });
     }

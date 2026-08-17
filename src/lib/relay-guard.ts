@@ -154,8 +154,14 @@ export function assertRelayPayload(kind: RelayKind, request: RelayRequest, ctx: 
   }
 
   const raw = message.calls;
-  if (!Array.isArray(raw) || raw.length === 0 || raw.length > 8) {
-    throw new Error("bad_call_shape: calls must be 1–8 entries");
+  // The ceiling is "our largest legitimate batch", not a round number: it exists so a server cannot
+  // bury an extra call in a long list the user will never read. That batch is the activation set —
+  // it grew from eight to nine when the auto-redeem operator joined it, and this bound has to move
+  // with it or the device refuses the very batch the product asks people to sign. Every call is
+  // checked individually below; the length only bounds what a person is asked to trust at once.
+  const MAX_CALLS = 9;
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_CALLS) {
+    throw new Error(`bad_call_shape: calls must be 1–${MAX_CALLS} entries`);
   }
   raw.forEach(assertCallShape);
   const calls = raw as readonly CallRecord[];

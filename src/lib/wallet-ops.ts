@@ -40,6 +40,12 @@ const MAX_UINT256 = "f".repeat(64);
 
 export const COLLATERAL_ADAPTER = "0xAdA100Db00Ca00073811820692005400218FcE1f"; // redeems normal-market wins
 export const NEG_RISK_COLLATERAL_ADAPTER = "0xadA2005600Dec949baf300f4C6120000bDB6eAab"; // redeems neg-risk wins
+// Polymarket's own auto-redeemer (SDK 0.6.0 `environment.contracts.autoRedeemOperator`). Granting it
+// operator rights over the user's conditional tokens is what makes a resolved market pay out by
+// itself; without it a win sits as an unredeemed position until somebody signs a redemption, which
+// is a step most people never take. It is in Polymarket's own required-approvals set — our batch
+// was missing exactly this one call.
+export const AUTO_REDEEM_OPERATOR = "0xa1200000d0002264C9a1698e001292D00E1b00af";
 
 // approve(spender, MAX)   0x095ea7b3   |   setApprovalForAll(operator, true)   0xa22cb465
 // The EXPLICIT alpha set: trade on the two exchanges, redeem through BOTH collateral adapters.
@@ -71,6 +77,10 @@ export function buildApprovalCalls(): WalletCall[] {
     approveCtf(COLLATERAL_ADAPTER),
     approvePusd(NEG_RISK_COLLATERAL_ADAPTER),
     approveCtf(NEG_RISK_COLLATERAL_ADAPTER),
+    // The ninth call, and the one the user feels: without it a resolved market leaves the payout
+    // sitting as an unredeemed position. Costs nothing extra — the whole set rides one batch and
+    // one device signature.
+    approveCtf(AUTO_REDEEM_OPERATOR),
   ];
 }
 

@@ -40,8 +40,10 @@ function payload(calls: readonly CallInput[], over: Record<string, unknown> = {}
 const req = (p: unknown, kind: unknown = "signGaslessTypedData") => ({ kind, payload: p });
 
 async function main() {
-  // 1 — the eight calls the alpha actually makes must pass untouched, or the guard breaks the product.
-  assert.strictEqual(APPROVAL_ALLOWLIST.length, 8); // 2 exchanges + 2 collateral adapters, each × pUSD and CTF
+  // 1 — the nine calls the alpha actually makes must pass untouched, or the guard breaks the product.
+  // 2 exchanges + 2 collateral adapters, each × pUSD and CTF, plus the auto-redeem operator on CTF
+  // alone (it never moves collateral — it hands a resolved position back as money).
+  assert.strictEqual(APPROVAL_ALLOWLIST.length, 9);
   assert.doesNotThrow(() => assertRelayPayload("APPROVALS", req(payload(asCalls(approvals))), ctx));
 
   // 2 — same for the wrap pair (approve + on-ramp), which is byte-pinned to a production transaction.

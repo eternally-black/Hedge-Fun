@@ -12,6 +12,7 @@ import { authUser, syncEmbeddedWallet, isEvmAddress } from "@/lib/privy";
 import { isRealMoneyEligible, hasRealConsent, sameOrigin } from "@/lib/real";
 import { captureToGlitchTip } from "@/lib/glitchtip";
 import { contractOwner, erc20BalanceOf, PUSD_ADDRESS } from "@/lib/polygon";
+import { isTradingReady } from "@/lib/trading-ready";
 import { polymarketPublic } from "@/lib/polymarket-sdk";
 // Low-level actions live in the /actions subpath, not the root (same trap as fetchBalanceAllowance).
 import { isWalletDeployed } from "@polymarket/client/actions";
@@ -142,6 +143,23 @@ export async function GET(req: Request) {
       .catch(() => null);
   }
 
+  // Can this wallet actually trade? A deposit wallet without its on-chain approvals holds money and
+  // still has every order refused by the exchange, so the client needs to know BEFORE the user
+  // swipes — this is what puts the activation blocker on the mode card instead of a raw 400 in the
+  // middle of a gesture. Cached in process (ten minutes once granted), and `?verify=1` forces a
+  // fresh read for the moment right after the activation batch lands. Null when there is no wallet
+  // yet or the chain could not be read: the client renders "unknown" and never a false blocker.
+  let tradingReady: boolean | null = null;
+  let missingApprovals: string[] | null = null;
+  if (user.depositWalletAddress) {
+    const force = new URL(req.url).searchParams.get("verify") === "1";
+    const readiness = await isTradingReady(user.depositWalletAddress, { force }).catch(() => null);
+    if (readiness) {
+      tradingReady = readiness.ready;
+      missingApprovals = readiness.missing;
+    }
+  }
+
   // Deliberately ungated: this read is what TELLS the client whether consent exists, and it exposes
   // nothing about the account the user cannot already see.
   return NextResponse.json(
@@ -151,6 +169,8 @@ export async function GET(req: Request) {
       embeddedWalletAddress: user.embeddedWalletAddress ?? null,
       depositWalletAddress: user.depositWalletAddress ?? null,
       pusdMicro,
+      tradingReady,
+      missingApprovals,
     },
     // A stale provisioning state would render a "Provision wallet" button for a wallet that exists.
     { headers: { "Cache-Control": "no-store" } },

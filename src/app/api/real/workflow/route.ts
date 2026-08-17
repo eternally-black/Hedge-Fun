@@ -13,7 +13,7 @@ import { captureToGlitchTip, sendOpsTelegram } from "@/lib/glitchtip";
 import { serverSecureClient } from "@/lib/polymarket-server";
 import { relayerVerdict } from "@/lib/relayer-verdict";
 import { bridgeOutSpec, type BridgeOutInputs } from "@/lib/bridge-out";
-import { buildWrapCalls, buildApprovalCalls, CTF_EXCHANGE, NEGRISK_CTF_EXCHANGE, CONDITIONAL_TOKENS } from "@/lib/wallet-ops";
+import { buildWrapCalls, buildApprovalCalls } from "@/lib/wallet-ops";
 import {
   startWorkflow,
   answerWorkflow,
@@ -22,7 +22,8 @@ import {
   type WorkflowSpec,
   type StepRequest,
 } from "@/lib/workflow";
-import { erc20BalanceOf, erc20Allowance, erc1155IsApprovedForAll, USDCE_ADDRESS, PUSD_ADDRESS } from "@/lib/polygon";
+import { erc20BalanceOf, USDCE_ADDRESS, PUSD_ADDRESS } from "@/lib/polygon";
+import { isTradingReady } from "@/lib/trading-ready";
 import { planRedeem } from "@/lib/redeem";
 import {
   prepareGaslessTransaction,
@@ -337,20 +338,13 @@ export async function POST(req: Request) {
           metadata: "HedgeFun trading approvals",
         }) as Promise<WorkflowGen>,
       autoAnswer: (r: StepRequest) => (r.kind === "requestAddress" ? signerAddress : null),
-      // On-chain truth for the EXACT alpha set: pUSD allowance on both exchanges AND the ERC-1155
-      // operator approval a SELL needs on both (S4 review B1/H2) — approvals are idempotent, so
-      // definitelyNotDone can safely allow a reset even when partially landed.
-      verify: async () => {
-        const [a1, a2, o1, o2] = await Promise.all([
-          erc20Allowance(PUSD_ADDRESS, wallet, CTF_EXCHANGE),
-          erc20Allowance(PUSD_ADDRESS, wallet, NEGRISK_CTF_EXCHANGE),
-          erc1155IsApprovedForAll(CONDITIONAL_TOKENS, wallet, CTF_EXCHANGE),
-          erc1155IsApprovedForAll(CONDITIONAL_TOKENS, wallet, NEGRISK_CTF_EXCHANGE),
-        ]);
-        // We grant MAX — a dust allowance must not read as "approved" (Sol S4-recheck #5).
-        const FLOOR = 10n ** 15n; // $1B in micro-USD: unreachable by dust, trivially met by MAX
-        return a1 >= FLOOR && a2 >= FLOOR && o1 && o2;
-      },
+      // On-chain truth for the EXACT alpha set (S4 review B1/H2) — approvals are idempotent, so
+      // definitelyNotDone can safely allow a reset even when partially landed. The predicate is
+      // shared with the order path's readiness gate: it used to check four of the eight grants
+      // here, which meant a run could report DONE while the wallet still could not redeem — and
+      // now that the gate refuses orders on the same answer, one drifting copy would either block
+      // trading forever or wave through a wallet the exchange refuses.
+      verify: async () => (await isTradingReady(wallet, { force: true })).ready,
       definitelyNotDone: async () => true,
     };
   }

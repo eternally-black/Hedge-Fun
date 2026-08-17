@@ -448,6 +448,14 @@ function App() {
               });
               flashToast("Price moved — swipe again to confirm");
             }
+            // The wallet has no trading permissions yet, so the intent refused before anything was
+            // signed or spent. Same treatment as a moved price: the card comes back, because
+            // nothing happened to it — and the toast names the one place that fixes it. Without
+            // this branch the card simply vanished and the swipe looked like it had worked.
+            else if (body?.error === "approvals_required") {
+              setDeck((d) => (d.some((c) => c.id === card.id) ? d : [card, ...d]));
+              flashToast("Activate trading in Profile first");
+            }
           }
           else console.error(e);
         });
