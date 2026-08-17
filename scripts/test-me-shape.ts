@@ -26,7 +26,7 @@ async function main() {
     ["artifacts","balanceCents","cashCents","dev","isNewUser","lockedCents","loginMarkedToday","points","real","referrals","shards","shardsPerArtifact","skins","skips","stakeCents","streak","swipes","topup","unreadResults","user"],
     "/me top-level keys include cashCents/lockedCents/stakeCents/topup/skins/real");
   assert.deepStrictEqual(Object.keys(body.real).sort(),
-    ["consentAt","consentVersion","depositWallet","mode","termsVersion"],
+    ["consentAt","consentVersion","depositWallet","maxStakeCents","minStakeCents","mode","stakeCents","termsVersion"],
     "/me real sub-keys");
   assert.deepStrictEqual(Object.keys(body.topup).sort(),
     ["artifactCashGateCents","artifactCost","artifactTopupAvailable","freeTopupAvailable","freeTopupUsed","grantCents"],

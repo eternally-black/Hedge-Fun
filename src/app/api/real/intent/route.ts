@@ -14,7 +14,7 @@ import { getMarketFee } from "@/lib/fees";
 import { getBook } from "@/lib/clob";
 import { quoteMovedAgainstUser } from "@/lib/depth";
 import { quoteBuyAllIn, quoteSellAllIn } from "@/lib/quote";
-import { STAKE_CENTS, HEDGE_MIN_STAKE_CENTS, HEDGE_MAX_STAKE_CENTS, SWIPE_CAP, DECK_MIN_LEAD_MS, BOOK_MAX_STALE_MS } from "@/lib/config";
+import { REAL_MIN_STAKE_CENTS, REAL_MAX_STAKE_CENTS, SWIPE_CAP, DECK_MIN_LEAD_MS, BOOK_MAX_STALE_MS } from "@/lib/config";
 
 export async function POST(req: Request) {
   const user = await authUser(req);
@@ -122,8 +122,12 @@ export async function POST(req: Request) {
     if (stakeCents !== undefined && (typeof stakeCents !== "number" || !Number.isInteger(stakeCents))) {
       return NextResponse.json({ error: "bad_stake" }, { status: 400 });
     }
-    const stake = typeof stakeCents === "number" ? stakeCents : STAKE_CENTS;
-    if (stake < HEDGE_MIN_STAKE_CENTS || stake > HEDGE_MAX_STAKE_CENTS) {
+    // The user's OWN configured stake, not the paper STAKE_CENTS: real money is the one number a
+    // person has to be able to set, and the amount to spend must come from their row rather than
+    // from whatever the client posts. An explicit stakeCents is still honoured (the /real console
+    // sends one) but is bounded by the same floor and ceiling.
+    const stake = typeof stakeCents === "number" ? stakeCents : user.realStakeCents;
+    if (stake < REAL_MIN_STAKE_CENTS || stake > REAL_MAX_STAKE_CENTS) {
       return NextResponse.json({ error: "bad_stake" }, { status: 400 });
     }
     const budgetMicro = BigInt(stake) * 10_000n; // cents → micro-USD
@@ -150,9 +154,19 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "price_moved", freshPriceBp: q.vwapBp }, { status: 409 });
     }
 
-    // minOrderSize is SHARES (trap list); reject before anyone signs an unfillable order.
+    // NO share-minimum gate on a BUY. Books advertise min_order_size 5 uniformly, but Polymarket's
+    // own ticket fills a $1 market buy on a 99.7c side (~1.003 shares), so that field does not bind
+    // a taker buy — enforcing it here would reject a $1 stake on most of a contested deck, which is
+    // the product. The dollar floor above is the gate; the exchange remains the authority on its own
+    // minimum, and a rejection there is loud and moves no money. Reported so we find out for certain
+    // from real traffic rather than from another reading of the field.
     if (q.sharesMicro < BigInt(Math.round(book.minOrderSize * 1_000_000))) {
-      return NextResponse.json({ error: "stake_too_small", minShares: book.minOrderSize }, { status: 409 });
+      await captureToGlitchTip(new Error("buy below advertised min_order_size"), {
+        route: "real/intent",
+        minShares: String(book.minOrderSize),
+        sharesMicro: q.sharesMicro.toString(),
+        stakeCents: String(stake),
+      });
     }
 
     // maxPrice = MARGINAL ask (never VWAP), tick-rounded UP for a BUY (rounding down makes the

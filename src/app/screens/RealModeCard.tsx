@@ -12,7 +12,7 @@ import type { Me } from "../ui";
 import { useRealCtx } from "../useRealCtx";
 import { provisionReal } from "@/lib/real-client";
 import { APP_SURFACE_ID } from "../appSurface";
-import { MIN_DEPOSIT_USD } from "@/lib/config";
+import { DepositSheet } from "./DepositSheet";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
@@ -38,6 +38,7 @@ export function RealModeCard({ me, api, onRefresh, onToast }: {
   onToast: (msg: string) => void;
 }) {
   const [noticeOpen, setNoticeOpen] = useState(false);
+  const [depositOpen, setDepositOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { ctx } = useRealCtx(me);
@@ -146,43 +147,31 @@ export function RealModeCard({ me, api, onRefresh, onToast }: {
           />
         </div>
 
+        {/* The deposit wallet address is deliberately NOT printed here. It is a Polygon contract, and
+            shown loose in a profile it reads as "my address" — the next step is a Solana withdrawal
+            to a string that means nothing on Solana. An address is only ever shown behind a chosen
+            network, in DepositSheet. */}
         {isReal && real.depositWallet ? (
           <div style={{ marginTop: 10, borderTop: "1px solid var(--line)", paddingTop: 10 }}>
             <button
               type="button"
-              onClick={() => copy(real.depositWallet as string)}
+              onClick={() => setDepositOpen(true)}
               style={{
                 margin: 0,
                 font: "inherit",
-                display: "block",
                 width: "100%",
-                textAlign: "left",
+                padding: "10px 16px",
+                borderRadius: 12,
                 background: "var(--panel2)",
                 border: "1px solid var(--line)",
-                borderRadius: 12,
-                padding: "8px 10px",
-                cursor: "pointer",
                 color: "var(--text)",
+                fontWeight: 700,
+                fontSize: 13,
+                cursor: "pointer",
               }}
             >
-              <div style={{ ...MUTED, fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase" }}>
-                Deposit wallet · Polygon · tap to copy
-              </div>
-              <div style={{ fontSize: 12, fontFamily: "monospace", wordBreak: "break-all", marginTop: 2 }}>
-                {real.depositWallet}
-              </div>
+              Deposit
             </button>
-            {/* Which token on which chain is not a detail — it is the difference between a deposit
-                and money sitting somewhere nobody is watching. The funding watcher scans exactly two
-                contracts on Polygon (USDC.e and pUSD, src/lib/funding.ts), so NATIVE Polygon USDC —
-                what most exchanges now send when you pick "USDC / Polygon" — lands in the wallet and
-                is never credited. Other chains are the bridge's job, not this address's. */}
-            <div style={{ ...MUTED, marginTop: 8, lineHeight: 1.45 }}>
-              Send <strong style={{ color: "var(--text)" }}>USDC.e</strong> (bridged USDC) or pUSD, on{" "}
-              <strong style={{ color: "var(--text)" }}>Polygon only</strong>. Minimum ${MIN_DEPOSIT_USD}. Native
-              Polygon USDC and other networks are not credited here — for those, use Top-Up, which issues a
-              bridge address per chain.
-            </div>
           </div>
         ) : null}
 
@@ -222,6 +211,9 @@ export function RealModeCard({ me, api, onRefresh, onToast }: {
 
       {noticeOpen ? (
         <ConsentModal busy={busy} error={error} onAccept={accept} onClose={() => setNoticeOpen(false)} />
+      ) : null}
+      {depositOpen ? (
+        <DepositSheet api={api} onClose={() => setDepositOpen(false)} onToast={onToast} />
       ) : null}
     </>
   );

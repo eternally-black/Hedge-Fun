@@ -13,6 +13,8 @@ import {
   FREE_TOPUP_CASH_GATE_CENTS,
   TOPUP_ARTIFACT_COST,
   ARTIFACT_TOPUP_CASH_GATE_CENTS,
+  REAL_MIN_STAKE_CENTS,
+  REAL_MAX_STAKE_CENTS,
 } from "@/lib/config";
 import { isDevUser } from "@/lib/dev";
 import type { MeResponse } from "@/lib/api-types";
@@ -109,6 +111,9 @@ export async function GET(req: Request) {
           ? "REAL"
           : "PAPER",
       depositWallet: user.depositWalletAddress ?? null,
+      stakeCents: user.realStakeCents,
+      minStakeCents: REAL_MIN_STAKE_CENTS,
+      maxStakeCents: REAL_MAX_STAKE_CENTS,
     },
     loginMarkedToday: !!loginMark,
     unreadResults,

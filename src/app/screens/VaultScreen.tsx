@@ -5,6 +5,7 @@ import { type Me, type Card, countdown } from "../ui";
 import { SKINS, skinById } from "@/lib/skins";
 import { skinStyle } from "../skins";
 import { CardFace } from "../DeckCard";
+import { STAKE_CENTS } from "@/lib/config";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
@@ -216,7 +217,9 @@ function PreviewOverlay({
       </div>
       <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "4px 22px", minHeight: 0 }}>
         <div style={{ position: "relative", width: 262, maxWidth: "100%", aspectRatio: "0.62", borderRadius: 24, overflow: "hidden", border: "1px solid var(--line)", boxShadow: "0 26px 56px -18px rgba(0,0,0,.85)" }}>
-          <CardFace card={card} skinId={sk.id} countdownText={cd.text} urgent={cd.urgent} windowText={cd.relText} yesP={0} noP={0} skipP={0} />
+          {/* A skin preview, not a live card: the paper stake is the right number to draw it with,
+              and there is nothing here to edit — no onEditStake, so the chip stays inert. */}
+          <CardFace card={card} skinId={sk.id} countdownText={cd.text} urgent={cd.urgent} windowText={cd.relText} yesP={0} noP={0} skipP={0} stakeCents={STAKE_CENTS} />
           <div style={{ position: "absolute", top: 12, left: 12, background: "var(--energy)", color: "#fff", fontFamily: "var(--df)", fontSize: 12, letterSpacing: ".06em", padding: "3px 10px", borderRadius: 8, transform: "rotate(-4deg)", boxShadow: "0 6px 16px -4px color-mix(in srgb,var(--energy) 60%,transparent)" }}>PREVIEW</div>
         </div>
         <div style={{ textAlign: "center", marginTop: 15 }}>

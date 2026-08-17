@@ -206,6 +206,12 @@ model User {
   // two gates every money route re-checks (allowlist + consent), so this column can never be the
   // thing that authorises spending — it only decides what is shown.
   realMode              Boolean      @default(false)
+  // How much a single real swipe stakes, in cents. Per-user because it is the one real-money number
+  // a person has to be able to set for themselves — the paper stake is a game rule, this is their
+  // money. Server-side for the same reason realMode is: /api/real/intent must not take the amount
+  // to spend from the client. Default and floor are both $1 (REAL_DEFAULT_STAKE_CENTS), which is
+  // what Polymarket's own ticket accepts as a market buy at any price.
+  realStakeCents        Int          @default(100)
 
   bets                  Bet[]
   pointsLedger          PointsLedger[]

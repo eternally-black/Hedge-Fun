@@ -13,6 +13,7 @@ import { VaultScreen } from "./screens/VaultScreen";
 import { InviteScreen } from "./screens/InviteScreen";
 import { ProfileScreen } from "./screens/ProfileScreen";
 import { HistorySheet } from "./screens/HistorySheet";
+import { StakeSheet } from "./screens/StakeSheet";
 import { BalanceSheet } from "./screens/BalanceSheet";
 import { NotificationsScreen } from "./screens/NotificationsScreen";
 import { HedgeScreen } from "./screens/HedgeScreen";
@@ -21,7 +22,7 @@ import { type Card, type Me, type Screen } from "./ui";
 import { useRealCtx } from "./useRealCtx";
 import { APP_SURFACE_ID } from "./appSurface";
 import { placeRealOrder } from "@/lib/real-client";
-import { DECK_MIN_LEAD_MS, QUOTE_POLL_MS } from "@/lib/config";
+import { DECK_MIN_LEAD_MS, QUOTE_POLL_MS, STAKE_CENTS } from "@/lib/config";
 import type { QuotesResponse, ResultRow, ResultsResponse, SwipeResponse } from "@/lib/api-types";
 
 const PRIVY_ON = !!process.env.NEXT_PUBLIC_PRIVY_APP_ID;
@@ -81,6 +82,9 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [pop, setPop] = useState<{ amt: number; color: string } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  // Opened from the STAKE chip on the top card. Real mode only — in paper the stake is a game rule
+  // (STAKE_CENTS) that a player does not get to set, so the chip there stays inert text.
+  const [stakeOpen, setStakeOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [balanceOpen, setBalanceOpen] = useState(false);
   // Results reveal: the rows to play, or null when closed. Opened by the daily-open ritual (unseen
@@ -101,6 +105,10 @@ function App() {
   // REAL mode. `me.real.mode` is the server's answer and already accounts for missing or stale
   // consent, so the client never has to re-derive eligibility — it just renders what it is told.
   const realMode = me?.real.mode === "REAL";
+  // The number the card states and derives its payouts from. In real mode it is the account's own
+  // setting; paper keeps the fixed game rule. Falls back to STAKE_CENTS only pre-boot, when there is
+  // no `me` yet and the card is not swipeable anyway.
+  const effectiveStakeCents = realMode ? (me?.real.stakeCents ?? STAKE_CENTS) : STAKE_CENTS;
   const { ctx: realCtx } = useRealCtx(me);
   // Refs, not values, for the same reason meRef exists here: the swipe callback must keep a stable
   // identity across the frequent /api/me refreshes, or the keyed DeckCard is handed new props every
@@ -543,6 +551,17 @@ function App() {
           {toast}
         </div>
       )}
+      {stakeOpen && me && (
+        <StakeSheet
+          stakeCents={me.real.stakeCents}
+          minCents={me.real.minStakeCents}
+          maxCents={me.real.maxStakeCents}
+          api={api}
+          onClose={() => setStakeOpen(false)}
+          onSaved={refreshMe}
+          onToast={flashToast}
+        />
+      )}
       {historyOpen && <HistorySheet api={api} onClose={closeHistory} />}
       {balanceOpen && <BalanceSheet me={me} api={api} realPusdMicro={realPusdMicro} onClose={closeBalance} onTopupDone={refreshMe} onToast={flashToast} />}
       <Hud me={me} pop={pop} realPusdMicro={realPusdMicro} onShards={goVault} onGM={goGmScreen} onBalance={openBalance} onBell={goNotifs} />
@@ -569,9 +588,18 @@ function App() {
               ) : (
                 <>
                   {/* next card — FULLY rendered behind the top one (not a gray stub) */}
-                  {next && <CardPreview key={next.id} card={next} skinId={equippedSkin} />}
+                  {next && <CardPreview key={next.id} card={next} skinId={equippedSkin} stakeCents={effectiveStakeCents} />}
                   {top ? (
-                    <DeckCard key={top.id} card={top} skinId={equippedSkin} busy={busy} onAction={handleAction} onTap={noop} />
+                    <DeckCard
+                      key={top.id}
+                      card={top}
+                      skinId={equippedSkin}
+                      busy={busy}
+                      onAction={handleAction}
+                      onTap={noop}
+                      stakeCents={effectiveStakeCents}
+                      onEditStake={realMode ? () => setStakeOpen(true) : undefined}
+                    />
                   ) : (
                     <div style={{ position: "absolute", inset: 0, borderRadius: 26, background: "var(--panel)", border: "1px solid var(--line)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, textAlign: "center" }}>
                       <p style={{ color: "var(--muted)" }}>No more cards right now. Check back after the next batch resolves.</p>

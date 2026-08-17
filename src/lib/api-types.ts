@@ -277,6 +277,9 @@ export interface MeResponse {
     termsVersion: string; // which text they would be shown now
     mode: "PAPER" | "REAL"; // which economy the app is currently rendering
     depositWallet: string | null; // provisioned Polymarket deposit wallet, null until setup runs
+    stakeCents: number; // what ONE real swipe spends — the user's own setting, not the paper stake
+    minStakeCents: number; // the floor the UI must not let them go under
+    maxStakeCents: number; // fat-finger ceiling
   };
   loginMarkedToday: boolean;
   unreadResults: number; // settled bets the user hasn't seen yet (seenAt IS NULL) — drives the HUD bell

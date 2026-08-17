@@ -6,11 +6,13 @@ import { authUser } from "@/lib/privy";
 import { isRealMoneyEligible, hasRealConsent, sameOrigin } from "@/lib/real";
 import { captureToGlitchTip } from "@/lib/glitchtip";
 import { MIN_DEPOSIT_USD } from "@/lib/config";
+import { fetchSupportedAssets } from "@/lib/bridge";
+import { depositChains, type DepositChain } from "@/lib/deposit-chains";
 
 // In-memory cache keyed by wallet — the bridge is idempotent per wallet; successful responses
 // only, 24h TTL (§6.2: this bridge moves operationally — never serve a rotated address forever).
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-const cache = new Map<string, { at: number; data: unknown }>();
+const cache = new Map<string, { at: number; data: DepositChain[] }>();
 
 export async function POST(req: Request) {
   const user = await authUser(req);
@@ -31,7 +33,7 @@ export async function POST(req: Request) {
 
   const cached = cache.get(wallet);
   if (cached && Date.now() - cached.at < CACHE_TTL_MS) {
-    return NextResponse.json({ minUsd: MIN_DEPOSIT_USD, addresses: cached.data });
+    return NextResponse.json({ minUsd: MIN_DEPOSIT_USD, chains: cached.data });
   }
 
   const code = process.env.POLYMARKET_BUILDER_CODE; // PUBLIC builder code — attribution, not a secret.
@@ -56,12 +58,33 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "bridge_unavailable" }, { status: 502 });
   }
 
-  const addresses: unknown = await bridgeRes.json();
-  if (typeof addresses !== "object" || addresses === null) {
-    await captureToGlitchTip(new Error("bridge deposit: non-object body"), { route: "real/deposit-address" });
+  const body: unknown = await bridgeRes.json();
+  // The bridge answers { address: { evm, svm, tron, btc }, note, warnings } — the addresses are one
+  // level DOWN. This route used to hand the whole envelope back as `addresses`, and the client, which
+  // kept only the string-valued entries, ended up rendering `note` as if it were a chain and its text
+  // as if it were an address. Reading the nested object is the fix; refusing a body without it is
+  // what stops the same class of mistake from ever being silent again.
+  const addresses = (body as { address?: unknown })?.address;
+  if (typeof addresses !== "object" || addresses === null || Array.isArray(addresses)) {
+    await captureToGlitchTip(new Error("bridge deposit: no address object"), { route: "real/deposit-address" });
     return NextResponse.json({ error: "bridge_unavailable" }, { status: 502 });
   }
-  cache.set(wallet, { at: Date.now(), data: addresses });
 
-  return NextResponse.json({ minUsd: MIN_DEPOSIT_USD, addresses });
+  let chains;
+  try {
+    chains = depositChains(await fetchSupportedAssets(), addresses as Record<string, unknown>);
+  } catch (e) {
+    // Without the asset list there is no chain to name, no minimum to quote and no way to say which
+    // token belongs where — showing a bare address with none of that is how money lands on the wrong
+    // network. Fail the whole call instead.
+    await captureToGlitchTip(e, { route: "real/deposit-address", stage: "supported-assets" });
+    return NextResponse.json({ error: "bridge_unavailable" }, { status: 502 });
+  }
+  if (chains.length === 0) {
+    await captureToGlitchTip(new Error("bridge deposit: no usable chains"), { route: "real/deposit-address" });
+    return NextResponse.json({ error: "bridge_unavailable" }, { status: 502 });
+  }
+
+  cache.set(wallet, { at: Date.now(), data: chains });
+  return NextResponse.json({ minUsd: MIN_DEPOSIT_USD, chains });
 }

@@ -8,6 +8,32 @@ export const STAKE_CENTS = 1_000; // $10.00 fixed per swipe
 // it a deposit parks silently and indefinitely. Hard client minimum with margin — never trust the
 // advertised number.
 export const MIN_DEPOSIT_USD = 5;
+// Applied to EVERY chain, over the top of whatever the bridge advertises. Measured 2026-08-17: the
+// bridge's /supported-assets says $2 on most chains and $5 on Ethereum, but the real Solana floor
+// was $3 — the advertised number is not the number that clears. Bitcoin and Tron ($7 floors) are
+// not offered at all, so "$5 everywhere" is literally true for the chains we show.
+export const DEPOSIT_FLOOR_USD = 5;
+
+// ---- Real-money stake (DECIDED: user-configurable, floor $1) ----
+// The stake is the user's ALL-IN debit cap: fees come OUT of it, so the shares bought are always
+// slightly fewer than stake/price. Paper keeps its own fixed STAKE_CENTS above; the two are
+// deliberately separate numbers because one is a game rule and the other is somebody's money.
+export const REAL_MIN_STAKE_CENTS = 100; // $1.00 floor — Polymarket takes a $1 market buy at any price
+export const REAL_MAX_STAKE_CENTS = 100_000; // $1,000 — a fat-finger bound, not a policy limit
+export const REAL_DEFAULT_STAKE_CENTS = 100; // $1.00
+// The quick choices in the stake sheet. They SET the amount rather than adding to it — four values
+// is the whole useful range for a swipe deck, and anything else goes in the input beside them.
+export const REAL_STAKE_PRESETS_CENTS = [100, 200, 500, 1_000] as const;
+// Books advertise `min_order_size: 5` — uniformly 5 on every market sampled (2026-08-17), including
+// ones whose expensive side sits at 95c, where 5 shares would cost $4.78. Polymarket's own ticket
+// nevertheless accepts a $1 market buy on a 99.7c side (~1.003 shares), so the field does not govern
+// TAKER buys; it reads as a maker/limit constraint. We therefore gate BUY on the dollar floor above
+// and let the exchange be the authority on its own minimum — a rejection there is loud and moves no
+// money, whereas enforcing 5 shares here would make a $1 stake impossible on most of the deck.
+// NOT verified by placing a real order; if submits start failing with a size error, this is the
+// first thing to revisit. SELL keeps the share check — exiting below the minimum is the documented
+// way to strand dust, and there `size` really is denominated in shares.
+export const REAL_MIN_ORDER_SHARES = 5;
 // Pessimistic fee fallback when a market's feeInfo is unfetchable (fees.ts): the highest measured
 // tier (rate 0.07, exponent 1 — the 2026-08-13 real fill). Overstating shrinks a hedge slightly;
 // understating lies on the card.

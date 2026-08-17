@@ -6,6 +6,7 @@
 // If a route adds/removes/renames a top-level key, this test fails: that's the point.
 // Run: npx tsx scripts/test-api-contract.ts  (needs DATABASE_URL)
 import assert from "node:assert";
+import { REAL_DEFAULT_STAKE_CENTS, REAL_MIN_STAKE_CENTS } from "../src/lib/config";
 import { PrivyClient } from "@privy-io/server-auth";
 
 const STUB_DID = `did:privy:apitest-${process.pid}-${Date.now() & 0xffffff}`;
@@ -42,6 +43,7 @@ async function main() {
   const skip = await import("../src/app/api/skip/route");
   const recover = await import("../src/app/api/recover/route");
   const topup = await import("../src/app/api/topup/route");
+  const realStake = await import("../src/app/api/real/stake/route");
   const history = await import("../src/app/api/history/route");
   const loginMark = await import("../src/app/api/login-mark/route");
   const results = await import("../src/app/api/results/route");
@@ -74,6 +76,7 @@ async function main() {
   await expect401(skip.POST, "http://x/api/skip", { method: "POST" });
   await expect401(recover.POST, "http://x/api/recover", { method: "POST" });
   await expect401(topup.POST, "http://x/api/topup", { method: "POST", body: "{}" });
+  await expect401(realStake.POST, "http://x/api/real/stake", { method: "POST", body: "{}" });
   await expect401(loginMark.POST, "http://x/api/login-mark", { method: "POST" });
   await expect401(results.GET, "http://x/api/results");
   await expect401(resultsSeen.POST, "http://x/api/results/seen", { method: "POST" });
@@ -89,13 +92,29 @@ async function main() {
   // here is a broken toggle there, so the shape is pinned like every other block on this endpoint.
   assert.deepStrictEqual(
     Object.keys(meBody.real).sort(),
-    ["consentAt","consentVersion","depositWallet","mode","termsVersion"],
+    ["consentAt","consentVersion","depositWallet","maxStakeCents","minStakeCents","mode","stakeCents","termsVersion"],
     "/me real keys",
   );
   // Default posture for an account that has never opted in: paper, no consent, no wallet. If this
   // ever flips by accident, a fresh user lands in a real-money shell.
   assert.strictEqual(meBody.real.mode, "PAPER", "/me real.mode defaults to PAPER");
   assert.strictEqual(meBody.real.consentAt, null, "/me real.consentAt null before consent");
+  // Every account starts at the $1 stake — a real swipe must never inherit the $10 PAPER game rule,
+  // which is what it did before the column existed.
+  assert.strictEqual(meBody.real.stakeCents, REAL_DEFAULT_STAKE_CENTS, "/me real.stakeCents defaults to $1");
+  assert.strictEqual(meBody.real.minStakeCents, REAL_MIN_STAKE_CENTS, "/me exposes the stake floor");
+
+  // ---- the stake is bounded server-side: the floor is not a client-side courtesy ----
+  const setStake = (cents: unknown) =>
+    realStake.POST(new Request("http://x/api/real/stake", {
+      method: "POST",
+      headers: { authorization: "Bearer good", "content-type": "application/json" },
+      body: JSON.stringify({ stakeCents: cents }),
+    }));
+  assert.strictEqual((await setStake(REAL_MIN_STAKE_CENTS - 1)).status, 400, "below the floor -> 400");
+  assert.strictEqual((await setStake(1_000_000)).status, 400, "above the ceiling -> 400");
+  assert.strictEqual((await setStake(250.5)).status, 400, "fractional cents -> 400");
+  assert.strictEqual((await setStake(250)).status, 200, "$2.50 is accepted");
   assert.deepStrictEqual(Object.keys(meBody.skins).sort(), ["equipped","owned"], "/me skins keys");
   assert.deepStrictEqual(Object.keys(meBody.points).sort(), ["bonusFromX2","breakdown","total"], "/me points keys");
   assert.deepStrictEqual(Object.keys(meBody.swipes).sort(), ["cap","used"], "/me swipes keys");
