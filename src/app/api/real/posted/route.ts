@@ -13,10 +13,9 @@ import { authUser } from "@/lib/privy";
 import { isRealMoneyEligible, hasRealConsent, sameOrigin } from "@/lib/real";
 import { captureToGlitchTip } from "@/lib/glitchtip";
 import { serverSecureClient } from "@/lib/polymarket-server";
-import { matchesExchangeOrder, type ExchangeOrderView, type SignedOrderWire } from "@/lib/orders";
+import { type SignedOrderWire } from "@/lib/orders";
 import { reconcileAttempt } from "@/lib/reconcile";
-import { realProbes } from "@/lib/order-probe";
-import { fetchOrder } from "@polymarket/client/actions";
+import { realProbes, verifyReportedOrder } from "@/lib/order-probe";
 
 export async function POST(req: Request) {
   const user = await authUser(req);
@@ -71,49 +70,34 @@ export async function POST(req: Request) {
   const client = await serverSecureClient(prisma, user);
   if (!client) return NextResponse.json({ error: "real_not_configured" }, { status: 503 });
 
-  // Read the order back from the exchange. fetchOrder is NOT curried (unlike postOrder). A throw
-  // or a non-object answer is an inability to PROVE the adoption, not a disproof of it: the
-  // attempt stays SUBMITTING and the discovery sweep resolves it against the exchange later.
-  let raw: unknown;
-  try {
-    raw = await fetchOrder(client as never, { orderId });
-  } catch (e) {
-    await captureToGlitchTip(e, { route: "real/posted", stage: "fetch_order" });
-    return NextResponse.json({ error: "order_unreadable" }, { status: 502 });
-  }
-  if (!raw || typeof raw !== "object") {
-    await captureToGlitchTip(new Error("order_unreadable: non-object"), { route: "real/posted", orderId });
-    return NextResponse.json({ error: "order_unreadable" }, { status: 502 });
-  }
-
-  const o = raw as Record<string, unknown>;
-  const view: ExchangeOrderView = {
-    id: String(o.id ?? ""),
-    tokenId: String(o.tokenId ?? ""),
-    makerAddress: String(o.makerAddress ?? ""),
-    side: String(o.side ?? ""),
-    originalSize: String(o.originalSize ?? ""),
-    price: String(o.price ?? ""),
-    status: String(o.status ?? ""),
-    sizeMatched: String(o.sizeMatched ?? ""),
-    createdAt: String(o.createdAt ?? ""),
-  };
-  const mismatch = matchesExchangeOrder(view, {
-    signed,
-    dir: attempt.dir === "EXIT" ? "EXIT" : "ENTRY",
-    depositWallet,
-    notBefore: attempt.createdAt,
-  });
-  if (mismatch) {
+  // Prove the reported id against the exchange: the order record when it can be read, otherwise a
+  // trade of this account naming that id as its taker order. The second path is not a convenience —
+  // a FAK order that fills immediately was, in the one case that mattered, not retrievable as an
+  // order at all, and the position went unbooked while the money was gone.
+  const verdict = await verifyReportedOrder(client, attempt, orderId, depositWallet);
+  if (!verdict.ok && verdict.reason === "mismatch") {
     // A wrong id proves nothing about our real order — it may still be live under an id nobody
     // reported. So this records the evidence and refuses; killing the attempt here would strand a
     // position, and the discovery sweep is the thing allowed to decide that an order does not exist.
     await prisma.orderAttempt.updateMany({
       where: { id: attempt.id, state: "SUBMITTING" },
-      data: { error: `order_mismatch: ${mismatch}` },
+      data: { error: `order_mismatch: ${verdict.detail}` },
     });
-    return NextResponse.json({ error: "order_mismatch", detail: mismatch }, { status: 422 });
+    return NextResponse.json({ error: "order_mismatch", detail: verdict.detail }, { status: 422 });
   }
+  if (!verdict.ok) {
+    // Unverifiable YET. The browser did post — it has an order id — and the exchange's own records
+    // simply have not caught up, so this is not a failure to report to the user. The attempt keeps
+    // its claim and the discovery sweep books it minutes later. Answering 502 here (as this route
+    // first did) turned a filled order into a red error in the middle of a swipe.
+    await captureToGlitchTip(new Error("reported order not yet verifiable"), {
+      route: "real/posted",
+      attemptId: attempt.id,
+      orderId,
+    });
+    return NextResponse.json({ status: "posted", outcome: "unverified" });
+  }
+  const raw = verdict.order;
 
   // CAS-adopt: SUBMITTING and unbound → POSTED with the id. The unique index on externalOrderId is
   // the backstop — binding one exchange order to two attempts would book its fills twice.

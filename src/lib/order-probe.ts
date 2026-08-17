@@ -3,6 +3,12 @@
 // which is exactly why the order is posted by the browser while every number that reaches the
 // ledger is read back from here. This file is the ONLY place the SDK meets those two callbacks;
 // src/lib/reconcile.ts stays SDK-free so the tests can drive it with fakes.
+//
+// TRADES ARE THE FALLBACK TRUTH. The order record is the nicer answer — it carries the exchange's
+// own `sizeMatched`, which cross-checks the trade set — but on 2026-08-17 a FAK order that really
+// did fill could not be read back at all (both /api/real/posted and the discovery sweep failed on
+// it), and the position stayed invisible while the money was gone. A FAK cannot match later, so
+// the trades naming it are the whole story: when the order record is unavailable, they answer.
 import type { PrismaClient } from "@prisma/client";
 import { fetchOrder, listAccountTrades, listOpenOrders } from "@polymarket/client/actions";
 import { serverSecureClient } from "./polymarket-server";
@@ -20,14 +26,164 @@ import { matchesExchangeOrder, type ExchangeOrderView, type SignedOrderWire } fr
 // A terminal verdict is what KILLS an attempt, so the terminal set is explicit and everything
 // unrecognized reads as still-matchable (fail-safe).
 const TERMINAL_STATUS = new Set(["matched", "canceled", "cancelled", "expired"]);
-// Paging is bounded so a pathological account cannot pin this request open; the short-set guard
-// below turns an exhausted budget into "unknown" (retry next pass), never into a partial booking.
+// Paging is bounded so a pathological account cannot pin this request open; an exhausted budget
+// reads as an incomplete set (retry next pass), never as a partial booking.
 const MAX_TRADE_PAGES = 20;
 // How many candidate order ids discovery is willing to fetch. Truncation is treated as "could not
 // check everything", never as absence.
 const MAX_CANDIDATES = 10;
+// The exchange's clock is not ours, so a trade may be stamped slightly before the intent it belongs to.
+const CLOCK_SKEW_MS = 120_000;
 
 type ServerClient = Awaited<ReturnType<typeof serverSecureClient>>;
+
+// Every read failure in here used to be swallowed into a boolean. On a path whose whole job is to
+// recover money, the REASON is the only thing that tells an operator whether the exchange is
+// unreachable, the credentials are wrong, or the code is — and its absence cost an evening.
+function noteFailure(where: string, attemptId: string, e: unknown): void {
+  const err = e as { name?: string; message?: string; status?: number };
+  console.warn(
+    `[order-probe] ${where} failed (attempt ${attemptId}): ${err?.name ?? "Error"}` +
+      `${err?.status ? ` ${err.status}` : ""} ${err?.message ?? String(e)}`,
+  );
+}
+
+// One trade row → a ledger-grade record, or null. A malformed record must never enter the money
+// ledger, and an unparseable fee rate is exactly the estimate reconciliation exists to remove.
+function decodeTrade(raw: unknown): (TradeRecord & { takerOrderId: string }) | null {
+  const t = raw as Record<string, unknown>;
+  const id = String(t.id ?? "");
+  const price = Number(t.price);
+  const size = Number(t.size);
+  const feeRateBps = Number(t.feeRateBps);
+  if (!id || !Number.isFinite(price) || price <= 0) return null;
+  if (!Number.isFinite(size) || size <= 0 || !Number.isFinite(feeRateBps) || feeRateBps < 0) return null;
+  const stamped = t.matchedAt ?? t.updatedAt;
+  const ts = stamped ? new Date(String(stamped)) : new Date();
+  return {
+    id,
+    priceBp: Math.round(price * 10_000),
+    sizeMicro: BigInt(Math.round(size * 1_000_000)),
+    feeRateBp: Math.round(feeRateBps),
+    ts: Number.isNaN(ts.getTime()) ? new Date() : ts,
+    takerOrderId: String(t.takerOrderId ?? ""),
+  };
+}
+
+// This account's trades on one token, bounded. `complete` is the load-bearing half: a short read
+// must never be mistaken for "there are no more trades", because both callers use the absence of
+// a trade to conclude something terminal.
+async function pageTrades(
+  client: NonNullable<ServerClient>,
+  attempt: ReconcilableAttempt,
+): Promise<{ rows: unknown[]; complete: boolean }> {
+  const rows: unknown[] = [];
+  try {
+    const paginator = listAccountTrades(client as never, { tokenId: attempt.tokenId });
+    const first = await paginator.firstPage();
+    rows.push(...first.items);
+    if (first.hasMore && first.nextCursor) {
+      let pages = 1;
+      let more = false;
+      for await (const page of paginator.from(first.nextCursor)) {
+        rows.push(...page.items);
+        more = page.hasMore;
+        if (++pages >= MAX_TRADE_PAGES) break;
+      }
+      // Hitting the cap is NOT a transient miss that the next pass fixes: there is no resume
+      // cursor, so every pass re-reads these same pages and comes up short again — forever,
+      // silently. Rare (one order's fills spanning MAX_TRADE_PAGES) but unrecoverable without a
+      // human, so it is surfaced. A persisted cursor on the attempt is the real fix if it fires.
+      if (more && pages >= MAX_TRADE_PAGES) {
+        await captureToGlitchTip(new Error("reconcile trade paging exhausted"), {
+          route: "real/reconcile",
+          attemptId: attempt.id,
+          tokenId: attempt.tokenId,
+          pages: String(pages),
+        });
+        return { rows, complete: false };
+      }
+    }
+    return { rows, complete: true };
+  } catch (e) {
+    noteFailure("listAccountTrades", attempt.id, e);
+    return { rows: [], complete: false }; // unreachable trades are unknown, never "no trades"
+  }
+}
+
+
+// Verify an order id the BROWSER reported, without trusting the browser for anything but the id.
+// /api/real/posted asks this before it books a cent. Three answers, and the middle one matters:
+// "unverifiable" is not "wrong" — it means the exchange could not answer YET, so the attempt keeps
+// its claim and the discovery sweep finishes the job, instead of the user seeing a failure for an
+// order that actually filled.
+export type ReportedOrderVerdict =
+  | { ok: true; order: unknown }
+  | { ok: false; reason: "mismatch"; detail: string }
+  | { ok: false; reason: "unverifiable" };
+
+export async function verifyReportedOrder(
+  client: NonNullable<ServerClient>,
+  attempt: ReconcilableAttempt,
+  orderId: string,
+  depositWallet: string,
+): Promise<ReportedOrderVerdict> {
+  const signed = attempt.signedOrder as unknown as SignedOrderWire | null;
+  if (!signed || typeof signed !== "object") return { ok: false, reason: "mismatch", detail: "no_signed_order" };
+  const dir = attempt.dir === "EXIT" ? "EXIT" : "ENTRY";
+
+  let raw: Record<string, unknown> | null = null;
+  try {
+    const fetched = await fetchOrder(client as never, { orderId });
+    raw = fetched && typeof fetched === "object" ? (fetched as Record<string, unknown>) : null;
+  } catch (e) {
+    noteFailure("fetchOrder(reported)", attempt.id, e);
+  }
+
+  if (raw) {
+    const view: ExchangeOrderView = {
+      id: String(raw.id ?? ""),
+      tokenId: String(raw.tokenId ?? ""),
+      makerAddress: String(raw.makerAddress ?? ""),
+      side: String(raw.side ?? ""),
+      originalSize: String(raw.originalSize ?? ""),
+      price: String(raw.price ?? ""),
+      status: String(raw.status ?? ""),
+      sizeMatched: String(raw.sizeMatched ?? ""),
+      createdAt: String(raw.createdAt ?? ""),
+    };
+    const mismatch = matchesExchangeOrder(view, {
+      signed,
+      dir,
+      depositWallet: depositWallet.toLowerCase(),
+      notBefore: attempt.createdAt,
+    });
+    return mismatch ? { ok: false, reason: "mismatch", detail: mismatch } : { ok: true, order: raw };
+  }
+
+  // The order record was unreadable. The trades are the fallback truth, and for a reported id they
+  // are a tight one: a trade that names this id as its TAKER order, on the token this attempt
+  // signed for, after the intent existed, in an account only these credentials can read. A client
+  // cannot fabricate that — it would have to make the exchange print someone else's trade.
+  const { rows, complete } = await pageTrades(client, attempt);
+  const floorMs = attempt.createdAt.getTime() - CLOCK_SKEW_MS;
+  const named = rows.some((row) => {
+    const t = row as Record<string, unknown>;
+    if (String(t.takerOrderId ?? "") !== orderId) return false;
+    if (String(t.traderSide ?? "") !== "TAKER") return false;
+    const stamped = t.matchedAt ?? t.updatedAt;
+    const ts = stamped ? new Date(String(stamped)).getTime() : Number.NaN;
+    return Number.isFinite(ts) && ts >= floorMs;
+  });
+  if (named) {
+    console.warn(`[order-probe] ${attempt.id}: reported order ${orderId} verified from trade evidence`);
+    return { ok: true, order: { id: orderId, source: "trade-evidence" } };
+  }
+  // Nothing yet, or the trade read failed. Either way this is "ask again later", never a refusal:
+  // the trade records lag a match by a beat, and /api/real/posted runs milliseconds after it.
+  if (!complete) noteFailure("verifyReportedOrder", attempt.id, new Error("trade read incomplete"));
+  return { ok: false, reason: "unverifiable" };
+}
 
 export function realProbes(prisma: PrismaClient): { probe: OrderProbe; discover: OrphanDiscover } {
   // One client per OWNER, cached for this request — each attempt is probed with its own user's
@@ -50,104 +206,54 @@ export function realProbes(prisma: PrismaClient): { probe: OrderProbe; discover:
   const probe: OrderProbe = async (attempt: ReconcilableAttempt): Promise<OrderVerdict | null> => {
     const { client } = await clientFor(attempt.userId);
     if (!client || !attempt.externalOrderId) return null; // not configured / nothing to ask about
+    const orderId = attempt.externalOrderId;
 
+    // 0.6.0: fetchOrder is NOT curried (unlike postOrder). A failure here is no longer fatal to the
+    // pass — it costs the sizeMatched cross-check, and the trades below carry the rest.
+    let order: Record<string, unknown> | null = null;
     try {
-      // 0.6.0: fetchOrder is NOT curried (unlike postOrder).
-      const order = (await fetchOrder(client as never, { orderId: attempt.externalOrderId })) as Record<
-        string,
-        unknown
-      > | null;
-      if (!order || typeof order !== "object") return null;
+      const raw = await fetchOrder(client as never, { orderId });
+      order = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
+    } catch (e) {
+      noteFailure("fetchOrder", attempt.id, e);
+    }
 
-      const sizeMatched = Number(order.sizeMatched);
-      if (!Number.isFinite(sizeMatched) || sizeMatched < 0) return null;
+    const { rows, complete } = await pageTrades(client, attempt);
+    const associated = order && Array.isArray(order.associateTrades) ? (order.associateTrades as unknown[]).map(String) : [];
+    // This order's trades: the taker order id is ours, or the order record named the trade.
+    // De-duplicated by trade id FIRST — a trade reachable both ways would otherwise inflate the
+    // booked size above what actually matched, which is value invented on a money ledger.
+    const mine = [
+      ...new Map(
+        rows
+          .map(decodeTrade)
+          .filter((t): t is TradeRecord & { takerOrderId: string } => t !== null)
+          .filter((t) => t.takerOrderId === orderId || associated.includes(t.id))
+          .map((t) => [t.id, t] as const),
+      ).values(),
+    ];
+    const collectedMicro = mine.reduce((sum, t) => sum + t.sizeMicro, 0n);
+
+    const sizeMatched = order ? Number(order.sizeMatched) : Number.NaN;
+    if (order && Number.isFinite(sizeMatched) && sizeMatched >= 0) {
       const matchedSharesMicro = BigInt(Math.round(sizeMatched * 1_000_000));
       const terminal = TERMINAL_STATUS.has(String(order.status ?? "").toLowerCase());
-
-      const trades: TradeRecord[] = [];
-      if (matchedSharesMicro > 0n) {
-        // Two bugs lived on the line this replaces. It read `.data` off the page, but the SDK's
-        // Page<T> carries `items` — so `rows` was ALWAYS empty, collectedMicro was always 0, the
-        // short-set guard below always fired, and no POSTED attempt was ever reconciled or had its
-        // estimated fee trued up. And it took only firstPage(), so an order whose fills span pages
-        // could never satisfy that guard even once the field name was right: every pass would re-read
-        // the same page and return unknown again. Nothing caught it — scripts/test-reconcile.ts
-        // injects its own probe and never exercises this decoding.
-        const rows: unknown[] = [];
-        try {
-          const paginator = listAccountTrades(client as never, { tokenId: attempt.tokenId });
-          const first = await paginator.firstPage();
-          rows.push(...first.items);
-          if (first.hasMore && first.nextCursor) {
-            let pages = 1;
-            let more = false;
-            for await (const page of paginator.from(first.nextCursor)) {
-              rows.push(...page.items);
-              more = page.hasMore;
-              if (++pages >= MAX_TRADE_PAGES) break;
-            }
-            // Hitting the cap is NOT a transient miss that the next pass fixes: there is no resume
-            // cursor, so every pass re-reads these same pages, comes up short of matchedShares, and
-            // returns unknown again — forever, silently. Rare (it needs one order's fills to span
-            // MAX_TRADE_PAGES) but unrecoverable without a human, so it is surfaced rather than
-            // absorbed. A persisted cursor on the attempt is the real fix if this ever fires.
-            if (more && pages >= MAX_TRADE_PAGES) {
-              await captureToGlitchTip(new Error("reconcile trade paging exhausted"), {
-                route: "real/reconcile",
-                attemptId: attempt.id,
-                tokenId: attempt.tokenId,
-                pages: String(pages),
-              });
-            }
-          }
-        } catch {
-          rows.length = 0; // unreachable trades read as "no records" → unknown, retried
-        }
-        const associated = Array.isArray(order.associateTrades) ? (order.associateTrades as unknown[]).map(String) : [];
-        for (const raw of rows) {
-          const t = raw as Record<string, unknown>;
-          const id = String(t.id ?? "");
-          // Only this order's trades: the taker order id is ours, or the order named the trade.
-          if (String(t.takerOrderId ?? "") !== attempt.externalOrderId && !associated.includes(id)) continue;
-          const price = Number(t.price);
-          const size = Number(t.size);
-          const feeRateBps = Number(t.feeRateBps);
-          // A malformed record must never enter the money ledger — and an unparseable fee rate is
-          // exactly the estimate this pass exists to remove, so drop that trade too.
-          if (!id || !Number.isFinite(price) || price <= 0) continue;
-          if (!Number.isFinite(size) || size <= 0 || !Number.isFinite(feeRateBps) || feeRateBps < 0) continue;
-          const stamped = t.matchedAt ?? t.updatedAt;
-          const ts = stamped ? new Date(String(stamped)) : new Date();
-          trades.push({
-            id,
-            priceBp: Math.round(price * 10_000),
-            sizeMicro: BigInt(Math.round(size * 1_000_000)),
-            feeRateBp: Math.round(feeRateBps),
-            ts: Number.isNaN(ts.getTime()) ? new Date() : ts,
-          });
-        }
-        // The collected set must account for EXACTLY what the exchange says matched. Short is the
-        // obvious hazard — a paging cut or a dropped malformed record would mark the attempt
-        // terminal with money missing from the ledger. But long is a hazard too, and the guard used
-        // to allow it: `associateTrades` and the taker-order-id filter can both name the same trade,
-        // and any duplicate row inflates the booked size above what actually matched — 100 shares
-        // reported, 200 booked, value invented on a money ledger. Either way write nothing and let
-        // the next pass retry; a stalled reconcile is recoverable, a wrong one is not.
-        // De-duplicate by trade id FIRST. A trade can be reached twice — once because its
-        // takerOrderId is ours and once because the order's `associateTrades` names it — and the
-        // paging loop above can also re-serve a row if the cursor overlaps. That duplication is the
-        // actual mechanism behind an inflated size; collapsing it is the fix, and the equality check
-        // below is then a genuine consistency assertion rather than a filter doing the real work.
-        const unique = [...new Map(trades.map((t) => [t.id, t])).values()];
-        const collectedMicro = unique.reduce((sum, t) => sum + t.sizeMicro, 0n);
-        if (collectedMicro !== matchedSharesMicro) return null;
-        trades.length = 0;
-        trades.push(...unique);
-      }
-      return { terminal, matchedSharesMicro, trades };
-    } catch {
-      return null; // any probe failure is "unknown": no writes, next pass retries
+      if (matchedSharesMicro === 0n) return { terminal, matchedSharesMicro, trades: [] };
+      // The collected set must account for EXACTLY what the exchange says matched. Short means a
+      // paging cut or a dropped record and would book an attempt terminal with money missing; long
+      // means a duplicate and would book value that never existed. Either way write nothing.
+      if (!complete || collectedMicro !== matchedSharesMicro) return null;
+      return { terminal, matchedSharesMicro, trades: mine };
     }
+
+    // No readable order record — the case that stranded a real position on 2026-08-17. A FAK order
+    // cannot match later, so a COMPLETE read of the trades naming it is the whole fill. An empty
+    // one stays "unknown" rather than "killed": without the order record there is no way to tell a
+    // killed order from an unreadable one, and killing a filled attempt is the one mistake here
+    // that cannot be undone.
+    if (!complete || mine.length === 0) return null;
+    console.warn(`[order-probe] ${attempt.id}: order record unreadable, settled from ${mine.length} trade(s)`);
+    return { terminal: true, matchedSharesMicro: collectedMicro, trades: mine };
   };
 
   // Find the exchange order an attempt never managed to report. Reads only — the caller decides
@@ -168,6 +274,7 @@ export function realProbes(prisma: PrismaClient): { probe: OrderProbe; discover:
 
       const dir = attempt.dir === "EXIT" ? "EXIT" : "ENTRY";
       const notBefore = attempt.createdAt;
+      const floorMs = notBefore.getTime() - CLOCK_SKEW_MS;
       const matches = (raw: Record<string, unknown>): boolean => {
         const id = String(raw.id ?? "");
         const tokenId = String(raw.tokenId ?? "");
@@ -198,10 +305,10 @@ export function realProbes(prisma: PrismaClient): { probe: OrderProbe; discover:
       try {
         const paginator = listOpenOrders(client as never, { tokenId: attempt.tokenId });
         const first = await paginator.firstPage();
-        // Same rule as the candidate loop below: a live order of OUR OWN wallet on this token that
-        // the identity test rejects is ambiguity — never proof that our order does not exist.
-        const scan = (rows: unknown[]): { orderId: string; order: unknown } | null => {
-          for (const raw of rows) {
+        // A live order of OUR OWN wallet on this token that the identity test rejects is ambiguity,
+        // never proof that our order does not exist.
+        const scan = (items: unknown[]): { orderId: string; order: unknown } | null => {
+          for (const raw of items) {
             const row = raw as Record<string, unknown>;
             if (matches(row)) return { orderId: String(row.id), order: row };
             if (String(row.makerAddress ?? "").toLowerCase() === depositWallet) incomplete = true;
@@ -221,72 +328,61 @@ export function realProbes(prisma: PrismaClient): { probe: OrderProbe; discover:
             }
           }
         }
-      } catch {
+      } catch (e) {
+        noteFailure("listOpenOrders", attempt.id, e);
         incomplete = true; // a failed listing is not proof of absence
       }
 
       // Step 2 — an order that matched and died. A FAK order that filled leaves no open order at
       // all; what it leaves is trades, and each trade names the taker order it belongs to. That is
       // the only handle the exchange gives us on an id we never learned.
-      const candidateIds: string[] = [];
-      try {
-        const paginator = listAccountTrades(client as never, { tokenId: attempt.tokenId });
-        const first = await paginator.firstPage();
-        // Same skew the identity matcher allows: the exchange's clock is not ours.
-        const floorMs = notBefore.getTime() - 120_000;
-        const collect = (rows: unknown[]) => {
-          for (const raw of rows) {
-            const row = raw as Record<string, unknown>;
-            if (String(row.traderSide ?? "") !== "TAKER") continue; // our FAK order is always the taker
-            const takerOrderId = String(row.takerOrderId ?? "");
-            if (!takerOrderId) continue;
-            const stamped = row.matchedAt ?? row.updatedAt;
-            const ts = stamped ? new Date(String(stamped)).getTime() : NaN;
-            // Without a readable timestamp we cannot tell this trade from one of the user's older
-            // trades on the same token, so it is not a candidate. fetchOrder would re-check the
-            // date anyway; skipping here just keeps the fan-out honest.
-            if (!Number.isFinite(ts) || ts < floorMs) continue;
-            candidateIds.push(takerOrderId);
-          }
-        };
-        collect(first.items);
-        if (first.hasMore && first.nextCursor) {
-          let pages = 1;
-          for await (const page of paginator.from(first.nextCursor)) {
-            collect(page.items);
-            if (++pages >= MAX_TRADE_PAGES) {
-              if (page.hasMore) incomplete = true;
-              break;
-            }
-          }
-        }
-      } catch {
-        incomplete = true;
+      const { rows, complete } = await pageTrades(client, attempt);
+      if (!complete) incomplete = true;
+      const candidates: string[] = [];
+      for (const raw of rows) {
+        const row = raw as Record<string, unknown>;
+        if (String(row.traderSide ?? "") !== "TAKER") continue; // our FAK order is always the taker
+        const takerOrderId = String(row.takerOrderId ?? "");
+        if (!takerOrderId) continue;
+        const stamped = row.matchedAt ?? row.updatedAt;
+        const ts = stamped ? new Date(String(stamped)).getTime() : Number.NaN;
+        // Without a readable timestamp this cannot be told apart from one of the user's older
+        // trades on the same token, so it is not a candidate.
+        if (!Number.isFinite(ts) || ts < floorMs) continue;
+        if (!candidates.includes(takerOrderId)) candidates.push(takerOrderId);
       }
+      if (candidates.length > MAX_CANDIDATES) incomplete = true; // an unchecked candidate may be ours
 
-      const unique = [...new Set(candidateIds)];
-      if (unique.length > MAX_CANDIDATES) incomplete = true; // an unchecked candidate may be ours
-      for (const orderId of unique.slice(0, MAX_CANDIDATES)) {
+      for (const orderId of candidates.slice(0, MAX_CANDIDATES)) {
+        let raw: Record<string, unknown> | null = null;
         try {
-          const raw = (await fetchOrder(client as never, { orderId })) as Record<string, unknown> | null;
-          if (!raw || typeof raw !== "object") continue;
-          if (matches(raw)) return { orderId, order: raw };
-          // A taker order of THIS wallet, on THIS token, inside the window — and yet the identity
-          // test said no. That may be an unrelated order the user placed on polymarket.com, or it
-          // may be ours failing a check that is stricter than the exchange's own formatting (the
-          // size comparison is exact to a micro-share; if the CLOB ever reports fewer decimals,
-          // this is where it shows). Declaring absence here would KILL an attempt whose money the
-          // exchange already spent, so an unattributed order of ours is ambiguity, not absence.
-          if (String(raw.makerAddress ?? "").toLowerCase() === depositWallet) incomplete = true;
-        } catch {
-          incomplete = true; // a candidate we could not read may be the one
+          const fetched = await fetchOrder(client as never, { orderId });
+          raw = fetched && typeof fetched === "object" ? (fetched as Record<string, unknown>) : null;
+        } catch (e) {
+          noteFailure("fetchOrder(candidate)", attempt.id, e);
         }
+        if (raw) {
+          if (matches(raw)) return { orderId, order: raw };
+          // A taker order of THIS wallet on THIS token inside the window that the identity test
+          // still rejects is ambiguity, not absence — our test may be stricter than the exchange's
+          // own formatting, and declaring absence would kill an attempt whose money is spent.
+          if (String(raw.makerAddress ?? "").toLowerCase() === depositWallet) incomplete = true;
+          continue;
+        }
+        // The order record is unreadable — the failure that stranded a live position. The trade
+        // itself is still evidence, and a strong one: it is OUR account's trade (the CLOB only
+        // reports trades its credentials own), on the token this attempt signed for, as the TAKER,
+        // after the intent existed. That is the same binding the order record would have given,
+        // minus the size — which is unknowable from one trade of a possibly-partial fill anyway.
+        console.warn(`[order-probe] ${attempt.id}: adopting ${orderId} on trade evidence alone`);
+        return { orderId, order: { id: orderId, source: "trade-evidence" } };
       }
 
       // Every read landed and nothing of ours is unaccounted for: the exchange genuinely has no
       // order here, so nothing was posted and no money moved.
       return incomplete ? null : { orderId: null };
-    } catch {
+    } catch (e) {
+      noteFailure("discover", attempt.id, e);
       return null; // indeterminate exchange state — no state change is safe
     }
   };
