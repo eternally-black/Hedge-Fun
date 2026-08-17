@@ -31,14 +31,30 @@ type SecureClient = Awaited<ReturnType<typeof createSecureClient>>;
 // XSS. The first ctx's getToken wins for the lifetime of the entry; one signed-in user per tab.
 const clientCache = new Map<string, SecureClient>();
 
-export async function getRealClient(ctx: RealCtx): Promise<SecureClient> {
+export async function getRealClient(api: Api, ctx: RealCtx): Promise<SecureClient> {
   const key = `${ctx.wallet.address.toLowerCase()}:${ctx.depositWalletAddress ?? ""}`;
   const cached = clientCache.get(key);
   if (cached) return cached;
 
+  // Build from the creds this account already derived, exactly as the server does
+  // (polymarket-server.ts). Without them the SDK asks the exchange for a fresh key on every page
+  // load, and the CLOB answers POST /auth/api-key with 400 once one exists for the address — which
+  // is what killed the first real swipe, before any of our own routes were reached.
+  //
+  // 404 is the normal first-run answer: nothing has been derived yet, so we fall through and let the
+  // SDK derive, and provisionReal stores the result. Any other failure falls through too — deriving
+  // is the behaviour we already had, so a creds read that breaks can only cost a round trip.
+  let credentials: { key: string; secret: string; passphrase: string } | undefined;
+  try {
+    credentials = (await api("/api/real/creds")) as typeof credentials;
+  } catch {
+    credentials = undefined;
+  }
+
   const client = await createSecureClient({
     signer: privySigner(ctx.wallet),
     wallet: ctx.depositWalletAddress ?? undefined,
+    ...(credentials ? { credentials } : {}),
     apiKey: remoteBuilderSigning({
       url: "/api/builder/sign",
       credentials: "same-origin",
@@ -53,7 +69,7 @@ export async function getRealClient(ctx: RealCtx): Promise<SecureClient> {
 }
 
 export async function provisionReal(api: Api, ctx: RealCtx): Promise<{ depositWalletAddress: string }> {
-  const client = await getRealClient(ctx);
+  const client = await getRealClient(api, ctx);
 
   if (!(await isWalletDeployed(client))) {
     const handle = await deployDepositWallet(client);
@@ -234,7 +250,7 @@ export async function placeRealOrder(
     quotedPriceBp?: number;
   },
 ): Promise<{ status: string; filledSharesMicro?: string }> {
-  const client = await getRealClient(ctx);
+  const client = await getRealClient(api, ctx);
   const intent = (await api("/api/real/intent", {
     method: "POST",
     body: JSON.stringify({ ...input, geo: await geoVerdict(client) }),

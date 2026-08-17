@@ -43,7 +43,8 @@ async function main() {
   const skip = await import("../src/app/api/skip/route");
   const recover = await import("../src/app/api/recover/route");
   const topup = await import("../src/app/api/topup/route");
-  const realStake = await import("../src/app/api/real/stake/route");
+  const realStake = await import("../src/app/api/real/stake/route");
+  const realCreds = await import("../src/app/api/real/creds/route");
   const history = await import("../src/app/api/history/route");
   const loginMark = await import("../src/app/api/login-mark/route");
   const results = await import("../src/app/api/results/route");
@@ -76,7 +77,8 @@ async function main() {
   await expect401(skip.POST, "http://x/api/skip", { method: "POST" });
   await expect401(recover.POST, "http://x/api/recover", { method: "POST" });
   await expect401(topup.POST, "http://x/api/topup", { method: "POST", body: "{}" });
-  await expect401(realStake.POST, "http://x/api/real/stake", { method: "POST", body: "{}" });
+  await expect401(realStake.POST, "http://x/api/real/stake", { method: "POST", body: "{}" });
+  await expect401(realCreds.GET, "http://x/api/real/creds");
   await expect401(loginMark.POST, "http://x/api/login-mark", { method: "POST" });
   await expect401(results.GET, "http://x/api/results");
   await expect401(resultsSeen.POST, "http://x/api/results/seen", { method: "POST" });
