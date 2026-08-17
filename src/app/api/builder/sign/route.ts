@@ -10,7 +10,6 @@
 // user can spend the shared relayer quota deploying wallets for other EOAs under our builder, or
 // post orders for an account this session does not own (S9 review, both reviewers).
 import { NextResponse } from "next/server";
-import { buildHmacSignature } from "@polymarket/client";
 import { authUser, syncEmbeddedWallet } from "@/lib/privy";
 import { isRealMoneyEligible, hasRealConsent, sameOrigin } from "@/lib/real";
 import { captureToGlitchTip } from "@/lib/glitchtip";
@@ -138,6 +137,13 @@ export async function POST(req: Request) {
   const timestamp = Math.floor(Date.now() / 1000);
   let signature: string;
   try {
+    // Imported HERE rather than at module scope: the SDK's root entry is a barrel that pulls its
+    // whole transport graph, including pure-ESM packages the tsx test runner cannot resolve as CJS.
+    // At module scope that made this route unimportable from a test — so the one route that decides
+    // whether we sign for a given wallet was the one route with no test. Nothing is deferred that
+    // matters in production: Next bundles it either way, and every access decision above is already
+    // made by the time we get here.
+    const { buildHmacSignature } = await import("@polymarket/client");
     // The SDK's own helper — signing the caller's method/path/body VERBATIM (not the uppercased
     // copy used for matching) is what keeps this concatenation identical to the one the CLOB
     // recomputes; any normalization here would read as a bad signature there.
