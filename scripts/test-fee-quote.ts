@@ -2,7 +2,14 @@
 // 2026-08-13: rate 0.07, exponent 1, p=0.52, 5 shares → fee $0.08736 charged, predicted exact.
 // Pure test (no DB, no SDK). Run: npx tsx scripts/test-fee-quote.ts
 import assert from "node:assert";
-import { feePerShareMicro, quoteBuyAllIn, quoteSellAllIn, quoteBuy } from "../src/lib/quote";
+import {
+  feePerShareMicro,
+  quoteBuyAllIn,
+  quoteSellAllIn,
+  quoteBuy,
+  marketableBuyBoundBp,
+  marketableSellBoundBp,
+} from "../src/lib/quote";
 
 // ---- 1. The measured-fill fixture, to the micro-cent.
 assert.strictEqual(feePerShareMicro(5200, 700, 1000), 17_472, "p=0.52: 0.07×(0.52×0.48) = $0.017472/share");
@@ -88,8 +95,26 @@ assert.strictEqual(t4.spendMicro, q4.spendMicro, "zero fee: same spend");
 assert.strictEqual(t4.sharesMicro, q4.sharesMicro, "zero fee: same shares");
 assert.strictEqual(t4.feeMicro, 0n);
 
+// ---- 7c. Marketable bounds, pinned to the live rejection of 2026-08-17. The order was aimed at a
+// 0.49 ask with the bound set to 0.49 exactly; the SDK divided the $1 amount by it and rounded the
+// share count UP (2.040816 → 2.0409), so the implied price came out at 1.00/2.0409 = 0.48998 and
+// the exchange answered "no orders found to match with FAK order" while 19 shares sat on that
+// level. A bound that sits ON the level it means to take is not reliably fillable.
+assert.strictEqual(marketableBuyBoundBp(4900, 100), 5000, "one tick CLEAR of the ask it takes");
+assert.strictEqual(marketableBuyBoundBp(4901, 100), 5100, "a mid-tick ask rounds up first, then clears");
+assert.strictEqual(marketableBuyBoundBp(9900, 100), 9900, "clamped below $1 — never signs an impossible price");
+assert.strictEqual(marketableSellBoundBp(4900, 100), 4800, "the SELL mirror: one tick below the bid");
+assert.strictEqual(marketableSellBoundBp(4899, 100), 4700, "rounds down first, then clears");
+assert.strictEqual(marketableSellBoundBp(100, 100), 100, "clamped at one tick — never signs a zero floor");
+// The invariant that matters, stated directly: the implied price of an order sized by dividing the
+// stake by the bound and rounding the shares UP still respects the level it aims at.
+const bound = marketableBuyBoundBp(4900, 100) / 10_000;
+const sharesCeil = Math.ceil((1 / bound) * 10_000) / 10_000; // the SDK's 4-decimal share rounding
+assert.ok(1 / sharesCeil >= 0.49, `implied ${(1 / sharesCeil).toFixed(6)} still crosses the 0.49 ask`);
+
 console.log("OK: fee math pinned to the measured fill; all-in solver honors the cap, surfaces shortfalls");
 console.log("OK: feeOnTop puts the whole stake on the exchange and charges the fee above it");
+console.log("OK: marketable bounds clear the level they take — the FAK no-match rejection");
 
 // ---- 8. Sell-side all-in: flat bid book, exact math.
 const sellFlat = [{ priceBp: 5000, size: 1000 }];

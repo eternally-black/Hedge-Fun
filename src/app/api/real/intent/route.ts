@@ -13,7 +13,13 @@ import { captureToGlitchTip } from "@/lib/glitchtip";
 import { getMarketFee } from "@/lib/fees";
 import { getBook } from "@/lib/clob";
 import { quoteMovedAgainstUser } from "@/lib/depth";
-import { quoteBuyAllIn, quoteSellAllIn, feePerShareMicro } from "@/lib/quote";
+import {
+  quoteBuyAllIn,
+  quoteSellAllIn,
+  feePerShareMicro,
+  marketableBuyBoundBp,
+  marketableSellBoundBp,
+} from "@/lib/quote";
 import { isTradingReady } from "@/lib/trading-ready";
 import {
   REAL_MIN_STAKE_CENTS,
@@ -203,9 +209,11 @@ export async function POST(req: Request) {
       });
     }
 
-    // maxPrice = MARGINAL ask (never VWAP), tick-rounded UP for a BUY (rounding down makes the
-    // protection unfillable — trap list), clamped inside [tick, 1-tick].
-    maxPriceBp = Math.min(Math.ceil(q.marginalAskBp / tickBp) * tickBp, 10_000 - tickBp);
+    // maxPrice = MARGINAL ask (never VWAP), tick-rounded UP for a BUY and then one tick CLEAR of it
+    // — an order whose bound sits exactly on the level it means to take is not reliably fillable
+    // (see marketableBuyBoundBp: the SDK's share rounding put the implied price at 0.48998 against
+    // a 0.49 ask and the exchange found nothing to match). Clamped inside [tick, 1-tick].
+    maxPriceBp = marketableBuyBoundBp(q.marginalAskBp, tickBp);
 
     // The debit ceiling is now stake + fee, and the fee it carries is the WORST of two readings:
     // our own per-level quote, and the fee at the bound price. The SDK reserves the fee at the
@@ -247,9 +255,10 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "stake_too_small", minShares: book.minOrderSize }, { status: 409 });
     }
 
-    // minPrice = MARGINAL bid (never VWAP), tick-rounded DOWN for a SELL (rounding up makes the
-    // protection unfillable — mirror of the BUY trap), clamped >= tick.
-    maxPriceBp = Math.max(Math.floor(q.marginalBidBp / tickBp) * tickBp, tickBp);
+    // minPrice = MARGINAL bid (never VWAP), tick-rounded DOWN for a SELL and then one tick clear of
+    // it, the mirror of the BUY bound — a floor sitting exactly on the bid is an exit that may find
+    // nothing to lift it, and refusing to fill an exit is the worse half of that bug. Clamped >= tick.
+    maxPriceBp = marketableSellBoundBp(q.marginalBidBp, tickBp);
     allInCapMicro = q.proceedsMicro; // informational for EXIT — the expected proceeds, not a cap
 
     approvedParams = {

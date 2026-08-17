@@ -280,6 +280,28 @@ export function quoteBuyAllIn(
   };
 }
 
+// The price bound a MARKETABLE order must carry, derived from the marginal level it intends to
+// take. It is deliberately one tick BEYOND that level, and the reason is a live rejection on
+// 2026-08-17: with the bound set to the marginal ask exactly (0.49), the SDK derived the share
+// count by dividing the $1 amount by it and rounded that count UP (2.040816 → 2.0409), which makes
+// the order's implied price 1.00/2.0409 = 0.48998 — a hair BELOW the ask it was aimed at. The
+// exchange answered "no orders found to match with FAK order" while 19 shares sat on that very
+// level. Any rounding in the share derivation has this effect, so the bound cannot sit on the
+// level; it has to clear it.
+// This does not loosen what the user pays: matching happens at the MAKER's price, and the order's
+// collateral (makerAmount) is fixed at the stake either way. What widens by one tick is only the
+// worst case if the book moves between the quote and the match — the price of being fillable at all.
+export function marketableBuyBoundBp(marginalAskBp: number, tickBp: number): number {
+  return Math.min(Math.ceil(marginalAskBp / tickBp) * tickBp + tickBp, 10_000 - tickBp);
+}
+
+// The SELL mirror: a floor one tick BELOW the marginal bid. Same failure in the other direction —
+// a rounded share/collateral pair whose implied price lands just above the bid is a sell nobody
+// can lift, and refusing to fill an exit is the worse half of this bug.
+export function marketableSellBoundBp(marginalBidBp: number, tickBp: number): number {
+  return Math.max(Math.floor(marginalBidBp / tickBp) * tickBp - tickBp, tickBp);
+}
+
 export interface SellAllInQuote {
   sharesMicro: bigint; // micro-shares actually sellable into the bids
   proceedsMicro: bigint; // notional received BEFORE fee, rounded DOWN (never overstate proceeds)
