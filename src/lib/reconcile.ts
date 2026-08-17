@@ -36,10 +36,33 @@ export async function reconcileAttempt(
   if (!verdict) return "unknown"; // an unreachable exchange must never mutate money state
 
   const dir = attempt.dir === "EXIT" ? "EXIT" : "ENTRY";
-  // Requested size lives in the approved params, read exactly as the submit route reads it.
-  const params = attempt.approvedParams as { betSide?: "YES" | "NO"; sharesMicro?: string } | null;
-  const requested = BigInt(params?.sharesMicro ?? "0");
+  const params = attempt.approvedParams as {
+    betSide?: "YES" | "NO";
+    sharesMicro?: string;
+    feeRateBp?: number;
+    feeExpMilli?: number;
+  } | null;
   const betSide = params?.betSide === "NO" ? "NO" : "YES";
+
+  // FILLED-vs-PARTIAL is judged against the size actually SIGNED, not the intent's PREDICTED
+  // sharesMicro — the same rule /api/real/submit already follows, and for the same reason: the SDK
+  // re-sizes and decimal-caps the order before signing, so the signed size sits a hair below the
+  // prediction. A fully matched order came back one micro-share short of the prediction and was
+  // labelled PARTIAL (live, 2026-08-17: 1.333332 signed, 1.333333 predicted). BUY: takerAmount is
+  // the shares. SELL: makerAmount is. Falls back to the prediction for rows with no signed payload.
+  const signed = attempt.signedOrder as unknown as { makerAmount?: string; takerAmount?: string } | null;
+  const signedSize = signed ? (dir === "EXIT" ? signed.makerAmount : signed.takerAmount) : undefined;
+  let requested = BigInt(params?.sharesMicro ?? "0");
+  if (typeof signedSize === "string" && /^\d+$/.test(signedSize)) requested = BigInt(signedSize);
+
+  // The PLATFORM fee rate is the MARKET's, and it does not come from the trade record. That field
+  // (`feeRateBps` on a ClobTrade) read 0 on a fill the chain shows paid $0.012490 — it describes
+  // the BUILDER's rate, which is zero for us, not the platform's. Reading it as the platform rate
+  // booked every real fill at zero fee and understated the position's cost basis by exactly the
+  // fee. The intent stored the rate it quoted with (fetchMarketInfo at intent time, 500bp on that
+  // market), and that is both the honest number and the one the user's cap was built from.
+  const rateBp = typeof params?.feeRateBp === "number" ? params.feeRateBp : 0;
+  const expMilli = typeof params?.feeExpMilli === "number" ? params.feeExpMilli : feeExpMilli;
 
   if (verdict.matchedSharesMicro === 0n) {
     if (!verdict.terminal) return "pending"; // still matchable — only a terminal verdict kills
@@ -62,11 +85,12 @@ export async function reconcileAttempt(
         : (t.sizeMicro * BigInt(t.priceBp)) / 10_000n),
     0n,
   );
-  // Fee PER TRADE at that trade's own price and rate, rounded up. The fee is convex in price, so
-  // the exchange charges it per execution — this is the authoritative number that replaces the
-  // intent-time estimate (which could only see the aggregate price).
+  // Fee PER TRADE at that trade's own EXECUTION price, rounded up. The fee is convex in price, so
+  // the exchange charges it per execution — this is what makes the reconciled number better than
+  // the intent's estimate, which could only see the aggregate price. The rate is the market's (see
+  // above); only the price varies per trade.
   const feeMicro = verdict.trades.reduce(
-    (s, t) => s + (BigInt(feePerShareMicro(t.priceBp, t.feeRateBp, feeExpMilli)) * t.sizeMicro + 999_999n) / 1_000_000n,
+    (s, t) => s + (BigInt(feePerShareMicro(t.priceBp, rateBp, expMilli)) * t.sizeMicro + 999_999n) / 1_000_000n,
     0n,
   );
   const priceBp =

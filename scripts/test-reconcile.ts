@@ -50,7 +50,7 @@ async function main() {
         side: "YES",
         tokenId: "tok-1",
         idempotencyKey: crypto.randomUUID(),
-        approvedParams: {},
+        approvedParams: { feeRateBp: FEE_RATE_BP, feeExpMilli: FEE_EXP_MILLI },
         allInCapMicro: 10_000_000n,
         maxPriceBp: 5200,
         state: "POSTED",
@@ -95,7 +95,7 @@ async function main() {
     const m5 = await mkMarket("c5");
     const a5 = await mkAttempt(m5.id, {
       externalOrderId: `${tag}-o5`,
-      approvedParams: { betSide: "YES", sharesMicro: "6000000" },
+      approvedParams: { betSide: "YES", sharesMicro: "6000000", feeRateBp: FEE_RATE_BP, feeExpMilli: FEE_EXP_MILLI },
     });
     await prisma.fill.create({
       data: {
@@ -177,7 +177,7 @@ async function main() {
     const a6 = await mkAttempt(m6.id, {
       dir: "EXIT",
       externalOrderId: `${tag}-o6`,
-      approvedParams: { sharesMicro: "4000000" },
+      approvedParams: { sharesMicro: "4000000", feeRateBp: FEE_RATE_BP, feeExpMilli: FEE_EXP_MILLI },
       betId: bet6.id,
     });
     await prisma.fill.create({
@@ -241,6 +241,52 @@ async function main() {
     assert.ok(swept.scanned >= 1);
     assert.strictEqual(swept.unknown, swept.scanned, "a null probe leaves everything unknown");
 
+    // ---- 7b. The PLATFORM fee comes from the INTENT's rate, not from the trade record. Live on
+    // 2026-08-17: the exchange's trade carried feeRateBps 0 while the chain showed $0.012490
+    // charged — that field is the BUILDER's rate (zero for us), and reading it as the platform's
+    // booked a real fill at zero fee and understated the position's basis by exactly the fee.
+    // Here the trade reports 0 and the intent says 700bp: the fee must still be the 700bp number.
+    const m7f = await mkMarket("c7f");
+    const a7f = await mkAttempt(m7f.id, {
+      externalOrderId: `${tag}-o7f`,
+      approvedParams: { betSide: "YES", sharesMicro: "2000000", feeRateBp: FEE_RATE_BP, feeExpMilli: FEE_EXP_MILLI },
+    });
+    const zeroRateTrade: OrderProbe = async () => ({
+      terminal: true,
+      matchedSharesMicro: 2_000_000n,
+      trades: [{ id: `${tag}-t7f`, priceBp: 5000, sizeMicro: 2_000_000n, feeRateBp: 0, ts: new Date() }],
+    });
+    assert.strictEqual(await reconcileAttempt(prisma, a7f, zeroRateTrade, FEE_EXP_MILLI), "booked");
+    const fill7f = await prisma.fill.findFirstOrThrow({ where: { attemptId: a7f.id } });
+    assert.strictEqual(fill7f.feeMicro, tradeFee(5000, 2_000_000n), "fee from the intent's rate, not the trade's 0");
+    assert.ok(fill7f.feeMicro > 0n, "a zero on the trade record must not book a free fill");
+
+    // ---- 7c. FILLED vs PARTIAL is judged against the SIGNED size, not the intent's prediction.
+    // A fully matched order came back one micro-share under the prediction and sat as PARTIAL.
+    // The replay path also refreshes the label, so a corrected rule heals rows it mislabelled.
+    const m7g = await mkMarket("c7g");
+    const a7g = await mkAttempt(m7g.id, {
+      externalOrderId: `${tag}-o7g`,
+      approvedParams: { betSide: "YES", sharesMicro: "1333333", feeRateBp: FEE_RATE_BP, feeExpMilli: FEE_EXP_MILLI },
+      signedOrder: { makerAmount: "1000000", takerAmount: "1333332", side: "BUY" },
+    });
+    const shortByOne: OrderProbe = async () => ({
+      terminal: true,
+      matchedSharesMicro: 1_333_332n,
+      trades: [{ id: `${tag}-t7g`, priceBp: 7500, sizeMicro: 1_333_332n, feeRateBp: 0, ts: new Date() }],
+    });
+    assert.strictEqual(await reconcileAttempt(prisma, a7g, shortByOne, FEE_EXP_MILLI), "booked");
+    assert.strictEqual(
+      (await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a7g.id } })).state,
+      "FILLED",
+      "matched every share it signed for",
+    );
+    // Re-running against the same trade set books nothing and must keep the label — and would have
+    // repaired it had the first pass got it wrong.
+    assert.strictEqual(await reconcileAttempt(prisma, a7g, shortByOne, FEE_EXP_MILLI), "booked");
+    assert.strictEqual((await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a7g.id } })).state, "FILLED");
+    assert.strictEqual(await prisma.fill.count({ where: { attemptId: a7g.id } }), 1, "replay booked no second fill");
+
     // ---- 8. Orphan discovery. The browser posts the order now, so an attempt can be left
     // SUBMITTING with no externalOrderId — invisible to the sweep above (it filters on that column)
     // and holding this user's in-flight slot on that market forever. These are the four answers.
@@ -249,7 +295,7 @@ async function main() {
     const m8a = await mkMarket("c8a");
     const a8a = await mkAttempt(m8a.id, {
       state: "SUBMITTING",
-      approvedParams: { betSide: "YES", sharesMicro: "6000000" },
+      approvedParams: { betSide: "YES", sharesMicro: "6000000", feeRateBp: FEE_RATE_BP, feeExpMilli: FEE_EXP_MILLI },
     });
     assert.strictEqual(await resolveOrphanAttempt(prisma, a8a, async () => null, async () => null, FEE_EXP_MILLI), "unknown");
     const a8aRow = await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a8a.id } });
@@ -262,7 +308,7 @@ async function main() {
     const m8b = await mkMarket("c8b");
     const a8b = await mkAttempt(m8b.id, {
       state: "SUBMITTING",
-      approvedParams: { betSide: "YES", sharesMicro: "6000000" },
+      approvedParams: { betSide: "YES", sharesMicro: "6000000", feeRateBp: FEE_RATE_BP, feeExpMilli: FEE_EXP_MILLI },
     });
     await prisma.dailyCounter.upsert({
       where: { userId_utcDay: { userId: user.id, utcDay } },
@@ -285,7 +331,7 @@ async function main() {
     const m8c = await mkMarket("c8c");
     const a8c = await mkAttempt(m8c.id, {
       state: "SUBMITTING",
-      approvedParams: { betSide: "YES", sharesMicro: "6000000" },
+      approvedParams: { betSide: "YES", sharesMicro: "6000000", feeRateBp: FEE_RATE_BP, feeExpMilli: FEE_EXP_MILLI },
     });
     const discover8c: OrphanDiscover = async () => ({
       orderId: `${tag}-orphan`,
@@ -347,6 +393,7 @@ async function main() {
     console.log("OK: the sweep selects id-carrying POSTED/FILLED/PARTIAL attempts inside the 48h window");
     console.log("OK: orphan discovery — unknown is inert, a definitive absence kills and frees the slot");
     console.log("OK: orphan adoption books from the exchange and refuses an already-bound order id");
+    console.log("OK: platform fee comes from the intent's rate; the label is judged against the SIGNED size");
     console.log("PASS: reconcile");
   } finally {
     await prisma.pointsLedger.deleteMany({ where: { userId: user.id } });

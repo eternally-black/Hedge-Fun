@@ -443,6 +443,17 @@ export async function bookEntryFills(
     }
     if (fresh.length === 0) {
       outcome = fillLabel(bookedShares, requestedSharesMicro);
+      // A replay books nothing, but the LABEL is derived — and the rule deriving it has been wrong
+      // before: judged against the intent's PREDICTED size, a fully matched order came back one
+      // micro-share short and sat as PARTIAL forever. Refreshing it here lets a corrected rule heal
+      // the rows it already mislabelled, on the next sweep, with no migration. Only from a booked
+      // state and only to a booked label: KILLED and FAILED are decisions, not labels.
+      if ((outcome === "FILLED" || outcome === "PARTIAL") && outcome !== attempt.state) {
+        await tx.orderAttempt.updateMany({
+          where: { id: attempt.id, state: { in: ["POSTED", "PARTIAL", "FILLED"] } },
+          data: { state: outcome },
+        });
+      }
       return; // full replay: nothing new to book
     }
     const totalShares = fresh.reduce((s, f) => s + f.sharesMicro, 0n);
@@ -623,6 +634,17 @@ export async function bookExitFills(
     }
     if (fresh.length === 0) {
       outcome = fillLabel(bookedShares, requestedSharesMicro);
+      // A replay books nothing, but the LABEL is derived — and the rule deriving it has been wrong
+      // before: judged against the intent's PREDICTED size, a fully matched order came back one
+      // micro-share short and sat as PARTIAL forever. Refreshing it here lets a corrected rule heal
+      // the rows it already mislabelled, on the next sweep, with no migration. Only from a booked
+      // state and only to a booked label: KILLED and FAILED are decisions, not labels.
+      if ((outcome === "FILLED" || outcome === "PARTIAL") && outcome !== attempt.state) {
+        await tx.orderAttempt.updateMany({
+          where: { id: attempt.id, state: { in: ["POSTED", "PARTIAL", "FILLED"] } },
+          data: { state: outcome },
+        });
+      }
       return; // full replay: nothing new to book
     }
     const totalShares = fresh.reduce((s, f) => s + f.sharesMicro, 0n);
