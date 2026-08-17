@@ -220,13 +220,29 @@ export async function POST(req: Request) {
     const REFUSED_BY_EXCHANGE = new Set(["RequestRejectedError", "UserInputError", "RateLimitError"]);
     const terminal = REFUSED_BY_EXCHANGE.has((e as Error).name);
 
+    if (terminal) {
+      // The refusal is terminal AND no order was created, so the daily slot this submit reserved
+      // has to go back. Every other terminal path returns it — the zero-fill booker does it inside
+      // its KILL, the real_not_configured rollback above does it inside its rollback — but this one
+      // never reaches a booker, so it silently ate a swipe of the user's cap for an order the
+      // exchange never accepted (four of them on 2026-08-17, all refused for region). Same shape as
+      // the rollback: one transaction, gated on the transition actually landing so a concurrent
+      // path cannot release the slot twice.
+      await prisma.$transaction(async (tx) => {
+        const failed = await tx.orderAttempt.updateMany({
+          where: { id: attempt.id, state: "SUBMITTING" },
+          data: { state: "FAILED", error: `post rejected: ${message}` },
+        });
+        if (failed.count > 0 && attempt.dir !== "EXIT") await releaseSwipeSlot(tx, user.id, capDay);
+      });
+      return NextResponse.json({ status: "failed", error: "post_rejected", detail: message }, { status: 409 });
+    }
+    // Ambiguous: the attempt stays SUBMITTING and keeps its slot, because the order may exist. The
+    // orphan sweep resolves it against the exchange and releases the slot if it kills the attempt.
     await prisma.orderAttempt.updateMany({
       where: { id: attempt.id, state: "SUBMITTING" },
-      data: terminal
-        ? { state: "FAILED", error: `post rejected: ${message}` }
-        : { error: `post failed: ${message}` },
+      data: { error: `post failed: ${message}` },
     });
-    if (terminal) return NextResponse.json({ status: "failed", error: "post_rejected", detail: message }, { status: 409 });
     return NextResponse.json({ status: "submitting", error: "post_ambiguous" });
   }
 
