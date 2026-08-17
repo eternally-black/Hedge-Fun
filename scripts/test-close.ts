@@ -51,6 +51,16 @@ async function main() {
     },
   });
 
+  // A second market: the dust case needs its own position, and one REAL bet per (user, market).
+  const dustMarket = await prisma.market.create({
+    data: {
+      polymarketId: `${tag}-dust`,
+      question: "exit dust write-off test",
+      status: "OPEN",
+      resolutionDeadline: new Date(Date.now() + 3_600_000),
+    },
+  });
+
   try {
     const utcDay = new Date().toISOString().slice(0, 10);
     const bet = await prisma.bet.create({
@@ -224,7 +234,67 @@ async function main() {
     assert.strictEqual(s7, "FILLED", "replay reports FILLED");
     assert.strictEqual(await prisma.fill.count({ where: { attemptId: attempt2.id } }), 2, "no third fill row");
 
+    // ---- 8. Sub-tick DUST. The signer works in 4-decimal shares, so a 1.333332-share position
+    // (the shape a $1 buy actually produces) can only be sold down to 1.3333. Left behind, those 32
+    // micro-shares are unsellable AND count as an open position, which locks the user out of that
+    // market forever over three thousandths of a cent. They must be written off by the close, with
+    // their basis realized as the loss it is.
+    const dustBet = await prisma.bet.create({
+      data: {
+        userId: user.id,
+        marketId: dustMarket.id,
+        side: "YES",
+        mode: "REAL",
+        stakeCents: 100,
+        lockedPriceBp: 7500,
+        utcDay,
+        filledSharesMicro: 1_333_332n,
+        spendMicro: 999_999n,
+        feeMicro: 12_500n,
+        vwapBp: 7500,
+      },
+    });
+    const dustAttempt = await prisma.orderAttempt.create({
+      data: {
+        userId: user.id,
+        marketId: dustMarket.id,
+        dir: "EXIT",
+        side: "YES",
+        tokenId: "tok-dust",
+        idempotencyKey: crypto.randomUUID(),
+        approvedParams: { sharesMicro: "1333300" },
+        allInCapMicro: 1_000_000n,
+        maxPriceBp: 7400,
+        state: "POSTED",
+        betId: dustBet.id,
+      },
+    });
+    // The exchange sold exactly what was signed: 1.3333 shares at 0.74.
+    const dustState = await bookExitFills(prisma, dustAttempt, 1_333_300n, [
+      {
+        externalFillId: `${tag}-dust`,
+        sharesMicro: 1_333_300n,
+        amountMicro: 986_642n,
+        feeMicro: 12_000n,
+        priceBp: 7400,
+        ts: new Date(),
+      },
+    ]);
+    assert.strictEqual(dustState, "FILLED", "sold every share it signed for");
+    const dustRow = await prisma.bet.findUniqueOrThrow({ where: { id: dustBet.id } });
+    assert.strictEqual(dustRow.closedSharesMicro, 1_333_332n, "the 32 micro-share remnant is written off, not left");
+    assert.strictEqual(
+      (dustRow.filledSharesMicro ?? 0n) - (dustRow.closedSharesMicro ?? 0n),
+      0n,
+      "no remainder survives to block a re-entry",
+    );
+    // Basis for 1_333_332 shares of a 1_012_499 spend: the dust carries its share of the cost and
+    // brings no proceeds, so realized PnL is proceeds − close fee − the WHOLE basis.
+    const dustBasis = ((999_999n + 12_500n) * 1_333_332n) / 1_333_332n;
+    assert.strictEqual(dustRow.realizedPnlMicro, 986_642n - 12_000n - dustBasis, "dust realized at its own cost");
+
     console.log("OK: exit validation + close booking, realized PnL exact, replay-safe, clamp holds");
+    console.log("OK: a sub-tick remnant is written off so it cannot block the market forever");
     console.log("OK: cumulative EXIT receipts book the delta, label FILLED, close the position exactly");
     console.log("PASS: close");
   } finally {

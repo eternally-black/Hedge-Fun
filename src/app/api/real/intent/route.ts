@@ -25,6 +25,7 @@ import {
   REAL_MIN_STAKE_CENTS,
   REAL_MAX_STAKE_CENTS,
   REAL_MIN_ORDER_MICRO,
+  SHARE_TICK_MICRO,
   SWIPE_CAP,
   DECK_MIN_LEAD_MS,
   BOOK_MAX_STALE_MS,
@@ -102,12 +103,21 @@ export async function POST(req: Request) {
   const existingRemainder = existingBet
     ? (existingBet.filledSharesMicro ?? 0n) - (existingBet.closedSharesMicro ?? 0n)
     : 0n;
-  if (direction === "ENTRY" && existingRemainder > 0n) {
+  // A remainder below one share tick cannot be sold at all (the signer works in 4 decimals), so it
+  // is not a position for either question: it must not block a new ENTRY, and there is nothing for
+  // an EXIT to offer. bookExitFills writes such a remnant off when it creates it; this is the guard
+  // for rows that already carry one.
+  const tradableRemainder = existingRemainder >= SHARE_TICK_MICRO ? existingRemainder : 0n;
+  if (direction === "ENTRY" && tradableRemainder > 0n) {
     return NextResponse.json({ error: "position_exists" }, { status: 409 });
   }
   if (direction === "EXIT") {
-    if (!existingBet || existingRemainder <= 0n) return NextResponse.json({ error: "no_position" }, { status: 409 });
-    remainder = existingRemainder;
+    if (!existingBet || tradableRemainder <= 0n) return NextResponse.json({ error: "no_position" }, { status: 409 });
+    // FLOOR to the tick the SDK signs in. Asking for 1.333332 shares means it signs 1.3333 or
+    // 1.3334, and the second one is larger than the position — which our own SELL validator refuses
+    // as over_position, leaving the user unable to close what they hold. Flooring costs at most
+    // 99 micro-shares (a hundredth of a cent at these prices) and removes the failure entirely.
+    remainder = (tradableRemainder / SHARE_TICK_MICRO) * SHARE_TICK_MICRO;
     betSide = existingBet.side; // the side the user HOLDS — that's the token they sell
   }
 
@@ -250,9 +260,19 @@ export async function POST(req: Request) {
     const q = quoteSellAllIn(book.bids, remainder, fee.rateBp, fee.expMilli);
     if (!q) return NextResponse.json({ error: "no_liquidity" }, { status: 409 });
 
-    // minOrderSize is SHARES (trap list); reject before anyone signs an unfillable order.
+    // NO share-minimum gate on the way out either, and this one mattered more than its BUY twin.
+    // Books advertise min_order_size 5 uniformly; the first real position on this app is 1.333332
+    // shares, bought as a taker on a book advertising exactly that 5. A hard refusal here would
+    // have made that position impossible to close — the user could only wait for resolution, on a
+    // rule the exchange does not apply to takers. Refusing an EXIT is the worst thing this route
+    // can do: it traps money. The exchange stays the authority on its own minimum, its rejection
+    // moves nothing, and the attempt is reported so real traffic settles the question.
     if (q.sharesMicro < BigInt(Math.round(book.minOrderSize * 1_000_000))) {
-      return NextResponse.json({ error: "stake_too_small", minShares: book.minOrderSize }, { status: 409 });
+      await captureToGlitchTip(new Error("sell below advertised min_order_size"), {
+        route: "real/intent",
+        minShares: String(book.minOrderSize),
+        sharesMicro: q.sharesMicro.toString(),
+      });
     }
 
     // minPrice = MARGINAL bid (never VWAP), tick-rounded DOWN for a SELL and then one tick clear of

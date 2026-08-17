@@ -4,6 +4,7 @@
 import { createHash } from "node:crypto";
 import type { PrismaClient, OrderAttempt } from "@prisma/client";
 import { feePerShareMicro } from "./quote";
+import { SHARE_TICK_MICRO } from "./config";
 // Aliased: `utcDay` is also a LOCAL const inside the bookers, and the zero-fill release below runs
 // before that declaration — an unaliased import would resolve into its temporal dead zone.
 import { utcDay as utcDayOf } from "./time";
@@ -700,11 +701,22 @@ export async function bookExitFills(
     const proceedsBooked = prorate ? (totalProceeds * sharesToBook) / totalShares : totalProceeds;
     const closeFeeBooked = prorate ? (totalFee * sharesToBook) / totalShares : totalFee;
 
+    // Sub-tick dust. The signer works in 4-decimal shares, so a position of 1.333332 can only ever
+    // be sold down to 1.3333 — and the 32 micro-shares left behind are not a position, they are an
+    // artefact of that granularity. Left on the row they are permanent: no EXIT can offer them, and
+    // the ENTRY guard reads any remainder as "position exists", so the market would be closed to
+    // this user forever over three thousandths of a cent. They are written off as closed with no
+    // proceeds, and their basis is realized as the loss it actually is.
+    const trailing = filledShares - (closedShares + sharesToBook);
+    const dust = trailing > 0n && trailing < SHARE_TICK_MICRO ? trailing : 0n;
+    const closedTotal = closedShares + sharesToBook + dust;
+
     // Realized PnL for the closed slice: proceeds − close fee − prorated cost basis, where the
     // basis includes the prorated ENTRY fee — fee-inclusive economics end to end (S6/S7 review:
-    // omitting it overstated user PnL by the entry fee).
+    // omitting it overstated user PnL by the entry fee). The dust carries its own basis and no
+    // proceeds, so it lands as a loss of exactly what it cost.
     const spend = (bet.spendMicro ?? 0n) + (bet.feeMicro ?? 0n);
-    const costBasis = filledShares > 0n ? (spend * sharesToBook) / filledShares : 0n;
+    const costBasis = filledShares > 0n ? (spend * (sharesToBook + dust)) / filledShares : 0n;
     const realizedDelta = proceedsBooked - closeFeeBooked - costBasis;
 
     // Explicit SET, not { increment }: these columns are NULL on an entry-created row, and SQL
@@ -713,7 +725,7 @@ export async function bookExitFills(
     await tx.bet.update({
       where: { id: bet.id },
       data: {
-        closedSharesMicro: closedShares + sharesToBook,
+        closedSharesMicro: closedTotal,
         proceedsMicro: (bet.proceedsMicro ?? 0n) + proceedsBooked,
         closeFeeMicro: (bet.closeFeeMicro ?? 0n) + closeFeeBooked,
         realizedPnlMicro: (bet.realizedPnlMicro ?? 0n) + realizedDelta, // can be negative — schema allows it
