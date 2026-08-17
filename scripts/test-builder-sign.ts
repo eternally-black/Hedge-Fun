@@ -120,6 +120,23 @@ async function main() {
       "no embedded wallet at Privy -> refuse, not sign",
     );
 
+    // ── The SDK's auth reads must pass; only the BUILDER's own key stays off limits ─────────────
+    // /auth/api-keys validates the credentials we hand the client. It was denied once, and that
+    // refusal failed every real order — the browser only saw "status 403".
+    const get = (p: string) =>
+      sign.POST(
+        new Request("http://x/api/builder/sign", {
+          method: "POST",
+          headers: { authorization: "Bearer good", "content-type": "application/json" },
+          body: JSON.stringify({ method: "GET", path: p }),
+        }),
+      );
+    assert.notStrictEqual((await get("/auth/api-keys")).status, 403, "the SDK's own auth read is allowed");
+    assert.notStrictEqual((await get("/book?token_id=1")).status, 403, "market reads stay open");
+    const builderKey = await get("/auth/builder-api-key");
+    assert.strictEqual(builderKey.status, 403, "our builder's own key is never readable by a client");
+    assert.strictEqual(((await builderKey.json()) as { error: string }).error, "path_not_allowed");
+
     console.log("OK: the first envelope backfills the signer, once, without loosening the binding");
     console.log("PASS: builder-sign");
   } finally {

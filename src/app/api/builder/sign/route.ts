@@ -24,8 +24,19 @@ const rateBuckets = new Map<string, { windowStartMs: number; count: number }>();
 const ALLOWED_POST_PATHS = new Set(["/submit", "/order", "/orders", "/auth/api-key"]);
 // These GETs read our BUILDER IDENTITY rather than market data. Everything else stays open: the
 // SDK's read set (books, tick size, /deployed, /v1/account/transactions/*, /auth/derive-api-key) is
-// wide, and a wrong refusal breaks the console — Gate-0 supplies the evidence to make it strict.
-const DENIED_GET_PATHS = new Set(["/auth/builder-api-key", "/auth/api-keys"]);
+// wide, and a wrong refusal breaks the console.
+//
+// `/auth/api-keys` USED to be on this list and is not any more. It was denied precautionarily,
+// pending evidence — and the evidence arrived: it is a normal step of the SDK's auth flow, called to
+// validate the credentials we hand it, and denying it failed every real order with nothing but
+// "Remote signer rejected request with status 403". It was invisible before only because the client
+// derived fresh credentials instead, and died earlier on the CLOB's own 400.
+//
+// Allowing it exposes nothing new. The response is scoped by L2 auth to the TRADING account — the
+// user's own deposit wallet — and the builder API key and passphrase are already handed to the
+// browser on every call to this route, by protocol necessity (see the header above). The one secret
+// that matters, the builder HMAC secret, never appears in a CLOB response at all.
+const DENIED_GET_PATHS = new Set(["/auth/builder-api-key"]);
 
 // Every refusal, in the log, always. The only reporter this route had was GlitchTip, which returns
 // immediately when SENTRY_DSN is unset — so a 403 here was invisible on the server and showed up in
