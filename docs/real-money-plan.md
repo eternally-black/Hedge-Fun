@@ -86,9 +86,26 @@ authoritative object, and every parameter in it must be server-derived **first**
    user's deposit wallet, signer = verified embedded EVM wallet, `signatureType == 3`, tokenId,
    side, amounts, price bound, builderCode = ours, freshness window; verifies the signature
    locally; atomically claims the intent `SUBMITTING`.
-4. Posting per Gate-0 locus: browser posts directly and reports the receipt, or server posts.
+4. Posting per locus (`REAL_ORDER_LOCUS`). Server arm: the server posts and its response is the
+   authoritative receipt. Browser arm (**decided 2026-08-17, and the only working one from VPS1**:
+   the CLOB answers our host "Trading restricted in your region" — Contabo, France — and that check
+   is about the TRADER, so a server post put our datacentre in front of a decision about the user):
+   `/api/real/submit` stops right after the CAS claim and returns `{ status: "approved" }`, the
+   browser posts with its own SecureClient, and it reports **only the order id** to
+   `POST /api/real/posted`. A client RECEIPT is refused in both arms — `/api/real/posted` re-reads
+   the order server-side (`fetchOrder`; reads are not geoblocked), proves it against the persisted
+   signed order (`matchesExchangeOrder`: token, side, maker = deposit wallet, size to one
+   micro-share, created-after-intent) and books through the ordinary reconcile path, so every
+   number on the ledger still comes from the exchange's own trade records.
    Either way the full response is persisted on the attempt; order hash and external order id are
    unique columns (replay-proof).
+   4a. **Orphan discovery** (`discoverOrphanAttempts`, run by the reconcile route on the poller's
+   cadence) closes the browser arm's residual risk: a browser that posts and dies before reporting
+   leaves a live order on a SUBMITTING row with no `externalOrderId`, which every reconcile scan
+   filters out and which the one-in-flight partial index turns into a permanently wedged market.
+   The sweep asks the exchange (open orders, then the taker-order ids of the account's trades on
+   that token), adopts the order if the identity check passes, and only kills the attempt when
+   every read succeeded and nothing matched — an incomplete read is "unknown", never a kill.
 5. Zero fill → attempt `KILLED`, **no position row** — the market slot frees for a retry.
    Fill(s) → `Fill` rows and a real `Bet` position row created/updated from **actual** fills.
    A receipt reports the ORDER's **cumulative** matched totals, so booking subtracts what the

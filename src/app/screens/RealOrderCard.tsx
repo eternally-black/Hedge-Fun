@@ -80,13 +80,14 @@ function resultText(res: { status: string; filledSharesMicro?: string }): string
       return "no fill — the market slot is free again";
     case "posted":
       return "posted, awaiting the exchange — the reconciler books it when the trade record lands";
-    // NOT the same promise. "posted" carries an exchange order id and the reconciler really does
-    // pick it up; "submitting" means the post outcome is unknown, and an attempt with no order id
-    // is excluded from every reconcile scan (reconcile.ts filters `externalOrderId: { not: null }`).
-    // Ops is paged by the stuck-attempt watcher and resolves it by hand, so promising an automatic
-    // booking here was telling the user to wait for something that never runs.
+    // NOT the same promise. "posted" carries an exchange order id, so the reconciler resolves it
+    // from the trade records. "submitting" means the outcome is unknown and the row has NO order
+    // id, which every reconcile scan filters out (`externalOrderId: { not: null }`) — that used to
+    // mean a human. It no longer does: the orphan sweep asks the exchange whether an order of ours
+    // exists on that token and either adopts it or kills the attempt, and the stuck-attempt watcher
+    // still pages ops for anything that survives it.
     case "submitting":
-      return "sent, outcome not yet confirmed — support is alerted and will reconcile this by hand";
+      return "sent, outcome not yet confirmed — the exchange itself is checked within minutes";
     default:
       return `status: ${res.status}`;
   }

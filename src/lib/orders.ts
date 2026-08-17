@@ -176,6 +176,75 @@ export function validateSignedSellOrder(
   return null;
 }
 
+// ------------------------------------------------------------------ exchange-order identity
+// The CLOB's own view of an order, read back server-side. It exists because the order is now
+// POSTED BY THE BROWSER (Polymarket geoblocks our host's IP, and that check is about the trader,
+// not our datacentre), so the only thing the client is allowed to report is an order id: the
+// server fetches that order itself and proves it is the one this attempt signed before booking a
+// cent. Field names are the SDK's camelCase OpenOrder, normalized to strings by the caller.
+export interface ExchangeOrderView {
+  id: string;
+  tokenId: string;
+  makerAddress: string;
+  side: string;
+  originalSize: string; // decimal SHARES as the CLOB reports them, e.g. "18.5962"
+  price: string; // decimal limit price, e.g. "0.52"
+  status: string;
+  sizeMatched: string;
+  createdAt: string; // ISO 8601
+}
+
+// Returns null when the fetched order IS this attempt's order, else a short error code. Pure, so
+// both the report route and the orphan-discovery sweep can ask the same question the same way.
+export function matchesExchangeOrder(
+  order: ExchangeOrderView,
+  expect: { signed: SignedOrderWire; dir: "ENTRY" | "EXIT"; depositWallet: string; notBefore: Date; skewMs?: number },
+): string | null {
+  // The token is the strongest pin: it is a signed field and the exchange echoes it verbatim.
+  if (order.tokenId !== expect.signed.tokenId) return "token_mismatch";
+  // A flipped side is a different trade entirely — booking a SELL against an ENTRY attempt would
+  // credit shares the user never bought.
+  if (order.side.toUpperCase() !== (expect.dir === "EXIT" ? "SELL" : "BUY")) return "side_mismatch";
+  // Ownership. fetchOrder already runs under this user's own L2 credentials, so the exchange will
+  // only ever hand back their own orders; this check is the second lock, and it is what stops a
+  // reported id from binding an attempt to an order made by some other wallet of theirs.
+  if (order.makerAddress.toLowerCase() !== expect.depositWallet.toLowerCase()) return "maker_mismatch";
+  // Shape guards before any comparison: garbage in any of these means the identity test below
+  // would be comparing noise, and on the money path that must read as "cannot prove it".
+  const sizeNum = Number(order.originalSize);
+  if (!Number.isFinite(sizeNum) || sizeNum <= 0) return "bad_order_shape";
+  let signedMaker: bigint;
+  let signedTaker: bigint;
+  try {
+    signedMaker = BigInt(expect.signed.makerAmount);
+    signedTaker = BigInt(expect.signed.takerAmount);
+  } catch {
+    return "bad_order_shape";
+  }
+  const createdMs = new Date(order.createdAt).getTime();
+  if (!Number.isFinite(createdMs)) return "bad_order_shape";
+  // Size identity: the exchange reports shares as a decimal, we signed micro-shares. BUY's
+  // takerAmount is the shares; SELL's makerAmount is. One micro-share of tolerance absorbs the
+  // decimal round-trip and nothing more — the SDK's own resize makes this number distinctive
+  // enough that an accidental collision with another order of the user's is not a real scenario.
+  // ponytail: exact to one micro-share, on the assumption the CLOB echoes the full 6-decimal size.
+  // Gate-0 confirms it against a real order; if it ever reports fewer decimals, widen the tolerance
+  // here rather than anywhere else. Both consumers already degrade safely on a false reject — the
+  // report route 422s and the discovery sweep treats an unattributed order of ours as ambiguity.
+  const signedSizeMicro = expect.dir === "ENTRY" ? signedTaker : signedMaker;
+  const orderSizeMicro = BigInt(Math.round(sizeNum * 1e6));
+  const diff = orderSizeMicro > signedSizeMicro ? orderSizeMicro - signedSizeMicro : signedSizeMicro - orderSizeMicro;
+  if (diff > 1n) return "size_mismatch";
+  // An order that existed before the intent did cannot be this attempt's order. The exchange's
+  // clock is not ours, so a couple of minutes of skew is allowed rather than false-rejecting a
+  // perfectly good order on the money path.
+  if (createdMs < expect.notBefore.getTime() - (expect.skewMs ?? 120_000)) return "too_early";
+  // The PRICE is deliberately not compared. It is derived from the two signed amounts with the
+  // exchange's own rounding, so re-deriving it here buys nothing the size check has not already
+  // pinned and risks false-rejecting a valid order — the expensive failure direction here.
+  return null;
+}
+
 // ------------------------------------------------------------------ fill booking
 export interface NormalizedFill {
   externalFillId: string;

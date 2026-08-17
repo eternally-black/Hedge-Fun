@@ -10,6 +10,7 @@ import {
   deployDepositWallet,
   prepareMarketOrder,
   fetchClosedOnlyMode,
+  postOrder,
 } from "@polymarket/client/actions";
 import { privySigner, rehydrateBigints, type EvmWalletLike } from "./real-signer";
 import { assertRelayPayload } from "./relay-guard";
@@ -312,9 +313,32 @@ export async function placeRealOrder(
   }
 
   // Forward the signed order VERBATIM — rebuilding it field by field risks a digest mismatch.
-  const result = await api("/api/real/submit", {
+  const result = (await api("/api/real/submit", {
     method: "POST",
     body: JSON.stringify({ intentId: intent.intentId, signedOrder: next.value }),
-  });
-  return result as { status: string; filledSharesMicro?: string };
+  })) as { status: string; filledSharesMicro?: string };
+  // Anything but "approved" is the server-posting locus: the server already holds the authoritative
+  // receipt and has booked whatever it saw.
+  if (result.status !== "approved") return result;
+
+  // Browser-posting locus. The exchange refuses orders from our host's IP and that geo check is
+  // about the TRADER, so the post belongs here, in front of the user's own connection. What goes
+  // back to the server is the order ID and nothing else — a receipt from this side would let a
+  // tampered client book fills, points and counters the exchange never saw, so /api/real/posted
+  // reads the order back from the exchange itself before booking.
+  // Cost of throwing below: the attempt stays SUBMITTING and holds this market's in-flight slot
+  // until the server's discovery sweep resolves it against the exchange (~15 min), because only a
+  // reading of the exchange — never a claim from here — may declare that no order exists.
+  const posted = (await postOrder(client)(next.value as never)) as {
+    ok?: boolean;
+    orderId?: string;
+    message?: string;
+  };
+  // A refusal comes back as ok:false with a message rather than as a throw.
+  if (posted.ok === false) throw new Error(`post_rejected: ${posted.message ?? ""}`);
+  if (!posted.orderId) throw new Error("post_no_order_id");
+  return (await api("/api/real/posted", {
+    method: "POST",
+    body: JSON.stringify({ intentId: intent.intentId, orderId: posted.orderId }),
+  })) as { status: string; filledSharesMicro?: string };
 }

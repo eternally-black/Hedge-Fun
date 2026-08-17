@@ -4,7 +4,15 @@
 import assert from "node:assert";
 import { prisma } from "../src/lib/prisma";
 import { randomCode } from "../src/lib/refcode";
-import { reconcileAttempt, reconcileStuckAttempts, type OrderProbe, type TradeRecord } from "../src/lib/reconcile";
+import {
+  reconcileAttempt,
+  reconcileStuckAttempts,
+  resolveOrphanAttempt,
+  discoverOrphanAttempts,
+  type OrderProbe,
+  type OrphanDiscover,
+  type TradeRecord,
+} from "../src/lib/reconcile";
 import { feePerShareMicro } from "../src/lib/quote";
 
 const FEE_EXP_MILLI = 1000;
@@ -233,10 +241,112 @@ async function main() {
     assert.ok(swept.scanned >= 1);
     assert.strictEqual(swept.unknown, swept.scanned, "a null probe leaves everything unknown");
 
+    // ---- 8. Orphan discovery. The browser posts the order now, so an attempt can be left
+    // SUBMITTING with no externalOrderId — invisible to the sweep above (it filters on that column)
+    // and holding this user's in-flight slot on that market forever. These are the four answers.
+
+    // 8a. Unknown discovery is inert: an unreachable exchange must never move money state.
+    const m8a = await mkMarket("c8a");
+    const a8a = await mkAttempt(m8a.id, {
+      state: "SUBMITTING",
+      approvedParams: { betSide: "YES", sharesMicro: "6000000" },
+    });
+    assert.strictEqual(await resolveOrphanAttempt(prisma, a8a, async () => null, async () => null, FEE_EXP_MILLI), "unknown");
+    const a8aRow = await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a8a.id } });
+    assert.strictEqual(a8aRow.state, "SUBMITTING", "unknown discovery leaves the state untouched");
+    assert.strictEqual(a8aRow.externalOrderId, null);
+    assert.strictEqual(await prisma.fill.count({ where: { attemptId: a8a.id } }), 0, "no fills on unknown discovery");
+
+    // 8b. A DEFINITIVE absence kills the attempt and hands the daily-cap slot back — nothing was
+    // posted, so no money moved and the market must be swipeable again.
+    const m8b = await mkMarket("c8b");
+    const a8b = await mkAttempt(m8b.id, {
+      state: "SUBMITTING",
+      approvedParams: { betSide: "YES", sharesMicro: "6000000" },
+    });
+    await prisma.dailyCounter.upsert({
+      where: { userId_utcDay: { userId: user.id, utcDay } },
+      create: { userId: user.id, utcDay, swipeCount: 1 }, // the slot /api/real/submit reserved
+      update: { swipeCount: 1 },
+    });
+    assert.strictEqual(
+      await resolveOrphanAttempt(prisma, a8b, async () => ({ orderId: null }), async () => null, FEE_EXP_MILLI),
+      "killed",
+    );
+    assert.strictEqual((await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a8b.id } })).state, "KILLED");
+    assert.strictEqual(await prisma.bet.count({ where: { marketId: m8b.id } }), 0, "no position on a killed orphan");
+    const counter8b = await prisma.dailyCounter.findUnique({
+      where: { userId_utcDay: { userId: user.id, utcDay } },
+    });
+    assert.strictEqual(counter8b?.swipeCount ?? -1, 0, "the reserved swipe slot came back");
+
+    // 8c. A FOUND order is adopted and booked — the id came from a client, every NUMBER from the
+    // exchange's own trade records.
+    const m8c = await mkMarket("c8c");
+    const a8c = await mkAttempt(m8c.id, {
+      state: "SUBMITTING",
+      approvedParams: { betSide: "YES", sharesMicro: "6000000" },
+    });
+    const discover8c: OrphanDiscover = async () => ({
+      orderId: `${tag}-orphan`,
+      order: { id: `${tag}-orphan`, status: "matched" },
+    });
+    const probe8c: OrderProbe = async () => ({
+      terminal: true,
+      matchedSharesMicro: 6_000_000n,
+      trades: [{ id: `${tag}-t8c`, priceBp: 5200, sizeMicro: 6_000_000n, feeRateBp: FEE_RATE_BP, ts: new Date() }],
+    });
+    assert.strictEqual(await resolveOrphanAttempt(prisma, a8c, discover8c, probe8c, FEE_EXP_MILLI), "adopted");
+    const a8cRow = await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a8c.id } });
+    assert.strictEqual(a8cRow.externalOrderId, `${tag}-orphan`, "the adopted attempt carries the exchange id");
+    assert.strictEqual(a8cRow.state, "FILLED");
+    const fills8c = await prisma.fill.findMany({ where: { attemptId: a8c.id } });
+    assert.strictEqual(fills8c.length, 1, "exactly one fill booked");
+    assert.strictEqual(fills8c[0].sharesMicro, 6_000_000n);
+    assert.strictEqual(fills8c[0].amountMicro, entryNotional(5200, 6_000_000n));
+    const bet8c = await prisma.bet.findUniqueOrThrow({
+      where: { userId_marketId_mode: { userId: user.id, marketId: m8c.id, mode: "REAL" } },
+    });
+    assert.strictEqual(bet8c.filledSharesMicro, 6_000_000n);
+    assert.strictEqual(bet8c.feeMicro, tradeFee(5200, 6_000_000n), "the CHARGED fee, not the estimate");
+
+    // 8d. One exchange order can never be bound to two attempts — adopting it would book the same
+    // fills twice, so the unique index throws P2002 and discovery backs off.
+    const m8d1 = await mkMarket("c8d1");
+    await mkAttempt(m8d1.id, { externalOrderId: `${tag}-taken` });
+    const m8d2 = await mkMarket("c8d2");
+    const a8d = await mkAttempt(m8d2.id, { state: "SUBMITTING" });
+    assert.strictEqual(
+      await resolveOrphanAttempt(
+        prisma,
+        a8d,
+        async () => ({ orderId: `${tag}-taken`, order: {} }),
+        async () => null,
+        FEE_EXP_MILLI,
+      ),
+      "unknown",
+    );
+    const a8dRow = await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a8d.id } });
+    assert.strictEqual(a8dRow.state, "SUBMITTING", "an already-bound id leaves the orphan untouched");
+    assert.strictEqual(a8dRow.externalOrderId, null);
+
+    // 8e. Sweep selection: SUBMITTING rows with NO id, which is exactly the set the reconcile sweep
+    // above cannot see. A null discover changes nothing about them.
+    const orphanCount = await prisma.orderAttempt.count({ where: { state: "SUBMITTING", externalOrderId: null } });
+    assert.ok(orphanCount >= 1, "at least one orphan is on the table");
+    const sweptOrphans = await discoverOrphanAttempts(prisma, async () => null, async () => null, {
+      minAgeMs: 0,
+      limit: 50,
+    });
+    assert.strictEqual(sweptOrphans.scanned, orphanCount, "scanned exactly the id-less SUBMITTING attempts");
+    assert.strictEqual(sweptOrphans.unknown, sweptOrphans.scanned, "a null discover leaves everything unknown");
+
     console.log("OK: unknown probe / matched-without-trades / terminal + live zero-match verdicts");
     console.log("OK: trade records replace the receipt estimate — delta booked, fee trued up");
     console.log("OK: EXIT true-up moves realized PnL by the charged close fee");
     console.log("OK: the sweep selects id-carrying POSTED/FILLED/PARTIAL attempts inside the 48h window");
+    console.log("OK: orphan discovery — unknown is inert, a definitive absence kills and frees the slot");
+    console.log("OK: orphan adoption books from the exchange and refuses an already-bound order id");
     console.log("PASS: reconcile");
   } finally {
     await prisma.pointsLedger.deleteMany({ where: { userId: user.id } });

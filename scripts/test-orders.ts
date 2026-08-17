@@ -9,6 +9,8 @@ import {
   classifyPostResponse,
   bookEntryFills,
   trueUpAttemptFee,
+  matchesExchangeOrder,
+  type ExchangeOrderView,
   type SignedOrderWire,
 } from "../src/lib/orders";
 import { SWIPE_CAP } from "../src/lib/config";
@@ -76,6 +78,59 @@ async function main() {
   assert.strictEqual(
     validateSignedOrder(goodOrder({ builder: "0x" + "dd".repeat(32) }), intent, { ...ctx, builderCode: null }),
     null,
+  );
+
+  // ---- 1b. Exchange-order identity. The BROWSER posts the order now (Polymarket geoblocks our
+  // host's IP and that check is about the trader), so the only thing a client may report is an
+  // order id — this is the proof, run against the order the server fetched back, that the id is
+  // ours. A false ACCEPT books someone else's trade onto this attempt; a false REJECT only stalls.
+  const view = (over: Partial<ExchangeOrderView> = {}): ExchangeOrderView => ({
+    id: "ord-1",
+    tokenId: "tok-1",
+    makerAddress: DW,
+    side: "BUY",
+    originalSize: "19.323671", // = goodOrder's takerAmount, the shares a BUY receives
+    price: "0.5175",
+    status: "matched",
+    sizeMatched: "19.323671",
+    createdAt: new Date().toISOString(),
+    ...over,
+  });
+  const ident = {
+    signed: goodOrder(),
+    dir: "ENTRY" as const,
+    depositWallet: DW,
+    notBefore: new Date(Date.now() - 60_000),
+  };
+
+  assert.strictEqual(matchesExchangeOrder(view(), ident), null, "the order we signed");
+  assert.strictEqual(matchesExchangeOrder(view({ makerAddress: DW.toUpperCase() }), ident), null, "case-insensitive");
+  assert.strictEqual(matchesExchangeOrder(view({ tokenId: "tok-2" }), ident), "token_mismatch");
+  assert.strictEqual(matchesExchangeOrder(view({ side: "SELL" }), ident), "side_mismatch");
+  assert.strictEqual(matchesExchangeOrder(view({ makerAddress: "0x" + "11".repeat(20) }), ident), "maker_mismatch");
+  assert.strictEqual(matchesExchangeOrder(view({ originalSize: "not-a-number" }), ident), "bad_order_shape");
+  assert.strictEqual(matchesExchangeOrder(view({ originalSize: "0" }), ident), "bad_order_shape");
+  assert.strictEqual(matchesExchangeOrder(view({ createdAt: "nonsense" }), ident), "bad_order_shape");
+  // One micro-share of tolerance absorbs the decimal round-trip and nothing more.
+  assert.strictEqual(matchesExchangeOrder(view({ originalSize: "19.323672" }), ident), null);
+  // The check that stops a DIFFERENT order of the user's own from being adopted onto this attempt.
+  assert.strictEqual(matchesExchangeOrder(view({ originalSize: "19.32" }), ident), "size_mismatch");
+  assert.strictEqual(
+    matchesExchangeOrder(view({ createdAt: new Date(ident.notBefore.getTime() - 5 * 60_000).toISOString() }), ident),
+    "too_early",
+  );
+  // Two minutes of skew is allowed: the exchange's clock is not ours, and a false reject here
+  // costs a stalled attempt on the money path.
+  assert.strictEqual(
+    matchesExchangeOrder(view({ createdAt: new Date(ident.notBefore.getTime() - 60_000).toISOString() }), ident),
+    null,
+  );
+  // EXIT reads the size off the OTHER amount — a SELL offers shares as makerAmount.
+  const sell = goodOrder({ side: "SELL", makerAmount: "19323671", takerAmount: "10000000" });
+  assert.strictEqual(matchesExchangeOrder(view({ side: "SELL" }), { ...ident, signed: sell, dir: "EXIT" }), null);
+  assert.strictEqual(
+    matchesExchangeOrder(view({ side: "SELL" }), { ...ident, signed: sell, dir: "ENTRY" }),
+    "side_mismatch",
   );
 
   // ---- 2. classifyPostResponse: the REAL 0.6.0 response shape (S6-review critical — a

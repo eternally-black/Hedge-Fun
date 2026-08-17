@@ -98,6 +98,100 @@ export async function reconcileAttempt(
   return "booked";
 }
 
+// ------------------------------------------------------------------ orphan discovery
+// A browser that posts an order and dies before reporting its id leaves a LIVE order whose
+// OrderAttempt row has externalOrderId = null. Every reconcile scan filters on that column being
+// non-null, so the row is invisible to reconciliation, and the partial unique index (one in-flight
+// attempt per user+market) wedges that market for that user forever. This is the path that closes
+// it: ask the exchange whether the order exists, then adopt it or kill the attempt.
+export type OrderDiscovery =
+  // { orderId, order } = found it, verified; `order` is the record to persist verbatim
+  | { orderId: string; order: unknown }
+  // { orderId: null } = the exchange definitively has no such order (nothing was posted, or it
+  // died with no match) — a licence to kill the attempt and give the market slot back
+  | { orderId: null }
+  // null = unknown / unreachable → never a state change
+  | null;
+export type OrphanDiscover = (attempt: ReconcilableAttempt) => Promise<OrderDiscovery>;
+export type OrphanOutcome = "unknown" | "adopted" | "killed";
+
+export async function resolveOrphanAttempt(
+  prisma: PrismaClient,
+  attempt: ReconcilableAttempt,
+  discover: OrphanDiscover,
+  probe: OrderProbe,
+  feeExpMilli: number,
+): Promise<OrphanOutcome> {
+  if (attempt.externalOrderId) return "unknown"; // not an orphan — the ordinary reconcile path owns it
+  const found = await discover(attempt);
+  if (!found) return "unknown"; // an unreachable exchange must never mutate money state
+
+  if (found.orderId === null) {
+    // Nothing exists at the exchange, so no money moved. Booking zero fills is the existing
+    // terminal path: SUBMITTING → KILLED plus the reserved daily-cap slot handed back.
+    const params = attempt.approvedParams as { betSide?: "YES" | "NO"; sharesMicro?: string } | null;
+    const requested = BigInt(params?.sharesMicro ?? "0");
+    if (attempt.dir === "EXIT") await bookExitFills(prisma, attempt, requested, []);
+    else await bookEntryFills(prisma, attempt, params?.betSide === "NO" ? "NO" : "YES", requested, []);
+    return "killed";
+  }
+
+  // Adopt it. The CAS gates on the row still being an unbound SUBMITTING one, and the unique index
+  // on externalOrderId is the backstop: binding one exchange order to two attempts would book the
+  // same fills twice, so a P2002 backs off instead of throwing.
+  try {
+    const cas = await prisma.orderAttempt.updateMany({
+      where: { id: attempt.id, state: "SUBMITTING", externalOrderId: null },
+      data: { state: "POSTED", externalOrderId: found.orderId, postResponse: found.order as never },
+    });
+    if (cas.count === 0) return "unknown"; // someone else moved the row
+  } catch (e) {
+    if ((e as { code?: string }).code === "P2002") return "unknown";
+    throw e;
+  }
+
+  // Book from the exchange's own records. The adoption is what this function reports — whatever
+  // reconciliation answers now, the ordinary POSTED sweep owns it from here.
+  await reconcileAttempt(prisma, { ...attempt, state: "POSTED", externalOrderId: found.orderId }, probe, feeExpMilli);
+  return "adopted";
+}
+
+// Sweep the orphans. The age floor is load-bearing: a browser that posted seconds ago may simply
+// not have reported yet, and the exchange's trade records lag a match a little, so concluding
+// "nothing exists" too early would KILL an attempt whose money was spent. Deliberately NO upper
+// bound (unlike the 48h window below): each of these rows wedges a market slot until it resolves,
+// so an old one must keep being retried rather than aging out of sight.
+export async function discoverOrphanAttempts(
+  prisma: PrismaClient,
+  discover: OrphanDiscover,
+  probe: OrderProbe,
+  opts: { now?: Date; minAgeMs?: number; limit?: number; feeExpMilli?: number } = {},
+): Promise<Record<OrphanOutcome, number> & { scanned: number }> {
+  const now = opts.now ?? new Date();
+  const cutoff = new Date(now.getTime() - (opts.minAgeMs ?? 15 * 60_000));
+  const attempts = await prisma.orderAttempt.findMany({
+    where: { state: "SUBMITTING", externalOrderId: null, updatedAt: { lt: cutoff } },
+    orderBy: { updatedAt: "asc" },
+    take: opts.limit ?? 10,
+  });
+
+  const counts: Record<OrphanOutcome, number> = { unknown: 0, adopted: 0, killed: 0 };
+  for (const attempt of attempts) {
+    try {
+      const market = await prisma.market.findUnique({
+        where: { id: attempt.marketId },
+        select: { feeExpMilli: true },
+      });
+      counts[
+        await resolveOrphanAttempt(prisma, attempt, discover, probe, market?.feeExpMilli ?? opts.feeExpMilli ?? 1000)
+      ]++;
+    } catch {
+      counts.unknown++; // one attempt's failure must not abort the sweep
+    }
+  }
+  return { ...counts, scanned: attempts.length };
+}
+
 // Sweep the unresolved attempts. Sequential on purpose — this is the money path at alpha volume,
 // and one attempt's failure must not abort the others (it counts as unknown and the next pass
 // retries it).

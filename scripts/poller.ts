@@ -229,10 +229,21 @@ async function tick() {
         signal: AbortSignal.timeout(20_000),
       });
       if (!resp.ok) throw new Error(`reconcile HTTP ${resp.status}`);
-      const c = (await resp.json()) as Partial<Record<"booked" | "killed" | "pending" | "unknown" | "scanned", number>>;
+      const c = (await resp.json()) as Partial<Record<"booked" | "killed" | "pending" | "unknown" | "scanned", number>> & {
+        orphans?: Partial<Record<"adopted" | "killed" | "unknown" | "scanned", number>>;
+      };
       if ((c.scanned ?? 0) > 0) {
         console.log(
           `[real-reconcile] scanned ${c.scanned}: booked ${c.booked ?? 0}, killed ${c.killed ?? 0}, pending ${c.pending ?? 0}, unknown ${c.unknown ?? 0}`,
+        );
+      }
+      // The orphan sweep resolves attempts the browser posted but never reported (no
+      // externalOrderId). It is the only thing that unwedges those market slots, so its numbers are
+      // logged separately rather than folded into the counts above.
+      const o = c.orphans;
+      if ((o?.scanned ?? 0) > 0) {
+        console.log(
+          `[real-orphans] scanned ${o?.scanned}: adopted ${o?.adopted ?? 0}, killed ${o?.killed ?? 0}, unknown ${o?.unknown ?? 0}`,
         );
       }
       subsystemOk("real-reconcile");

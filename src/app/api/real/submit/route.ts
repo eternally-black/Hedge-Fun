@@ -167,6 +167,21 @@ export async function POST(req: Request) {
   }
   if (claimed.count === 0) return NextResponse.json({ status: "submitting" });
 
+  // POSTING LOCUS. With REAL_ORDER_LOCUS=browser the post itself goes back to the client: the CLOB
+  // answers our host with "Trading restricted in your region" (the VPS is in France) and that check
+  // is about the TRADER — posting server-side inserted our datacentre into a decision that is about
+  // the end user. Nothing protective is skipped by returning here: the signed order was validated
+  // against the durable intent above, the replay guard and the daily-slot reserve landed with the
+  // CAS, and the attempt is now SUBMITTING with its signed payload persisted. The browser posts and
+  // reports only the order ID to /api/real/posted, which reads that order back from the exchange
+  // (reads are not geoblocked) before a cent is booked — a client-supplied RECEIPT is still refused
+  // at the top of this route. A browser that posts and then dies is recovered by the discovery
+  // sweep (src/lib/reconcile.ts): without it the row would be invisible to every reconcile scan,
+  // which all filter on a non-null externalOrderId, and its market slot would stay wedged forever.
+  if (process.env.REAL_ORDER_LOCUS === "browser") {
+    return NextResponse.json({ status: "approved", intentId: attempt.id });
+  }
+
   // Server posts — the response is the authoritative receipt. Forward the signed payload VERBATIM.
   const client = await serverSecureClient(prisma, user);
   if (!client) {
