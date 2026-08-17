@@ -265,9 +265,16 @@ regenerated yields can never byte-match. Shipped design (`bb3ba15`):
 - `feeInfo` is **per-market**, cached on the `Market` row and refreshed with the depth fields;
   `config.ts` holds only a pessimistic fallback (K3 R1 + DeepSeek). Builder fee fixed at 0 for
   alpha — an unknown additive fee cannot be honestly displayed (Sol).
-- Stake semantics (conflict resolved 2:1 + locked owner rule): **the displayed stake is the user's
-  all-in debit cap** (`maxSpend = stake`). Shares are the derived quantity, shown net of fee. No
-  pre-shrinking of the stake number; what must never be silent is the share count.
+- Stake semantics — **REVERSED BY THE OWNER 2026-08-17, and this is the rule now: the stake is the
+  ORDER, the platform fee rides on top of it** out of the free balance. A $1 swipe posts a $1 order
+  and debits about $1.04 (`amount = stake`, `maxSpend = stake + fee`). Shares stay the derived
+  quantity. What forced it: the old reading (below) shrank a $1 stake into a $0.96 order and the
+  exchange refused it live — *"invalid amount for a marketable BUY order ($0.96), min size: 1"* —
+  so the product's own minimum stake was unbuyable by construction. The cap carries the WORSE of
+  our per-level fee quote and the fee at the bound price, because the SDK reserves at the bound and
+  would otherwise shrink the order back under $1.
+  *Superseded (kept for the record, it was settled 2:1 by K3+Sol): the displayed stake was the
+  user's all-in debit cap (`maxSpend = stake`), shares shown net of fee, no pre-shrinking.*
 - `maxPrice` derives from the **marginal ask** (tick-rounded up for BUY), not VWAP; fee resizing
   must still satisfy `minOrderSize` (shares!) — minimum viable stake ≈
   `minShares × maxPrice × (1+fee)`, which nearly touches the $5 deposit floor on expensive
