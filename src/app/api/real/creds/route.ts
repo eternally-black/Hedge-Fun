@@ -57,8 +57,12 @@ export async function GET(req: Request) {
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   if (!isRealMoneyEligible(user)) return NextResponse.json({ error: "real_disabled" }, { status: 403 });
   if (!hasRealConsent(user)) return NextResponse.json({ error: "consent_required" }, { status: 403 });
-  if (!sameOrigin(req)) return NextResponse.json({ error: "bad_origin" }, { status: 403 });
-
+  // NO same-origin check here, deliberately. Browsers omit the Origin header on same-origin GETs, so
+  // the check does not merely add nothing — it refuses every legitimate call, which is exactly what
+  // it did: a 403 here sent the client back to deriving and straight into the CLOB's 400. It is not
+  // load-bearing either way, because these routes authenticate with a Bearer token rather than a
+  // cookie, so a third-party page cannot make an authenticated request in the first place. The POST
+  // above keeps its check: it is state-changing, and there the header is actually sent.
   const creds = await loadClobCreds(prisma, user.id).catch(() => null);
   // 404, not an error: "never provisioned" is a normal state, and the client answers it by deriving
   // a fresh set exactly as it does on first setup.
