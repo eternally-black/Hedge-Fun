@@ -6,16 +6,6 @@ import { categoryOf, gameOf, shuffleNoRun, isContextPoor, isVagueEsports, within
 import { DECK_MIN_LEAD_MS } from "@/lib/config";
 import { priceIsContested } from "@/lib/polymarket";
 import { authoritativePrices, sourceHasClobBook } from "@/lib/depth";
-import { REAL_SLIPPAGE_BP } from "@/lib/config";
-
-// The deck has no live book in hand (its prices are the poller's cached walk), so the promise here
-// is the cached price plus the allowance — no tick rounding, because this is a display figure that
-// /api/quotes replaces within a second with the exact bound.
-function promisePrices(p: { yes: number | null; no: number | null }, real: boolean) {
-  if (!real) return p;
-  const up = (v: number | null) => (v === null ? null : Math.min(Math.ceil((v * (10_000 + REAL_SLIPPAGE_BP)) / 10_000), 9_900));
-  return { yes: up(p.yes), no: up(p.no) };
-}
 import type { DeckResponse } from "@/lib/api-types";
 
 // The blitz deck: cached OPEN binary markets, each kept only within ITS category's horizon
@@ -108,11 +98,7 @@ export async function GET(req: Request) {
     .filter(
       (c) => !isContextPoor(c) && !isVagueEsports(c) && withinCategoryHorizon(c, c.resolutionDeadline.getTime(), nowMs),
     )
-    // In REAL mode the price a card states is a PROMISE the order will honour, so the deck inflates
-    // its cached VWAP by the same allowance the bound carries. This is the number a user can swipe
-    // on in the first second, before /api/quotes re-prices the top card exactly; erring HIGH is the
-    // safe direction — the intent refuses anything above the promise, and a fill below it is a gift.
-    .map((c) => ({ c, p: promisePrices(authoritativePrices(c, nowMs), user.realMode) }))
+    .map((c) => ({ c, p: authoritativePrices(c, nowMs) }))
     .filter(({ p }) => p.yes !== null && p.no !== null && priceIsContested(p.yes, p.no));
 
   // Randomly mix categories with the rule: never >2 cards of the same category in a row.

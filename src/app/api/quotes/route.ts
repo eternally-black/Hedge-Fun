@@ -9,7 +9,6 @@ import {
   HEDGE_MAX_STAKE_CENTS,
   QUOTES_MAX_IDS,
   QUOTES_RATE_PER_MIN,
-  REAL_SLIPPAGE_BP,
 } from "@/lib/config";
 import type { QuoteRow, QuotesResponse } from "@/lib/api-types";
 
@@ -68,11 +67,12 @@ export async function GET(req: Request) {
           live: false,
         };
       }
-      // In REAL mode the number this endpoint returns is a PROMISE, not an observation: the card
-      // shows it, the swipe sends it back, and /api/real/intent refuses to execute above it. So it
-      // is quoted as the marketable bound rather than the live VWAP — the user can be filled better
-      // than the card said, never worse.
-      const q = await quoteMarketForDisplay(m.yesTokenId, m.noTokenId, stakeCents, user.realMode ? REAL_SLIPPAGE_BP : 0);
+      // The MARKET price for this stake — the same number Polymarket shows. It carried the order's
+      // slippage allowance for a day, and the cost of that was visible on every card: a 55c side
+      // rendered 59c (5% + a tick of clearance), both sides did, and the deck read ~118c against a
+      // book summing ~104. The allowance belongs to the ORDER, where it stops a marketable order
+      // from missing; on the card it is just a worse price than the market's own.
+      const q = await quoteMarketForDisplay(m.yesTokenId, m.noTokenId, stakeCents);
       return {
         marketId: m.id,
         yesPriceBp: q.yesPriceBp,

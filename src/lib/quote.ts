@@ -35,10 +35,6 @@ export interface Quote {
   filledCents: number; // how much of the stake the book could actually absorb
   levelsUsed: number;
   depthCents: number; // total USD sitting on this side of the ladder
-  // The DEAREST level the walk actually touched. The displayed price is a VWAP, but the price a
-  // marketable order has to be bounded by is this one — the last level it eats into. Exposed so the
-  // display path can quote the same worst-case bound the order will carry (REAL_SLIPPAGE_BP).
-  marginalPriceBp: number;
 }
 
 // Sort a raw ladder into buy order (cheapest first) and drop junk levels. Exported because both the
@@ -87,12 +83,10 @@ export function quoteBuy(asks: BookLevel[], stakeCents: number): Quote | null {
   let shares = 0;
   let spent = 0;
   let levelsUsed = 0;
-  let marginalPriceBp = ladder[0]!.priceBp;
 
   for (const l of ladder) {
     const cost = levelCostCents(l.priceBp, l.size);
     levelsUsed++;
-    marginalPriceBp = l.priceBp;
     if (cost >= remaining) {
       // Partial take of this level finishes the order.
       shares += (remaining * 100) / l.priceBp;
@@ -115,7 +109,6 @@ export function quoteBuy(asks: BookLevel[], stakeCents: number): Quote | null {
     filledCents: Math.floor(spent),
     levelsUsed,
     depthCents: Math.floor(depthCents),
-    marginalPriceBp,
   };
 }
 

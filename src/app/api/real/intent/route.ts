@@ -19,6 +19,7 @@ import {
   marketableBuyBoundBp,
   marketableSellBoundBp,
 } from "@/lib/quote";
+import { quoteMovedAgainstUser } from "@/lib/depth";
 import { isTradingReady } from "@/lib/trading-ready";
 import {
   REAL_MIN_STAKE_CENTS,
@@ -172,27 +173,21 @@ export async function POST(req: Request) {
     const q = quoteBuyAllIn(book.asks, budgetMicro, fee.rateBp, fee.expMilli, { feeOnTop: true });
     if (!q) return NextResponse.json({ error: "no_liquidity" }, { status: 409 });
 
-    // THE PROMISE. In real mode the card does not show the live VWAP — it shows the marketable
-    // bound (/api/quotes, REAL_SLIPPAGE_BP), i.e. the worst price the order may pay. The client
-    // sends that number back as quotedPriceBp, and this route's job is to HONOUR it rather than
-    // re-derive a fresh one: re-deriving would stack a second allowance on top of the displayed one
-    // (5% shown, 5% more at execution) and the number on the card would stop meaning anything.
+    // Seen-vs-executed. The card shows the MARKET price for this stake, so this is the check that
+    // the market has not moved away from the number the user tapped: a drift beyond tolerance is a
+    // refusal, and the fresh price goes back so the card can re-render and wait for a deliberate
+    // re-swipe. Comparing vwapBp against vwapBp — the same fee-exclusive basis the card is drawn
+    // from; allInPriceBp would be measuring the platform fee, not book drift, and would 409 every
+    // ENTRY on a fee-bearing market.
     //
-    // So the promise becomes the order's own bound, and there are exactly two ways out. The market
-    // has moved past what we promised — refuse, and hand back the fresh bound so the card can
-    // re-render at an honest number and wait for a deliberate re-swipe. Or the promise is too tight
-    // to be matchable (a marketable order whose bound sits on the level it means to take does not
-    // fill — measured: 0.83 against an 0.82 ask, "no orders found to match") — refuse the same way.
-    // Otherwise the order goes out bounded by the promise, fills at whatever the book gives, and the
-    // only surprise available to the user is a good one.
-    const freshBoundBp = marketableBuyBoundBp(q.marginalAskBp, tickBp, REAL_SLIPPAGE_BP);
-    let promisedBp: number | null = null;
-    if (typeof quotedPriceBp === "number" && quotedPriceBp > 0) {
-      // One tick of clearance under the promise, or the FAK has nothing it can cross.
-      if (quotedPriceBp < q.marginalAskBp + tickBp) {
-        return NextResponse.json({ error: "price_moved", freshPriceBp: freshBoundBp }, { status: 409 });
-      }
-      promisedBp = Math.min(quotedPriceBp, freshBoundBp);
+    // The card carried the ORDER's slippage allowance for a day instead of this check, on the idea
+    // that a promised worst price can never disappoint. It cannot — but it made every card read
+    // several cents above the market (a 55c side showing 59c, both sides, a deck summing 118c
+    // against a book at ~104c), which is its own kind of lie about the price. The allowance now
+    // stays where it is needed and invisible: on the order's bound below, which is what keeps a
+    // marketable FAK crossing a book that moved while the device was signing.
+    if (typeof quotedPriceBp === "number" && quoteMovedAgainstUser(quotedPriceBp, q.vwapBp)) {
+      return NextResponse.json({ error: "price_moved", freshPriceBp: q.vwapBp }, { status: 409 });
     }
 
     // The exchange's DOLLAR minimum on a marketable BUY, checked on the amount we are about to ask
@@ -226,7 +221,7 @@ export async function POST(req: Request) {
     // — an order whose bound sits exactly on the level it means to take is not reliably fillable
     // (see marketableBuyBoundBp: the SDK's share rounding put the implied price at 0.48998 against
     // a 0.49 ask and the exchange found nothing to match). Clamped inside [tick, 1-tick].
-    maxPriceBp = promisedBp ?? freshBoundBp;
+    maxPriceBp = marketableBuyBoundBp(q.marginalAskBp, tickBp, REAL_SLIPPAGE_BP);
 
     // The debit ceiling is now stake + fee, and the fee it carries is the WORST of two readings:
     // our own per-level quote, and the fee at the bound price. The SDK reserves the fee at the
