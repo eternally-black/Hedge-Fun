@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 
 import { categoryOf, gameOf, shuffleNoRun, isContextPoor, isVagueEsports, withinCategoryHorizon, DECK_FETCH_HORIZON_HOURS } from "@/lib/deck-mix";
+import { servableUpDown } from "@/lib/updown";
 import { DECK_MIN_LEAD_MS } from "@/lib/config";
 import { priceIsContested } from "@/lib/polymarket";
 import { authoritativePrices, sourceHasClobBook } from "@/lib/depth";
@@ -96,7 +97,14 @@ export async function GET(req: Request) {
     : candidates;
   const usable = tradable
     .filter(
-      (c) => !isContextPoor(c) && !isVagueEsports(c) && withinCategoryHorizon(c, c.resolutionDeadline.getTime(), nowMs),
+      (c) =>
+        !isContextPoor(c) &&
+        !isVagueEsports(c) &&
+        // Crypto Up/Down windows: long enough to be an ordinary bet, and already open. See
+        // src/lib/updown.ts — the five-minute series is a product we have not built yet, and an
+        // unopened window is a coin flip that looks identical to the running market beside it.
+        servableUpDown(c.question, c.resolutionDeadline.getTime(), nowMs) &&
+        withinCategoryHorizon(c, c.resolutionDeadline.getTime(), nowMs),
     )
     .map((c) => ({ c, p: authoritativePrices(c, nowMs) }))
     .filter(({ p }) => p.yes !== null && p.no !== null && priceIsContested(p.yes, p.no));

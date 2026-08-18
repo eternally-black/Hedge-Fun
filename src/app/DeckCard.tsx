@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useEffect, useRef, useState } from "react";
-import { type Card, catOf, isFootball, cents, usd, winPayout, countdown, sideLabels, marketHint, displayQuestion, isUpDown } from "./ui";
+import { type Card, catOf, isFootball, cents, usd, winPayout, countdown, sideLabels, marketHint, displayQuestion, isUpDown, upDownWindow } from "./ui";
 import { skinStyle, SCRIM } from "./skins";
 import { useCardSwipe } from "./useCardSwipe";
 
@@ -54,6 +54,18 @@ function useTick(value: number): string | undefined {
 
 export const CardFace = memo(function CardFace({ card, skinId, countdownText, urgent, windowText, yesP, noP, skipP, stakeCents, onEditStake }: FaceProps) {
   const cat = catOf(card);
+  // WHICH window this is, and whether it has started. Two Up/Down markets can end at the same minute
+  // and be completely different bets — a not-yet-open five-minute window is a coin flip while the
+  // fifteen-minute one closing beside it is two thirds decided — and the countdown alone cannot tell
+  // them apart. The start is derived from the end (which we know exactly) minus the window length,
+  // so no timezone maths is involved.
+  const win = isUpDown(card) ? upDownWindow(card.question) : null;
+  const startsInMin = win
+    ? Math.ceil((new Date(card.resolutionDeadline).getTime() - win.lengthMin * 60_000 - Date.now()) / 60_000)
+    : 0;
+  const windowLine = win
+    ? `${win.label} · ${startsInMin > 0 ? `opens in ~${startsInMin} min` : windowText.replace(/^Resolves/, "resolves")}`
+    : windowText;
   // Both sides tick independently: a book usually moves one of them.
   const yesTick = useTick(card.yesPriceBp);
   const noTick = useTick(card.noPriceBp);
@@ -98,7 +110,7 @@ export const CardFace = memo(function CardFace({ card, skinId, countdownText, ur
         <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center", padding: "14px 0" }}>
           <div style={{ fontFamily: "var(--df)", fontSize: 32, lineHeight: 1.04, letterSpacing: ".2px", color: "#fff", textShadow: "0 2px 20px rgba(0,0,0,.5)", textWrap: "balance" }}>{displayQuestion(card)}</div>
           {isUpDown(card)
-            ? <div style={{ marginTop: 10, fontSize: 13, color: "rgba(255,255,255,.62)", lineHeight: 1.3 }}>{windowText}</div>
+            ? <div style={{ marginTop: 10, fontSize: 13, color: "rgba(255,255,255,.62)", lineHeight: 1.3 }}>{windowLine}</div>
             : hint && <div style={{ marginTop: 10, fontSize: 13, color: "rgba(255,255,255,.62)", lineHeight: 1.3, textWrap: "pretty" }}>{hint}</div>}
         </div>
 

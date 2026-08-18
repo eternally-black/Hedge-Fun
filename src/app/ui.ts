@@ -288,5 +288,14 @@ export function displayQuestion(card: Pick<Card, "question" | "outcomeYesLabel" 
   return card.question
     .replace(/\s*[-–—]\s*[^-–—]*\b(?:\d{1,2}(?::\d{2})?\s*(?:am|pm)|am|pm|et|edt|est|utc|gmt)\b[^-–—]*$/i, "")
     .replace(/\s*\b\d{1,2}(?::\d{2})?\s*(?:am|pm)(?:\s+(?:et|edt|est|utc|gmt))?\s*$/i, "")
+    // ...and the date with it. What is left is the market itself ("Bitcoin Up or Down"); the WINDOW,
+    // which is the only thing telling two of these apart, moves to its own line (upDownWindow).
+    .replace(/\s*[-–—]\s*(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2},?\s*$/i, "")
+    .replace(/[\s,–—-]+$/, "")
     .trim();
 }
+
+// The Up/Down trading window lives in src/lib/updown.ts — the deck route needs it too, and a
+// parser that decides what is servable does not belong in a "use client" module.
+export { upDownWindow } from "@/lib/updown";
+

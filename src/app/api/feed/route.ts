@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 import { categoryOf, gameOf, isContextPoor, isVagueEsports, withinCategoryHorizon, DECK_FETCH_HORIZON_HOURS } from "@/lib/deck-mix";
+import { servableUpDown } from "@/lib/updown";
 import { DECK_MIN_LEAD_MS, FEED_BAND_BP, FEED_PAGE_SIZE } from "@/lib/config";
 import { authoritativePrices } from "@/lib/depth";
 import type { FeedResponse } from "@/lib/api-types";
@@ -98,7 +99,14 @@ export async function GET(req: Request) {
   const nowMs = now.getTime();
   const usable = candidates
     .filter(
-      (c) => !isContextPoor(c) && !isVagueEsports(c) && withinCategoryHorizon(c, c.resolutionDeadline.getTime(), nowMs),
+      (c) =>
+        !isContextPoor(c) &&
+        !isVagueEsports(c) &&
+        // Crypto Up/Down windows: long enough to be an ordinary bet, and already open. See
+        // src/lib/updown.ts — the five-minute series is a product we have not built yet, and an
+        // unopened window is a coin flip that looks identical to the running market beside it.
+        servableUpDown(c.question, c.resolutionDeadline.getTime(), nowMs) &&
+        withinCategoryHorizon(c, c.resolutionDeadline.getTime(), nowMs),
     )
     .map((c) => ({ c, p: authoritativePrices(c, nowMs) }))
     .filter(({ p }) => p.yes !== null && p.no !== null && inFeedBand(p.yes, p.no));

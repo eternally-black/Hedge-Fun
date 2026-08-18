@@ -1,8 +1,42 @@
+
+// ---- Up/Down windows. Two of these can END at the same minute and be different bets entirely: on
+// 2026-08-18 the deck served the 5:10-5:15 window at 51/50 (not open yet, an honest coin flip) while
+// Polymarket showed the 5:00-5:15 market at 69/32, eleven minutes in. Same countdown, same truncated
+// title. The window is the only thing that tells them apart, and the short series is cut outright.
+{
+  const q5 = "Bitcoin Up or Down - August 18, 5:10PM-5:15PM ET";
+  const q15 = "Bitcoin Up or Down - August 18, 5:00PM-5:15PM ET";
+  const w5 = upDownWindow(q5);
+  const w15 = upDownWindow(q15);
+  assert.ok(w5 && w15, "both windows parse");
+  assert.strictEqual(w5!.lengthMin, 5);
+  assert.strictEqual(w15!.lengthMin, 15);
+  assert.strictEqual(w15!.label, "5:00–5:15PM ET", "label carries the window, not just the end");
+  assert.strictEqual(upDownWindow("Will BTC hit 100k in 2026?"), null, "not an Up/Down question");
+
+  const end = Date.parse("2026-08-18T21:15:00Z");
+  // The five-minute series is out regardless of when you ask — it is a product we have not built.
+  assert.strictEqual(servableUpDown(q5, end, end - 60_000), false, "5-min window: never served");
+  assert.ok(MIN_UPDOWN_WINDOW_MIN > 5);
+  // The fifteen-minute one is served once it has OPENED, and not before.
+  assert.strictEqual(servableUpDown(q15, end, end - 16 * 60_000), false, "not open yet");
+  assert.strictEqual(servableUpDown(q15, end, end - 11 * 60_000), true, "open, eleven minutes to run");
+  // Anything that is not an Up/Down market is unaffected.
+  assert.strictEqual(servableUpDown("Arsenal vs Chelsea", end, end - 60_000), true);
+  // And the title keeps the market, not the timestamp — the window has its own line now.
+  assert.strictEqual(
+    displayQuestion({ question: q15, outcomeYesLabel: "Up", outcomeNoLabel: "Down" }),
+    "Bitcoin Up or Down",
+    "title is the market itself",
+  );
+}
+
 // Self-check for human-readable Over/Under labels + hint (DB-free, pure).
 // Polymarket hands "Over"/"Under" with the line buried in the question; we fold it in.
 // Run: npx tsx scripts/test-side-labels.ts
 import assert from "node:assert";
 import { sideLabels, marketHint, isUpDown, displayQuestion, soccerHint } from "../src/app/ui";
+import { upDownWindow, servableUpDown, MIN_UPDOWN_WINDOW_MIN } from "../src/lib/updown";
 // The RN port, imported to prove the two clients agree (see the drift check at the bottom). Its only
 // import is `import type`, so pulling it in here needs nothing from mobile/node_modules.
 import { soccerHint as mobileSoccerHint } from "../mobile/src/format";
