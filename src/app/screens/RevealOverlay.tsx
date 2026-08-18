@@ -168,8 +168,8 @@ const RevealCardFace = memo(function RevealCardFace({ row }: { row: ResultRow })
   const isWin = row.status === "WIN";
   const isVoid = row.status === "PUSH";
   const badge = isWin ? "WON" : isVoid ? "REFUNDED" : "MISSED";
-  const d = Math.round(row.deltaCents / 100);
-  const deltaStr = isVoid ? usd(STAKE_CENTS) : d >= 0 ? `+$${d}` : `−$${Math.abs(d)}`;
+  // Exact to the cent, and the sign is explicit: a win of 89 cents is "+$0.89", not "+$1".
+  const deltaStr = isVoid ? usd(STAKE_CENTS) : `${row.deltaCents >= 0 ? "+" : ""}${usd(row.deltaCents)}`;
   const sideColor = row.side === "YES" ? "var(--yes)" : "var(--no)";
   // Gold shard line only when shards were actually collected. An over-cap win (shards=0) still won
   // the payout, so show that — never "+0 ◆ collected".

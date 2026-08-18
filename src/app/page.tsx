@@ -6,7 +6,7 @@ import { usePrivy } from "@privy-io/react-auth";
 import { useApi } from "./useApi";
 import { DeckCard, CardPreview, type SwipeAction } from "./DeckCard";
 import { Hud } from "./screens/Hud";
-import { BottomNav } from "./screens/BottomNav";
+import { BottomNav, type NavKey } from "./screens/BottomNav";
 import { Onboarding } from "./screens/Onboarding";
 import { GmScreen } from "./screens/GmScreen";
 import { VaultScreen } from "./screens/VaultScreen";
@@ -507,7 +507,6 @@ function App() {
   // Stable nav callbacks so memo'd Hud/BottomNav don't re-render on unrelated state changes.
   const goVault = useCallback(() => setScreen("vault"), []);
   const goGmScreen = useCallback(() => setScreen("gm"), []);
-  const openHistory = useCallback(() => setHistoryOpen(true), []);
   const closeHistory = useCallback(() => setHistoryOpen(false), []);
   const openBalance = useCallback(() => setBalanceOpen(true), []);
   const closeBalance = useCallback(() => setBalanceOpen(false), []);
@@ -515,7 +514,14 @@ function App() {
   const goNotifs = useCallback(() => setScreen("notifications"), []);
   // Nav from the bottom bar: consume the one-shot hand-off, so after the first time the deck is
   // locked every further navigation lands on the feed (never the panel again).
-  const navTo = useCallback((s: Screen) => { setJustExhausted(false); setScreen(s); }, []);
+  // History is a SHEET, not a screen, so the nav's second slot opens it instead of routing. Keeping
+  // it a sheet is deliberate: it is a list you glance at and dismiss, and it must be reachable from
+  // wherever you already are.
+  const navTo = useCallback((s: NavKey) => {
+    setJustExhausted(false);
+    if (s === "history") return setHistoryOpen(true);
+    setScreen(s);
+  }, []);
   // The hand-off panel's CTA: into the feed, one-shot consumed.
   const enterFeedFromCap = useCallback(() => { setJustExhausted(false); setScreen("feed"); }, []);
 
@@ -681,7 +687,7 @@ function App() {
         {effectiveScreen === "gm" && <GmScreen me={me} busy={busy} onGM={gm} onEnterDeck={goDeck} onRevive={revive} />}
         {effectiveScreen === "vault" && <VaultScreen me={me} api={api} onRefresh={refresh} previewCard={top ?? next} />}
         {effectiveScreen === "invite" && <InviteScreen me={me} />}
-        {effectiveScreen === "you" && <ProfileScreen me={me} api={api} onRefresh={refresh} onHistory={openHistory} onLogout={doLogout} onToast={flashToast} pusdMicro={realPusdMicro} />}
+        {effectiveScreen === "you" && <ProfileScreen me={me} api={api} onRefresh={refresh} onLogout={doLogout} onToast={flashToast} pusdMicro={realPusdMicro} />}
         {effectiveScreen === "notifications" && <NotificationsScreen api={api} onSeen={markResultsSeen} onReplay={replayReveal} />}
       </div>
 

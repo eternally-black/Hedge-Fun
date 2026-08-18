@@ -20,14 +20,25 @@ export const cents = (bp: number) => {
 };
 
 export const num = (n: number) => n.toLocaleString("en-US");
-export const usd = (cents: number) => `$${Math.round(cents / 100).toLocaleString("en-US")}`;
+// Money, EXACT to the cent and never rounded UP. It used to round to whole dollars, which was fine
+// while every amount in the game was one ($200 balance, $10 stake) and became a lie the moment real
+// money arrived: an $0.89 win rendered as "+$1", and a $1 stake's payout as a flat "$2". Whole
+// amounts still print whole, so the paper economy looks exactly as it did; anything with cents
+// prints them. Truncation, not rounding: a gain must never read larger than it is.
+export const usd = (cents: number) => {
+  const neg = cents < 0;
+  const abs = Math.abs(Math.trunc(cents));
+  const whole = Math.floor(abs / 100).toLocaleString("en-US");
+  const rest = abs % 100;
+  return `${neg ? "−" : ""}$${rest === 0 ? whole : `${whole}.${String(rest).padStart(2, "0")}`}`;
+};
 
-// Virtual-$ payout (whole dollars) if this side wins: stake of `stakeCents` at price p (bp/10000)
+// Payout in CENTS if this side wins: stake of `stakeCents` at price p (bp/10000)
 // buys stake/p of $1 shares. Mirrors settle.ts share math (payout = stake*10000/priceBp). bp is the
 // bought side's price; stakeCents defaults to the live STAKE_CENTS so callers pass just the price.
 export const winPayout = (bp: number, stakeCents: number = STAKE_CENTS) => {
   const p = Math.max(0.02, bp / 10000);
-  return Math.round(stakeCents / 100 / p);
+  return Math.floor(stakeCents / p); // CENTS, floored — a promised payout must never read high
 };
 
 // Category accent + display label. Single source of truth = deck-mix categoryOf, so the badge a

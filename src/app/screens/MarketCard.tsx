@@ -84,8 +84,8 @@ export const MarketCard = memo(function MarketCard({
           <LockedBanner card={card} side={placedSide} labels={labels} />
         ) : (
           <div style={{ display: "flex", alignItems: "stretch", gap: 8 }}>
-            <BetButton label={labels.no} payout={winPayout(card.noPriceBp)} color="var(--no)" disabled={expired} onClick={() => onBet(card, "NO")} />
-            <BetButton label={labels.yes} payout={winPayout(card.yesPriceBp)} color="var(--yes)" disabled={expired} onClick={() => onBet(card, "YES")} />
+            <BetButton label={labels.no} payout={usd(winPayout(card.noPriceBp))} color="var(--no)" disabled={expired} onClick={() => onBet(card, "NO")} />
+            <BetButton label={labels.yes} payout={usd(winPayout(card.yesPriceBp))} color="var(--yes)" disabled={expired} onClick={() => onBet(card, "YES")} />
           </div>
         )}
         <div style={{ textAlign: "center", marginTop: 8, fontSize: 10, color: "rgba(255,255,255,.5)", letterSpacing: ".02em" }}>
@@ -96,7 +96,7 @@ export const MarketCard = memo(function MarketCard({
   );
 });
 
-function BetButton({ label, payout, color, disabled, onClick }: { label: string; payout: number; color: string; disabled?: boolean; onClick: () => void }) {
+function BetButton({ label, payout, color, disabled, onClick }: { label: string; payout: string; color: string; disabled?: boolean; onClick: () => void }) {
   return (
     <button
       type="button"
@@ -109,7 +109,7 @@ function BetButton({ label, payout, color, disabled, onClick }: { label: string;
       }}
     >
       <span style={{ fontFamily: "var(--df)", fontSize: 16, lineHeight: 1, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
-      <span style={{ fontSize: 10, color: "rgba(255,255,255,.7)" }}>to win <span style={{ fontFamily: "var(--nf)", fontWeight: 700, color }}>${payout}</span></span>
+      <span style={{ fontSize: 10, color: "rgba(255,255,255,.7)" }}>to win <span style={{ fontFamily: "var(--nf)", fontWeight: 700, color }}>{payout}</span></span>
     </button>
   );
 }
@@ -117,12 +117,12 @@ function BetButton({ label, payout, color, disabled, onClick }: { label: string;
 function LockedBanner({ card, side, labels }: { card: Card; side: BetSide; labels: { yes: string; no: string } }) {
   const color = side === "YES" ? "var(--yes)" : "var(--no)";
   const label = side === "YES" ? labels.yes : labels.no;
-  const payout = winPayout(side === "YES" ? card.yesPriceBp : card.noPriceBp);
+  const payout = usd(winPayout(side === "YES" ? card.yesPriceBp : card.noPriceBp));
   return (
     <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, padding: "13px 12px", borderRadius: 16, background: `color-mix(in srgb,${color} 18%,transparent)`, border: `1.5px solid color-mix(in srgb,${color} 55%,transparent)` }}>
       <span style={{ fontSize: 16, color }}>✓</span>
       <span style={{ fontSize: 13, color: "#fff" }}>
-        You&apos;re in on <span style={{ fontFamily: "var(--df)", color }}>{label}</span> — <span style={{ fontFamily: "var(--nf)", fontWeight: 700, color }}>${payout}</span> to win
+        You&apos;re in on <span style={{ fontFamily: "var(--df)", color }}>{label}</span> — <span style={{ fontFamily: "var(--nf)", fontWeight: 700, color }}>{payout}</span> to win
       </span>
     </div>
   );

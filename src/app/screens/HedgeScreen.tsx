@@ -635,7 +635,7 @@ const HedgeCard = memo(function HedgeCard({
   const cd = countdown(s.resolutionDeadline, nowMs);
   const sideColor = s.side === "YES" ? "var(--yes)" : "var(--no)";
   const sidePriceBp = s.side === "YES" ? s.yesPriceBp : s.noPriceBp;
-  const payout = winPayout(sidePriceBp, s.proposedStakeCents);
+  const payout = usd(winPayout(sidePriceBp, s.proposedStakeCents));
 
   // Kind drives the framing: S2 = "bets AGAINST the entity you support" (the returned side IS that
   // against-bet — we never re-derive it here); a discovery fallback is NOT a hedge and carries no
@@ -755,7 +755,7 @@ const HedgeCard = memo(function HedgeCard({
                   <span style={{ fontFamily: "var(--df)", fontSize: 16, lineHeight: 1, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {ctaLabel}
                   </span>
-                  <span style={{ fontSize: 10, color: "rgba(255,255,255,.7)" }}>to win <span style={{ fontFamily: "var(--nf)", fontWeight: 700, color: sideColor }}>${payout}</span></span>
+                  <span style={{ fontSize: 10, color: "rgba(255,255,255,.7)" }}>to win <span style={{ fontFamily: "var(--nf)", fontWeight: 700, color: sideColor }}>{payout}</span></span>
                 </>
               )}
             </button>

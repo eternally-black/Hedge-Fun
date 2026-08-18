@@ -3,9 +3,14 @@
 import { memo, useEffect, useState } from "react";
 import { type Screen } from "../ui";
 
-const ITEMS: { key: Screen; glyph: string; label: string }[] = [
+// The second slot is the PREDICTIONS HISTORY, not a screen: it opens the sheet that lists open and
+// settled calls. It took the place of Hedge, whose path is hidden while that feature goes untested —
+// the screen and its routes are untouched, there is simply no way in from the UI for now.
+export type NavKey = Screen | "history";
+
+const ITEMS: { key: NavKey; glyph: string; label: string }[] = [
   { key: "deck", glyph: "⚡", label: "Deck" },
-  { key: "hedge", glyph: "🛡", label: "Hedge" }, // S1 wallet hedge (phase 2)
+  { key: "history", glyph: "≡", label: "History" },
   { key: "feed", glyph: "≋", label: "Feed" }, // DEV-ONLY (testing). Real users reach the feed via the post-cap Deck tab.
   { key: "vault", glyph: "◆", label: "Vault" },
   { key: "invite", glyph: "＋", label: "Invite" },
@@ -34,7 +39,7 @@ function useDeckResetCountdown(): string {
 // shows the deck; once the cap is spent (deckLocked) tapping it opens the feed instead, and its label
 // becomes the countdown to the next deck (00:00 UTC). No separate Feed tab for users — only dev gets
 // one (devFeed) so the unlimited-swipe dev account can still reach the feed for testing.
-export const BottomNav = memo(function BottomNav({ screen, onNav, deckLocked, devFeed }: { screen: Screen; onNav: (s: Screen) => void; deckLocked: boolean; devFeed: boolean }) {
+export const BottomNav = memo(function BottomNav({ screen, onNav, deckLocked, devFeed }: { screen: Screen; onNav: (s: NavKey) => void; deckLocked: boolean; devFeed: boolean }) {
   const resetIn = useDeckResetCountdown();
   const items = devFeed ? ITEMS : ITEMS.filter((it) => it.key !== "feed");
   return (

@@ -143,8 +143,8 @@ export const CardFace = memo(function CardFace({ card, skinId, countdownText, ur
             <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 15, color: "#fff" }}>{usd(stakeCents)}</div>
           </div>
           <div style={{ flex: 1, minWidth: 0, display: "flex", gap: 6 }}>
-            <PayBox label={labels.no} val={winPayout(card.noPriceBp, stakeCents)} color="var(--no)" tick={noTick} />
-            <PayBox label={labels.yes} val={winPayout(card.yesPriceBp, stakeCents)} color="var(--yes)" tick={yesTick} />
+            <PayBox label={labels.no} val={usd(winPayout(card.noPriceBp, stakeCents))} color="var(--no)" tick={noTick} />
+            <PayBox label={labels.yes} val={usd(winPayout(card.yesPriceBp, stakeCents))} color="var(--yes)" tick={yesTick} />
           </div>
         </div>
         <div style={{ textAlign: "center", marginTop: 12, fontSize: 11, color: "rgba(255,255,255,.55)", letterSpacing: ".02em" }}>Tap for details · swipe to call</div>
@@ -266,11 +266,11 @@ function Stamp({ label, color, o, s, pos, rot }: { label: string; color: string;
   );
 }
 
-function PayBox({ label, val, color, tick }: { label: string; val: number; color: string; tick?: string }) {
+function PayBox({ label, val, color, tick }: { label: string; val: string; color: string; tick?: string }) {
   return (
     <div style={{ flex: 1, textAlign: "center", background: `color-mix(in srgb,${color} 14%,transparent)`, border: `1px solid color-mix(in srgb,${color} 35%,transparent)`, padding: "8px 6px", borderRadius: 14, minWidth: 0 }}>
       <div style={{ fontSize: 8, letterSpacing: ".1em", color, textTransform: "uppercase", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</div>
-      <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 14, color, animation: tick }}>${val}</div>
+      <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 14, color, animation: tick }}>{val}</div>
     </div>
   );
 }

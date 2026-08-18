@@ -17,7 +17,9 @@ const SUPPORT_CONTACTS = [
 
 // Profile / "You" (ported from app design). Real stats from /api/me. Prediction history is a
 // placeholder until /api/history. (No user-facing leaderboard — ranking is admin-only.)
-export function ProfileScreen({ me, api, onRefresh, onHistory, onLogout, onToast, pusdMicro }: { me: Me | null; api: Api; onRefresh: () => Promise<void>; onHistory: () => void; onLogout: () => void; onToast: (msg: string) => void; pusdMicro: string | null }) {
+// Prediction history moved OUT of here and into the bottom nav's second slot: it is the thing a
+// user checks most often after swiping, and it was two taps deep behind a profile screen.
+export function ProfileScreen({ me, api, onRefresh, onLogout, onToast, pusdMicro }: { me: Me | null; api: Api; onRefresh: () => Promise<void>; onLogout: () => void; onToast: (msg: string) => void; pusdMicro: string | null }) {
   const handle = me?.user.twitter ?? (me?.user.email ? me.user.email.split("@")[0] : "degen");
   const initials = handle.slice(0, 2).toUpperCase();
   const [resetting, setResetting] = useState(false);
@@ -117,11 +119,6 @@ export function ProfileScreen({ me, api, onRefresh, onHistory, onLogout, onToast
         <Tile label="Streak" value={me ? `🔥 ${me.streak.level}d` : "—"} color="var(--text)" />
         <Tile label="◆ Shards" value={me ? `${me.shards}/${me.shardsPerArtifact}` : "—"} color="var(--gold)" />
       </div>
-
-      <div style={{ marginTop: 20, fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700 }}>Prediction history</div>
-      <button type="button" onClick={onHistory} style={{ margin: 0, font: "inherit", width: "100%", marginTop: 10, background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 14, padding: 16, textAlign: "center", color: "var(--text)", fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
-        <span>📜 View your open & settled predictions</span><span style={{ color: "var(--muted)" }}>›</span>
-      </button>
 
       {me?.dev && (
         <div style={{ marginTop: 22, border: "1px dashed color-mix(in srgb,var(--skip) 50%,var(--line))", borderRadius: 14, padding: 14, background: "color-mix(in srgb,var(--skip) 8%,transparent)" }}>
