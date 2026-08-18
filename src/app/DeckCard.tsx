@@ -31,9 +31,11 @@ type FaceProps = {
   // Present only where the stake is editable (real mode, live top card). Absent -> the chip stays
   // inert text, which is what a preview card sitting behind the top one has to be.
   onEditStake?: () => void;
+  // Real money: the card's prices are the bound the order will carry, so its payouts are minimums.
+  guaranteed?: boolean;
 };
 
-export const CardFace = memo(function CardFace({ card, skinId, countdownText, urgent, windowText, yesP, noP, skipP, stakeCents, onEditStake }: FaceProps) {
+export const CardFace = memo(function CardFace({ card, skinId, countdownText, urgent, windowText, yesP, noP, skipP, stakeCents, onEditStake, guaranteed }: FaceProps) {
   const cat = catOf(card);
   const stamp = (p: number) => ({ o: Math.max(0, Math.min(1, (p - 0.15) / 0.5)), s: 0.6 + 0.4 * Math.min(1, p) });
   const ys = stamp(yesP), ns = stamp(noP), ks = stamp(skipP);
@@ -117,8 +119,8 @@ export const CardFace = memo(function CardFace({ card, skinId, countdownText, ur
             <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 15, color: "#fff" }}>{usd(stakeCents)}</div>
           </div>
           <div style={{ flex: 1, minWidth: 0, display: "flex", gap: 6 }}>
-            <PayBox label={labels.no} val={winPayout(card.noPriceBp, stakeCents)} color="var(--no)" />
-            <PayBox label={labels.yes} val={winPayout(card.yesPriceBp, stakeCents)} color="var(--yes)" />
+            <PayBox label={labels.no} val={winPayout(card.noPriceBp, stakeCents)} color="var(--no)" atLeast={guaranteed} />
+            <PayBox label={labels.yes} val={winPayout(card.yesPriceBp, stakeCents)} color="var(--yes)" atLeast={guaranteed} />
           </div>
         </div>
         <div style={{ textAlign: "center", marginTop: 12, fontSize: 11, color: "rgba(255,255,255,.55)", letterSpacing: ".02em" }}>Tap for details · swipe to call</div>
@@ -139,11 +141,11 @@ export const CardFace = memo(function CardFace({ card, skinId, countdownText, ur
 export const PREVIEW_SCALE = 0.957;
 export const PREVIEW_Y = 13;
 
-export const CardPreview = memo(function CardPreview({ card, skinId, stakeCents }: { card: Card; skinId: string; stakeCents: number }) {
+export const CardPreview = memo(function CardPreview({ card, skinId, stakeCents, guaranteed }: { card: Card; skinId: string; stakeCents: number; guaranteed?: boolean }) {
   const text = useCountdown(card.resolutionDeadline, 0); // no urgency styling needed behind
   return (
     <div style={{ position: "absolute", inset: 0, borderRadius: 26, overflow: "hidden", background: "var(--panel2)", border: "1px solid var(--line)", filter: "brightness(.82)", pointerEvents: "none", transform: `scale(${PREVIEW_SCALE}) translateY(${PREVIEW_Y}px)`, transformOrigin: "center bottom" }}>
-      <CardFace card={card} skinId={skinId} countdownText={text.text} urgent={false} windowText={text.relText} yesP={0} noP={0} skipP={0} stakeCents={stakeCents} />
+      <CardFace card={card} skinId={skinId} countdownText={text.text} urgent={false} windowText={text.relText} yesP={0} noP={0} skipP={0} stakeCents={stakeCents} guaranteed={guaranteed} />
     </div>
   );
 });
@@ -160,6 +162,7 @@ export function DeckCard({
   onTap,
   stakeCents,
   onEditStake,
+  guaranteed,
 }: {
   card: Card;
   skinId: string;
@@ -168,6 +171,7 @@ export function DeckCard({
   onTap: () => void;
   stakeCents: number;
   onEditStake?: () => void;
+  guaranteed?: boolean;
 }) {
   // `entering` plays the rise-out-of-stack animation once on mount (this card just became top).
   // While entering we let the CSS keyframe own `transform`; after it ends we switch to the
@@ -209,7 +213,7 @@ export function DeckCard({
           : swipe.style),
       }}
     >
-      <CardFace card={card} skinId={skinId} countdownText={cd.text} urgent={cd.urgent} windowText={cd.relText} yesP={swipe.progressOf("YES")} noP={swipe.progressOf("NO")} skipP={swipe.progressOf("SKIP")} stakeCents={stakeCents} onEditStake={onEditStake} />
+      <CardFace card={card} skinId={skinId} countdownText={cd.text} urgent={cd.urgent} windowText={cd.relText} yesP={swipe.progressOf("YES")} noP={swipe.progressOf("NO")} skipP={swipe.progressOf("SKIP")} stakeCents={stakeCents} onEditStake={onEditStake} guaranteed={guaranteed} />
     </div>
   );
 }
@@ -240,11 +244,17 @@ function Stamp({ label, color, o, s, pos, rot }: { label: string; color: string;
   );
 }
 
-function PayBox({ label, val, color }: { label: string; val: number; color: string }) {
+// `atLeast` is the real-money truth in one character. The price on a real card is the WORST the
+// order may pay (the marketable bound), so the payout beside it is a floor, not an estimate: the
+// exchange normally fills better and the number grows. Saying so is the difference between a good
+// surprise and a user deciding the app quotes prices it does not honour.
+function PayBox({ label, val, color, atLeast }: { label: string; val: number; color: string; atLeast?: boolean }) {
   return (
     <div style={{ flex: 1, textAlign: "center", background: `color-mix(in srgb,${color} 14%,transparent)`, border: `1px solid color-mix(in srgb,${color} 35%,transparent)`, padding: "8px 6px", borderRadius: 14, minWidth: 0 }}>
       <div style={{ fontSize: 8, letterSpacing: ".1em", color, textTransform: "uppercase", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</div>
-      <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 14, color }}>${val}</div>
+      <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 14, color }}>
+        {atLeast ? "≥" : ""}${val}
+      </div>
     </div>
   );
 }

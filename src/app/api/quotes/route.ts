@@ -9,6 +9,7 @@ import {
   HEDGE_MAX_STAKE_CENTS,
   QUOTES_MAX_IDS,
   QUOTES_RATE_PER_MIN,
+  REAL_SLIPPAGE_BP,
 } from "@/lib/config";
 import type { QuoteRow, QuotesResponse } from "@/lib/api-types";
 
@@ -67,7 +68,11 @@ export async function GET(req: Request) {
           live: false,
         };
       }
-      const q = await quoteMarketForDisplay(m.yesTokenId, m.noTokenId, stakeCents);
+      // In REAL mode the number this endpoint returns is a PROMISE, not an observation: the card
+      // shows it, the swipe sends it back, and /api/real/intent refuses to execute above it. So it
+      // is quoted as the marketable bound rather than the live VWAP — the user can be filled better
+      // than the card said, never worse.
+      const q = await quoteMarketForDisplay(m.yesTokenId, m.noTokenId, stakeCents, user.realMode ? REAL_SLIPPAGE_BP : 0);
       return {
         marketId: m.id,
         yesPriceBp: q.yesPriceBp,

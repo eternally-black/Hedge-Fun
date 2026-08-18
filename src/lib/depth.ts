@@ -30,7 +30,7 @@ import {
   QUOTE_TOLERANCE_FLOOR_BP,
 } from "./config";
 import { getBook, getBooks, ClobUnavailableError } from "./clob";
-import { quoteBuy, maxStakeWithinSlippage, normalizeAsks, type BookLevel } from "./quote";
+import { quoteBuy, maxStakeWithinSlippage, marketableBuyBoundBp, normalizeAsks, type BookLevel } from "./quote";
 
 // The eligibility slippage cap for ONE side, in RELATIVE bp. Two-part by design: the relative CAP is
 // what a user feels (payout = stake/price), but on a cheap side one tick of book walk is a huge
@@ -210,10 +210,17 @@ export interface DisplayQuote {
   asOfMs: number | null; // null when neither side had a usable book
 }
 
+// `slipBp` turns the displayed price into the PROMISE the order will carry: the marketable bound
+// for this stake, not the VWAP the book would give right now. Real money only, and deliberately so —
+// the card then states the worst price the user can be charged, the exchange normally fills better,
+// and the one thing that cannot happen is the number moving against them after they swiped. Paper
+// keeps the plain VWAP: nothing there is executed, so a conservative price would just be a worse
+// game. See REAL_SLIPPAGE_BP for why the allowance is not zero.
 export async function quoteMarketForDisplay(
   yesTokenId: string,
   noTokenId: string,
   stakeCents: number,
+  slipBp = 0,
 ): Promise<DisplayQuote> {
   let books;
   try {
@@ -227,7 +234,10 @@ export async function quoteMarketForDisplay(
     const b = books.get(tokenId);
     if (!b || now - b.fetchedAtMs > BOOK_MAX_DISPLAY_STALE_MS) return { priceBp: null, at: null };
     const q = quoteBuy(b.asks, stakeCents);
-    return { priceBp: q && q.filled ? q.effPriceBp : null, at: b.fetchedAtMs };
+    if (!q || !q.filled) return { priceBp: null, at: b.fetchedAtMs };
+    const tickBp = Math.round(b.tickSize * 10_000);
+    const priceBp = slipBp > 0 && tickBp > 0 ? marketableBuyBoundBp(q.marginalPriceBp, tickBp, slipBp) : q.effPriceBp;
+    return { priceBp, at: b.fetchedAtMs };
   };
   const y = side(yesTokenId);
   const n = side(noTokenId);

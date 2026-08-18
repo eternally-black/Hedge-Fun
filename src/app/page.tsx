@@ -632,7 +632,7 @@ function App() {
               ) : (
                 <>
                   {/* next card — FULLY rendered behind the top one (not a gray stub) */}
-                  {next && <CardPreview key={next.id} card={next} skinId={equippedSkin} stakeCents={effectiveStakeCents} />}
+                  {next && <CardPreview key={next.id} card={next} skinId={equippedSkin} stakeCents={effectiveStakeCents} guaranteed={realMode} />}
                   {top ? (
                     <DeckCard
                       key={top.id}
@@ -643,6 +643,8 @@ function App() {
                       onTap={noop}
                       stakeCents={effectiveStakeCents}
                       onEditStake={realMode ? () => setStakeOpen(true) : undefined}
+                      /* Real prices are the bound the order carries, so the payouts are floors. */
+                      guaranteed={realMode}
                     />
                   ) : (
                     <div style={{ position: "absolute", inset: 0, borderRadius: 26, background: "var(--panel)", border: "1px solid var(--line)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, textAlign: "center" }}>

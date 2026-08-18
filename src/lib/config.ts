@@ -15,9 +15,12 @@ export const MIN_DEPOSIT_USD = 5;
 export const DEPOSIT_FLOOR_USD = 5;
 
 // ---- Real-money stake (DECIDED: user-configurable, floor $1) ----
-// The stake is the user's ALL-IN debit cap: fees come OUT of it, so the shares bought are always
-// slightly fewer than stake/price. Paper keeps its own fixed STAKE_CENTS above; the two are
-// deliberately separate numbers because one is a game rule and the other is somebody's money.
+// The stake IS the order (owner, 2026-08-17, reversing the earlier all-in reading): the platform fee
+// rides on top of it out of the free balance, so a $1 swipe posts a $1 order and debits about $1.04.
+// Taking the fee out of the stake instead made a $1 swipe post $0.96, which is under Polymarket's own
+// minimum for a marketable buy — the product's floor was unbuyable by construction. Paper keeps its
+// fixed STAKE_CENTS above; the two are deliberately separate numbers because one is a game rule and
+// the other is somebody's money.
 export const REAL_MIN_STAKE_CENTS = 100; // $1.00 floor — Polymarket takes a $1 market buy at any price
 // The exchange's OWN floor on a marketable BUY, in micro-USD, and it applies to the order's own
 // amount — not to what the user set aside. Learned from a live refusal on 2026-08-17: a $1 stake
@@ -37,6 +40,15 @@ export const REAL_MIN_ORDER_MICRO = 1_000_000n;
 // with the wrong value here, 0.003332 shares read as a live position, kept offering a Close button
 // that could only produce an empty order, and left an ISSUED intent wedging the market.
 export const SHARE_TICK_MICRO = 10_000n;
+// How far the EXECUTION price may sit above the price we quoted, before the exchange simply refuses
+// to fill. A bound pinned to the book we saw is a bound that misses: on an in-play market the ask
+// moved 0.82 → 0.88 while the device was signing, and the order came back "no orders found to match
+// with FAK order" with the money untouched but the swipe wasted.
+// This costs the user SHARES, never dollars: the order's collateral is the stake and the fee rides
+// on top, so a worse fill buys less rather than spending more. Five percent is the alpha default —
+// it covers ordinary in-play churn on a 1¢-tick book. Tighten it and swipes fail on fast markets;
+// widen it and a thin book fills further up the ladder than the card implied.
+export const REAL_SLIPPAGE_BP = 500;
 export const REAL_MAX_STAKE_CENTS = 100_000; // $1,000 — a fat-finger bound, not a policy limit
 export const REAL_DEFAULT_STAKE_CENTS = 100; // $1.00
 // The quick choices in the stake sheet. They SET the amount rather than adding to it — four values
@@ -48,9 +60,9 @@ export const REAL_STAKE_PRESETS_CENTS = [100, 200, 500, 1_000] as const;
 // TAKER buys; it reads as a maker/limit constraint. We therefore gate BUY on the dollar floor above
 // and let the exchange be the authority on its own minimum — a rejection there is loud and moves no
 // money, whereas enforcing 5 shares here would make a $1 stake impossible on most of the deck.
-// NOT verified by placing a real order; if submits start failing with a size error, this is the
-// first thing to revisit. SELL keeps the share check — exiting below the minimum is the documented
-// way to strand dust, and there `size` really is denominated in shares.
+// Confirmed by a real fill: 1.333332 shares bought as a taker on a book advertising 5. The SELL side
+// no longer enforces it either — the first real position was 1.33 shares, and refusing to close what
+// the same rule let someone open would trap the money until resolution.
 export const REAL_MIN_ORDER_SHARES = 5;
 // Pessimistic fee fallback when a market's feeInfo is unfetchable (fees.ts): the highest measured
 // tier (rate 0.07, exponent 1 — the 2026-08-13 real fill). Overstating shrinks a hedge slightly;
@@ -171,7 +183,7 @@ export const DEPTH_SLIPPAGE_CAP_BP = 500; // 5% relative: deck/feed TRADABILITY 
 export const DEPTH_SLIPPAGE_FLOOR_BP = 100; // absolute floor for the same (1¢ of wiggle on a cheap side)
 // CLOB book cache (src/lib/clob.ts). TTL is only a fetch-throttle — the cache NEVER decides what is
 // fresh enough to USE; that policy lives in the callers (BOOK_MAX_STALE_MS at bet-lock time).
-export const BOOK_CACHE_TTL_MS = 3_000;
+export const BOOK_CACHE_TTL_MS = 1_000;
 export const BOOK_MAX_STALE_MS = 30_000; // pre-Privy: refuse to LOCK a bet against a book older than this
 // Two deliberately different freshness bounds on the same bookTsAt. LOCKING is strict (30s, above):
 // the price a bet books at must come from a just-read book. DISPLAYING is looser (10min): a card may
@@ -186,9 +198,13 @@ export const BOOK_MAX_DISPLAY_STALE_MS = 10 * 60_000; // drop a POLYMARKET card 
 // The client polls ONLY the card(s) it can see — in practice the top one. Next-up cards are cold-
 // rendered from the stored book price and get a live quote the moment they reach the top: their
 // price is irrelevant until then, so polling them is spend without a scenario.
-export const QUOTE_POLL_MS = 3_000; // top-card cadence; books churn ~every 5s, so this tracks them
+export const QUOTE_POLL_MS = 1_000; // top-card cadence. An in-play book moves several times a
+// second — measured 0.82 → 0.88 in six seconds on a live match — so a three-second card was showing
+// a price the exchange had already left. This only fixes what the user SEES before they swipe: the
+// order is signed against a bound derived at intent time and posted a second or two later, and that
+// gap is closed by REAL_SLIPPAGE_BP below, not by polling.
 export const QUOTES_MAX_IDS = 4; // per request — the visible card plus headroom, not a bulk feed
-export const QUOTES_RATE_PER_MIN = 60; // 3s polling = 20/min; the rest is headroom for other surfaces
+export const QUOTES_RATE_PER_MIN = 150; // 1s polling = 60/min; the rest is headroom for other surfaces
 
 // Real-money balance refresh. The HUD states this number on every screen, so it has to become
 // true without a reload — a deposit that only appears after F5 reads as a deposit that never

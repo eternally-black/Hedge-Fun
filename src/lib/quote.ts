@@ -35,6 +35,10 @@ export interface Quote {
   filledCents: number; // how much of the stake the book could actually absorb
   levelsUsed: number;
   depthCents: number; // total USD sitting on this side of the ladder
+  // The DEAREST level the walk actually touched. The displayed price is a VWAP, but the price a
+  // marketable order has to be bounded by is this one — the last level it eats into. Exposed so the
+  // display path can quote the same worst-case bound the order will carry (REAL_SLIPPAGE_BP).
+  marginalPriceBp: number;
 }
 
 // Sort a raw ladder into buy order (cheapest first) and drop junk levels. Exported because both the
@@ -83,10 +87,12 @@ export function quoteBuy(asks: BookLevel[], stakeCents: number): Quote | null {
   let shares = 0;
   let spent = 0;
   let levelsUsed = 0;
+  let marginalPriceBp = ladder[0]!.priceBp;
 
   for (const l of ladder) {
     const cost = levelCostCents(l.priceBp, l.size);
     levelsUsed++;
+    marginalPriceBp = l.priceBp;
     if (cost >= remaining) {
       // Partial take of this level finishes the order.
       shares += (remaining * 100) / l.priceBp;
@@ -109,6 +115,7 @@ export function quoteBuy(asks: BookLevel[], stakeCents: number): Quote | null {
     filledCents: Math.floor(spent),
     levelsUsed,
     depthCents: Math.floor(depthCents),
+    marginalPriceBp,
   };
 }
 
@@ -291,15 +298,21 @@ export function quoteBuyAllIn(
 // This does not loosen what the user pays: matching happens at the MAKER's price, and the order's
 // collateral (makerAmount) is fixed at the stake either way. What widens by one tick is only the
 // worst case if the book moves between the quote and the match — the price of being fillable at all.
-export function marketableBuyBoundBp(marginalAskBp: number, tickBp: number): number {
-  return Math.min(Math.ceil(marginalAskBp / tickBp) * tickBp + tickBp, 10_000 - tickBp);
+export function marketableBuyBoundBp(marginalAskBp: number, tickBp: number, slipBp = 0): number {
+  // Slippage first, then the tick clearance. The two answer different failures: `slipBp` is room for
+  // the book to MOVE between the quote and the post (the device takes a second or two to sign, and
+  // an in-play ask moved 0.82 → 0.88 in that window), while the extra tick is for the rounding that
+  // would otherwise leave the bound sitting exactly on a level it cannot cross.
+  const slipped = Math.ceil((marginalAskBp * (10_000 + slipBp)) / 10_000);
+  return Math.min(Math.ceil(slipped / tickBp) * tickBp + tickBp, 10_000 - tickBp);
 }
 
 // The SELL mirror: a floor one tick BELOW the marginal bid. Same failure in the other direction —
 // a rounded share/collateral pair whose implied price lands just above the bid is a sell nobody
 // can lift, and refusing to fill an exit is the worse half of this bug.
-export function marketableSellBoundBp(marginalBidBp: number, tickBp: number): number {
-  return Math.max(Math.floor(marginalBidBp / tickBp) * tickBp - tickBp, tickBp);
+export function marketableSellBoundBp(marginalBidBp: number, tickBp: number, slipBp = 0): number {
+  const slipped = Math.floor((marginalBidBp * (10_000 - slipBp)) / 10_000);
+  return Math.max(Math.floor(slipped / tickBp) * tickBp - tickBp, tickBp);
 }
 
 export interface SellAllInQuote {

@@ -106,6 +106,18 @@ assert.strictEqual(marketableBuyBoundBp(9900, 100), 9900, "clamped below $1 — 
 assert.strictEqual(marketableSellBoundBp(4900, 100), 4800, "the SELL mirror: one tick below the bid");
 assert.strictEqual(marketableSellBoundBp(4899, 100), 4700, "rounds down first, then clears");
 assert.strictEqual(marketableSellBoundBp(100, 100), 100, "clamped at one tick — never signs a zero floor");
+// Slippage headroom, pinned to the order that failed on 2026-08-18. The card quoted a marginal ask
+// of 0.82 and the bound went out at 0.83; by the time the device had signed, the book's best ask was
+// 0.88 and the exchange found nothing to match. Five percent of 0.82 clears it — and clears it
+// EXACTLY, which is the point: the allowance is sized to real in-play churn, not to a round number.
+assert.strictEqual(marketableBuyBoundBp(8200, 100, 500), 8800, "5% + a tick covers an 0.82 → 0.88 jump");
+assert.strictEqual(marketableBuyBoundBp(8200, 100), 8300, "no allowance = the old bound, unchanged");
+assert.strictEqual(marketableSellBoundBp(8000, 100, 500), 7500, "the SELL mirror gives the same room down");
+assert.ok(
+  marketableBuyBoundBp(9800, 100, 500) <= 9900,
+  "clamped below $1 however wide the allowance — never signs an impossible price",
+);
+
 // The invariant that matters, stated directly: the implied price of an order sized by dividing the
 // stake by the bound and rounding the shares UP still respects the level it aims at.
 const bound = marketableBuyBoundBp(4900, 100) / 10_000;

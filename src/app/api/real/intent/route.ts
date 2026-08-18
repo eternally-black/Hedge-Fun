@@ -12,7 +12,6 @@ import { isRealMoneyEligible, hasRealConsent, sameOrigin } from "@/lib/real";
 import { captureToGlitchTip } from "@/lib/glitchtip";
 import { getMarketFee } from "@/lib/fees";
 import { getBook } from "@/lib/clob";
-import { quoteMovedAgainstUser } from "@/lib/depth";
 import {
   quoteBuyAllIn,
   quoteSellAllIn,
@@ -25,6 +24,7 @@ import {
   REAL_MIN_STAKE_CENTS,
   REAL_MAX_STAKE_CENTS,
   REAL_MIN_ORDER_MICRO,
+  REAL_SLIPPAGE_BP,
   SHARE_TICK_MICRO,
   SWIPE_CAP,
   DECK_MIN_LEAD_MS,
@@ -172,24 +172,27 @@ export async function POST(req: Request) {
     const q = quoteBuyAllIn(book.asks, budgetMicro, fee.rateBp, fee.expMilli, { feeOnTop: true });
     if (!q) return NextResponse.json({ error: "no_liquidity" }, { status: 409 });
 
-    // Seen-vs-executed, the same rule /api/swipe and /api/feed/bet apply to PAPER stakes — the real
-    // path was the one without it, so a card price that had already moved was executed silently
-    // here while a play-money swipe at the same price was refused. maxPriceBp below bounds the
-    // WORST fill, not the drift from what the user tapped: the two are the same number only on a
-    // single-level book. Optional, and absent → never rejects, exactly like the paper routes.
-    // ENTRY only: quoteMovedAgainstUser reads "up is bad", which is the buyer's direction; a SELL
-    // is harmed by the opposite move and its floor already lives in minPriceBp.
+    // THE PROMISE. In real mode the card does not show the live VWAP — it shows the marketable
+    // bound (/api/quotes, REAL_SLIPPAGE_BP), i.e. the worst price the order may pay. The client
+    // sends that number back as quotedPriceBp, and this route's job is to HONOUR it rather than
+    // re-derive a fresh one: re-deriving would stack a second allowance on top of the displayed one
+    // (5% shown, 5% more at execution) and the number on the card would stop meaning anything.
     //
-    // Compared against vwapBp, NOT allInPriceBp, and the difference is the whole check. The client
-    // sends the price the DECK served, and that is `yesEffPriceBp` — a book-walked VWAP with no fee
-    // term anywhere in depth.ts. allInPriceBp is (spend+fee)/shares. Comparing the two measures the
-    // platform fee, not book drift: at the measured 700bp/1000 tier the fee alone is 175bp of price
-    // at p=0.5 (test-fee-quote.ts pins allInPriceBp 5175 on a 5000 book) against a 100bp allowance,
-    // so every ENTRY on a fee-bearing market would 409 `price_moved` forever while the book sat
-    // still — and the only escape would be a client that omits the field, i.e. no protection at all.
-    // vwapBp is spend/shares, the same fee-exclusive basis the card was drawn from.
-    if (typeof quotedPriceBp === "number" && quoteMovedAgainstUser(quotedPriceBp, q.vwapBp)) {
-      return NextResponse.json({ error: "price_moved", freshPriceBp: q.vwapBp }, { status: 409 });
+    // So the promise becomes the order's own bound, and there are exactly two ways out. The market
+    // has moved past what we promised — refuse, and hand back the fresh bound so the card can
+    // re-render at an honest number and wait for a deliberate re-swipe. Or the promise is too tight
+    // to be matchable (a marketable order whose bound sits on the level it means to take does not
+    // fill — measured: 0.83 against an 0.82 ask, "no orders found to match") — refuse the same way.
+    // Otherwise the order goes out bounded by the promise, fills at whatever the book gives, and the
+    // only surprise available to the user is a good one.
+    const freshBoundBp = marketableBuyBoundBp(q.marginalAskBp, tickBp, REAL_SLIPPAGE_BP);
+    let promisedBp: number | null = null;
+    if (typeof quotedPriceBp === "number" && quotedPriceBp > 0) {
+      // One tick of clearance under the promise, or the FAK has nothing it can cross.
+      if (quotedPriceBp < q.marginalAskBp + tickBp) {
+        return NextResponse.json({ error: "price_moved", freshPriceBp: freshBoundBp }, { status: 409 });
+      }
+      promisedBp = Math.min(quotedPriceBp, freshBoundBp);
     }
 
     // The exchange's DOLLAR minimum on a marketable BUY, checked on the amount we are about to ask
@@ -223,7 +226,7 @@ export async function POST(req: Request) {
     // — an order whose bound sits exactly on the level it means to take is not reliably fillable
     // (see marketableBuyBoundBp: the SDK's share rounding put the implied price at 0.48998 against
     // a 0.49 ask and the exchange found nothing to match). Clamped inside [tick, 1-tick].
-    maxPriceBp = marketableBuyBoundBp(q.marginalAskBp, tickBp);
+    maxPriceBp = promisedBp ?? freshBoundBp;
 
     // The debit ceiling is now stake + fee, and the fee it carries is the WORST of two readings:
     // our own per-level quote, and the fee at the bound price. The SDK reserves the fee at the
@@ -278,7 +281,7 @@ export async function POST(req: Request) {
     // minPrice = MARGINAL bid (never VWAP), tick-rounded DOWN for a SELL and then one tick clear of
     // it, the mirror of the BUY bound — a floor sitting exactly on the bid is an exit that may find
     // nothing to lift it, and refusing to fill an exit is the worse half of that bug. Clamped >= tick.
-    maxPriceBp = marketableSellBoundBp(q.marginalBidBp, tickBp);
+    maxPriceBp = marketableSellBoundBp(q.marginalBidBp, tickBp, REAL_SLIPPAGE_BP);
     allInCapMicro = q.proceedsMicro; // informational for EXIT — the expected proceeds, not a cap
 
     approvedParams = {
