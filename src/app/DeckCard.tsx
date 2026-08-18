@@ -33,8 +33,30 @@ type FaceProps = {
   onEditStake?: () => void;
 };
 
+
+// A price that MOVED, rendered as a pulse. The top card re-quotes every second; without this the
+// number just differs between frames, which reads exactly like a number that never moves. Returns
+// the animation to play — cheaper is a bright pulse (the same stake buys more), dearer is a dim one
+// — and nothing else, so a re-render mid-swipe can never shift the layout under a thumb.
+function useTick(value: number): string | undefined {
+  const prev = useRef(value);
+  const [anim, setAnim] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    if (prev.current === value) return;
+    const down = value < prev.current; // a LOWER price is better for the buyer
+    prev.current = value;
+    setAnim(`${down ? "hfTickUp" : "hfTickDown"} .45s ease`);
+    const t = window.setTimeout(() => setAnim(undefined), 460);
+    return () => window.clearTimeout(t);
+  }, [value]);
+  return anim;
+}
+
 export const CardFace = memo(function CardFace({ card, skinId, countdownText, urgent, windowText, yesP, noP, skipP, stakeCents, onEditStake }: FaceProps) {
   const cat = catOf(card);
+  // Both sides tick independently: a book usually moves one of them.
+  const yesTick = useTick(card.yesPriceBp);
+  const noTick = useTick(card.noPriceBp);
   const stamp = (p: number) => ({ o: Math.max(0, Math.min(1, (p - 0.15) / 0.5)), s: 0.6 + 0.4 * Math.min(1, p) });
   const ys = stamp(yesP), ns = stamp(noP), ks = stamp(skipP);
   // Human-readable side labels (Over/Under markets get the line folded in) + a plain-language hint.
@@ -83,8 +105,12 @@ export const CardFace = memo(function CardFace({ card, skinId, countdownText, ur
         {/* odds split — sides + CENTS (Polymarket-style), not % */}
         <div style={{ marginBottom: 14 }}>
           <div style={{ display: "flex", justifyContent: "space-between", fontFamily: "var(--nf)", fontWeight: 700, fontSize: 13, marginBottom: 6 }}>
-            <span style={{ color: "var(--no)" }}>{labels.no} {cents(card.noPriceBp)}</span>
-            <span style={{ color: "var(--yes)" }}>{cents(card.yesPriceBp)} {labels.yes}</span>
+            <span style={{ color: "var(--no)", display: "inline-block", animation: noTick }}>
+              {labels.no} {cents(card.noPriceBp)}
+            </span>
+            <span style={{ color: "var(--yes)", display: "inline-block", animation: yesTick }}>
+              {cents(card.yesPriceBp)} {labels.yes}
+            </span>
           </div>
           <div style={{ display: "flex", height: 12, borderRadius: 8, overflow: "hidden", background: "rgba(0,0,0,.4)" }}>
             <div style={{ width: `${card.noPriceBp / 100}%`, background: "linear-gradient(90deg,color-mix(in srgb,var(--no) 60%,#000),var(--no))" }} />
@@ -117,8 +143,8 @@ export const CardFace = memo(function CardFace({ card, skinId, countdownText, ur
             <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 15, color: "#fff" }}>{usd(stakeCents)}</div>
           </div>
           <div style={{ flex: 1, minWidth: 0, display: "flex", gap: 6 }}>
-            <PayBox label={labels.no} val={winPayout(card.noPriceBp, stakeCents)} color="var(--no)" />
-            <PayBox label={labels.yes} val={winPayout(card.yesPriceBp, stakeCents)} color="var(--yes)" />
+            <PayBox label={labels.no} val={winPayout(card.noPriceBp, stakeCents)} color="var(--no)" tick={noTick} />
+            <PayBox label={labels.yes} val={winPayout(card.yesPriceBp, stakeCents)} color="var(--yes)" tick={yesTick} />
           </div>
         </div>
         <div style={{ textAlign: "center", marginTop: 12, fontSize: 11, color: "rgba(255,255,255,.55)", letterSpacing: ".02em" }}>Tap for details · swipe to call</div>
@@ -240,11 +266,11 @@ function Stamp({ label, color, o, s, pos, rot }: { label: string; color: string;
   );
 }
 
-function PayBox({ label, val, color }: { label: string; val: number; color: string }) {
+function PayBox({ label, val, color, tick }: { label: string; val: number; color: string; tick?: string }) {
   return (
     <div style={{ flex: 1, textAlign: "center", background: `color-mix(in srgb,${color} 14%,transparent)`, border: `1px solid color-mix(in srgb,${color} 35%,transparent)`, padding: "8px 6px", borderRadius: 14, minWidth: 0 }}>
       <div style={{ fontSize: 8, letterSpacing: ".1em", color, textTransform: "uppercase", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</div>
-      <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 14, color }}>${val}</div>
+      <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 14, color, animation: tick }}>${val}</div>
     </div>
   );
 }

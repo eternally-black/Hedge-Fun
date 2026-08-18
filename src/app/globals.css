@@ -83,6 +83,21 @@ body {
   50% { box-shadow: 0 0 0 10px rgba(255, 194, 75, 0); }
 }
 @keyframes hfSpin { to { transform: rotate(360deg); } }
+/* A price that moved. The top card re-quotes every second, and until now the number simply changed
+   between frames — indistinguishable from a number that never moves, which is the wrong impression
+   to give about a live book. One short pulse, in the direction of the move: brighter when the side
+   got cheaper (more shares for the same stake), dimmer-red when it got dearer. Deliberately ~450ms
+   and opacity/scale only — nothing that shifts layout under a thumb mid-swipe. */
+@keyframes hfTickUp {
+  0% { transform: scale(1); filter: brightness(1); }
+  35% { transform: scale(1.13); filter: brightness(1.7); }
+  100% { transform: scale(1); filter: brightness(1); }
+}
+@keyframes hfTickDown {
+  0% { transform: scale(1); opacity: 1; }
+  35% { transform: scale(0.93); opacity: 0.55; }
+  100% { transform: scale(1); opacity: 1; }
+}
 
 /* ---- results reveal + bell (ported from app design diff) ---- */
 /* (hfFlipIn removed — the reveal now uses hfCardRise, the deck's rise-out-of-stack, for one mechanic.) */

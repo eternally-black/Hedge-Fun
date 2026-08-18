@@ -309,7 +309,14 @@ function App() {
       const m = meRef.current;
       if (m && !m.dev && m.swipes.used >= m.swipes.cap) return;
       try {
-        const r = (await api(`/api/quotes?ids=${encodeURIComponent(topId)}`)) as QuotesResponse;
+        // The stake goes WITH the request: a quote is a walk of the book, so its price only means
+        // anything for a size. Omitting it made the route fall back to the paper $10 while a real
+        // order was $1 — a deeper walk, a worse price, and in real mode that number is the bound the
+        // order gets bound to. Conservative, so nothing was promised that could not be honoured, but
+        // the card understated its own payout and priced a size nobody was about to trade.
+        const r = (await api(
+          `/api/quotes?ids=${encodeURIComponent(topId)}&stake=${effectiveStakeCents}`,
+        )) as QuotesResponse;
         const q = r.quotes.find((x) => x.marketId === topId);
         if (!alive || !q || q.yesPriceBp == null || q.noPriceBp == null) return;
         // Patch prices in place — never reorder or drop, or the card would move under the thumb.
@@ -334,7 +341,7 @@ function App() {
       window.clearInterval(id);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [topId, screen, api]);
+  }, [topId, screen, api, effectiveStakeCents]);
 
   const flashPop = useCallback((amt: number, color: string) => {
     setPop({ amt, color });
