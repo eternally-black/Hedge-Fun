@@ -26,13 +26,17 @@ export const REAL_MIN_STAKE_CENTS = 100; // $1.00 floor — Polymarket takes a $
 // dollar; this constant is the belt that stops a thin book (which can leave the walk short of the
 // stake) from sending an unpostable amount to a device that has to sign it first.
 export const REAL_MIN_ORDER_MICRO = 1_000_000n;
-// The share granularity the SDK actually signs in: FOUR decimals, i.e. 100 micro-shares. Measured,
-// not assumed — the first real order carried takerAmount 2_040_900 for a size the walk computed as
-// 2.040816. It matters in two places on the EXIT path: a sell is FLOORED to it so the signed order
-// can never exceed the position (our own validator would refuse that, trapping the user in a
-// position they asked to close), and a remainder smaller than it is unsellable by construction, so
-// it is written off rather than left to block a re-entry forever.
-export const SHARE_TICK_MICRO = 100n;
+// The share granularity the signer actually rounds to: TWO decimals, i.e. 10_000 micro-shares.
+// Measured on a real close, and the first measurement was wrong by a factor of a hundred: a BUY
+// carried takerAmount 2_040_900 (four decimals) so this said 100, but the SELL that followed asked
+// for 1.3333 shares and signed 1.33 — the collateral side of a buy can be finer than the SIZE the
+// exchange accepts. Two decimals is the binding one.
+// It matters twice on the EXIT path. A sell is FLOORED to it, so the signed order can never exceed
+// the position (our own validator refuses that as over_position, which would trap someone in a
+// position they asked to close). And a remainder SMALLER than it is unsellable by construction —
+// with the wrong value here, 0.003332 shares read as a live position, kept offering a Close button
+// that could only produce an empty order, and left an ISSUED intent wedging the market.
+export const SHARE_TICK_MICRO = 10_000n;
 export const REAL_MAX_STAKE_CENTS = 100_000; // $1,000 — a fat-finger bound, not a policy limit
 export const REAL_DEFAULT_STAKE_CENTS = 100; // $1.00
 // The quick choices in the stake sheet. They SET the amount rather than adding to it — four values

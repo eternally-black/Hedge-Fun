@@ -31,10 +31,29 @@ export function HistorySheet({ me, api, onClose, onToast }: { me: Me | null; api
       style={{ position: "absolute", inset: 0, zIndex: 50, background: "rgba(4,4,8,.6)", backdropFilter: "blur(8px)", display: "flex", flexDirection: "column", justifyContent: "flex-end", animation: "hfRise .28s ease", border: "none", cursor: "default" }}
     >
       <div onClick={(e) => e.stopPropagation()} className="hf-scroll" style={{ background: "var(--bg2)", borderRadius: "28px 28px 0 0", borderTop: "1px solid var(--line)", padding: "8px 18px 22px", maxHeight: "82%", overflowY: "auto" }}>
-        <div style={{ width: 42, height: 5, borderRadius: 4, background: "var(--line)", margin: "0 auto 14px" }} />
-        <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 14 }}>
+        {/* The backdrop closes on click, but it only spans the DEVICE SURFACE — on desktop the app is
+            a 402px phone mock and a click beside it lands on the page, not on this overlay. So the
+            dismiss cannot live only there: this handle is a real button, and there is an X beside
+            the title. Reported as "the sheet cannot be closed", which it could not, from outside. */}
+        <button
+          type="button"
+          aria-label="Close"
+          onClick={onClose}
+          style={{ display: "block", margin: "0 auto 14px", padding: "6px 24px", background: "none", border: "none", cursor: "pointer" }}
+        >
+          <div style={{ width: 42, height: 5, borderRadius: 4, background: "var(--line)" }} />
+        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
           <div style={{ fontFamily: "var(--df)", fontSize: 26 }}>Your predictions</div>
           {pending > 0 && <div style={{ fontSize: 11, color: "var(--skip)", fontWeight: 700 }}>{pending} open</div>}
+          <button
+            type="button"
+            aria-label="Close"
+            onClick={onClose}
+            style={{ margin: "0 0 0 auto", font: "inherit", width: 30, height: 30, borderRadius: 999, background: "var(--panel)", border: "1px solid var(--line)", color: "var(--muted)", fontSize: 15, lineHeight: 1, cursor: "pointer", flexShrink: 0 }}
+          >
+            ✕
+          </button>
         </div>
 
         {!rows ? (

@@ -50,7 +50,9 @@ export async function GET(req: Request) {
     const filled = b.filledSharesMicro ?? 0n;
     const remainder = filled - (b.closedSharesMicro ?? 0n);
     const realizedMicro = b.realizedPnlMicro ?? 0n;
-    const realOpen = mode === "REAL" && (filled === 0n || remainder > 0n);
+    // A remainder below one share tick is not an open position: the signer cannot sell it, so it
+    // can never be closed and would sit as "open" forever. The same rule the intent route applies.
+    const realOpen = mode === "REAL" && (filled === 0n || remainder >= SHARE_TICK_MICRO);
     const realStatus: "PENDING" | "WIN" | "LOSS" | "PUSH" = realOpen
       ? "PENDING"
       : realizedMicro > 0n
@@ -62,7 +64,7 @@ export async function GET(req: Request) {
     // Can the user close this from the history sheet? Only a REAL position with something the
     // signer can actually sell: it works in 4-decimal shares, so a sub-tick remnant is unsellable
     // by construction and offering a button for it would produce nothing but a refusal.
-    const closable = mode === "REAL" && remainder >= SHARE_TICK_MICRO;
+    const closable = realOpen && remainder >= SHARE_TICK_MICRO;
 
     return {
     id: b.id,

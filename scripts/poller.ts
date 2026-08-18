@@ -15,6 +15,7 @@ import { captureToGlitchTip, sendOpsTelegram } from "../src/lib/glitchtip";
 import { settleMarket, type Resolution } from "./settle";
 import { watchFunding, rpcChain } from "../src/lib/funding";
 import { watchStuckAttempts } from "../src/lib/attempts-watch";
+import { settleResolvedRealPositions, expireStaleIntents } from "../src/lib/real-settle";
 import { evaluateStreak } from "../src/lib/streak";
 import { refreshDeck } from "./refresh-deck";
 import { pruneMarkets } from "./prune-markets";
@@ -202,6 +203,26 @@ async function tick() {
   } catch (e) {
     console.warn("[funding] watcher error:", (e as Error).message);
     subsystemFailed("funding", e);
+  }
+
+  // REAL positions on markets that have already resolved. A LOST one redeems to zero, so it needs
+  // no signature and no relayer — waiting for the user to open a developer console and press REDEEM
+  // is not settlement, it is a position sitting "open" for hours after the match ended. Winners are
+  // NOT booked here: their collateral exists only once a redemption lands on chain, and writing it
+  // into the ledger because the market went our way would be booking money we have not got.
+  // The same pass clears intents nobody signed — one such row holds the market's in-flight slot and
+  // the intent route only expires it when a NEW intent arrives for that same market, which never
+  // comes if the reason nobody retried is that the button correctly disappeared.
+  try {
+    const rs = await settleResolvedRealPositions(prisma);
+    if (rs.lost + rs.dust > 0) console.log(`[real-settle] booked ${rs.lost} lost, ${rs.dust} sub-tick remnant(s)`);
+    if (rs.winnersPending > 0) console.warn(`[real-settle] ${rs.winnersPending} won position(s) awaiting redemption`);
+    const expired = await expireStaleIntents(prisma);
+    if (expired > 0) console.log(`[real-settle] expired ${expired} unsigned intent(s)`);
+    subsystemOk("real-settle");
+  } catch (e) {
+    console.warn("[real-settle] error:", (e as Error).message);
+    subsystemFailed("real-settle", e);
   }
 
   // Stuck real-order attempts (S8): ambiguous submissions must reach ops, never silently rot.

@@ -25,6 +25,7 @@ import {
 import { erc20BalanceOf, USDCE_ADDRESS, PUSD_ADDRESS } from "@/lib/polygon";
 import { isTradingReady } from "@/lib/trading-ready";
 import { planRedeem } from "@/lib/redeem";
+import { consumeResolvedPosition } from "@/lib/real-settle";
 import {
   prepareGaslessTransaction,
   prepareRedeemPositions,
@@ -36,38 +37,6 @@ const KINDS = ["APPROVALS", "WRAP", "REDEEM", "WITHDRAW", "BRIDGE_OUT"] as const
 type Kind = (typeof KINDS)[number];
 
 const EVM_SIG = /^0x[0-9a-fA-F]{130}$/; // validate BEFORE the fence — the SDK throws on garbage inside it
-
-// Consume a resolved position: the remainder closes, winners book $1/share on it, losers zero,
-// basis is fee-inclusive and prorated. One transaction with the re-read INSIDE it — the previous
-// read-then-update could double-book under two concurrent runs. Idempotent: a consumed position
-// has no remainder left, and false says "nothing was left to consume".
-// CANCELED is not an ordinary win. It is this codebase's INVALID resolution (scripts/settle.ts
-// writes status CANCELED with resolvedOutcome INVALID), and an invalid binary CTF market carries
-// payout numerators [1,1]: every share of EITHER side redeems $0.50, not $1.00. Booking it 1:1
-// overstated proceeds and realized PnL by rem/2 — 100 shares on a $61.68 basis showed +$38.32
-// realized where the wallet actually received $50.00, a −$11.68 outcome. `rem / 2n` floors, so an
-// odd remainder drops 1 micro-dollar; that matches the on-chain division rather than inventing
-// collateral that never lands.
-async function consumeResolvedPosition(betId: string, won: boolean, canceled: boolean): Promise<boolean> {
-  return prisma.$transaction(async (tx) => {
-    const b = await tx.bet.findUnique({ where: { id: betId } });
-    if (!b) return false;
-    const filled = b.filledSharesMicro ?? 0n;
-    const rem = filled - (b.closedSharesMicro ?? 0n);
-    if (rem <= 0n) return false;
-    const proceeds = won ? (canceled ? rem / 2n : rem) : 0n; // winner $1/share, CANCELED $0.50/share
-    const basis = filled > 0n ? (((b.spendMicro ?? 0n) + (b.feeMicro ?? 0n)) * rem) / filled : 0n;
-    await tx.bet.update({
-      where: { id: b.id },
-      data: {
-        closedSharesMicro: filled,
-        proceedsMicro: (b.proceedsMicro ?? 0n) + proceeds,
-        realizedPnlMicro: (b.realizedPnlMicro ?? 0n) + proceeds - basis,
-      },
-    });
-    return true;
-  });
-}
 
 // Run-scoped convergence probe (K3 S6/S7 MEDIUM-1). The relayer's own view of THIS run's
 // transaction — no other flow can move it, unlike the wallet-wide pUSD balance the predicates
@@ -201,7 +170,7 @@ export async function POST(req: Request) {
     // it imports the SDK); here we only ACT on the plan.
     const plan = active ? { bind: null, losses: [] } : planRedeem(candidates);
     let lossesBooked = 0;
-    for (const l of plan.losses) if (await consumeResolvedPosition(l.id, false, false)) lossesBooked++;
+    for (const l of plan.losses) if (await consumeResolvedPosition(prisma, l.id, false, false)) lossesBooked++;
     const boundBet = plan.bind ? candidates.find((c) => c.id === plan.bind!.id) ?? null : null;
     // Mirror the WRAP pattern: an ACTIVE run drives on its own persisted inputs; a DONE row with
     // nothing new to redeem answers idempotent done; otherwise require a redeemable position.
@@ -240,7 +209,7 @@ export async function POST(req: Request) {
             select: { market: { select: { status: true } } },
           })
         )?.market.status === "CANCELED";
-      await consumeResolvedPosition(runInputs.betId, runInputs.won, canceled);
+      await consumeResolvedPosition(prisma, runInputs.betId, runInputs.won, canceled);
     };
     spec = {
       userId: user.id,
