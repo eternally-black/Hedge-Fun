@@ -38,7 +38,15 @@ export async function GET(req: Request) {
     prisma.dailyCounter.findUnique({ where: { userId_utcDay: { userId: user.id, utcDay: day } } }),
     prisma.loginMark.findUnique({ where: { userId_utcDay: { userId: user.id, utcDay: day } } }),
     prisma.bet.count({
-      where: { userId: user.id, mode: "PAPER", settlementStatus: { in: ["SETTLED", "VOID"] }, seenAt: null },
+      where: {
+        userId: user.id,
+        // Follows the MODE: a real position now settles server-side (real-settle.ts), so a real user
+        // has real results to be told about — the bell counting paper ones would be counting a game
+        // they are not playing.
+        mode: user.realMode ? "REAL" : "PAPER",
+        settlementStatus: { in: ["SETTLED", "VOID"] },
+        seenAt: null,
+      },
     }),
     getReferralStats(user.id),
   ]);

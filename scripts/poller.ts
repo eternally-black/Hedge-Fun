@@ -208,15 +208,17 @@ async function tick() {
   // REAL positions on markets that have already resolved. A LOST one redeems to zero, so it needs
   // no signature and no relayer — waiting for the user to open a developer console and press REDEEM
   // is not settlement, it is a position sitting "open" for hours after the match ended. Winners are
-  // NOT booked here: their collateral exists only once a redemption lands on chain, and writing it
-  // into the ledger because the market went our way would be booking money we have not got.
+  // booked only once the collateral has demonstrably moved — the outcome token has left the wallet,
+  // which is what Polymarket's auto-redeemer does with the operator right granted at activation.
+  // Resolution alone is not proof, so the token balance is what the pass reads.
   // The same pass clears intents nobody signed — one such row holds the market's in-flight slot and
   // the intent route only expires it when a NEW intent arrives for that same market, which never
   // comes if the reason nobody retried is that the button correctly disappeared.
   try {
     const rs = await settleResolvedRealPositions(prisma);
-    if (rs.lost + rs.dust > 0) console.log(`[real-settle] booked ${rs.lost} lost, ${rs.dust} sub-tick remnant(s)`);
-    if (rs.winnersPending > 0) console.warn(`[real-settle] ${rs.winnersPending} won position(s) awaiting redemption`);
+    if (rs.lost + rs.won + rs.dust > 0)
+      console.log(`[real-settle] booked ${rs.won} won, ${rs.lost} lost, ${rs.dust} sub-tick remnant(s)`);
+    if (rs.winnersPending > 0) console.warn(`[real-settle] ${rs.winnersPending} won position(s) not yet redeemed on chain`);
     const expired = await expireStaleIntents(prisma);
     if (expired > 0) console.log(`[real-settle] expired ${expired} unsigned intent(s)`);
     subsystemOk("real-settle");

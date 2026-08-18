@@ -37,7 +37,7 @@ export async function GET(req: Request) {
       closedSharesMicro: true,
       realizedPnlMicro: true,
       market: {
-        select: { question: true, outcomeYesLabel: true, outcomeNoLabel: true, resolutionDeadline: true },
+        select: { question: true, outcomeYesLabel: true, outcomeNoLabel: true, resolutionDeadline: true, status: true },
       },
     },
   });
@@ -64,7 +64,10 @@ export async function GET(req: Request) {
     // Can the user close this from the history sheet? Only a REAL position with something the
     // signer can actually sell: it works in 4-decimal shares, so a sub-tick remnant is unsellable
     // by construction and offering a button for it would produce nothing but a refusal.
-    const closable = realOpen && remainder >= SHARE_TICK_MICRO;
+    // Only a market that is still OPEN can be traded out of. Offering Close on one that has already
+    // resolved is offering a button the exchange will refuse — the position there is not sold, it is
+    // redeemed, and the server does that on its own.
+    const closable = realOpen && remainder >= SHARE_TICK_MICRO && b.market.status === "OPEN";
 
     return {
     id: b.id,

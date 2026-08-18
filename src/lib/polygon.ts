@@ -60,6 +60,16 @@ export async function erc1155IsApprovedForAll(token: string, owner: string, oper
   return BigInt(r) === 1n;
 }
 
+// ERC-1155 balanceOf(owner, id) — 0x00fdd58e. The outcome-token holding of a Deposit Wallet, and
+// the PROOF a redemption actually happened: Polymarket's auto-redeemer (an operator we grant during
+// activation) burns the position and sends the collateral, so a resolved market whose token balance
+// has gone to zero is money that has landed. Booking a win on the market's resolution alone would
+// be writing collateral into the ledger before anything moved it.
+export async function erc1155BalanceOf(token: string, owner: string, tokenId: string): Promise<bigint> {
+  const id = BigInt(tokenId).toString(16).padStart(64, "0");
+  return BigInt(await ethCall(token, "0x00fdd58e" + padAddr(owner) + id));
+}
+
 // ------------------------------------------------------------------ deposit attribution (§2.5)
 // Transfer(address,address,uint256) — the ERC-20 event a deposit actually IS. Balance deltas are
 // an inference: any outflow masks them, any inflow fires them. A log names the transaction.

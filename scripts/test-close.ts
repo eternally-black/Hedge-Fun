@@ -4,6 +4,7 @@ import assert from "node:assert";
 import { prisma } from "../src/lib/prisma";
 import { randomCode } from "../src/lib/refcode";
 import { validateSignedSellOrder, bookExitFills, classifyPostResponse, type SignedOrderWire } from "../src/lib/orders";
+import { settleResolvedRealPositions } from "../src/lib/real-settle";
 
 const DW = "0x" + "aa".repeat(20);
 const EW = "0x" + "bb".repeat(20);
@@ -293,7 +294,62 @@ async function main() {
     const dustBasis = ((999_999n + 12_500n) * 1_333_332n) / 1_333_332n;
     assert.strictEqual(dustRow.realizedPnlMicro, 986_642n - 12_000n - dustBasis, "dust realized at its own cost");
 
+    // ---- 9. Server-side settlement of a RESOLVED position. A win is booked on PROOF that the
+    // collateral moved — the outcome token has left the wallet, which is what Polymarket's
+    // auto-redeemer does — never on the market's verdict alone. Live case that forced it: the market
+    // resolved, the money arrived, and the app still said "awaiting result" with a Close button.
+    const wonMarket = await prisma.market.create({
+      data: {
+        polymarketId: `${tag}-won`,
+        question: "settled winner",
+        status: "RESOLVED",
+        resolvedOutcome: "NO",
+        yesTokenId: `${tag}-yes`,
+        noTokenId: `${tag}-no`,
+        resolutionDeadline: new Date(Date.now() - 3_600_000),
+      },
+    });
+    const wonBet = await prisma.bet.create({
+      data: {
+        userId: user.id,
+        marketId: wonMarket.id,
+        side: "NO", // the side the market resolved to
+        mode: "REAL",
+        stakeCents: 100,
+        lockedPriceBp: 5200,
+        utcDay,
+        filledSharesMicro: 1_923_075n,
+        spendMicro: 1_000_000n,
+        feeMicro: 12_500n,
+        vwapBp: 5200,
+      },
+    });
+    await prisma.user.update({ where: { id: user.id }, data: { depositWalletAddress: `0x${"ab".repeat(20)}` } });
+
+    // Still holding the token: the redemption has not landed, so nothing is booked.
+    const held = await settleResolvedRealPositions(prisma, async () => 1_923_075n);
+    assert.strictEqual(held.won, 0, "a resolved winner is NOT booked while the token is still held");
+    assert.strictEqual(held.winnersPending, 1);
+    assert.strictEqual((await prisma.bet.findUniqueOrThrow({ where: { id: wonBet.id } })).closedSharesMicro, null);
+
+    // Token gone → the redeemer burned it and sent the collateral. NOW it books.
+    const settled = await settleResolvedRealPositions(prisma, async () => 0n);
+    assert.strictEqual(settled.won, 1, "token gone from the wallet = the win is real");
+    const wonRow = await prisma.bet.findUniqueOrThrow({ where: { id: wonBet.id } });
+    assert.strictEqual(wonRow.closedSharesMicro, 1_923_075n, "position fully consumed");
+    // 1.923075 shares × $1 − (spend + entry fee) = 1_923_075 − 1_012_500.
+    assert.strictEqual(wonRow.realizedPnlMicro, 910_575n, "payout is $1/share, basis is fee-inclusive");
+    assert.strictEqual(wonRow.settlementStatus, "SETTLED", "and it is stamped like a settled bet");
+    assert.strictEqual(wonRow.result, "WIN");
+    assert.strictEqual(wonRow.pnlCents, 91, "so the results inbox and the reveal can show it");
+    assert.strictEqual(wonRow.seenAt, null, "unseen — that is what makes it a notification");
+
+    // Idempotent: a second pass finds no remainder and books nothing.
+    const again = await settleResolvedRealPositions(prisma, async () => 0n);
+    assert.strictEqual(again.won, 0, "nothing left to consume");
+
     console.log("OK: exit validation + close booking, realized PnL exact, replay-safe, clamp holds");
+    console.log("OK: a resolved winner books only once the outcome token has left the wallet");
     console.log("OK: a sub-tick remnant is written off so it cannot block the market forever");
     console.log("OK: cumulative EXIT receipts book the delta, label FILLED, close the position exactly");
     console.log("PASS: close");

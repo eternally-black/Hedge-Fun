@@ -13,23 +13,26 @@ export async function GET(req: Request) {
   // Count unread over the FULL set, not the windowed rows — otherwise a user with >100 settled
   // bets whose unseen ones fall outside the latest 100 would show a different badge here than in
   // /api/me (which counts unwindowed). Both must agree, so unreadCount is its own count().
-  // mode: PAPER, and deliberately NOT mode-following like /api/history is. This endpoint drives the
-  // reveal ritual and the unread bell, both of which are paper-economy mechanics: a real position
-  // never passes through the paper settle job, so settlementStatus stays PENDING on it and this
-  // query would return nothing for a real-mode user no matter what filter it used. Making it follow
-  // the mode would swap "your paper results" for a permanently empty screen — worse than showing the
-  // paper results that genuinely exist. Real outcomes surface in /api/history (money-derived status)
-  // and on the real console. Also: an old mobile build receiving a REAL row would render real-money
-  // outcomes as paper Results.
+  // FOLLOWS THE MODE. It did not, and could not: a real position never passed through the paper
+  // settle job, so its settlementStatus stayed PENDING forever and a mode-following query would have
+  // returned an empty screen. src/lib/real-settle.ts changed that — a resolved real position is now
+  // booked and stamped server-side — and the consequence of leaving this paper-only was worse than
+  // an empty screen: a market resolved, the collateral landed in the wallet, and the app told the
+  // user nothing at all while still showing the position as awaiting a result.
   const [bets, unreadCount] = await Promise.all([
     prisma.bet.findMany({
-      where: { userId: user.id, mode: "PAPER", settlementStatus: { in: ["SETTLED", "VOID"] } },
+      where: { userId: user.id, mode: user.realMode ? "REAL" : "PAPER", settlementStatus: { in: ["SETTLED", "VOID"] } },
       orderBy: { settledAt: "desc" },
       take: 100,
       select: resultBetSelect,
     }),
     prisma.bet.count({
-      where: { userId: user.id, mode: "PAPER", settlementStatus: { in: ["SETTLED", "VOID"] }, seenAt: null },
+      where: {
+        userId: user.id,
+        mode: user.realMode ? "REAL" : "PAPER",
+        settlementStatus: { in: ["SETTLED", "VOID"] },
+        seenAt: null,
+      },
     }),
   ]);
 
