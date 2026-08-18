@@ -72,7 +72,9 @@ export function RevealOverlay({
   const next = () => dispatch({ t: "next", last });
 
   const netPositive = agg.net >= 0;
-  const netStr = (netPositive ? "+$" : "−$") + Math.abs(Math.round(agg.net / 100)).toLocaleString("en-US");
+  // Exact, like every other money figure: the session total of an $0.89 and an $0.56 win is $1.45,
+  // and rounding each to a dollar first is how a summary stops matching the rows above it.
+  const netStr = (netPositive ? "+" : "") + usd(agg.net);
   const netColor = netPositive ? "var(--yes)" : "var(--no)";
   const shardPct = Math.round((shards / shardsPerArtifact) * 100);
   const shardsLeft = Math.max(0, shardsPerArtifact - shards);

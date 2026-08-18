@@ -70,6 +70,35 @@ export async function erc1155BalanceOf(token: string, owner: string, tokenId: st
   return BigInt(await ethCall(token, "0x00fdd58e" + padAddr(owner) + id));
 }
 
+// The CONDITION's resolution, straight from the Conditional Tokens contract. This is the source the
+// redemption itself uses, and it is AHEAD of Polymarket's API: measured 2026-08-18, a market whose
+// oracle had reported, whose position had been auto-redeemed and whose collateral was already in the
+// wallet still came back from Gamma as `closed: false` with live prices. A ledger that waits for the
+// API tells the user "awaiting result" about money they have already been paid.
+// payoutDenominator(bytes32) = 0xdd34de67, payoutNumerators(bytes32,uint256) = 0x0504c814 — both
+// derived from their signatures, pinned here the way wallet-ops pins its calldata.
+// Denominator 0 = not reported yet. Otherwise the numerators say who was paid: index 0 is the YES
+// outcome, index 1 the NO one, and BOTH positive is the invalid/split resolution (payout [1,1]),
+// which pays every share of either side half a dollar.
+// Same address wallet-ops grants operator rights on; pinned here so this module stays import-free.
+const CONDITIONAL_TOKENS_ADDRESS = "0x4d97dcd97ec945f40cf65f87097ace5ea0476045";
+
+export type ChainOutcome = "YES" | "NO" | "INVALID";
+
+export async function conditionResolution(conditionId: string): Promise<ChainOutcome | null> {
+  const id = conditionId.toLowerCase().replace(/^0x/, "").padStart(64, "0");
+  const denominator = BigInt(await ethCall(CONDITIONAL_TOKENS_ADDRESS, "0xdd34de67" + id));
+  if (denominator === 0n) return null;
+  const [yes, no] = await Promise.all([
+    ethCall(CONDITIONAL_TOKENS_ADDRESS, "0x0504c814" + id + "0".padStart(64, "0")).then(BigInt),
+    ethCall(CONDITIONAL_TOKENS_ADDRESS, "0x0504c814" + id + "1".padStart(64, "0")).then(BigInt),
+  ]);
+  if (yes > 0n && no > 0n) return "INVALID";
+  if (yes > 0n) return "YES";
+  if (no > 0n) return "NO";
+  return null; // reported with nothing payable — not a resolution we know how to book
+}
+
 // ------------------------------------------------------------------ deposit attribution (§2.5)
 // Transfer(address,address,uint256) — the ERC-20 event a deposit actually IS. Balance deltas are
 // an inference: any outflow masks them, any inflow fires them. A log names the transaction.

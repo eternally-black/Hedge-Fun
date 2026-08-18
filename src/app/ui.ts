@@ -244,11 +244,13 @@ export function resultMeta(status: "WIN" | "LOSS" | "PUSH"): { accent: string; g
   return { accent: "var(--skip)", glyph: "↩", tag: "Void" };
 }
 
-// Signed dollar delta from cents, with a real minus glyph. Push shows "Refund".
+// Signed delta, EXACT to the cent — usd() already truncates and carries the minus glyph, so this
+// only adds the plus. It used to round to whole dollars of its own accord, which is why an $0.89 win
+// still read "+$1" in the results inbox after the shared formatter was fixed: two places rounded,
+// one got corrected. Push shows "Refund".
 export function deltaStr(status: "WIN" | "LOSS" | "PUSH", cents: number): string {
   if (status === "PUSH") return "Refund";
-  const d = Math.round(cents / 100);
-  return d >= 0 ? `+$${d.toLocaleString("en-US")}` : `−$${Math.abs(d).toLocaleString("en-US")}`;
+  return cents >= 0 ? `+${usd(cents)}` : usd(cents);
 }
 
 export function bgGrad(color: string) {
