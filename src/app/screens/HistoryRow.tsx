@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { cents, usd, countdown } from "../ui";
 import type { HistoryRowData } from "./usePredictionHistory";
+import type { ExitQuoteRow } from "@/lib/api-types";
 
 // One prediction-history row. Was verbatim-duplicated in HistorySheet + BalanceSheet; extracted to a
 // single shared component (visuals unchanged). Right column: status + delta — PENDING shows the live
@@ -12,12 +13,16 @@ export function HistoryRow({
   nowMs,
   onClosePosition,
   closing,
+  exitQuote,
 }: {
   row: HistoryRowData;
   nowMs: number;
   // Present only where a REAL position can be sold (the two history sheets). Absent = display only.
   onClosePosition?: (row: HistoryRowData) => void | Promise<void>;
   closing?: boolean;
+  // Live mark-to-market for THIS position, re-polled every second (useExitQuotes). Absent while the
+  // first poll is in flight, or when the server has no honest number (book down, no bids).
+  exitQuote?: ExitQuoteRow;
 }) {
   // Two taps, not one. A swipe is a deliberate gesture and spends without confirmation by design;
   // a button in a list is not, and this one sells a position at market. The arm resets itself so a
@@ -26,8 +31,17 @@ export function HistoryRow({
   const sideColor = row.side === "YES" ? "var(--yes)" : "var(--no)";
   const sideBg = row.side === "YES" ? "color-mix(in srgb,var(--yes) 18%,transparent)" : "color-mix(in srgb,var(--no) 18%,transparent)";
 
+  // An open REAL position is worth something RIGHT NOW, and that is the number a person decides
+  // "Close" against — so it takes the row's headline spot while it is live, with the countdown
+  // moving down beside the entry price. Settled rows are unaffected: nothing left to sell.
+  const live = row.status === "PENDING" && row.closable ? exitQuote : undefined;
+
   let statusText: string, statusColor: string, delta: string;
-  if (row.status === "PENDING") {
+  if (live) {
+    statusText = `≈ ${usd(live.proceedsCents)}`;
+    statusColor = live.pnlCents >= 0 ? "var(--yes)" : "var(--no)";
+    delta = `${live.pnlCents > 0 ? "+" : ""}${usd(live.pnlCents)}`; // usd() prints its own minus
+  } else if (row.status === "PENDING") {
     // After the deadline the market enters Polymarket's UMA resolution window — it's not settled
     // yet but the timer is at 0. Show "Awaiting result" instead of a frozen 0m 00s so it doesn't
     // look stuck. Before the deadline, show the live countdown.
@@ -64,6 +78,7 @@ export function HistoryRow({
         <div style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.question}</div>
         <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 2 }}>
           {cents(row.lockedPriceBp)} · {usd(row.stakeCents)} stake
+          {live ? ` · now ${cents(live.priceBp)} · ⏱ ${countdown(row.resolutionDeadline, nowMs).text}` : ""}
         </div>
       </div>
       <div style={{ textAlign: "right", flexShrink: 0 }}>
@@ -102,7 +117,16 @@ export function HistoryRow({
             whiteSpace: "nowrap",
           }}
         >
-          {closing ? "Selling…" : armed ? "Sell now?" : "Close"}
+          {/* The confirm names the money: what comes back and whether that is a gain or a loss.
+              "Sell now?" asked someone to approve a trade without telling them its price. Falls
+              back to the bare question only when there is no live quote to state. */}
+          {closing
+            ? "Selling…"
+            : armed
+              ? live
+                ? `Sell ${usd(live.proceedsCents)} (${live.pnlCents > 0 ? "+" : ""}${usd(live.pnlCents)})?`
+                : "Sell now?"
+              : "Close"}
         </button>
       ) : null}
     </div>

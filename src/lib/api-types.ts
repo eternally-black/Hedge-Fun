@@ -85,6 +85,25 @@ export interface QuotesResponse {
   quotes: QuoteRow[];
 }
 
+// ─── GET /api/real/exit-quote?ids=<betId,...> ──────────────────────────────────────────────────
+// Auth: Bearer + real consent (NOT eligibility — a restricted user may always value and leave a
+// position). What the named REAL positions are worth if sold at market right now. Quoted off the
+// same book walk, fee and pro-rata basis the sale itself books, so the number shown before a close
+// is the number realized after it. A position with no live number (book unreachable, no bids,
+// market no longer OPEN, remainder below one share tick) is simply ABSENT from `quotes` — the
+// client shows nothing rather than a stale figure. Poll at most 1/s.
+export interface ExitQuoteRow {
+  betId: string;
+  sharesMicro: string; // micro-shares this quote is for (the remainder, floored to a share tick)
+  proceedsCents: number; // what the user RECEIVES after the platform fee, truncated to the cent
+  pnlCents: number; // proceeds − the fee-inclusive cost basis of those shares; negative = a loss
+  priceBp: number; // sell VWAP for the whole remainder, in bp (rounded down — payout side)
+  partial: boolean; // the bids ran out: the numbers value only what the book can absorb today
+}
+export interface ExitQuotesResponse {
+  quotes: ExitQuoteRow[];
+}
+
 // ─── GET /api/feed ─────────────────────────────────────────────────────────────────────────────
 // Auth: Bearer. The post-cap "лента": an endless, crypto-first stream of near-50% binary markets
 // (all tiers), minus any the user already bet. Cursor-paginated for infinite scroll — pass the prior

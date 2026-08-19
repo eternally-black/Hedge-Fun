@@ -205,6 +205,9 @@ export const QUOTE_POLL_MS = 1_000; // top-card cadence. An in-play book moves s
 // gap is closed by REAL_SLIPPAGE_BP below, not by polling.
 export const QUOTES_MAX_IDS = 4; // per request — the visible card plus headroom, not a bulk feed
 export const QUOTES_RATE_PER_MIN = 150; // 1s polling = 60/min; the rest is headroom for other surfaces
+// Exit quotes are per POSITION, not per visible card, and a history sheet shows several at once —
+// so this cap is larger than QUOTES_MAX_IDS. Still bounded: each id costs one (cached) book read.
+export const EXIT_QUOTES_MAX_IDS = 8;
 
 // Real-money balance refresh. The HUD states this number on every screen, so it has to become
 // true without a reload — a deposit that only appears after F5 reads as a deposit that never

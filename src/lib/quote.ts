@@ -308,6 +308,20 @@ export function marketableSellBoundBp(marginalBidBp: number, tickBp: number, sli
   return Math.max(Math.floor(slipped / tickBp) * tickBp - tickBp, tickBp);
 }
 
+// Cost basis of `sharesMicro` taken out of a lot of `filledSharesMicro` that cost `spendMicro` plus
+// its entry `feeMicro`. Pro-rata and fee-inclusive — this is EXACTLY what an exit realizes
+// (orders.bookExitFills), so a preview quoting anything else would promise a P&L the booking then
+// contradicts. Integer division floors, which understates the basis by at most a micro-cent.
+export function costBasisMicro(
+  spendMicro: bigint,
+  feeMicro: bigint,
+  filledSharesMicro: bigint,
+  sharesMicro: bigint,
+): bigint {
+  if (filledSharesMicro <= 0n) return 0n;
+  return ((spendMicro + feeMicro) * sharesMicro) / filledSharesMicro;
+}
+
 export interface SellAllInQuote {
   sharesMicro: bigint; // micro-shares actually sellable into the bids
   proceedsMicro: bigint; // notional received BEFORE fee, rounded DOWN (never overstate proceeds)

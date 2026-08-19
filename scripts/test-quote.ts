@@ -11,6 +11,8 @@ import {
   sideIsTradable,
   normalizeAsks,
   normalizeBids,
+  costBasisMicro,
+  quoteSellAllIn,
   type BookLevel,
 } from "../src/lib/quote";
 
@@ -155,6 +157,25 @@ const lvl = (priceCents: number, size: number): BookLevel => ({ priceBp: priceCe
     assert.ok(q.effPriceBp >= prev, `effective price never improves with size (at ${cents}c)`);
     prev = q.effPriceBp;
   }
+}
+
+
+// ─── costBasisMicro: the number an exit PREVIEW quotes against is the one the booking realizes ────
+{
+  // A lot of 3 shares that cost $1.50 + $0.06 fee. Selling all of it must price the whole basis;
+  // selling a third must price exactly a third — the pro-rata rule bookExitFills applies.
+  const spend = 1_500_000n, fee = 60_000n, filled = 3_000_000n;
+  assert.strictEqual(costBasisMicro(spend, fee, filled, filled), 1_560_000n, "full close -> the whole fee-inclusive basis");
+  assert.strictEqual(costBasisMicro(spend, fee, filled, 1_000_000n), 520_000n, "one third of the lot -> one third of the basis");
+  assert.strictEqual(costBasisMicro(spend, fee, 0n, 1_000_000n), 0n, "no fills -> no basis (never divide by zero)");
+  // The preview's P&L: net proceeds of the remainder minus its basis. Sell 3 shares into a 60c bid
+  // with a fee, and the sign of the answer is the sign the row must show.
+  const q = quoteSellAllIn([lvl(60, 10)], filled, 100, 1_000);
+  assert.ok(q, "bids exist -> a quote");
+  const pnl = q!.netMicro - costBasisMicro(spend, fee, filled, filled);
+  assert.ok(pnl > 0n, `60c exit on a 52c basis is a gain (got ${pnl})`);
+  const underwater = q!.netMicro - costBasisMicro(2_400_000n, 60_000n, filled, filled);
+  assert.ok(underwater < 0n, `60c exit on an 82c basis is a loss (got ${underwater})`);
 }
 
 console.log("✓ quote core: normalization, VWAP, conservative rounding, thin/husk/empty books, slippage cap");

@@ -1,7 +1,7 @@
 "use client";
 
 import type { Me } from "../ui";
-import { usePredictionHistory, useClosePosition } from "./usePredictionHistory";
+import { usePredictionHistory, useClosePosition, useExitQuotes } from "./usePredictionHistory";
 import { HistoryRow } from "./HistoryRow";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
@@ -13,6 +13,7 @@ type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 export function HistorySheet({ me, api, onClose, onToast }: { me: Me | null; api: Api; onClose: () => void; onToast: (msg: string) => void }) {
   const { rows, pending, nowMs, refresh } = usePredictionHistory(api);
   const { close, closing } = useClosePosition(api, me, onToast, refresh);
+  const exitQuotes = useExitQuotes(api, rows); // live value + P&L for the closable rows, 1s
 
   return (
     // Backdrop is a real button: click/Enter/Escape closes (matches the overlay-click-to-close).
@@ -63,7 +64,7 @@ export function HistorySheet({ me, api, onClose, onToast }: { me: Me | null; api
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {rows.map((r) => (
-              <HistoryRow key={r.id} row={r} nowMs={nowMs} onClosePosition={close} closing={closing === r.id} />
+              <HistoryRow key={r.id} row={r} nowMs={nowMs} onClosePosition={close} closing={closing === r.id} exitQuote={exitQuotes[r.id]} />
             ))}
           </div>
         )}

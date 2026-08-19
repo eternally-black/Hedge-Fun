@@ -4,6 +4,8 @@ import { useCallback, useEffect, useState } from "react";
 import type { Me } from "../ui";
 import { useRealCtx } from "../useRealCtx";
 import { placeRealOrder } from "@/lib/real-client";
+import { QUOTE_POLL_MS } from "@/lib/config";
+import type { ExitQuoteRow, ExitQuotesResponse } from "@/lib/api-types";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
@@ -65,6 +67,42 @@ export function usePredictionHistory(api: Api) {
   }, [needsTick]);
 
   return { rows, pending, nowMs, refresh };
+}
+
+// Live mark-to-market for the closable rows on screen: what each position would fetch if sold right
+// now, and whether that is a gain or a loss. Polled every second because a CLOB book moves several
+// times a second — a P&L that only refreshes when the sheet opens is a number from the past, and
+// "Close" is a decision made against the number in front of the user.
+//
+// Only CLOSABLE rows are asked for (a settled row has nothing to sell), and the poll stops entirely
+// when there are none. A row the server has no honest number for is simply absent from the map.
+export function useExitQuotes(api: Api, rows: HistoryRowData[] | null) {
+  const [quotes, setQuotes] = useState<Record<string, ExitQuoteRow>>({});
+  // Sorted + joined so the effect re-runs when the SET of closable rows changes, not on every
+  // refresh that hands back an equal array.
+  const ids = (rows ?? []).filter((r) => r.closable).map((r) => r.id).sort().join(",");
+
+  useEffect(() => {
+    if (!ids) return; // nothing sellable on screen — no poll, and the map below reads empty
+    let alive = true;
+    const tick = async () => {
+      try {
+        const r = (await api(`/api/real/exit-quote?ids=${encodeURIComponent(ids)}`)) as ExitQuotesResponse;
+        if (!alive) return;
+        setQuotes(Object.fromEntries(r.quotes.map((q) => [q.betId, q])));
+      } catch {
+        // A failed poll keeps the last number rather than blanking the row: one dropped request is
+        // not news, and a value that flickers away and back is worse than a value one second old.
+      }
+    };
+    void tick();
+    const t = window.setInterval(tick, QUOTE_POLL_MS);
+    return () => { alive = false; window.clearInterval(t); };
+  }, [api, ids]);
+
+  // Empty when nothing is closable, rather than clearing state in the effect: a leftover entry for
+  // a row that has since settled is never read (HistoryRow only marks up a closable row).
+  return ids ? quotes : {};
 }
 
 // Closing a REAL position from the history sheet. The sell is the same two-phase order protocol a

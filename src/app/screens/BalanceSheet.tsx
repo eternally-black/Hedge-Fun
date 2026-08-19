@@ -2,7 +2,7 @@
 
 import { useCallback, useState } from "react";
 import { type Me, usd } from "../ui";
-import { usePredictionHistory, useClosePosition } from "./usePredictionHistory";
+import { usePredictionHistory, useClosePosition, useExitQuotes } from "./usePredictionHistory";
 import { HistoryRow } from "./HistoryRow";
 import { RealDepositPanel } from "./RealDepositPanel";
 
@@ -22,6 +22,7 @@ export function BalanceSheet({ me, api, realPusdMicro, onClose, onTopupDone, onT
 }) {
   const { rows, pending, nowMs, refresh } = usePredictionHistory(api);
   const { close, closing } = useClosePosition(api, me, onToast, refresh);
+  const exitQuotes = useExitQuotes(api, rows); // live value + P&L for the closable rows, 1s
   const [busy, setBusy] = useState(false);
 
   const doTopup = useCallback(async (kind: "free" | "artifact") => {
@@ -110,7 +111,7 @@ export function BalanceSheet({ me, api, realPusdMicro, onClose, onTopupDone, onT
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {rows.map((r) => (
-              <HistoryRow key={r.id} row={r} nowMs={nowMs} onClosePosition={close} closing={closing === r.id} />
+              <HistoryRow key={r.id} row={r} nowMs={nowMs} onClosePosition={close} closing={closing === r.id} exitQuote={exitQuotes[r.id]} />
             ))}
           </div>
         )}

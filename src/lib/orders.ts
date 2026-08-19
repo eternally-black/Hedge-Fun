@@ -3,7 +3,7 @@
 // possible — the route wires the SDK; this module is what the tests pin.
 import { createHash } from "node:crypto";
 import type { PrismaClient, OrderAttempt } from "@prisma/client";
-import { feePerShareMicro } from "./quote";
+import { costBasisMicro, feePerShareMicro } from "./quote";
 import { SHARE_TICK_MICRO } from "./config";
 // Aliased: `utcDay` is also a LOCAL const inside the bookers, and the zero-fill release below runs
 // before that declaration — an unaliased import would resolve into its temporal dead zone.
@@ -715,8 +715,7 @@ export async function bookExitFills(
     // basis includes the prorated ENTRY fee — fee-inclusive economics end to end (S6/S7 review:
     // omitting it overstated user PnL by the entry fee). The dust carries its own basis and no
     // proceeds, so it lands as a loss of exactly what it cost.
-    const spend = (bet.spendMicro ?? 0n) + (bet.feeMicro ?? 0n);
-    const costBasis = filledShares > 0n ? (spend * (sharesToBook + dust)) / filledShares : 0n;
+    const costBasis = costBasisMicro(bet.spendMicro ?? 0n, bet.feeMicro ?? 0n, filledShares, sharesToBook + dust);
     const realizedDelta = proceedsBooked - closeFeeBooked - costBasis;
 
     // Explicit SET, not { increment }: these columns are NULL on an entry-created row, and SQL
