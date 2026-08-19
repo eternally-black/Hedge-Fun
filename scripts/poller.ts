@@ -9,6 +9,7 @@ import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fetchResolution } from "../src/lib/polymarket";
+import { conditionResolution, type ChainOutcome } from "../src/lib/polygon";
 import { DECK_FETCH_HORIZON_HOURS } from "../src/lib/deck-mix";
 import { DECK_MIN_SERVABLE } from "../src/lib/config";
 import { captureToGlitchTip, sendOpsTelegram } from "../src/lib/glitchtip";
@@ -83,8 +84,37 @@ export function toResolution(m: Awaited<ReturnType<typeof fetchResolution>>): Re
   return { kind: "open" };
 }
 
+// The chain's verdict in the settler's own vocabulary. Index 0 is the YES outcome, index 1 the NO
+// one, and a payout to both is the invalid/split resolution — this repo's "void".
+export function chainToResolution(outcome: ChainOutcome | null): Resolution {
+  if (outcome === "YES") return { kind: "resolved", resolvedYes: true };
+  if (outcome === "NO") return { kind: "resolved", resolvedYes: false };
+  if (outcome === "INVALID") return { kind: "void" };
+  return { kind: "open" };
+}
+
 async function settleOne(market: { id: string; polymarketId: string; source: string; resolutionDeadline: Date }) {
-  const resolution: Resolution = toResolution(await fetchResolution(market.polymarketId)); // may throw -> transient
+  let resolution: Resolution = toResolution(await fetchResolution(market.polymarketId)); // may throw -> transient
+  // Gamma is not the authority on resolution — the Conditional Tokens contract is, and it is
+  // measurably AHEAD. Measured on our own positions 2026-08-19: markets flipped 5, 6, 7 and 16
+  // minutes after their deadline, every one of them waiting on `umaResolutionStatus` while the
+  // collateral had ALREADY been auto-redeemed into the wallet. For those minutes the app said
+  // "awaiting result" about money the user had been paid, and offered to sell a position that no
+  // longer existed. So once the deadline has passed and Gamma still says open, ask the contract
+  // that pays the money. POLYMARKET only: a synthetic id (TXODDS) is not a conditionId.
+  if (
+    resolution.kind === "open" &&
+    market.source === "POLYMARKET" &&
+    market.resolutionDeadline.getTime() <= Date.now()
+  ) {
+    // ponytail: one RPC read (3 eth_calls) per stuck market per tick, unbounded by count — fine at
+    // today's volume (the scan reports a single market with pending bets), and the honest upgrade is
+    // to cap the oldest N per tick if a backlog of undecided markets ever makes this a rate limit.
+    resolution = chainToResolution(await conditionResolution(market.polymarketId)); // may throw -> transient
+    if (resolution.kind !== "open") {
+      console.log(`[settle] ${market.polymarketId.slice(0, 16)}… resolved from CHAIN (Gamma still open)`);
+    }
+  }
   if (resolution.kind === "open") return;
   const r = await settleMarket(prisma, market.id, resolution);
   await prisma.market.update({ where: { id: market.id }, data: { lastPolledAt: new Date() } });
