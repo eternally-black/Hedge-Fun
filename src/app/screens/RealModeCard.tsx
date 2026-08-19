@@ -13,6 +13,7 @@ import { useRealCtx } from "../useRealCtx";
 import { provisionReal, runRealWorkflow } from "@/lib/real-client";
 import { APP_SURFACE_ID } from "../appSurface";
 import { DepositSheet } from "./DepositSheet";
+import { RealWithdrawCard } from "./RealWithdrawCard";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
@@ -30,6 +31,19 @@ const LABEL = {
   fontWeight: 700,
 } as const;
 const MUTED = { fontSize: 12, color: "var(--muted)" } as const;
+const MONEY_BTN = {
+  margin: 0,
+  font: "inherit",
+  flex: 1,
+  padding: "10px 16px",
+  borderRadius: 12,
+  background: "var(--panel2)",
+  border: "1px solid var(--line)",
+  color: "var(--text)",
+  fontWeight: 700,
+  fontSize: 13,
+  cursor: "pointer",
+} as const;
 
 export function RealModeCard({ me, api, onRefresh, onToast, pusdMicro }: {
   me: Me | null;
@@ -40,6 +54,7 @@ export function RealModeCard({ me, api, onRefresh, onToast, pusdMicro }: {
 }) {
   const [noticeOpen, setNoticeOpen] = useState(false);
   const [depositOpen, setDepositOpen] = useState(false);
+  const [withdrawOpen, setWithdrawOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { ctx } = useRealCtx(me);
@@ -208,26 +223,21 @@ export function RealModeCard({ me, api, onRefresh, onToast, pusdMicro }: {
             shown loose in a profile it reads as "my address" — the next step is a Solana withdrawal
             to a string that means nothing on Solana. An address is only ever shown behind a chosen
             network, in DepositSheet. */}
+        {/* Both directions sit together: a profile that offers only the way in is how money gets in
+            and stays there. Withdrawing signs on the device, so it waits for the embedded wallet
+            rather than failing on tap — the same ctx the setup buttons below depend on. */}
         {isReal && real.depositWallet ? (
-          <div style={{ marginTop: 10, borderTop: "1px solid var(--line)", paddingTop: 10 }}>
+          <div style={{ marginTop: 10, borderTop: "1px solid var(--line)", paddingTop: 10, display: "flex", gap: 8 }}>
+            <button type="button" onClick={() => setDepositOpen(true)} style={MONEY_BTN}>
+              Deposit
+            </button>
             <button
               type="button"
-              onClick={() => setDepositOpen(true)}
-              style={{
-                margin: 0,
-                font: "inherit",
-                width: "100%",
-                padding: "10px 16px",
-                borderRadius: 12,
-                background: "var(--panel2)",
-                border: "1px solid var(--line)",
-                color: "var(--text)",
-                fontWeight: 700,
-                fontSize: 13,
-                cursor: "pointer",
-              }}
+              onClick={() => setWithdrawOpen((v) => !v)}
+              disabled={!ctx}
+              style={{ ...MONEY_BTN, ...(ctx ? {} : { opacity: 0.5, cursor: "default" }) }}
             >
-              Deposit
+              {withdrawOpen ? "Close" : ctx ? "Withdraw" : "Withdraw…"}
             </button>
           </div>
         ) : null}
@@ -301,6 +311,14 @@ export function RealModeCard({ me, api, onRefresh, onToast, pusdMicro }: {
 
         {error && !noticeOpen ? <div style={{ fontSize: 12, color: "var(--no)", marginTop: 8 }}>{error}</div> : null}
       </div>
+
+      {/* Outside the mode card, not inside it: the withdrawal card brings its own panel background,
+          and one panel nested in another flattens both. */}
+      {withdrawOpen && isReal && real.depositWallet && ctx ? (
+        <div style={{ marginTop: 10 }}>
+          <RealWithdrawCard api={api} ctx={ctx} />
+        </div>
+      ) : null}
 
       {noticeOpen ? (
         <ConsentModal busy={busy} error={error} onAccept={accept} onClose={() => setNoticeOpen(false)} />
