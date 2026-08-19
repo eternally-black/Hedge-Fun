@@ -25,6 +25,7 @@ export type HistoryRowData = {
   status: "PENDING" | "WIN" | "LOSS" | "PUSH";
   pnlCents: number | null;
   resolutionDeadline: string;
+  startsAt?: string | null;
   createdAt: string;
   settledAt?: string | null;
   closable?: boolean; // REAL position with a remainder the signer can actually sell
@@ -125,6 +126,7 @@ export function toPredictionRow(r: HistoryRowData): PredictionRowData {
     pnlCents: r.pnlCents,
     createdAt: r.createdAt,
     resolutionDeadline: r.resolutionDeadline,
+    startsAt: r.startsAt,
     settledAt: r.settledAt,
     closable: r.closable,
   };

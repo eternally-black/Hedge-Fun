@@ -40,6 +40,7 @@ export async function GET(req: Request) {
       market: {
         select: {
           question: true, outcomeYesLabel: true, outcomeNoLabel: true, resolutionDeadline: true, status: true,
+          startsAt: true, // kick-off — a match "deadline" IS its kick-off, see HistoryRow
           league: true, // the sport/game named at ingest — the row states it in its subtitle
         },
       },
@@ -101,6 +102,7 @@ export async function GET(req: Request) {
     // micro-USD → cents. Truncates sub-cent dust, which is display-only: the ledger keeps the micros.
     pnlCents: mode === "REAL" ? Number(realizedMicro / 10_000n) : b.pnlCents,
     resolutionDeadline: b.market.resolutionDeadline.toISOString(),
+    startsAt: b.market.startsAt?.toISOString() ?? null,
     createdAt: b.createdAt.toISOString(),
     settledAt: b.settledAt?.toISOString() ?? null,
     };

@@ -52,7 +52,10 @@ export interface MarketCache {
   // not a sports/esports market, or one we could not name — the deck refuses to serve the latter
   // (deck-mix.isUnnamedMatch).
   league: string | null;
-  startsAt: string | null; // ISO UTC (startDate); null if absent (crypto/Yes-No have none)
+  // When the thing being bet on BEGINS — kick-off for a match, null for crypto/Yes-No. Read from
+  // Gamma's `gameStartTime`, NOT `startDate`: startDate is when the market was listed (a week
+  // earlier), which is not a fact about the game and was never usable as one.
+  startsAt: string | null; // ISO UTC
   resolutionDeadline: string; // ISO UTC (endDate)
   status: "OPEN" | "CLOSED" | "RESOLVED";
   resolvedOutcome: "YES" | "NO" | null;
@@ -65,7 +68,11 @@ interface GammaMarket {
   category?: string | null;
   image?: string | null;
   endDate?: string;
-  startDate?: string; // ISO; present on sports/esports (match kickoff), absent on crypto/Yes-No
+  startDate?: string; // ISO; when the MARKET was listed — not the match (see gameStartTime)
+  // Kick-off, as "2026-08-19 16:00:00+00". Measured 2026-08-19 over 172 live sport markets: this is
+  // EXACTLY equal to endDate on every one of them — so for a match, the "end date" Gamma advertises
+  // is the start of the game, and the market resolves hours later, in-play trading and all.
+  gameStartTime?: string;
   outcomes?: string; // JSON string e.g. '["Yes","No"]'
   outcomePrices?: string; // JSON string e.g. '["0.42","0.58"]'
   clobTokenIds?: string; // JSON string e.g. '["713210456792522125...", "521157195012..."]'
@@ -87,6 +94,15 @@ interface GammaMarket {
   // the request carries include_tag=true (see gammaGet callers) — the sole place a club-vs-club
   // match states its sport.
   tags?: { label?: string }[];
+}
+
+// Gamma writes kick-off as "2026-08-19 16:00:00+00" — a space instead of the T, and an offset with
+// no minutes. Date.parse takes neither reliably, so normalise before trusting it; anything we cannot
+// read comes back null rather than as an Invalid Date that would silently poison a comparison.
+function gameStart(raw: string | undefined): string | null {
+  if (!raw) return null;
+  const ms = Date.parse(raw.replace(" ", "T").replace(/([+-]\d{2})$/, "$1:00"));
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
 }
 
 function parseJsonArray(s: string | undefined): string[] | null {
@@ -186,7 +202,9 @@ export function mapMarket(m: GammaMarket): MarketCache | null {
       outcomeNoLabel: noLabel,
       tags: (m.tags ?? []).map((t) => t.label ?? "").filter(Boolean),
     }),
-    startsAt: m.startDate ?? null, // pure shape-map; the not-started gate lives in fetchBlitzDeck + deck route
+    // Kick-off ONLY. startDate is the listing date — months old on a long-dated market — and it used
+    // to land here under the name "startsAt", which reads as a fact about the game and is not one.
+    startsAt: gameStart(m.gameStartTime),
     resolutionDeadline: m.endDate,
     status,
     resolvedOutcome,

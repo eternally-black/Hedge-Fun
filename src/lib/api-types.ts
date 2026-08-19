@@ -204,7 +204,11 @@ export interface HistoryRow {
   lockedPriceBp: number;
   status: BetStatus;
   pnlCents: number | null; // null while PENDING
-  resolutionDeadline: string; // ISO-8601
+  // ISO-8601. For a MATCH this is Gamma's endDate, which equals KICK-OFF (measured 2026-08-19 over
+  // 172 live sport markets: endDate === gameStartTime on every one) — the market then trades in-play
+  // and resolves hours later. Compare with startsAt before calling it a resolution time.
+  resolutionDeadline: string;
+  startsAt?: string | null; // ISO-8601 kick-off; null for crypto/Yes-No, which have no game
   createdAt: string; // ISO-8601
   settledAt?: string | null; // ISO-8601; null while the bet is still PENDING
   // REAL positions only: there is a remainder the signer can actually sell (it works in 4-decimal

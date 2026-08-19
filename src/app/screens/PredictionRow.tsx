@@ -26,6 +26,7 @@ export type PredictionRowData = {
   pnlCents: number | null; // null while open
   createdAt: string;
   resolutionDeadline?: string | null; // absent on a settled inbox row (the deadline is spent)
+  startsAt?: string | null; // kick-off; equal to the deadline on a match — see below
   settledAt?: string | null;
   outcome?: string | null; // "Resolved Up" — the settled row's human verdict
   shards?: number;
@@ -58,6 +59,14 @@ export function PredictionRow({
   // Live numbers belong to an open position that can still be sold — a settled row's money is done.
   const live = !settled && row.closable ? exitQuote : undefined;
   const deadlinePassed = !!row.resolutionDeadline && new Date(row.resolutionDeadline).getTime() <= nowMs;
+  // For a match, the "deadline" IS the kick-off: Gamma's endDate equals gameStartTime on every live
+  // sport market, and the thing then trades in-play for the length of the game and resolves after.
+  // So once that clock runs out the game is ON, not overdue — saying "awaiting result soon" there
+  // promised a result two hours early, which is exactly how a settled market reads when it is late.
+  const kickoffClock =
+    !!row.startsAt &&
+    !!row.resolutionDeadline &&
+    Math.abs(new Date(row.startsAt).getTime() - new Date(row.resolutionDeadline).getTime()) < 60_000;
 
   // Right column: what this call is worth. Two lines only when there IS money to state — settled
   // pays, or a live quote says what the position would fetch. A row that is merely waiting gets one
@@ -84,7 +93,11 @@ export function PredictionRow({
   const detail = settled
     ? `Your call ${row.sideLabel}${row.outcome ? ` · ${row.outcome}` : ""}`
     : `${cents(row.lockedPriceBp)} · ${usd(row.stakeCents)} stake${live ? ` · now ${cents(live.priceBp)}` : ""}${
-        !row.resolutionDeadline ? "" : deadlinePassed ? " · ⏳ awaiting result" : ` · ⏱ ${countdown(row.resolutionDeadline, nowMs).text}`
+        !row.resolutionDeadline
+          ? ""
+          : deadlinePassed
+            ? kickoffClock ? " · in play" : " · ⏳ awaiting result"
+            : ` · ⏱ ${kickoffClock ? "starts in " : ""}${countdown(row.resolutionDeadline, nowMs).text}`
       }`;
 
   const toggle = () => setOpen((o) => !o);
@@ -190,7 +203,9 @@ export function PredictionRow({
             />
           ) : null}
           <Detail k="Placed" v={when(row.createdAt)} />
-          {row.resolutionDeadline ? <Detail k={settled ? "Resolved" : "Resolves"} v={when(row.resolutionDeadline)} /> : null}
+          {row.resolutionDeadline ? (
+            <Detail k={kickoffClock ? "Kick-off" : settled ? "Resolved" : "Resolves"} v={when(row.resolutionDeadline)} />
+          ) : null}
           {row.settledAt ? <Detail k="Settled" v={when(row.settledAt)} /> : null}
           {row.outcome ? <Detail k="Outcome" v={row.outcome} /> : null}
           {settled && headline ? <Detail k="Result" v={`${sub ?? ""} · ${headline}`.trim()} color={accent} /> : null}
