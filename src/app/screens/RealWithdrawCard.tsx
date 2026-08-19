@@ -279,6 +279,17 @@ export function RealWithdrawCard({ api, ctx }: { api: Api; ctx: RealCtx }) {
             {dollars.trim() === "" ? "entire pUSD balance" : `$${dollars.trim()}`} as {chosen?.symbol ?? "?"} on{" "}
             {chosen?.chainName ?? "?"}
           </div>
+          {/* The bridge charges, and publishes no rate anywhere in its API — /supported-assets
+              carries minCheckoutUsd and nothing else. So this states the one thing that is actually
+              known instead of quoting a number nobody guaranteed. It deliberately does NOT express
+              it as a percentage: a single $2 observation cannot tell a 0.3% cut from a flat ~0.6¢
+              destination cost, and the two differ by orders of magnitude on a large withdrawal.
+              ponytail: one measured data point; replace with the delivered amount once /status is
+              known to carry it. */}
+          <div style={MUTED}>
+            the bridge takes a fee and does not publish a rate — a $2.00 withdrawal delivered
+            1.99386 USDC, so expect slightly less than this to arrive
+          </div>
           <div style={MUTED}>this cannot be undone or recalled</div>
         </div>
       ) : null}

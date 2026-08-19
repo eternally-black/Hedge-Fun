@@ -53,7 +53,10 @@ wallet** (not a raw-key throwaway — K3's top risk):
    `docs.polymarket.com/trading/bridge/withdraw` and implemented as `BRIDGE_OUT`:
    `GET /supported-assets` → `POST /withdraw {address,toChainId,toTokenAddress,recipientAddr}` with
    `X-Builder-Code` → send pUSD to the returned **evm** address (even for Solana — the deposit
-   wallet lives on Polygon) → poll `GET /status/{address}`. No Polymarket fee; per-asset minimums
+   wallet lives on Polygon) → poll `GET /status/{address}`. The bridge DOES take a cut and publishes
+   no rate: measured 2026-08-19, a $2.00 withdrawal delivered 1.99386 USDC on Solana. One data point
+   cannot separate a percentage from a flat destination cost, so nothing quotes a rate; per-asset
+   minimums
    (Solana USDC: $2, chain id is the STRING `1151111081099710`). Gate-0 now only has to run it once
    with real money, not discover whether a path exists.
 
