@@ -1,7 +1,7 @@
 // Self-check for deck mixing: never >2 same-category in a row, and the mix is random.
 // Run: npx tsx scripts/test-deck-mix.ts
 import assert from "node:assert";
-import { shuffleNoRun, categoryOf, gameOf, isContextPoor, isVagueEsports, MAX_RUN, withinCategoryHorizon, DECK_HORIZON_HOURS } from "../src/lib/deck-mix";
+import { shuffleNoRun, categoryOf, gameOf, isContextPoor, isUnnamedMatch, MAX_RUN, withinCategoryHorizon, DECK_HORIZON_HOURS } from "../src/lib/deck-mix";
 
 // ---- categoryOf: real shapes (verified live) bucket correctly ----
 assert.strictEqual(categoryOf({ question: "Bitcoin Up or Down - 9:05AM", outcomeYesLabel: "Up", outcomeNoLabel: "Down" }), "crypto");
@@ -19,17 +19,26 @@ assert.strictEqual(isContextPoor(ou("Games Total: O/U 4.5")), true, "bare total,
 assert.strictEqual(isContextPoor(ou("Map 1 Total Rounds: Over/Under 21.5")), true, "esports signal but no match named -> poor");
 assert.strictEqual(isContextPoor(ou("Norway vs. France: Norway O/U 0.5")), false, "names the match -> usable");
 
-// ---- isVagueEsports: esports with no identifiable game is dropped; recognized games + sports stay ----
+// ---- isUnnamedMatch: a match we cannot name a discipline for is dropped (sports AND esports) ----
 const em = (q: string, yes: string, no: string) => ({ question: q, outcomeYesLabel: yes, outcomeNoLabel: no });
-assert.strictEqual(isVagueEsports(em("Map 1 Rounds Handicap: Millennium Esports (-6.5) vs Alpha Dominion Nation (+6.5)", "Millennium Esports", "Alpha Dominion Nation")), true, "esports, no recognizable game -> vague (dropped)");
-assert.strictEqual(isVagueEsports(em("Dota 2: L1ga Team vs 4ikibamboni", "L1ga Team", "4ikibamboni")), false, "esports with a named game (Dota 2) -> kept");
-assert.strictEqual(isVagueEsports(em("Bosnia vs. Qatar match", "Bosnia", "Qatar")), false, "sports (not esports) -> kept");
-assert.strictEqual(isVagueEsports(em("Bitcoin Up or Down - 9:05AM", "Up", "Down")), false, "crypto -> kept");
+assert.strictEqual(isUnnamedMatch(em("Map 1 Rounds Handicap: Millennium Esports (-6.5) vs Alpha Dominion Nation (+6.5)", "Millennium Esports", "Alpha Dominion Nation")), true, "esports, no recognizable game -> vague (dropped)");
+assert.strictEqual(isUnnamedMatch(em("Dota 2: L1ga Team vs 4ikibamboni", "L1ga Team", "4ikibamboni")), false, "esports with a named game (Dota 2) -> kept");
+assert.strictEqual(isUnnamedMatch(em("Bosnia vs. Qatar match", "Bosnia", "Qatar")), true, "sports with no named discipline -> dropped (no bare SPORTS badge)");
+assert.strictEqual(isUnnamedMatch(em("Bitcoin Up or Down - 9:05AM", "Up", "Down")), false, "crypto -> kept");
 // "Map Handicap" CS2-style series markets: "map" is an esports bet term, so they classify esports —
 // with unknown teams/game gameOf is null -> vague -> hidden (the reported "SPORTS: Map Handicap" bug).
 assert.strictEqual(categoryOf(em("Map Handicap: Entropy (-1.5) vs SAW (+1.5)", "SAW", "Entropy")), "esports", "map handicap -> esports, not sports");
-assert.strictEqual(isVagueEsports(em("Map Handicap: Entropy (-1.5) vs SAW (+1.5)", "SAW", "Entropy")), true, "map handicap + unknown teams -> vague (dropped)");
-assert.strictEqual(isVagueEsports(em("CS2 Map Handicap: NAVI (-1.5) vs FaZe (+1.5)", "NAVI", "FaZe")), false, "map handicap + named game (CS2) -> kept, not over-hidden");
+assert.strictEqual(isUnnamedMatch(em("Map Handicap: Entropy (-1.5) vs SAW (+1.5)", "SAW", "Entropy")), true, "map handicap + unknown teams -> vague (dropped)");
+assert.strictEqual(isUnnamedMatch(em("CS2 Map Handicap: NAVI (-1.5) vs FaZe (+1.5)", "NAVI", "FaZe")), false, "map handicap + named game (CS2) -> kept, not over-hidden");
+// The real card that started this rule: a club-vs-club soccer market says "soccer" NOWHERE in its
+// text. Gamma's tags do — so with tags it is named, without them it is not served, and a row that
+// was already named at ingest (league passed in) is served on that stored name.
+const uzb = em("PFK Mash'al Mubarek vs. FC Andijon: PFK Mash'al Mubarek O/U 1.5", "Over", "Under");
+assert.strictEqual(gameOf(uzb), null, "no tags, no sport word -> unnamed");
+assert.strictEqual(gameOf({ ...uzb, tags: ["Sports", "Games", "Soccer", "King Cup"] }), "Soccer", "Gamma tag names the sport");
+assert.strictEqual(isUnnamedMatch(uzb), true, "unnamed match -> not served");
+assert.strictEqual(isUnnamedMatch({ ...uzb, league: "Soccer" }), false, "stored ingest-time name -> served");
+assert.strictEqual(gameOf({ ...em("Games Total: O/U 2.5", "Over", "Under"), tags: ["Esports", "counter strike 2", "Games", "Sports"] }), "CS2", "spaced tag 'counter strike 2' still names CS2");
 assert.strictEqual(isContextPoor(ou("Lakers @ Celtics: Total Points O/U 210.5")), false, "@ match form -> usable");
 // non-Over/Under markets are never poor — a team name or Yes/No explains itself.
 assert.strictEqual(isContextPoor({ question: "Games Total 4.5", outcomeYesLabel: "Bosnia", outcomeNoLabel: "Qatar" }), false, "named teams -> never poor");

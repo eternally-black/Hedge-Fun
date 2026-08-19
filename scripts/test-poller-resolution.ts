@@ -4,7 +4,7 @@
 // DB-free: importing poller.ts does not start the daemon (its loop() is guarded to direct-run).
 // Run: npx tsx scripts/test-poller-resolution.ts
 import assert from "node:assert";
-import { toResolution } from "./poller";
+import { toResolution, chainToResolution } from "./poller";
 import type { MarketCache } from "../src/lib/polymarket";
 
 const base: MarketCache = {
@@ -15,7 +15,7 @@ const base: MarketCache = {
   yesTokenId: null, noTokenId: null, bestAskBp: null,
   yesEffPriceBp: null, noEffPriceBp: null,
   yesMaxStakeCents: null, noMaxStakeCents: null, bookTsAt: null,
-  startsAt: null, resolutionDeadline: new Date().toISOString(),
+  league: null, startsAt: null, resolutionDeadline: new Date().toISOString(),
   status: "OPEN", resolvedOutcome: null,
 };
 const mk = (o: Partial<MarketCache>): MarketCache => ({ ...base, ...o });
@@ -37,5 +37,13 @@ assert.deepStrictEqual(toResolution(mk({ status: "RESOLVED", resolvedOutcome: "N
 // (settleMarket already handles void -> PUSH/refund). This test pins the CURRENT behavior so the
 // deferral is explicit, not an accident.
 assert.deepStrictEqual(toResolution(mk({ status: "RESOLVED", resolvedOutcome: null })), { kind: "open" }, "resolved-flag-but-no-clean-outcome -> open (void detection deferred)");
+
+// ---- chainToResolution: the fallback that stops a Gamma lag holding paid-out money "awaiting" ----
+// Index 0 is YES, index 1 is NO, a payout to both is the invalid/split — and "no verdict yet" must
+// stay OPEN, or a market nobody has reported on would settle against whoever is holding it.
+assert.deepStrictEqual(chainToResolution("YES"), { kind: "resolved", resolvedYes: true }, "chain YES -> settle YES");
+assert.deepStrictEqual(chainToResolution("NO"), { kind: "resolved", resolvedYes: false }, "chain NO -> settle NO");
+assert.deepStrictEqual(chainToResolution("INVALID"), { kind: "void" }, "chain [1,1] split -> void");
+assert.deepStrictEqual(chainToResolution(null), { kind: "open" }, "nothing reported on chain -> open, re-poll");
 
 console.log("poller toResolution: OK");

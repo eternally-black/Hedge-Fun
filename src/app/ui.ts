@@ -56,18 +56,21 @@ const CAT_COLORS: Record<Category, { color: string; label: string; icon: string 
 // Display accent + label for a card, derived via the SAME classifier the deck mixer uses. For
 // sports/esports we name the specific league/game (NBA, UFC, Dota 2, CS2…) when recognized,
 // keeping the category's color + icon; otherwise the generic category label.
-export function catOf(card: Pick<Card, "question" | "outcomeYesLabel" | "outcomeNoLabel">): { color: string; label: string; icon: string } {
+export function catOf(card: Pick<Card, "question" | "outcomeYesLabel" | "outcomeNoLabel" | "league">): { color: string; label: string; icon: string } {
   const m = { question: card.question, outcomeYesLabel: card.outcomeYesLabel, outcomeNoLabel: card.outcomeNoLabel };
   const cat = categoryOf(m);
-  const game = gameOf(m, cat); // reuse the category — no second classify pass
+  // The server's name wins: it was derived at ingest from Polymarket's tags, which say the sport
+  // even when the question doesn't ("PFK Mash'al Mubarek vs. FC Andijon" -> Soccer). The local
+  // classifier is only the fallback for rows cached before tagging.
+  const game = card.league ?? gameOf(m, cat);
   return game ? { ...CAT_COLORS[cat], label: game } : CAT_COLORS[cat];
 }
 
 // Soccer cards get the auto pitch+grass under the free Classic skin (category art, not a sellable
 // skin). Reuse the deck classifier's league naming: gameOf returns "Soccer" only for soccer — NFL /
 // "american football" match earlier in its table, so the word "football" never misfires here.
-export function isFootball(card: Pick<Card, "question" | "outcomeYesLabel" | "outcomeNoLabel">): boolean {
-  return gameOf({ question: card.question, outcomeYesLabel: card.outcomeYesLabel, outcomeNoLabel: card.outcomeNoLabel }) === "Soccer";
+export function isFootball(card: Pick<Card, "question" | "outcomeYesLabel" | "outcomeNoLabel" | "league">): boolean {
+  return (card.league ?? gameOf({ question: card.question, outcomeYesLabel: card.outcomeYesLabel, outcomeNoLabel: card.outcomeNoLabel })) === "Soccer";
 }
 
 // Polymarket hands us raw "Over"/"Under" side labels with the threshold buried in the question
@@ -230,10 +233,10 @@ export function marketHint(card: Pick<Card, "question" | "outcomeYesLabel" | "ou
 // Visual for a result/inbox row. The reveal & inbox don't carry side labels, so classify by the
 // question alone (deck-mix's categoryOf reads labels too, but question-only still hits the common
 // signals). Falls back to the raw `category` string from the API only for the display label.
-export function catOfResult(r: { question: string; category: string | null }): { color: string; label: string; icon: string } {
+export function catOfResult(r: { question: string; category: string | null; league?: string | null }): { color: string; label: string; icon: string } {
   const m = { question: r.question, outcomeYesLabel: "", outcomeNoLabel: "" };
   const cat = categoryOf(m);
-  const game = gameOf(m, cat); // reuse the category — no second classify pass
+  const game = r.league ?? gameOf(m, cat); // server's ingest-time name first (see catOf)
   return game ? { ...CAT_COLORS[cat], label: game } : CAT_COLORS[cat];
 }
 

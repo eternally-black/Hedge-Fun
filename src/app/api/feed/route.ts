@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
-import { categoryOf, gameOf, isContextPoor, isVagueEsports, withinCategoryHorizon, DECK_FETCH_HORIZON_HOURS } from "@/lib/deck-mix";
+import { categoryOf, gameOf, isContextPoor, isUnnamedMatch, withinCategoryHorizon, DECK_FETCH_HORIZON_HOURS } from "@/lib/deck-mix";
 import { servableUpDown } from "@/lib/updown";
 import { DECK_MIN_LEAD_MS, FEED_BAND_BP, FEED_PAGE_SIZE } from "@/lib/config";
 import { authoritativePrices } from "@/lib/depth";
@@ -44,12 +44,17 @@ function inFeedBand(yesBp: number, noBp: number): boolean {
 
 // The badge the card should carry, classified once and sent to BOTH clients. Web re-derives this
 // locally (it imports deck-mix directly); RN cannot and binds to these two fields.
-function catFields(m: { question: string; outcomeYesLabel: string; outcomeNoLabel: string }): {
+function catFields(m: {
+  question: string;
+  outcomeYesLabel: string;
+  outcomeNoLabel: string;
+  league: string | null; // ingest-time name from Gamma's tags — the only source for a club-vs-club match
+}): {
   category: string;
   league: string | null;
 } {
   const cat = categoryOf(m);
-  return { category: cat, league: gameOf(m, cat) };
+  return { category: cat, league: m.league ?? gameOf(m, cat) };
 }
 
 export async function GET(req: Request) {
@@ -80,6 +85,7 @@ export async function GET(req: Request) {
       id: true,
       question: true,
       category: true,
+      league: true,
       outcomeYesLabel: true,
       outcomeNoLabel: true,
       yesPriceBp: true,
@@ -101,7 +107,7 @@ export async function GET(req: Request) {
     .filter(
       (c) =>
         !isContextPoor(c) &&
-        !isVagueEsports(c) &&
+        !isUnnamedMatch(c) &&
         // Crypto Up/Down windows: long enough to be an ordinary bet, and already open. See
         // src/lib/updown.ts — the five-minute series is a product we have not built yet, and an
         // unopened window is a coin flip that looks identical to the running market beside it.

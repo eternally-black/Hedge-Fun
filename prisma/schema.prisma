@@ -290,6 +290,12 @@ model Market {
   feeUpdatedAt DateTime?
   negRisk      Boolean?
 
+  // Which sport / which game ("Soccer", "MLB", "CS2"), named at ingest from Gamma's tags — the only
+  // place a club-vs-club market states its discipline ("PFK Mash'al Mubarek vs. FC Andijon" does
+  // not). Stored because serve time has no tags. NULL on non-match markets, and on match markets we
+  // could not name — those are never served (deck-mix.isUnnamedMatch).
+  league             String?
+
   startsAt           DateTime? // from startDate (sports/esports kickoff); null for crypto/Yes-No. Gates "not started yet" in the deck.
   resolutionDeadline DateTime // from endDate; powers <=24h blitz filter
   status             MarketStatus   @default(OPEN)

@@ -1,0 +1,11 @@
+-- Which sport / which game a market is about ("Soccer", "MLB", "CS2").
+--
+-- Derived at INGEST from Gamma's own tags (include_tag=true) because the question text of a
+-- club-vs-club match never names the sport: "PFK Mash'al Mubarek vs. FC Andijon: O/U 1.5" is
+-- tagged ["Sports","Games","Soccer","King Cup"] and says "Soccer" nowhere else. Serve time has no
+-- tags, so the derived NAME is stored here.
+--
+-- NULL for non-match markets, and for a match we could not name -- the deck refuses to serve the
+-- latter (a bare "SPORTS" badge is useless), so existing rows show up short until the next
+-- refresh-deck backfills them.
+ALTER TABLE "markets" ADD COLUMN "league" TEXT;

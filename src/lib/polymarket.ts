@@ -9,7 +9,7 @@
 
 import {
   isContextPoor,
-  isVagueEsports,
+  isUnnamedMatch,
   withinCategoryHorizon,
   DECK_FETCH_HORIZON_HOURS,
   categoryOf,
@@ -47,6 +47,11 @@ export interface MarketCache {
   yesMaxStakeCents: number | null; // maxStakeWithinSlippage on the YES asks at the eligibility cap
   noMaxStakeCents: number | null;
   bookTsAt: string | null; // ISO — when the book behind the four eff numbers was read
+  // The discipline this market is about ("Soccer", "MLB", "CS2"), named at INGEST from Gamma's own
+  // tags (which the question text usually lacks) and stored, because serve time has no tags. null =
+  // not a sports/esports market, or one we could not name — the deck refuses to serve the latter
+  // (deck-mix.isUnnamedMatch).
+  league: string | null;
   startsAt: string | null; // ISO UTC (startDate); null if absent (crypto/Yes-No have none)
   resolutionDeadline: string; // ISO UTC (endDate)
   status: "OPEN" | "CLOSED" | "RESOLVED";
@@ -78,6 +83,10 @@ interface GammaMarket {
   volumeNum?: number;
   volume?: string | number;
   events?: { slug?: string; ticker?: string; title?: string; series?: { title?: string }[] }[];
+  // Polymarket's own topic labels, e.g. ["Sports","Games","Soccer","King Cup"]. Present ONLY when
+  // the request carries include_tag=true (see gammaGet callers) — the sole place a club-vs-club
+  // match states its sport.
+  tags?: { label?: string }[];
 }
 
 function parseJsonArray(s: string | undefined): string[] | null {
@@ -169,6 +178,14 @@ export function mapMarket(m: GammaMarket): MarketCache | null {
     yesMaxStakeCents: null,
     noMaxStakeCents: null,
     bookTsAt: null,
+    // Named HERE, where the tags exist. A cached row keeps the name; nothing downstream can re-derive
+    // it, because the question of a club-vs-club match never says which sport it is.
+    league: gameOf({
+      question: m.question,
+      outcomeYesLabel: yesLabel,
+      outcomeNoLabel: noLabel,
+      tags: (m.tags ?? []).map((t) => t.label ?? "").filter(Boolean),
+    }),
     startsAt: m.startDate ?? null, // pure shape-map; the not-started gate lives in fetchBlitzDeck + deck route
     resolutionDeadline: m.endDate,
     status,
@@ -315,6 +332,7 @@ export async function fetchBlitzDeck(hours = DECK_FETCH_HORIZON_HOURS, want = 10
         active: "true",
         closed: "false",
         enableOrderBook: "true",
+        include_tag: "true", // the sport/game name lives ONLY here — see MarketCache.league
         end_date_min: new Date(bandFromMs).toISOString(),
         end_date_max: new Date(bandToMs).toISOString(),
         order: "endDate",
@@ -337,7 +355,7 @@ export async function fetchBlitzDeck(hours = DECK_FETCH_HORIZON_HOURS, want = 10
           withinCategoryHorizon(m, new Date(m.resolutionDeadline).getTime(), nowMs) && // per-category cap
           priceIsContested(m.yesPriceBp, m.noPriceBp) && // cheap MID pre-filter; the AUTHORITATIVE band runs on the eff price below
           !isContextPoor(m) && // drop bare Over/Under totals with no match named ("Games Total: O/U 4.5")
-          !isVagueEsports(m) // drop esports we can't name a game for (bare "Esports" badge)
+          !isUnnamedMatch(m) // a match card must say WHICH sport / which game — no generic "SPORTS"
         ) {
           buckets[shapeOf(m)].push(m);
           bandOf.set(m.polymarketId, bandIdx);
@@ -564,6 +582,7 @@ export async function fetchSportsMarkets(opts: { hours?: number; maxPages?: numb
       active: "true",
       closed: "false",
       enableOrderBook: "true",
+      include_tag: "true", // same reason as the deck fetch — the league name comes from the tags
       end_date_min: now.toISOString(),
       end_date_max: max.toISOString(),
       order: "endDate",
@@ -580,7 +599,7 @@ export async function fetchSportsMarkets(opts: { hours?: number; maxPages?: numb
       if (shapeOf(cache) !== "named") continue; // entity-vs-entity only (the AGAINST-side needs two teams)
       const cat = categoryOf(cache);
       if (cat !== "sports" && cat !== "esports") continue;
-      if (isContextPoor(cache) || isVagueEsports(cache)) continue; // drop jargon totals / unnamed esports
+      if (isContextPoor(cache) || isUnnamedMatch(cache)) continue; // drop jargon totals / unnamed disciplines
       const ev = r.events?.[0];
       out.push({
         cache,

@@ -39,6 +39,7 @@ export async function refreshDeck(hours = DECK_FETCH_HORIZON_HOURS, limit = 100)
         polymarketId: m.polymarketId,
         question: m.question,
         category: m.category,
+        league: m.league, // which sport / which game — from Gamma's tags, see MarketCache.league
         outcomeYesLabel: m.outcomeYesLabel,
         outcomeNoLabel: m.outcomeNoLabel,
         yesPriceBp: m.yesPriceBp,
@@ -55,6 +56,7 @@ export async function refreshDeck(hours = DECK_FETCH_HORIZON_HOURS, limit = 100)
         status: m.status,
       },
       update: {
+        league: m.league, // backfills rows cached before tags were read
         outcomeYesLabel: m.outcomeYesLabel,
         outcomeNoLabel: m.outcomeNoLabel,
         yesPriceBp: m.yesPriceBp,

@@ -14,8 +14,8 @@ export type Category = "crypto" | "esports" | "sports" | "overunder" | "politics
 // "map ..." is an esports-only bet term (CS2/Dota/Valorant series play over maps; no traditional
 // sport uses it). Catch the series-level lines too — "Map Handicap", "Map Advantage", "Total Maps" —
 // not just numbered "Map 1", so a CS2 match with unknown teams still classifies esports and gets
-// hidden by isVagueEsports instead of leaking to the deck as a bare "SPORTS" card.
-const ESPORTS = /\b(dota|counter-?strike|cs2|cs:go|csgo|valorant|league of legends|lol|overwatch|honor of kings|mobile legends|rainbow six|rocket league|starcraft|king of glory|pubg|esports|map \d|map handicap|map advantage|map spread|total maps|bo[135]\b)\b/i;
+// hidden by isUnnamedMatch instead of leaking to the deck as a bare "SPORTS" card.
+const ESPORTS = /\b(dota|counter[- ]?strike|cs2|cs:go|csgo|valorant|league of legends|lol|overwatch|honor of kings|mobile legends|rainbow six|rocket league|starcraft|king of glory|pubg|esports|map \d|map handicap|map advantage|map spread|total maps|bo[135]\b)\b/i;
 // Crypto: ticker/coin names, ETF flow markets, and the Up/Down shape.
 const CRYPTO = /\b(bitcoin|btc|ethereum|eth|solana|sol|xrp|bnb|dogecoin|doge|hyperliquid|cardano|ada|crypto|etf flows?|gas\b|gwei)\b/i;
 // Sports: leagues + the "type" words that head named-binary sports markets (spread, handicap,
@@ -39,17 +39,25 @@ const WEATHER = /\b(temperature|°f|°c|degrees|rain|snow|hurricane|storm|weathe
 // Measured 2026-08-03: ZERO markets inside either live window (deck 72h, hedge index 240h) contain a
 // quoted span at all, so this changes nothing today. It is the guard, not the fix — those markets
 // exist further out and drift into range on their own.
-function signalText(m: { question: string; outcomeYesLabel: string; outcomeNoLabel: string }): string {
-  const q = m.question.replace(/["“][^"”]*["”]/g, " ");
-  return `${q} ${m.outcomeYesLabel} ${m.outcomeNoLabel}`;
-}
-
-export function categoryOf(m: {
+// `tags` are Polymarket's OWN topic labels for the market (Gamma `include_tag=true`), and they are
+// the only place the discipline is stated for a club-vs-club match: "PFK Mash'al Mubarek vs. FC
+// Andijon: O/U 1.5" carries no sport word anywhere in its text, while its tags read
+// ["Sports","Games","Soccer","King Cup"]. Ingest passes them; anything reading a cached row does not
+// have them (we store the NAME instead — MarketCache.league).
+export type Classifiable = {
   question: string;
   category?: string | null;
   outcomeYesLabel: string;
   outcomeNoLabel: string;
-}): Category {
+  tags?: string[];
+};
+
+function signalText(m: Classifiable): string {
+  const q = m.question.replace(/["“][^"”]*["”]/g, " ");
+  return `${q} ${m.outcomeYesLabel} ${m.outcomeNoLabel} ${(m.tags ?? []).join(" ")}`;
+}
+
+export function categoryOf(m: Classifiable): Category {
   const y = m.outcomeYesLabel.toLowerCase();
   const n = m.outcomeNoLabel.toLowerCase();
   const text = signalText(m);
@@ -147,7 +155,7 @@ const SPORT_GAMES: [RegExp, string][] = [
 ];
 const ESPORT_GAMES: [RegExp, string][] = [
   [/\b(dota\s*2?|dota)\b/i, "Dota 2"],
-  [/\b(counter-?strike|cs2|cs:go|csgo)\b/i, "CS2"],
+  [/\b(counter[- ]?strike|cs2|cs:go|csgo)\b/i, "CS2"], // Gamma's tag is "counter strike 2" — spaced
   [/\bvalorant\b/i, "Valorant"],
   [/\b(league of legends|\blol\b)\b/i, "LoL"],
   [/\boverwatch\b/i, "Overwatch"],
@@ -161,10 +169,7 @@ const ESPORT_GAMES: [RegExp, string][] = [
 
 // `cat` lets callers that already classified the market pass it in to skip a redundant
 // categoryOf() pass (catOf/catOfResult do exactly that). Omit it and we classify here.
-export function gameOf(
-  m: { question: string; category?: string | null; outcomeYesLabel: string; outcomeNoLabel: string },
-  cat: Category = categoryOf(m),
-): string | null {
+export function gameOf(m: Classifiable, cat: Category = categoryOf(m)): string | null {
   if (cat !== "sports" && cat !== "esports") return null;
   const text = signalText(m); // same quoted-span rule as categoryOf — see signalText
   const table = cat === "esports" ? ESPORT_GAMES : SPORT_GAMES;
@@ -194,18 +199,19 @@ export function isContextPoor(m: {
   return !MATCH.test(m.question);
 }
 
-// "Vague esports" = classified esports but gameOf can't name the discipline (title/teams match no
-// known game, e.g. "Map 1 Rounds Handicap: Millennium Esports vs Alpha Dominion Nation"). Per
-// product: too niche to identify → don't surface it — the card would only show a bare "Esports"
-// badge the user can't act on. Esports ONLY (sports league recognition is broader, so sports stay).
-export function isVagueEsports(m: {
-  question: string;
-  category?: string | null;
-  outcomeYesLabel: string;
-  outcomeNoLabel: string;
-}): boolean {
+// A match card MUST name its discipline — which sport, or which game for esports. Product rule, no
+// exceptions: a bare "SPORTS" badge over "PFK Mash'al Mubarek vs. FC Andijon" tells the user nothing
+// they can act on. So anything classified sports/esports that we cannot name is not served at all.
+//
+// This is affordable now only because the name comes from Polymarket's own tags at ingest
+// (MarketCache.league): measured live 2026-08-19 over the 72h window, 1098 of 1098 sports/esports
+// markets were named. `league` is that stored name; rows cached before tagging (null) fall back to
+// the question-only classifier and drop if that can't name them either — they come back named on the
+// next refresh-deck.
+export function isUnnamedMatch(m: Classifiable & { league?: string | null }): boolean {
   const cat = categoryOf(m);
-  return cat === "esports" && gameOf(m, cat) === null;
+  if (cat !== "sports" && cat !== "esports") return false;
+  return !(m.league ?? gameOf(m, cat));
 }
 
 // Mutable xorshift PRNG seeded from a number — deterministic given a seed (testable), random

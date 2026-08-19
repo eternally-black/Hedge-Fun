@@ -21,6 +21,7 @@ export const resultBetSelect = {
     select: {
       question: true,
       category: true,
+      league: true,
       outcomeYesLabel: true,
       outcomeNoLabel: true,
       resolvedOutcome: true,
@@ -51,7 +52,9 @@ export function toResultRow(b: ResultBet): ResultRow {
         outcomeNoLabel: b.market.outcomeNoLabel,
       };
       const cat = categoryOf(m);
-      return { category: cat, league: gameOf(m, cat) };
+      // Stored name first — it came from Polymarket's tags at ingest and is the only thing that
+      // knows a club-vs-club row is soccer (see MarketCache.league).
+      return { category: cat, league: b.market.league ?? gameOf(m, cat) };
     })(),
     side: b.side,
     sideLabel: b.side === "YES" ? b.market.outcomeYesLabel : b.market.outcomeNoLabel,
