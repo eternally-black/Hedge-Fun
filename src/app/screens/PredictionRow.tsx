@@ -59,9 +59,11 @@ export function PredictionRow({
   const live = !settled && row.closable ? exitQuote : undefined;
   const deadlinePassed = !!row.resolutionDeadline && new Date(row.resolutionDeadline).getTime() <= nowMs;
 
-  // Right column: what this call is worth. Settled says what it paid; open says what it would fetch
-  // now (when we have a live quote), else how long is left.
-  let headline: string, sub: string, accent: string;
+  // Right column: what this call is worth. Two lines only when there IS money to state — settled
+  // pays, or a live quote says what the position would fetch. A row that is merely waiting gets one
+  // muted line: it was competing for width with the question and winning, and "⏳" stacked over
+  // "AWAITING" said one thing twice.
+  let headline: string | null = null, sub: string | null = null, accent = "var(--muted)";
   if (settled) {
     const m = resultMeta(row.status as "WIN" | "LOSS" | "PUSH");
     headline = deltaStr(row.status as "WIN" | "LOSS" | "PUSH", row.pnlCents ?? 0);
@@ -71,15 +73,10 @@ export function PredictionRow({
     headline = `≈ ${usd(live.proceedsCents)}`;
     sub = `${live.pnlCents > 0 ? "+" : ""}${usd(live.pnlCents)}`; // usd() prints its own minus
     accent = live.pnlCents >= 0 ? "var(--yes)" : "var(--no)";
-  } else if (deadlinePassed) {
-    headline = "⏳";
-    sub = "Awaiting";
-    accent = "var(--skip)";
-  } else {
-    headline = row.resolutionDeadline ? countdown(row.resolutionDeadline, nowMs).text : "—";
-    sub = "Pending";
-    accent = "var(--muted)";
   }
+  // A row that is only waiting gets NO right column: the wait is already stated in the subtitle
+  // ("⏱ 7m 30s", or "awaiting result" once the clock is spent), and a second copy of it was taking
+  // the width the question needed — "MGS Panserraikos vs. APS…" is not a market anyone recognises.
 
   // Subtitle: the discipline first (a card must say WHICH sport, and so must its row), then either
   // what the position costs and is worth NOW, or what the call was and how it landed.
@@ -87,7 +84,7 @@ export function PredictionRow({
   const detail = settled
     ? `Your call ${row.sideLabel}${row.outcome ? ` · ${row.outcome}` : ""}`
     : `${cents(row.lockedPriceBp)} · ${usd(row.stakeCents)} stake${live ? ` · now ${cents(live.priceBp)}` : ""}${
-        row.resolutionDeadline && !deadlinePassed ? ` · ⏱ ${countdown(row.resolutionDeadline, nowMs).text}` : ""
+        !row.resolutionDeadline ? "" : deadlinePassed ? " · ⏳ awaiting result" : ` · ⏱ ${countdown(row.resolutionDeadline, nowMs).text}`
       }`;
 
   const toggle = () => setOpen((o) => !o);
@@ -108,7 +105,7 @@ export function PredictionRow({
       >
         <div
           style={{
-            minWidth: 36, minHeight: 36, maxWidth: 84, padding: "0 7px", borderRadius: 10,
+            minWidth: 36, height: 36, maxWidth: 84, padding: "0 7px", borderRadius: 10, alignSelf: "flex-start",
             background: `color-mix(in srgb,${sideColor} 18%,var(--panel2))`,
             display: "flex", alignItems: "center", justifyContent: "center", textAlign: "center",
             fontFamily: "var(--df)", fontSize: 12, lineHeight: 1.05, color: sideColor, flexShrink: 0,
@@ -127,19 +124,25 @@ export function PredictionRow({
             {detail}
           </div>
         </div>
-        <div style={{ textAlign: "right", flexShrink: 0 }}>
-          <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 14, color: accent }}>{headline}</div>
-          <div style={{ fontSize: 10, letterSpacing: ".06em", textTransform: "uppercase", color: accent, fontWeight: 700, marginTop: 2 }}>{sub}</div>
-          {row.shards ? <div style={{ fontSize: 10, color: "var(--gold)", marginTop: 2 }}>+{row.shards} ◆</div> : null}
-        </div>
-        {/* Selling out is the other half of owning a position. The click is stopped: selling must
-            never be a side effect of opening a row to read it. */}
-        {onClosePosition && row.closable ? (
+        {headline ? (
+          <div style={{ textAlign: "right", flexShrink: 0, alignSelf: "flex-start" }}>
+            <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 14, color: accent, whiteSpace: "nowrap" }}>{headline}</div>
+            {sub ? <div style={{ fontSize: 10, letterSpacing: ".06em", textTransform: "uppercase", color: accent, fontWeight: 700, marginTop: 2 }}>{sub}</div> : null}
+            {row.shards ? <div style={{ fontSize: 10, color: "var(--gold)", marginTop: 2 }}>+{row.shards} ◆</div> : null}
+          </div>
+        ) : null}
+        <div style={{ flexShrink: 0, alignSelf: "center", color: "var(--muted)", fontSize: 10, transform: open ? "rotate(180deg)" : "none", transition: "transform .15s" }}>▾</div>
+      </div>
+
+      {/* Selling out is the other half of owning a position, and it gets its own line: crammed into
+          the header it took the width the question needed, and "MGS Panserraikos vs. APS…" is not a
+          market anyone can identify. Outside the header, the click cannot toggle the row either. */}
+      {onClosePosition && row.closable ? (
+        <div style={{ display: "flex", justifyContent: "flex-end", padding: "0 13px 11px" }}>
           <button
             type="button"
             disabled={closing}
-            onClick={(e) => {
-              e.stopPropagation();
+            onClick={() => {
               if (closing) return;
               if (!armed) {
                 setArmed(true);
@@ -150,8 +153,8 @@ export function PredictionRow({
               void onClosePosition(row);
             }}
             style={{
-              margin: 0, font: "inherit", flexShrink: 0, alignSelf: "center",
-              padding: "7px 10px", borderRadius: 10,
+              margin: 0, font: "inherit",
+              padding: "7px 12px", borderRadius: 10,
               background: armed ? "var(--gold)" : "transparent",
               color: armed ? "#1a1205" : "var(--muted)",
               border: "1px solid " + (armed ? "var(--gold)" : "var(--line)"),
@@ -170,9 +173,8 @@ export function PredictionRow({
                   : "Sell now?"
                 : "Close"}
           </button>
-        ) : null}
-        <div style={{ flexShrink: 0, alignSelf: "center", color: "var(--muted)", fontSize: 10, transform: open ? "rotate(180deg)" : "none", transition: "transform .15s" }}>▾</div>
-      </div>
+        </div>
+      ) : null}
 
       {open ? (
         <div style={{ borderTop: "1px solid var(--line)", padding: "10px 13px 12px", display: "grid", gridTemplateColumns: "auto 1fr", gap: "6px 12px", fontSize: 11, lineHeight: 1.35 }}>
@@ -191,7 +193,7 @@ export function PredictionRow({
           {row.resolutionDeadline ? <Detail k={settled ? "Resolved" : "Resolves"} v={when(row.resolutionDeadline)} /> : null}
           {row.settledAt ? <Detail k="Settled" v={when(row.settledAt)} /> : null}
           {row.outcome ? <Detail k="Outcome" v={row.outcome} /> : null}
-          {settled ? <Detail k="Result" v={`${sub} · ${headline}`} color={accent} /> : null}
+          {settled && headline ? <Detail k="Result" v={`${sub ?? ""} · ${headline}`.trim()} color={accent} /> : null}
         </div>
       ) : null}
     </div>
