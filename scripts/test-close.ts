@@ -293,6 +293,13 @@ async function main() {
     // brings no proceeds, so realized PnL is proceeds − close fee − the WHOLE basis.
     const dustBasis = ((999_999n + 12_500n) * 1_333_332n) / 1_333_332n;
     assert.strictEqual(dustRow.realizedPnlMicro, 986_642n - 12_000n - dustBasis, "dust realized at its own cost");
+    // Selling out ENDS the position, so it is stamped like any settled bet — /api/results serves
+    // SETTLED/VOID only, and without this an early close never appeared under "every call you've
+    // made", while the history sheet (which derives status from the remainder) showed it.
+    assert.strictEqual(dustRow.settlementStatus, "SETTLED", "a sold-out position is settled");
+    assert.strictEqual(dustRow.result, "LOSS", "the LEDGER's outcome: this sale realized less than it cost");
+    assert.strictEqual(dustRow.pnlCents, Number((dustRow.realizedPnlMicro ?? 0n) / 10_000n), "cents match the micros");
+    assert.ok(dustRow.settledAt, "and it carries the moment it ended");
 
     // ---- 9. Server-side settlement of a RESOLVED position. A win is booked on PROOF that the
     // collateral moved — the outcome token has left the wallet, which is what Polymarket's

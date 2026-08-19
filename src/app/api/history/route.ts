@@ -67,16 +67,15 @@ export async function GET(req: Request) {
     // Only a market that is still OPEN can be traded out of. Offering Close on one that has already
     // resolved is offering a button the exchange will refuse — the position there is not sold, it is
     // redeemed, and the server does that on its own.
-    // ...and only while the market is still TRADABLE. Past its deadline Polymarket has closed the
-    // book: the sell would be refused by the exchange, and our cached OPEN status is just a poll
-    // behind reality. Offering the button there is offering an action that cannot work — precisely
-    // in the window where the market has resolved, the collateral may already have been redeemed,
-    // and the row still reads "awaiting result".
-    const closable =
-      realOpen &&
-      remainder >= SHARE_TICK_MICRO &&
-      b.market.status === "OPEN" &&
-      b.market.resolutionDeadline.getTime() > Date.now();
+    // ...and only while the market is still OPEN. NOT "before the deadline": that gate shipped on
+    // the theory that Polymarket shuts the book at endDate, and a live market disproved it within
+    // the hour — "MGS Panserraikos vs. APS Panthrakikos: 1st Half O/U 0.5" was still closed:false,
+    // active:true and quoting 99.55c/0.45c thirty minutes past its endDate. endDate is a schedule,
+    // not a closing bell, and taking the exit away from someone whose position is still trading is
+    // the worse error: the resolved-but-not-yet-flipped window it was meant to cover now lasts one
+    // poller tick (the chain fallback in scripts/poller.ts), and a sell into a shut book fails
+    // loudly and moves no money.
+    const closable = realOpen && remainder >= SHARE_TICK_MICRO && b.market.status === "OPEN";
 
     return {
     id: b.id,

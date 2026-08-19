@@ -530,6 +530,14 @@ export async function bookEntryFills(
             closedSharesMicro: 0n,
             proceedsMicro: 0n,
             closeFeeMicro: 0n,
+            // The previous lot's settlement stamp belongs to the previous lot. Left in place, a
+            // re-entered market would open already wearing "SETTLED / LOST" (bookExitFills stamps
+            // a fully sold-out position), and the results inbox would list a position that is open.
+            settlementStatus: "PENDING",
+            result: "PENDING", // BetResult's own not-decided value — the column is not nullable
+            pnlCents: null,
+            settledAt: null,
+            seenAt: null,
           }
         : {
             filledSharesMicro: { increment: totalShares },
@@ -721,13 +729,29 @@ export async function bookExitFills(
     // Explicit SET, not { increment }: these columns are NULL on an entry-created row, and SQL
     // NULL + x = NULL — an increment would silently book nothing (caught by the close test).
     // Safe because the row was read in THIS transaction.
+    // Selling the LAST share ends the position, so it is stamped exactly as a redemption is
+    // (real-settle.consumeResolvedPosition). Without this an early close left the row PENDING
+    // forever: /api/results serves SETTLED/VOID only, so a position the user deliberately exited
+    // never appeared under "every call you've made" — the history sheet showed it (that status is
+    // derived from the remainder) and the results inbox did not. The outcome is the LEDGER's, not
+    // the market's: what the sale realized is what happened to this person's money.
+    const realizedTotal = (bet.realizedPnlMicro ?? 0n) + realizedDelta;
+    const closedOut = closedTotal >= filledShares;
     await tx.bet.update({
       where: { id: bet.id },
       data: {
         closedSharesMicro: closedTotal,
         proceedsMicro: (bet.proceedsMicro ?? 0n) + proceedsBooked,
         closeFeeMicro: (bet.closeFeeMicro ?? 0n) + closeFeeBooked,
-        realizedPnlMicro: (bet.realizedPnlMicro ?? 0n) + realizedDelta, // can be negative — schema allows it
+        realizedPnlMicro: realizedTotal, // can be negative — schema allows it
+        ...(closedOut
+          ? {
+              settlementStatus: "SETTLED" as const,
+              result: realizedTotal > 0n ? ("WIN" as const) : realizedTotal < 0n ? ("LOSS" as const) : ("PUSH" as const),
+              pnlCents: Number(realizedTotal / 10_000n),
+              settledAt: new Date(),
+            }
+          : {}),
       },
     });
 
