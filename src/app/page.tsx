@@ -291,15 +291,23 @@ function App() {
     return () => window.clearInterval(id);
   }, [topUpIfLow]);
 
-  // Live quote on the TOP card (D10 Slice B). A CLOB book churns roughly every 5s, so the price a
-  // card was dealt with is stale within seconds — and the scenario that matters is exactly the one
-  // where the user sits on a card deliberating. We re-poll only the card they can act on: a
-  // next-up card's price is irrelevant until it surfaces, and it gets a live quote the moment it
-  // does (this effect re-arms on topId). Paused when the tab is hidden — no radio spend on a deck
-  // nobody is looking at, and the first poll on return re-syncs before any swipe can land.
+  // Live quotes on the two cards that are ON SCREEN (D10 Slice B). A CLOB book churns roughly every
+  // 5s, so the price a card was dealt with is stale within seconds — and the scenario that matters
+  // is exactly the one where the user sits on a card deliberating.
+  //
+  // The NEXT card is polled too, and that is not headroom: it is fully rendered behind the top one,
+  // so leaving it on its dealt price meant the user watched a stale number for as long as the card
+  // above it lived, and then saw it snap the instant it was promoted — a visible price jump caused
+  // by us, not by the market. Quoting both means the card that rises is already showing the number
+  // it will be swiped at.
+  //
+  // Paused when the tab is hidden — no radio spend on a deck nobody is looking at, and the first
+  // poll on return re-syncs before any swipe can land.
   const topId = deck[0]?.id;
+  const nextId = deck[1]?.id;
   useEffect(() => {
     if (!topId || screen !== "deck") return;
+    const ids = nextId ? `${topId},${nextId}` : topId;
     let alive = true;
     const poll = async () => {
       if (document.hidden) return;
@@ -315,18 +323,24 @@ function App() {
         // order gets bound to. Conservative, so nothing was promised that could not be honoured, but
         // the card understated its own payout and priced a size nobody was about to trade.
         const r = (await api(
-          `/api/quotes?ids=${encodeURIComponent(topId)}&stake=${effectiveStakeCents}`,
+          `/api/quotes?ids=${encodeURIComponent(ids)}&stake=${effectiveStakeCents}`,
         )) as QuotesResponse;
-        const q = r.quotes.find((x) => x.marketId === topId);
-        if (!alive || !q || q.yesPriceBp == null || q.noPriceBp == null) return;
-        // Patch prices in place — never reorder or drop, or the card would move under the thumb.
-        setDeck((d) =>
-          d.map((c) =>
-            c.id === topId && (c.yesPriceBp !== q.yesPriceBp || c.noPriceBp !== q.noPriceBp)
-              ? { ...c, yesPriceBp: q.yesPriceBp!, noPriceBp: q.noPriceBp! }
-              : c,
-          ),
+        const fresh = new Map(
+          r.quotes.filter((q) => q.yesPriceBp != null && q.noPriceBp != null).map((q) => [q.marketId, q]),
         );
+        if (!alive || fresh.size === 0) return;
+        // Patch prices in place — never reorder or drop, or the card would move under the thumb.
+        // The array identity is kept when nothing moved, so a quiet book costs no re-render.
+        setDeck((d) => {
+          let moved = false;
+          const next = d.map((c) => {
+            const q = fresh.get(c.id);
+            if (!q || (c.yesPriceBp === q.yesPriceBp && c.noPriceBp === q.noPriceBp)) return c;
+            moved = true;
+            return { ...c, yesPriceBp: q.yesPriceBp!, noPriceBp: q.noPriceBp! };
+          });
+          return moved ? next : d;
+        });
       } catch {
         // A failed poll is a no-op: keep showing the last real price. The swipe re-quotes anyway,
         // and the seen-vs-executed guard catches anything that drifted while we were blind.
@@ -341,7 +355,7 @@ function App() {
       window.clearInterval(id);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [topId, screen, api, effectiveStakeCents]);
+  }, [topId, nextId, screen, api, effectiveStakeCents]);
 
   const flashPop = useCallback((amt: number, color: string) => {
     setPop({ amt, color });
