@@ -15,6 +15,9 @@ type WithdrawalInfo = {
   chainId: string;
   amountMicro: string;
   status: string | null;
+  // Did the bridge answer at all? A null status with statusRead means "nothing has landed yet",
+  // which is the normal state for most of a withdrawal's life — not an outage.
+  statusRead?: boolean;
   txHash: string | null;
 };
 
@@ -109,6 +112,18 @@ export function RealWithdrawCard({ api, ctx }: { api: Api; ctx: RealCtx }) {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // This card used to read the run ONCE. Everything below — the relay state, the bridge status, the
+  // outgoing tx — is a live thing that changes over minutes, so "relay submitting" stayed frozen on
+  // screen long after the money had moved, and the only way to learn anything was to close the card
+  // and open it again. While a run is watchable, ask again.
+  // ponytail: fixed 10s poll, only while the card is open; switch to backoff if the bridge complains.
+  const inFlight = Boolean(withdrawal && !withdrawal.txHash);
+  useEffect(() => {
+    if (!inFlight) return;
+    const id = setInterval(() => void refresh(), 10_000);
+    return () => clearInterval(id);
+  }, [inFlight, refresh]);
 
   const chains = [...new Map(assets.map((a) => [a.chainId, a.chainName])).entries()];
   const tokens = assets.filter((a) => a.chainId === chainId);
@@ -280,7 +295,11 @@ export function RealWithdrawCard({ api, ctx }: { api: Api; ctx: RealCtx }) {
           <div style={MUTED}>bridge {short(withdrawal.bridgeAddress)}</div>
           <div style={MUTED}>
             relay {workflow?.state.toLowerCase() ?? "unknown"}
-            {withdrawal.status ? ` · bridge ${withdrawal.status.toLowerCase()}` : " · bridge status unavailable"}
+            {withdrawal.status
+              ? ` · bridge ${withdrawal.status.toLowerCase()}`
+              : withdrawal.statusRead
+                ? " · nothing at the bridge yet"
+                : " · bridge status unavailable"}
           </div>
           {withdrawal.txHash ? <div style={MUTED}>tx {short(withdrawal.txHash)}</div> : null}
           {workflow?.error ? <div style={ERR}>{workflow.error}</div> : null}

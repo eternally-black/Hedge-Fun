@@ -201,9 +201,16 @@ export async function GET(req: Request) {
   const inputs = row.inputs as unknown as BridgeOutInputs | null;
   let status: string | null = null;
   let txHash: string | null = null;
+  // Two very different things used to arrive as the same `status: null`: the bridge answering
+  // "nothing has landed here yet" (an empty transactions list, which is the NORMAL state for the
+  // whole window between relay submission and arrival) and the bridge not answering at all. The
+  // card rendered both as "status unavailable", so the healthy majority of a withdrawal's life
+  // read as an outage. `statusRead` separates them.
+  let statusRead = false;
   if (inputs?.bridgeAddress) {
     try {
       ({ status, txHash } = await fetchWithdrawalStatus(inputs.bridgeAddress));
+      statusRead = true;
     } catch {
       // A status outage must not hide the row: the destination and the amount are exactly what the
       // operator needs to see while the bridge is unreachable.
@@ -226,6 +233,7 @@ export async function GET(req: Request) {
           tokenAddress: inputs.tokenAddress,
           amountMicro: inputs.amountMicro,
           status,
+          statusRead,
           txHash,
         }
       : null,
