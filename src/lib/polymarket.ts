@@ -193,14 +193,78 @@ export function mapMarket(m: GammaMarket): MarketCache | null {
   };
 }
 
-async function gammaGet(path: string): Promise<GammaMarket[]> {
+// Gamma 5xx is CONGESTION, not a verdict about the query — bounded retry, same idiom as clob.ts.
+//
+// Measured live 2026-08-19 against the exact URL the hedge index pages with (tag_id=235, offset=300):
+// 30/30 sequential requests returned 200, while a 24-request burst (3 tags x 8 pages at once) drew
+// 6 x 500 `{"type":"internal error"}`. So the 500 tracks CONCURRENCY, not offset.
+// Which concurrent load trips it in prod is NOT established: within one poller tick the Gamma calls
+// are sequential awaits (refreshDeck -> refreshHedgeIndex -> the settle sweep), so the poller does not
+// collide with itself. The unverified candidates are the app's own Gamma reads on the same host and
+// the second host in the two-host topology. The retry below does not depend on which it is; if these
+// errors ever survive it, pinning that down is the next lever (a cross-process rate limit).
+//
+// Why this is NOT handled by breaking the paging loop: it would silently TRUNCATE the index. A 500 at
+// offset=300 came back with 100 real markets on retry, and tag 235's pool is ~767 deep; the same burst
+// re-run with this retry returned the identical 2143 markets across all three tags (0 unhealed), where
+// "stop at the page that 500s" would have dropped whole tails of the pool with a green subsystem light.
+// Missing hedge markets that nothing reports are worse than the loud error they'd replace.
+//
+// A REAL outage still throws after the attempts are spent, and a 4xx (a genuinely bad query) throws
+// immediately — retrying can't heal a contract problem. Both keep subsystemFailed meaningful.
+// Three retries, JITTERED. Both numbers are measured, not guessed (2026-08-19, 4 concurrent paging
+// walkers): clob.ts's flat [250, 500] left 1 page unhealed per 3 runs, because every walker that
+// took a 500 in the same burst also retried in the same millisecond and re-collided. Spreading the
+// wait over 0.5–1.5x and adding a third step took that to 0 unhealed.
+// The tick's 180 s heartbeat budget is safe: a page that exhausts its retries THROWS, ending the
+// pass, so a total Gamma outage costs one page's backoff (~3 s) — never 39 pages' worth.
+const GAMMA_MAX_RETRIES = 3;
+const GAMMA_BACKOFF_MS = [250, 500, 1000];
+
+// Carries the status so the retry loop can tell congestion from a contract problem without
+// re-parsing a message (clob.ts's ClobStatusError, same job).
+export class GammaStatusError extends Error {
+  constructor(readonly status: number, path: string) {
+    super(`Gamma ${status} for ${path}`);
+    this.name = "GammaStatusError";
+  }
+}
+
+// Exported for scripts/test-gamma-retry.ts — the retry is the thing under test, so it needs a seam
+// to inject failures through instead of waiting for a live burst to misbehave.
+export async function gammaGetOnce(path: string): Promise<GammaMarket[]> {
   const res = await fetch(`${BASE}${path}`, {
     cache: "no-store",
     headers: { accept: "application/json" },
     signal: AbortSignal.timeout(15_000), // an upstream hang must not stall a poller tick into its 180 s heartbeat kill
   });
-  if (!res.ok) throw new Error(`Gamma ${res.status} for ${path}`);
+  if (!res.ok) throw new GammaStatusError(res.status, path);
   return (await res.json()) as GammaMarket[];
+}
+
+export async function gammaGetWithRetry(
+  path: string,
+  once: (p: string) => Promise<GammaMarket[]> = gammaGetOnce,
+): Promise<GammaMarket[]> {
+  let lastErr: Error | null = null;
+  for (let attempt = 0; attempt <= GAMMA_MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      const wait = GAMMA_BACKOFF_MS[attempt - 1] * (0.5 + Math.random()); // de-sync colliding walkers
+      await new Promise((r) => setTimeout(r, wait));
+    }
+    try {
+      return await once(path);
+    } catch (e) {
+      // A non-429 4xx is a contract problem, not congestion — retrying can't heal it.
+      if (e instanceof GammaStatusError && e.status !== 429 && e.status < 500) throw e;
+      lastErr = e as Error; // 429 / 5xx / timeout / transport -> bounded backoff, then give up
+    }
+  }
+  throw new Error(`${lastErr?.message} (after ${GAMMA_MAX_RETRIES + 1} attempts)`);
+}
+
+async function gammaGet(path: string): Promise<GammaMarket[]> {
+  return gammaGetWithRetry(path);
 }
 
 const GAMMA_PAGE = 100; // Gamma caps `limit` at 100/request regardless of what we ask.
