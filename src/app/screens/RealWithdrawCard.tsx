@@ -299,7 +299,15 @@ export function RealWithdrawCard({ api, ctx }: { api: Api; ctx: RealCtx }) {
 
       {withdrawal ? (
         <div style={{ marginTop: 14, borderTop: "1px solid var(--line)", paddingTop: 10 }}>
-          <div style={LABEL}>In flight</div>
+          {/* The row survives the withdrawal it describes, so this block used to call a finished
+              transfer "in flight" forever — money that had already landed, still reading as money in
+              motion. The heading comes off the SAME predicate that drives the poll, so the label and
+              the polling can never disagree about whether anything is still moving. "Sent" and not
+              "delivered": a txHash means the bridge broadcast the forwarding transaction, which is
+              the last thing observable from here — not that the destination chain confirmed it. */}
+          <div style={LABEL}>
+            {workflow?.state === "FAILED" ? "Last withdrawal — failed" : inFlight ? "In flight" : "Sent"}
+          </div>
           <div style={{ fontSize: 13, marginTop: 4 }}>
             {usd(withdrawal.amountMicro)} → {short(withdrawal.recipient)}
           </div>
