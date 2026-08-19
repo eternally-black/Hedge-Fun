@@ -86,6 +86,7 @@ export async function GET(req: Request) {
       question: true,
       category: true,
       league: true,
+      startsAt: true, // kick-off — a match's "deadline" IS its kick-off, see DeckCard
       outcomeYesLabel: true,
       outcomeNoLabel: true,
       yesPriceBp: true,
@@ -146,6 +147,7 @@ export async function GET(req: Request) {
       yesPriceBp: p.yes!,
       noPriceBp: p.no!,
       resolutionDeadline: c.resolutionDeadline.toISOString(),
+      startsAt: c.startsAt?.toISOString() ?? null,
     })),
     nextCursor,
   };

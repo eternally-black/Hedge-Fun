@@ -55,7 +55,10 @@ export interface DeckCard {
   // these as display prices.
   yesPriceBp: number;
   noPriceBp: number;
-  resolutionDeadline: string; // ISO-8601
+  // ISO-8601. For a MATCH this is Gamma's endDate, which equals KICK-OFF — the card's clock counts
+  // down to the whistle, not to a payout, and the market then trades in-play and resolves after.
+  resolutionDeadline: string;
+  startsAt?: string | null; // ISO-8601 kick-off; equal to the deadline on a match, null off the pitch
 }
 export interface DeckResponse {
   cards: DeckCard[];

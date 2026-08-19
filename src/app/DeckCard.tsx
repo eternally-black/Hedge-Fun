@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useEffect, useRef, useState } from "react";
-import { type Card, catOf, isFootball, cents, usd, winPayout, countdown, sideLabels, marketHint, displayQuestion, isUpDown, upDownWindow } from "./ui";
+import { type Card, catOf, isFootball, cents, usd, winPayout, countdown, sideLabels, marketHint, displayQuestion, isUpDown, upDownWindow, isMatchClock } from "./ui";
 import { skinStyle, SCRIM } from "./skins";
 import { useCardSwipe } from "./useCardSwipe";
 
@@ -59,6 +59,7 @@ export const CardFace = memo(function CardFace({ card, skinId, countdownText, ur
   // fifteen-minute one closing beside it is two thirds decided — and the countdown alone cannot tell
   // them apart. The start is derived from the end (which we know exactly) minus the window length,
   // so no timezone maths is involved.
+  const matchClock = isMatchClock(card);
   const win = isUpDown(card) ? upDownWindow(card.question) : null;
   const startsInMin = win
     ? Math.ceil((new Date(card.resolutionDeadline).getTime() - win.lengthMin * 60_000 - Date.now()) / 60_000)
@@ -112,6 +113,15 @@ export const CardFace = memo(function CardFace({ card, skinId, countdownText, ur
           {isUpDown(card)
             ? <div style={{ marginTop: 10, fontSize: 13, color: "rgba(255,255,255,.62)", lineHeight: 1.3 }}>{windowLine}</div>
             : hint && <div style={{ marginTop: 10, fontSize: 13, color: "rgba(255,255,255,.62)", lineHeight: 1.3, textWrap: "pretty" }}>{hint}</div>}
+          {/* What the ⏱ badge is actually counting. On a match it is the KICK-OFF: Gamma's endDate
+              equals gameStartTime on every live sport market, the thing then trades through the game
+              and resolves after it. Unlabelled, the same badge that means "pays out in 7m" on a
+              crypto card meant "starts in 7m" here, and a position read as overdue from the whistle. */}
+          {matchClock ? (
+            <div style={{ marginTop: 8, fontSize: 12, color: "rgba(255,255,255,.5)", lineHeight: 1.3 }}>
+              Kick-off in {countdownText} · resolves after the match
+            </div>
+          ) : null}
         </div>
 
         {/* odds split — sides + CENTS (Polymarket-style), not % */}

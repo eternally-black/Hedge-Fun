@@ -183,6 +183,16 @@ export function marketHint(card: Pick<DeckCard, "question" | "outcomeYesLabel" |
 
 // Crypto Up/Down = the quick minute/15-min markets whose question carries an ABSOLUTE resolution
 // time ("Bitcoin Up or Down - 9:05AM"). Detected by the Up/Down side labels.
+// A MATCH card's clock counts down to KICK-OFF, not to a payout: Gamma's endDate equals
+// gameStartTime on every live sport market (measured 2026-08-19 over 172 of them), and the market
+// then trades in-play for the length of the game and resolves after it. The card said "⏱ 1h 3m"
+// and let the reader assume that was time-to-result, which is the same lie the history row told
+// until it learned to say "in play".
+export function isMatchClock(card: Pick<DeckCard, "resolutionDeadline" | "startsAt">): boolean {
+  if (!card.startsAt) return false;
+  return Math.abs(new Date(card.startsAt).getTime() - new Date(card.resolutionDeadline).getTime()) < 60_000;
+}
+
 export function isUpDown(card: Pick<DeckCard, "outcomeYesLabel" | "outcomeNoLabel">): boolean {
   return card.outcomeYesLabel.toLowerCase() === "up" && card.outcomeNoLabel.toLowerCase() === "down";
 }

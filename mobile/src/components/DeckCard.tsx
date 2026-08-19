@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { Animated, PanResponder, StyleSheet, Text, View } from "react-native";
 import type { DeckCard as DeckCardT } from "../../lib/api-types";
 import { colors } from "../theme";
-import { catOf, cents, countdown, displayQuestion, isUpDown, marketHint, sideLabels, usd, winPayout } from "../format";
+import { catOf, cents, countdown, displayQuestion, isMatchClock, isUpDown, marketHint, sideLabels, usd, winPayout } from "../format";
 
 export type SwipeDir = "YES" | "NO" | "SKIP";
 
@@ -142,6 +142,10 @@ function CardFace({ card, stakeCents, dimmed = false }: { card: DeckCardT; stake
         {isUpDown(card)
           ? <Text style={styles.hint}>{cd.relText}</Text>
           : hint ? <Text style={styles.hint} numberOfLines={2}>{hint}</Text> : null}
+        {/* What the ⏱ badge counts on a match: the kick-off, not a payout — see web CardFace. */}
+        {isMatchClock(card) ? (
+          <Text style={styles.kickoff}>Kick-off in {cd.text} · resolves after the match</Text>
+        ) : null}
       </View>
 
       {/* odds split — real side labels, prices in CENTS (52¢), spread is real (need not sum to 100¢) */}
@@ -196,6 +200,7 @@ const styles = StyleSheet.create({
   middle: { flex: 1, justifyContent: "center", paddingVertical: 8 },
   question: { color: "#fff", fontSize: 22, lineHeight: 26, fontWeight: "800", letterSpacing: 0.2 },
   hint: { marginTop: 8, fontSize: 11, color: "rgba(255,255,255,0.6)", lineHeight: 15 },
+  kickoff: { marginTop: 6, fontSize: 10, color: "rgba(255,255,255,0.5)", lineHeight: 14 },
   oddsRow: { flexDirection: "row", justifyContent: "space-between", marginBottom: 5, gap: 8 },
   oddsCol: { flexShrink: 1, minWidth: 0 },
   oddsSide: { fontFamily: "monospace", fontWeight: "700", fontSize: 12, flexShrink: 1 },

@@ -134,7 +134,7 @@ async function main() {
   assert.ok(Array.isArray(deckBody.cards), "/deck cards is an array");
   if (deckBody.cards.length) {
     assert.deepStrictEqual(Object.keys(deckBody.cards[0]).sort(),
-      ["category","id","league","noPriceBp","outcomeNoLabel","outcomeYesLabel","question","resolutionDeadline","yesPriceBp"],
+      ["category","id","league","noPriceBp","outcomeNoLabel","outcomeYesLabel","question","resolutionDeadline","startsAt","yesPriceBp"],
       "/deck card keys");
   }
 
