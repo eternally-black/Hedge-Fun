@@ -147,8 +147,14 @@ function CardFace({ card, stakeCents, dimmed = false }: { card: DeckCardT; stake
       {/* odds split — real side labels, prices in CENTS (52¢), spread is real (need not sum to 100¢) */}
       <View>
         <View style={styles.oddsRow}>
-          <Text style={[styles.oddsSide, { color: colors.no }]} numberOfLines={1}>{labels.no} {cents(card.noPriceBp)}</Text>
-          <Text style={[styles.oddsSide, { color: colors.yes }]} numberOfLines={1}>{cents(card.yesPriceBp)} {labels.yes}</Text>
+          <View style={styles.oddsCol}>
+            <Text style={[styles.oddsSide, { color: colors.no }]} numberOfLines={1}>{labels.no}</Text>
+            <Text style={[styles.oddsSide, { color: colors.no }]}>{cents(card.noPriceBp)}</Text>
+          </View>
+          <View style={[styles.oddsCol, { alignItems: "flex-end" }]}>
+            <Text style={[styles.oddsSide, { color: colors.yes }]} numberOfLines={1}>{labels.yes}</Text>
+            <Text style={[styles.oddsSide, { color: colors.yes }]}>{cents(card.yesPriceBp)}</Text>
+          </View>
         </View>
         <View style={styles.oddsBar}>
           <View style={{ width: `${card.noPriceBp / 100}%`, backgroundColor: colors.no, height: "100%" }} />
@@ -191,6 +197,7 @@ const styles = StyleSheet.create({
   question: { color: "#fff", fontSize: 22, lineHeight: 26, fontWeight: "800", letterSpacing: 0.2 },
   hint: { marginTop: 8, fontSize: 11, color: "rgba(255,255,255,0.6)", lineHeight: 15 },
   oddsRow: { flexDirection: "row", justifyContent: "space-between", marginBottom: 5, gap: 8 },
+  oddsCol: { flexShrink: 1, minWidth: 0 },
   oddsSide: { fontFamily: "monospace", fontWeight: "700", fontSize: 12, flexShrink: 1 },
   oddsBar: { flexDirection: "row", height: 10, borderRadius: 6, overflow: "hidden", backgroundColor: "rgba(0,0,0,0.4)" },
   payoutRow: { flexDirection: "row", justifyContent: "space-between", marginTop: 10, gap: 8 },

@@ -116,13 +116,15 @@ export const CardFace = memo(function CardFace({ card, skinId, countdownText, ur
 
         {/* odds split — sides + CENTS (Polymarket-style), not % */}
         <div style={{ marginBottom: 14 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", fontFamily: "var(--nf)", fontWeight: 700, fontSize: 13, marginBottom: 6 }}>
-            <span style={{ color: "var(--no)", display: "inline-block", animation: noTick }}>
-              {labels.no} {cents(card.noPriceBp)}
-            </span>
-            <span style={{ color: "var(--yes)", display: "inline-block", animation: yesTick }}>
-              {cents(card.yesPriceBp)} {labels.yes}
-            </span>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontFamily: "var(--nf)", fontWeight: 700, fontSize: 13, marginBottom: 6 }}>
+            <div style={{ color: "var(--no)", minWidth: 0, animation: noTick }}>
+              <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{labels.no}</div>
+              <div>{cents(card.noPriceBp)}</div>
+            </div>
+            <div style={{ color: "var(--yes)", minWidth: 0, textAlign: "right", animation: yesTick }}>
+              <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{labels.yes}</div>
+              <div>{cents(card.yesPriceBp)}</div>
+            </div>
           </div>
           <div style={{ display: "flex", height: 12, borderRadius: 8, overflow: "hidden", background: "rgba(0,0,0,.4)" }}>
             <div style={{ width: `${card.noPriceBp / 100}%`, background: "linear-gradient(90deg,color-mix(in srgb,var(--no) 60%,#000),var(--no))" }} />
