@@ -23,6 +23,7 @@ export type HistoryRowData = {
   pnlCents: number | null;
   resolutionDeadline: string;
   createdAt: string;
+  settledAt?: string | null;
   closable?: boolean; // REAL position with a remainder the signer can actually sell
 };
 

@@ -204,6 +204,7 @@ export interface HistoryRow {
   pnlCents: number | null; // null while PENDING
   resolutionDeadline: string; // ISO-8601
   createdAt: string; // ISO-8601
+  settledAt?: string | null; // ISO-8601; null while the bet is still PENDING
   // REAL positions only: there is a remainder the signer can actually sell (it works in 4-decimal
   // shares, so a sub-tick remnant is unsellable and must not be offered as closable).
   closable?: boolean;

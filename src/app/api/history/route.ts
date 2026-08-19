@@ -93,6 +93,7 @@ export async function GET(req: Request) {
     pnlCents: mode === "REAL" ? Number(realizedMicro / 10_000n) : b.pnlCents,
     resolutionDeadline: b.market.resolutionDeadline.toISOString(),
     createdAt: b.createdAt.toISOString(),
+    settledAt: b.settledAt?.toISOString() ?? null,
     };
   });
 
