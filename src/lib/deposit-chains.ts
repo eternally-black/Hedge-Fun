@@ -26,10 +26,11 @@ const EXCLUDED_CHAIN_IDS = new Set(["728126428", "8253038"]);
 // USDC on the way through — but naming the stablecoins is what answers "what can I send here".
 const STABLE_SYMBOLS = new Set(["USDC", "USDC.e", "USDT", "USDbC", "DAI", "USDS", "PYUSD"]);
 
-// Polygon leads because it is the DESTINATION chain: a deposit there is already home and skips the
-// bridge hop entirely. Solana next because it is where this app's users actually hold stables. The
-// rest keep the bridge's own order, which is stable enough to not reshuffle the list every load.
-const LEAD_CHAIN_IDS = ["137", "1151111081099710"];
+// Solana leads because it is where this app's users actually hold stables — the first row should be
+// the one most people will pick, not the one that is technically cheapest to service. Polygon next:
+// it is the DESTINATION chain, so a deposit there is already home and skips the bridge hop. The rest
+// fall back to name order, which is stable enough to not reshuffle the list every load.
+const LEAD_CHAIN_IDS = ["1151111081099710", "137"];
 
 export type DepositChain = {
   chainId: string;

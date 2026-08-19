@@ -81,9 +81,9 @@ function main() {
   assert.ok(byId(noSvm, "137"), "…while the EVM chains are unaffected");
   assert.equal(depositChains(ASSETS, {}).length, 0, "no addresses at all -> nothing to show");
 
-  // ── Polygon leads: it is the destination chain, so a deposit there skips the bridge hop ─────────
-  assert.equal(chains[0]?.chainId, "137", "Polygon first");
-  assert.equal(chains[1]?.chainId, "1151111081099710", "Solana second");
+  // ── Solana leads: it is where these users hold stables, so it is the row most will pick ─────────
+  assert.equal(chains[0]?.chainId, "1151111081099710", "Solana first");
+  assert.equal(chains[1]?.chainId, "137", "Polygon second");
 
   console.log("OK: chains map to the right address family, excluded chains never surface, floor holds");
   console.log("PASS: deposit-chains");
