@@ -196,6 +196,8 @@ export interface HistoryRow {
   id: string;
   marketId: string; // an EXIT is placed against the market — the sheet's Close button needs it
   question: string;
+  category: string | null; // server-derived, see DeckCard.category
+  league?: string | null; // server-derived, see DeckCard.league — the sport a row names in its subtitle
   sideLabel: string; // the label of the side the user bet (team / Over / Up / Yes)
   side: BetSide; // drives badge color
   stakeCents: number;
@@ -229,6 +231,11 @@ export interface ResultRow {
   pnlCents: number; // settled P&L (negative on a loss, 0 on push)
   deltaCents: number; // alias of pnlCents — the balance delta this result applied
   shards: number; // shards granted for this bet (0 or 1)
+  // What the call COST, so a settled row can be opened and read like an open one: the two lists
+  // share a component, and the expanded detail is the same detail in both.
+  stakeCents: number;
+  lockedPriceBp: number;
+  createdAt: string; // ISO-8601 — when the call was made
   settledAt: string; // ISO-8601
   seen: boolean; // seenAt != null
   // DEPRECATED (2026-08-03). Marked a settlement made on Solana-anchored data — only ever true for

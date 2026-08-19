@@ -2,8 +2,8 @@
 
 import { useCallback, useState } from "react";
 import { type Me, usd } from "../ui";
-import { usePredictionHistory, useClosePosition, useExitQuotes } from "./usePredictionHistory";
-import { HistoryRow } from "./HistoryRow";
+import { usePredictionHistory, useClosePosition, useExitQuotes, toPredictionRow } from "./usePredictionHistory";
+import { PredictionRow } from "./PredictionRow";
 import { RealDepositPanel } from "./RealDepositPanel";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
@@ -111,7 +111,7 @@ export function BalanceSheet({ me, api, realPusdMicro, onClose, onTopupDone, onT
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {rows.map((r) => (
-              <HistoryRow key={r.id} row={r} nowMs={nowMs} onClosePosition={close} closing={closing === r.id} exitQuote={exitQuotes[r.id]} />
+              <PredictionRow key={r.id} row={toPredictionRow(r)} nowMs={nowMs} onClosePosition={() => close(r)} closing={closing === r.id} exitQuote={exitQuotes[r.id]} />
             ))}
           </div>
         )}

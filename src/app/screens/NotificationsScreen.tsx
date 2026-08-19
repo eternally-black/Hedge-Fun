@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { ResultsResponse, ResultRow } from "@/lib/api-types";
-import { catOfResult, resultMeta, deltaStr } from "../ui";
+import { PredictionRow, type PredictionRowData } from "./PredictionRow";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
@@ -44,31 +44,31 @@ export function NotificationsScreen({ api, onSeen, onReplay }: { api: Api; onSee
         </div>
       ) : (
         <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 8 }}>
-          {rows.map((n) => <InboxRow key={n.id} row={n} />)}
+          {/* Nothing here counts down — every row is decided — so one clock read is enough. */}
+          {rows.map((n) => <PredictionRow key={n.id} row={toPredictionRow(n)} nowMs={0} />)}
         </div>
       )}
     </div>
   );
 }
 
-function InboxRow({ row }: { row: ResultRow }) {
-  const cat = catOfResult(row);
-  const m = resultMeta(row.status);
-  const sideColor = row.side === "YES" ? "var(--yes)" : "var(--no)";
-  return (
-    <div style={{ display: "flex", gap: 11, background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 14, padding: "12px 13px" }}>
-      <div style={{ width: 36, height: 36, borderRadius: 10, background: `color-mix(in srgb,${m.accent} 20%,var(--panel2))`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flexShrink: 0 }}>{cat.icon}</div>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.25, textWrap: "pretty" }}>{row.question}</div>
-        <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 3 }}>
-          Your call <span style={{ color: sideColor, fontWeight: 700 }}>{row.side}</span> · {row.outcome}
-        </div>
-      </div>
-      <div style={{ textAlign: "right", flexShrink: 0 }}>
-        <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 14, color: m.accent }}>{deltaStr(row.status, row.deltaCents)}</div>
-        <div style={{ fontSize: 10, letterSpacing: ".06em", textTransform: "uppercase", color: m.accent, fontWeight: 700, marginTop: 2 }}>{m.tag}</div>
-        {row.shards > 0 && <div style={{ fontSize: 10, color: "var(--gold)", marginTop: 2 }}>+{row.shards} ◆</div>}
-      </div>
-    </div>
-  );
+// A settled result in the shape every list of the user's own calls renders (PredictionRow). The
+// inbox has no deadline to show — the market is decided, and `outcome` says how.
+function toPredictionRow(r: ResultRow): PredictionRowData {
+  return {
+    id: r.id,
+    question: r.question,
+    side: r.side,
+    sideLabel: r.sideLabel,
+    status: r.status,
+    league: r.league,
+    category: r.category,
+    stakeCents: r.stakeCents,
+    lockedPriceBp: r.lockedPriceBp,
+    pnlCents: r.deltaCents,
+    createdAt: r.createdAt,
+    settledAt: r.settledAt,
+    outcome: r.outcome,
+    shards: r.shards,
+  };
 }

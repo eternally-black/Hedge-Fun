@@ -7,7 +7,7 @@ import { peakEndOrder } from "../src/app/screens/RevealOverlay";
 
 // Minimal row factory — only the fields peakEndOrder reads matter.
 const row = (id: string, status: ResultRow["status"], deltaCents: number): ResultRow => ({
-  id, question: id, category: null, side: "YES", sideLabel: "Yes",
+  id, question: id, category: null, stakeCents: 100, lockedPriceBp: 5000, createdAt: new Date(0).toISOString(), side: "YES", sideLabel: "Yes",
   status, outcome: "", pnlCents: deltaCents, deltaCents, shards: status === "WIN" ? 1 : 0,
   settledAt: "2026-06-26T00:00:00.000Z", seen: false,
 });

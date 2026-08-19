@@ -1,8 +1,8 @@
 "use client";
 
 import type { Me } from "../ui";
-import { usePredictionHistory, useClosePosition, useExitQuotes } from "./usePredictionHistory";
-import { HistoryRow } from "./HistoryRow";
+import { usePredictionHistory, useClosePosition, useExitQuotes, toPredictionRow } from "./usePredictionHistory";
+import { PredictionRow } from "./PredictionRow";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
@@ -64,7 +64,7 @@ export function HistorySheet({ me, api, onClose, onToast }: { me: Me | null; api
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {rows.map((r) => (
-              <HistoryRow key={r.id} row={r} nowMs={nowMs} onClosePosition={close} closing={closing === r.id} exitQuote={exitQuotes[r.id]} />
+              <PredictionRow key={r.id} row={toPredictionRow(r)} nowMs={nowMs} onClosePosition={() => close(r)} closing={closing === r.id} exitQuote={exitQuotes[r.id]} />
             ))}
           </div>
         )}

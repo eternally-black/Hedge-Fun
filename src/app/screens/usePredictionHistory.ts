@@ -6,6 +6,7 @@ import { useRealCtx } from "../useRealCtx";
 import { placeRealOrder } from "@/lib/real-client";
 import { QUOTE_POLL_MS } from "@/lib/config";
 import type { ExitQuoteRow, ExitQuotesResponse } from "@/lib/api-types";
+import type { PredictionRowData } from "./PredictionRow";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
@@ -15,6 +16,8 @@ export type HistoryRowData = {
   id: string;
   marketId: string;
   question: string;
+  category: string | null;
+  league?: string | null;
   sideLabel: string;
   side: "YES" | "NO";
   stakeCents: number;
@@ -104,6 +107,27 @@ export function useExitQuotes(api: Api, rows: HistoryRowData[] | null) {
   // Empty when nothing is closable, rather than clearing state in the effect: a leftover entry for
   // a row that has since settled is never read (HistoryRow only marks up a closable row).
   return ids ? quotes : {};
+}
+
+// The history row in the shape every list of the user's own calls renders (PredictionRow). The
+// sheet keeps `marketId` for the EXIT — the row itself never needs it.
+export function toPredictionRow(r: HistoryRowData): PredictionRowData {
+  return {
+    id: r.id,
+    question: r.question,
+    side: r.side,
+    sideLabel: r.sideLabel,
+    status: r.status,
+    league: r.league,
+    category: r.category,
+    stakeCents: r.stakeCents,
+    lockedPriceBp: r.lockedPriceBp,
+    pnlCents: r.pnlCents,
+    createdAt: r.createdAt,
+    resolutionDeadline: r.resolutionDeadline,
+    settledAt: r.settledAt,
+    closable: r.closable,
+  };
 }
 
 // Closing a REAL position from the history sheet. The sell is the same two-phase order protocol a

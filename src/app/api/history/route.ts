@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 import type { HistoryResponse } from "@/lib/api-types";
 import { SHARE_TICK_MICRO } from "@/lib/config";
+import { categoryOf, gameOf } from "@/lib/deck-mix";
 
 // Prediction history: the user's bets joined with market info. PENDING (awaiting resolution)
 // first, then most-recently-settled. Returns the REAL side label the user picked (team/Over/Up/
@@ -37,7 +38,10 @@ export async function GET(req: Request) {
       closedSharesMicro: true,
       realizedPnlMicro: true,
       market: {
-        select: { question: true, outcomeYesLabel: true, outcomeNoLabel: true, resolutionDeadline: true, status: true },
+        select: {
+          question: true, outcomeYesLabel: true, outcomeNoLabel: true, resolutionDeadline: true, status: true,
+          league: true, // the sport/game named at ingest — the row states it in its subtitle
+        },
       },
     },
   });
@@ -82,6 +86,12 @@ export async function GET(req: Request) {
     marketId: b.marketId,
     closable,
     question: b.market.question,
+    // Same derivation the deck and the results inbox use, so one row component can render either
+    // list without asking which endpoint it came from.
+    ...(() => {
+      const cat = categoryOf(b.market);
+      return { category: cat, league: b.market.league ?? gameOf(b.market, cat) };
+    })(),
     // The label of the side the user actually bet (YES = side A label, NO = side B label).
     sideLabel: b.side === "YES" ? b.market.outcomeYesLabel : b.market.outcomeNoLabel,
     side: b.side, // "YES" | "NO" — drives the badge color
