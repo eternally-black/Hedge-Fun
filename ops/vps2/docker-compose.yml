@@ -3,9 +3,10 @@
 # tg-bridge (GlitchTip webhook -> Telegram), and this host's own Caddy ingress.
 # Deployed to /opt/glitchtip on VPS2 by ops/vps2/install-vps2.sh (the dir name keeps the
 # compose project name "glitchtip", which the shared watchdog script already knows).
-# Inside GlitchTip, set the alert webhook URL to:  https://ingest.hedgeyour.fun/hook-<TG_BRIDGE_HOOK>
-# (GlitchTip 6.2+ SSRF-guards webhook URLs, so the old docker-internal http://tg-bridge:8080 is
-# refused; Caddy publishes the bridge under that unguessable path instead — see Caddyfile.)
+# Inside GlitchTip, set the alert webhook URL to exactly:  http://tg-bridge:8080
+# That URL is docker-internal, and GlitchTip 6.2+ SSRF-guards webhook targets (silently, at every
+# send) — GLITCHTIP_ALLOW_PRIVATE_IPS below is what makes it legal. Single-tenant box, owner-only
+# GlitchTip accounts, so the exfiltration channel the guard closes is not a concern here.
 
 x-logging: &bounded-logs
   driver: json-file
@@ -30,6 +31,11 @@ x-environment: &glitchtip-env
   # to the real ingress name; localhost stays for the container healthcheck and the SSH tunnel.
   ALLOWED_HOSTS: "ingest.hedgeyour.fun,localhost,127.0.0.1"
   ENABLE_USER_REGISTRATION: "False"
+  # The alert webhook targets tg-bridge on the docker network. GlitchTip's SSRF guard otherwise
+  # refuses private-IP targets at CREATION (a visible 422) and again at EVERY SEND (silently —
+  # the notification is marked sent and nothing goes out, which cost an evening to see). Safe to
+  # allow here: single-tenant box, owner-only accounts, and the only private target is the bridge.
+  GLITCHTIP_ALLOW_PRIVATE_IPS: "True"
   ENABLE_ADMIN: "False"
   ENABLE_OPENAPI: "False"
 
@@ -40,16 +46,6 @@ services:
     ports:
       - "80:80"
       - "443:443"
-    environment:
-      TG_BRIDGE_HOOK: ${TG_BRIDGE_HOOK} # secret path segment for the GlitchTip->tg-bridge webhook
-    networks:
-      default:
-        aliases:
-          # In-network DNS for the public name: a container POSTing to the alert webhook
-          # (worker -> https://ingest.hedgeyour.fun/hook-...) otherwise routes to the HOST's
-          # public IP, and that hairpin times out at the host firewall. The alias sends it
-          # straight to caddy, whose real certificate matches the SNI, so TLS still verifies.
-          - ingest.hedgeyour.fun
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

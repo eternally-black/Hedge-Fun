@@ -1,18 +1,6 @@
 # VPS2 ingress. Both A records must point at VPS2 before first `up` (ACME HTTP challenge).
 ingest.hedgeyour.fun {
-	# GlitchTip 6.2+ refuses alert-webhook URLs that resolve to private/internal IPs (SSRF
-	# guard), so the docker-internal http://tg-bridge:8080 can no longer be a recipient. The
-	# bridge is published HERE instead, under an unguessable path — the same security model as
-	# Kuma's push tokens. TG_BRIDGE_HOOK comes from /opt/glitchtip/.env (openssl rand -hex 16);
-	# the GlitchTip alert webhook URL is then:
-	#   https://ingest.hedgeyour.fun/hook-<TG_BRIDGE_HOOK>
-	@tgbridge path /hook-{$TG_BRIDGE_HOOK}
-	handle @tgbridge {
-		reverse_proxy tg-bridge:8080
-	}
-	handle {
-		reverse_proxy web:8000
-	}
+	reverse_proxy web:8000
 }
 
 push.hedgeyour.fun {
