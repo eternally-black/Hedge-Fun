@@ -106,6 +106,29 @@ services:
           memory: 1g
     logging: *bounded-logs
 
+  # The task worker WITH the scheduler (`runworker --scheduler`). all_in_one's embedded worker
+  # consumes the ingest queue but runs no scheduler, so scheduled jobs — alert evaluation above
+  # all — silently never happened: events became issues, no alert ever fired. Only this service
+  # runs the scheduler, so scheduled tasks execute exactly once.
+  worker:
+    image: glitchtip/glitchtip:6
+    environment:
+      <<: *glitchtip-env
+      SERVER_ROLE: worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_started
+    volumes:
+      - uploads:/code/uploads
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    logging: *bounded-logs
+
   tg-bridge:
     image: node:22-alpine
     command: ["node", "/srv/tg-bridge.mjs"]
