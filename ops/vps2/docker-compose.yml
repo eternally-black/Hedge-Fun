@@ -42,6 +42,14 @@ services:
       - "443:443"
     environment:
       TG_BRIDGE_HOOK: ${TG_BRIDGE_HOOK} # secret path segment for the GlitchTip->tg-bridge webhook
+    networks:
+      default:
+        aliases:
+          # In-network DNS for the public name: a container POSTing to the alert webhook
+          # (worker -> https://ingest.hedgeyour.fun/hook-...) otherwise routes to the HOST's
+          # public IP, and that hairpin times out at the host firewall. The alias sends it
+          # straight to caddy, whose real certificate matches the SNI, so TLS still verifies.
+          - ingest.hedgeyour.fun
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
