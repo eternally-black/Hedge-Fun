@@ -61,13 +61,18 @@ export async function fetchSupportedAssets(): Promise<BridgeAsset[]> {
     ) {
       continue;
     }
+    // minUsd is the ONLY thing standing between a dust withdrawal and money parked below the
+    // bridge's real floor forever (the deposit side hard-floors for the same reason). A row that
+    // stops carrying it is malformed like the arms above — dropping it beats defaulting to 0,
+    // which silently disables the minimum.
+    if (typeof minCheckoutUsd !== "number" || !Number.isFinite(minCheckoutUsd)) continue;
     data.push({
       chainId,
       chainName,
       symbol,
       tokenAddress: address,
       decimals,
-      minUsd: typeof minCheckoutUsd === "number" ? minCheckoutUsd : 0,
+      minUsd: minCheckoutUsd,
     });
   }
   if (data.length === 0) throw new Error("bridge_bad_response: no usable assets");

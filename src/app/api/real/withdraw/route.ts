@@ -9,6 +9,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 import { hasRealConsent, sameOrigin } from "@/lib/real";
+import { rateLimit } from "@/lib/ratelimit";
 import { captureToGlitchTip, sendOpsTelegram } from "@/lib/glitchtip";
 import { serverSecureClient } from "@/lib/polymarket-server";
 import { createWithdrawal, fetchSupportedAssets, fetchWithdrawalStatus } from "@/lib/bridge";
@@ -16,6 +17,7 @@ import { bridgeOutSpec, type BridgeOutInputs } from "@/lib/bridge-out";
 import { relayerVerdict } from "@/lib/relayer-verdict";
 import { runScoped, startWorkflow } from "@/lib/workflow";
 import { erc20BalanceOf, PUSD_ADDRESS } from "@/lib/polygon";
+import { isAddress as isSolanaAddress } from "@solana/kit";
 
 const isBridgeError = (e: unknown) => e instanceof Error && e.message.startsWith("bridge_");
 
@@ -26,6 +28,11 @@ export async function POST(req: Request) {
   // must never be able to trap someone's money on Polygon.
   if (!hasRealConsent(user)) return NextResponse.json({ error: "consent_required" }, { status: 403 });
   if (!sameOrigin(req)) return NextResponse.json({ error: "bad_origin" }, { status: 403 });
+  // Each POST can mint a live single-purpose forwarding address at the bridge — an unbounded loop
+  // is an unbounded pile of live forwarders under our builder code that nobody is watching.
+  if (!rateLimit(`real-withdraw:${user.id}`, 6, 60_000)) {
+    return NextResponse.json({ error: "rate_limited" }, { status: 429 });
+  }
   const wallet = user.depositWalletAddress;
   const signerAddress = user.embeddedWalletAddress;
   if (!wallet || !signerAddress) return NextResponse.json({ error: "no_deposit_wallet" }, { status: 409 });
@@ -67,8 +74,16 @@ export async function POST(req: Request) {
   // on either chain. The family comes from the asset row rather than a pinned chain id — a bridge
   // tokenAddress is 0x-hex on exactly the EVM chains (bridge.ts BridgeAsset) — so a new chain in
   // the bridge's list is classified without touching this code.
-  if (/^0x[0-9a-fA-F]{40}$/.test(asset.tokenAddress) !== /^0x[0-9a-fA-F]{40}$/.test(recipient.trim())) {
+  const evmFamily = /^0x[0-9a-fA-F]{40}$/.test(asset.tokenAddress);
+  if (evmFamily !== /^0x[0-9a-fA-F]{40}$/.test(recipient.trim())) {
     return NextResponse.json({ error: "wrong_chain_recipient", chainName: asset.chainName }, { status: 400 });
+  }
+  // Solana is the only non-EVM chain the bridge serves, and base58 has no checksum — a truncated
+  // paste or a one-character typo still "looks like" an address, and the forwarder it mints sends
+  // money there irreversibly. Validate for real, with the validator the read-only hedge-wallet
+  // link already uses; the money destination must not be the one address this codebase skips.
+  if (!evmFamily && !isSolanaAddress(recipient.trim())) {
+    return NextResponse.json({ error: "bad_recipient" }, { status: 400 });
   }
 
   const pusd = await erc20BalanceOf(PUSD_ADDRESS, wallet);
