@@ -64,6 +64,20 @@ export function DepositSheet({ api, pusdMicro, onClose, onToast }: {
 
   useEffect(() => setHost(document.getElementById(APP_SURFACE_ID)), []);
 
+  // Declaring the attempt is what makes the SERVER watch this deposit: it snapshots the balance
+  // baseline and starts the Transfer-log scan. Without it the watcher has no row to check — the
+  // bridge lands USDC.e (which the pUSD number above never shows), nothing ever offers the
+  // conversion, and this sheet says "Watching…" forever. The ops console declares by hand; a
+  // tester's sheet must declare for them. Idempotent server-side: one active attempt per user.
+  const declared = useRef(false);
+  useEffect(() => {
+    if (!picked || declared.current) return;
+    declared.current = true;
+    api("/api/real/funding", { method: "POST", body: "{}" }).catch(() => {
+      declared.current = false; // transient failure — the next network pick retries
+    });
+  }, [picked, api]);
+
   useEffect(() => {
     let live = true;
     setFailed(false);

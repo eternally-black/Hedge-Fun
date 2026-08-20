@@ -113,15 +113,15 @@ export function RealScreen({ api }: { api: Api }) {
 
   const loadDepositAddresses = useCallback(async () => {
     try {
-      // POST — the route exports only POST; the default GET 405s. Same bug as RealDepositPanel.
+      // POST — the route exports only POST; the default GET 405s. The route answers { minUsd,
+      // chains: DepositChain[] } — reading a flat `addresses` map here left this card stuck on
+      // "loading deposit addresses…" with a TypeError in fundingError.
       const res = (await api("/api/real/deposit-address", { method: "POST" })) as {
         minUsd: number;
-        addresses: Record<string, unknown>;
+        chains: { name: string; address: string }[];
       };
       setMinUsd(res.minUsd);
-      setAddresses(
-        Object.fromEntries(Object.entries(res.addresses).filter((e): e is [string, string] => typeof e[1] === "string")),
-      );
+      setAddresses(Object.fromEntries((res.chains ?? []).filter((c) => c.address).map((c) => [c.name, c.address])));
     } catch (e) {
       setFundingError(errText(e));
     }

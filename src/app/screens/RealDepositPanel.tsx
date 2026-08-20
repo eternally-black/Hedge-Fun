@@ -7,13 +7,16 @@
 //
 // It replaces the paper Top-Up affordance in real mode rather than sitting beside it — a screen that
 // offers "free top-up" next to "send real USDC" invites exactly the wrong tap.
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Me } from "../ui";
 import { useRealCtx } from "../useRealCtx";
+import { runRealWorkflow } from "@/lib/real-client";
 import { DepositSheet } from "./DepositSheet";
 import { RealWithdrawCard } from "./RealWithdrawCard";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
+
+type Attempt = { id: string; state: string; usdceDeltaMicro: string; pusdDeltaMicro: string };
 
 const MUTED = { fontSize: 12, color: "var(--muted)" } as const;
 const ACTION = {
@@ -40,6 +43,57 @@ export function RealDepositPanel({ me, api, pusdMicro, onToast }: {
   // mode card uses. It arrives a beat after login, hence the disabled state rather than a button
   // that fails when tapped.
   const { ctx } = useRealCtx(me);
+
+  const [attempt, setAttempt] = useState<Attempt | null>(null);
+  const [wrapBusy, setWrapBusy] = useState(false);
+  const [wrapNote, setWrapNote] = useState("");
+
+  // The GET also re-arms the server-side watcher tier, so this poll is the client's half of
+  // deposit detection for everyone who never opens the ops console — which is every tester.
+  useEffect(() => {
+    if (!wallet) return;
+    let live = true;
+    const load = async () => {
+      try {
+        const r = (await api("/api/real/funding")) as { attempt: Attempt | null };
+        if (live) setAttempt(r.attempt);
+      } catch {
+        // best-effort status; the balance above stays the source of truth
+      }
+    };
+    void load();
+    const id = window.setInterval(load, 20_000);
+    return () => {
+      live = false;
+      window.clearInterval(id);
+    };
+  }, [wallet, api]);
+
+  // A DETECTED attempt is USDC.e sitting in the wallet — real money the CLOB counts as $0 until
+  // the wrap converts it. The ops console had the only button; the deposit panel is where the
+  // person who actually sent the money is looking.
+  const detected = attempt?.state === "DETECTED";
+  const convert = async () => {
+    if (!ctx || wrapBusy) return;
+    setWrapBusy(true);
+    setWrapNote("starting");
+    try {
+      const outcome = await runRealWorkflow(api, ctx, "WRAP", setWrapNote);
+      if (outcome.status === "done") {
+        onToast("Deposit converted — spendable now");
+        setAttempt(null);
+      } else if (outcome.status === "failed") {
+        onToast(`Conversion failed: ${outcome.error ?? "try again"}`);
+      } else {
+        onToast("Conversion submitted — it lands in a minute or two");
+      }
+    } catch (e) {
+      onToast(e instanceof Error ? e.message : String(e));
+    } finally {
+      setWrapBusy(false);
+      setWrapNote("");
+    }
+  };
 
   return (
     <>
@@ -81,6 +135,29 @@ export function RealDepositPanel({ me, api, pusdMicro, onToast }: {
           </button>
         </div>
       )}
+
+      {detected ? (
+        <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--line)" }}>
+          <div style={{ ...MUTED, lineHeight: 1.5 }}>
+            Your deposit arrived. One signature converts it to pUSD, the balance you trade with.
+          </div>
+          <button
+            type="button"
+            onClick={convert}
+            disabled={!ctx || wrapBusy}
+            style={{
+              ...ACTION,
+              width: "100%",
+              background: "var(--gold)",
+              color: "#1a1205",
+              border: "none",
+              ...(!ctx || wrapBusy ? { opacity: 0.6, cursor: "default" } : {}),
+            }}
+          >
+            {wrapBusy ? wrapNote || "Converting…" : "Make it spendable"}
+          </button>
+        </div>
+      ) : null}
 
       {open ? <DepositSheet api={api} pusdMicro={pusdMicro} onClose={() => setOpen(false)} onToast={onToast} /> : null}
     </div>
