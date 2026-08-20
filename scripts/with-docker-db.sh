@@ -32,6 +32,16 @@ trap teardown EXIT
 
 # 1. Start the engine headless if it isn't running.
 if [ "$engine_was_up" -eq 0 ]; then
+  # Windows bug: the Secrets Engine leaves a CORRUPTED unix-socket file behind on engine stop, and
+  # the next start dies on 'remove engine.sock: The file cannot be accessed by the system' — forever,
+  # every start, until the file is gone. Only cmd's `del` can remove the broken reparse point (rm and
+  # PowerShell both fail on it). Harmless no-op when the file is absent or healthy.
+  # No [ -e ] guard on purpose: stat() itself fails on the broken reparse point, so -e reads false
+  # while the file very much exists. And no absolute path in the del: git-bash mangles it into a
+  # cmd syntax error — cd + relative name is the form that actually deletes the thing.
+  if [ -n "${LOCALAPPDATA:-}" ] && [ -d "$LOCALAPPDATA/docker-secrets-engine" ]; then
+    (cd "$LOCALAPPDATA/docker-secrets-engine" && cmd //c "del /f /q engine.sock") >/dev/null 2>&1 || true
+  fi
   echo "↑ starting Docker engine (headless)..."
   "$DOCKER" desktop start >/dev/null 2>&1 || true
   for i in $(seq 1 60); do
