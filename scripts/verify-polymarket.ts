@@ -151,27 +151,30 @@ async function main() {
   assert.strictEqual(synthetic?.resolvedOutcome, "YES");
   console.log("3. ✓ mapMarket resolves YES on [1,0] + umaResolutionStatus=resolved");
 
-  // 3b. startsAt mapping: a market WITH startDate maps startsAt to that exact ISO; a market
-  //     WITHOUT startDate maps startsAt to null (crypto/Yes-No have no meaningful start).
-  const startIso = "2026-07-01T18:00:00Z";
+  // 3b. startsAt is KICK-OFF only (c61ebbc): Gamma's `gameStartTime` ("+00" wire form normalized
+  //     to ISO), never `startDate` — that is the LISTING date, often weeks before the match, and
+  //     it used to masquerade here as a fact about the game. This fixture pins both halves.
+  const kickoffIso = "2026-07-01T18:00:00.000Z";
   const withStart = mapMarket({
     conditionId: "0xstart",
     question: "Match starts later?",
-    startDate: startIso,
+    startDate: "2026-06-20T00:00:00Z", // listing date — must be IGNORED
+    gameStartTime: "2026-07-01 18:00:00+00", // Gamma's own wire format for kick-off
     endDate: new Date(Date.now() + 3_600_000).toISOString(),
     outcomes: '["Team A","Team B"]',
     outcomePrices: '["0.5","0.5"]',
   });
-  assert.strictEqual(withStart?.startsAt, startIso, "startDate present -> startsAt = that ISO");
+  assert.strictEqual(withStart?.startsAt, kickoffIso, "gameStartTime present -> startsAt = kick-off ISO");
   const noStart = mapMarket({
     conditionId: "0xnostart",
     question: "Crypto up or down?",
+    startDate: "2026-06-20T00:00:00Z", // a listing date alone is NOT a start
     endDate: new Date(Date.now() + 3_600_000).toISOString(),
     outcomes: '["Up","Down"]',
     outcomePrices: '["0.5","0.5"]',
   });
-  assert.strictEqual(noStart?.startsAt, null, "no startDate -> startsAt = null");
-  console.log("3b. ✓ mapMarket maps startsAt from startDate (ISO when present, null when absent)");
+  assert.strictEqual(noStart?.startsAt, null, "no gameStartTime -> startsAt = null (startDate ignored)");
+  console.log("3b. ✓ mapMarket maps startsAt from gameStartTime only (kick-off), never startDate");
 
   // 4. Binary markets keep their REAL side labels (index 0 = YES side, index 1 = NO side).
   //    The card shows these, not a forced Yes/No. Covers Up/Down, teams, and Over/Under.
