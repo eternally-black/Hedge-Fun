@@ -3,7 +3,9 @@
 # tg-bridge (GlitchTip webhook -> Telegram), and this host's own Caddy ingress.
 # Deployed to /opt/glitchtip on VPS2 by ops/vps2/install-vps2.sh (the dir name keeps the
 # compose project name "glitchtip", which the shared watchdog script already knows).
-# Inside GlitchTip, set the alert webhook URL to exactly:  http://tg-bridge:8080
+# Inside GlitchTip, set the alert webhook URL to:  https://ingest.hedgeyour.fun/hook-<TG_BRIDGE_HOOK>
+# (GlitchTip 6.2+ SSRF-guards webhook URLs, so the old docker-internal http://tg-bridge:8080 is
+# refused; Caddy publishes the bridge under that unguessable path instead — see Caddyfile.)
 
 x-logging: &bounded-logs
   driver: json-file
@@ -38,6 +40,8 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    environment:
+      TG_BRIDGE_HOOK: ${TG_BRIDGE_HOOK} # secret path segment for the GlitchTip->tg-bridge webhook
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
