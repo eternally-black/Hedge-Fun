@@ -6,6 +6,7 @@
 import type { PrismaClient, OrderAttempt } from "@prisma/client";
 import { bookEntryFills, bookExitFills, receiptFillKey, trueUpAttemptFee } from "./orders";
 import { feePerShareMicro } from "./quote";
+import { REAL_FEE_FALLBACK_RATE_BP } from "./config";
 
 export interface TradeRecord {
   id: string; // exchange trade id
@@ -61,7 +62,9 @@ export async function reconcileAttempt(
   // booked every real fill at zero fee and understated the position's cost basis by exactly the
   // fee. The intent stored the rate it quoted with (fetchMarketInfo at intent time, 500bp on that
   // market), and that is both the honest number and the one the user's cap was built from.
-  const rateBp = typeof params?.feeRateBp === "number" ? params.feeRateBp : 0;
+  // Fallback RATE, not 0: a pre-params attempt reconciling at zero fee would hand trueUpAttemptFee
+  // a zero total, which OVERWRITES an already-correct booked fee and overstates realized PnL by it.
+  const rateBp = typeof params?.feeRateBp === "number" ? params.feeRateBp : REAL_FEE_FALLBACK_RATE_BP;
   const expMilli = typeof params?.feeExpMilli === "number" ? params.feeExpMilli : feeExpMilli;
 
   if (verdict.matchedSharesMicro === 0n) {

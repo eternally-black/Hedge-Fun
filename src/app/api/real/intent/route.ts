@@ -9,6 +9,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 import { isRealMoneyEligible, hasRealConsent, sameOrigin } from "@/lib/real";
+import { rateLimit } from "@/lib/ratelimit";
 import { captureToGlitchTip } from "@/lib/glitchtip";
 import { getMarketFee } from "@/lib/fees";
 import { getBook } from "@/lib/clob";
@@ -38,6 +39,12 @@ export async function POST(req: Request) {
   if (!isRealMoneyEligible(user)) return NextResponse.json({ error: "real_disabled" }, { status: 403 });
   if (!hasRealConsent(user)) return NextResponse.json({ error: "consent_required" }, { status: 403 });
   if (!sameOrigin(req)) return NextResponse.json({ error: "bad_origin" }, { status: 403 });
+  // Every call rides one book fetch per distinct token (1s cache TTL) — a scripted loop over
+  // distinct markets gets OUR shared IP throttled by the CLOB, breaking quotes for every user.
+  // 30/min is far above any human swipe cadence.
+  if (!rateLimit(`real-intent:${user.id}`, 30, 60_000)) {
+    return NextResponse.json({ error: "rate_limited" }, { status: 429 });
+  }
   if (!user.depositWalletAddress || !user.embeddedWalletAddress) {
     return NextResponse.json({ error: "no_deposit_wallet" }, { status: 409 });
   }
@@ -142,6 +149,7 @@ export async function POST(req: Request) {
   let approvedParams: Record<string, unknown>;
   let allInCapMicro: bigint;
   let maxPriceBp: number;
+  let entryStakeCents: number | null = null; // set on ENTRY — the replay guard compares against it
 
   if (direction === "ENTRY") {
     // Trading approvals, checked BEFORE anything is quoted or signed. A deposit wallet without them
@@ -159,12 +167,14 @@ export async function POST(req: Request) {
     }
     // The user's OWN configured stake, not the paper STAKE_CENTS: real money is the one number a
     // person has to be able to set, and the amount to spend must come from their row rather than
-    // from whatever the client posts. An explicit stakeCents is still honoured (the /real console
-    // sends one) but is bounded by the same floor and ceiling.
-    const stake = typeof stakeCents === "number" ? stakeCents : user.realStakeCents;
+    // from whatever the client posts. An explicit stakeCents is honoured DOWNWARD only (the /real
+    // console sends small test stakes) — the row is the ceiling, so a stale tab or injected script
+    // cannot deploy 1000× the number the user actually set.
+    const stake = Math.min(typeof stakeCents === "number" ? stakeCents : user.realStakeCents, user.realStakeCents);
     if (stake < REAL_MIN_STAKE_CENTS || stake > REAL_MAX_STAKE_CENTS) {
       return NextResponse.json({ error: "bad_stake" }, { status: 400 });
     }
+    entryStakeCents = stake;
     const budgetMicro = BigInt(stake) * 10_000n; // cents → micro-USD
     // feeOnTop (owner, 2026-08-17): the stake is what the ORDER is worth, and the platform fee is
     // paid on top of it out of the free balance. The old all-in reading made a $1 swipe post a
@@ -336,10 +346,15 @@ export async function POST(req: Request) {
         // input), so handing a YES intent back to a request that just asked for NO — or a $5 intent
         // back to a $50 request — deploys real money on a side/size the user did not ask for. Only
         // an exact match may replay; anything else waits for the slot like any other in-flight
-        // attempt. EXIT is exempt from the size check: its cap is the live quoted proceeds, which
-        // move with the book, while its side is derived from the position and cannot differ.
+        // attempt. Size identity is the STAKE, not allInCapMicro: the cap is re-derived from the
+        // live book on every call, so an honest same-swipe retry (response lost on a flaky
+        // connection) almost never matched it and 409'd until the 10-minute expiry. EXIT is exempt
+        // from the size check: its cap is the live quoted proceeds, which move with the book,
+        // while its side is derived from the position and cannot differ.
         const sameOrder =
-          existing.side === betSide && (direction !== "ENTRY" || existing.allInCapMicro === allInCapMicro);
+          existing.side === betSide &&
+          (direction !== "ENTRY" ||
+            (existing.approvedParams as { stakeCents?: number } | null)?.stakeCents === entryStakeCents);
         if (!sameOrder) return NextResponse.json({ error: "attempt_in_flight" }, { status: 409 });
         return NextResponse.json({ intentId: existing.id, params: existing.approvedParams });
       }

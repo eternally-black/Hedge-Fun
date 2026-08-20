@@ -7,6 +7,7 @@ import {
   STAKE_CENTS,
   HEDGE_MIN_STAKE_CENTS,
   HEDGE_MAX_STAKE_CENTS,
+  REAL_MAX_STAKE_CENTS,
   QUOTES_MAX_IDS,
   QUOTES_RATE_PER_MIN,
 } from "@/lib/config";
@@ -36,10 +37,13 @@ export async function GET(req: Request) {
   if (ids.length === 0) return NextResponse.json({ error: "ids required" }, { status: 400 });
 
   // Stake is user-controlled input to a book walk. Clamp rather than reject: an out-of-range value
-  // is far more likely a stale client than an attack, and a clamped quote is still honest.
+  // is far more likely a stale client than an attack, and a clamped quote is still honest. The
+  // ceiling must admit the REAL maximum, not just the hedge cap — a real-mode card quoted at a
+  // clamped $500 while /api/real/intent walks the true $1,000 makes the seen-vs-executed check
+  // compare two different trades, and every swipe above the clamp 409s as "price moved", forever.
   const rawStake = Number(url.searchParams.get("stake"));
   const stakeCents = Number.isFinite(rawStake) && rawStake > 0
-    ? Math.min(Math.max(Math.round(rawStake), HEDGE_MIN_STAKE_CENTS), HEDGE_MAX_STAKE_CENTS)
+    ? Math.min(Math.max(Math.round(rawStake), HEDGE_MIN_STAKE_CENTS), Math.max(HEDGE_MAX_STAKE_CENTS, REAL_MAX_STAKE_CENTS))
     : STAKE_CENTS;
 
   const markets = await prisma.market.findMany({

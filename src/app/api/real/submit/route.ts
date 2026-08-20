@@ -186,6 +186,22 @@ export async function POST(req: Request) {
   // sweep (src/lib/reconcile.ts): without it the row would be invisible to every reconcile scan,
   // which all filter on a non-null externalOrderId, and its market slot would stay wedged forever.
   if (process.env.REAL_ORDER_LOCUS === "browser") {
+    // The browser can post without the server, but the server must be able to READ THE ORDER BACK —
+    // the posted-route receipt, reconcile and orphan discovery all build this same client. Approving
+    // a post the server can never book turns a missing/undecryptable creds row into spent money with
+    // no position, a consumed slot and a permanently wedged market. Nothing is posted yet, so the
+    // rollback is the same one the server-post arm uses for real_not_configured.
+    const readback = await serverSecureClient(prisma, user);
+    if (!readback) {
+      await prisma.$transaction(async (tx) => {
+        const rolledBack = await tx.orderAttempt.updateMany({
+          where: { id: attempt.id, state: "SUBMITTING" },
+          data: { state: "ISSUED", signedOrderHash: null, error: "real_not_configured" },
+        });
+        if (rolledBack.count > 0 && attempt.dir !== "EXIT") await releaseSwipeSlot(tx, user.id, capDay);
+      });
+      return NextResponse.json({ error: "real_not_configured" }, { status: 503 });
+    }
     return NextResponse.json({ status: "approved", intentId: attempt.id });
   }
 

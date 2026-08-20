@@ -613,7 +613,11 @@ export async function fetchMajorsMarkets(
 
     for (const r of raw) {
       const cache = mapMarket(r);
-      if (!cache) continue;
+      // OPEN only, like fetchBlitzDeck and fetchSportsMarkets: Gamma's active/closed flags lag its
+      // own resolution state, and a row read as RESOLVED here carries NO outcome — persisted, it
+      // fails the poller's pending scan (status OPEN) AND planRedeem's outcome guard, so every bet
+      // on it would sit PENDING forever with the stake held.
+      if (!cache || cache.status !== "OPEN") continue;
       const ev = r.events?.[0];
       out.push({
         cache,

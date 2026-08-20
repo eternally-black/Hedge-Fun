@@ -55,16 +55,19 @@ function decodeTrade(raw: unknown): (TradeRecord & { takerOrderId: string }) | n
   const id = String(t.id ?? "");
   const price = Number(t.price);
   const size = Number(t.size);
-  const feeRateBps = Number(t.feeRateBps);
   if (!id || !Number.isFinite(price) || price <= 0) return null;
-  if (!Number.isFinite(size) || size <= 0 || !Number.isFinite(feeRateBps) || feeRateBps < 0) return null;
+  if (!Number.isFinite(size) || size <= 0) return null;
+  // feeRateBps is carried for observability only — reconcile.ts deliberately IGNORES it (it is the
+  // BUILDER's rate; the platform rate comes from the intent's approvedParams). Rejecting the whole
+  // trade on a field nothing reads made a filled order unbookable forever when the CLOB omitted it.
+  const feeRateBps = Number(t.feeRateBps);
   const stamped = t.matchedAt ?? t.updatedAt;
   const ts = stamped ? new Date(String(stamped)) : new Date();
   return {
     id,
     priceBp: Math.round(price * 10_000),
     sizeMicro: BigInt(Math.round(size * 1_000_000)),
-    feeRateBp: Math.round(feeRateBps),
+    feeRateBp: Number.isFinite(feeRateBps) && feeRateBps >= 0 ? Math.round(feeRateBps) : 0,
     ts: Number.isNaN(ts.getTime()) ? new Date() : ts,
     takerOrderId: String(t.takerOrderId ?? ""),
   };

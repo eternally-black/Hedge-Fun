@@ -82,8 +82,8 @@ export function StakeSheet({ stakeCents, minCents, maxCents, api, onClose, onSav
       >
         <div style={{ fontFamily: "var(--df)", fontSize: 19, lineHeight: 1.2 }}>Stake per swipe</div>
         <div style={{ ...MUTED, marginTop: 6, lineHeight: 1.45 }}>
-          Every call spends up to this much. Fees come out of it, so the shares you get are slightly
-          fewer than the amount divided by the price.
+          Every call buys this much of the market. The platform fee is charged on top, so the total
+          debit is slightly more than the stake.
         </div>
 
         <div style={{ display: "flex", gap: 6, marginTop: 14 }}>

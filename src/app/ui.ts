@@ -37,7 +37,10 @@ export const usd = (cents: number) => {
 // buys stake/p of $1 shares. Mirrors settle.ts share math (payout = stake*10000/priceBp). bp is the
 // bought side's price; stakeCents defaults to the live STAKE_CENTS so callers pass just the price.
 export const winPayout = (bp: number, stakeCents: number = STAKE_CENTS) => {
-  const p = Math.max(0.02, bp / 10000);
+  // 1bp floor — a div-by-zero guard only, matching settle.ts computePnl's own clamp. The old 2%
+  // floor silently understated every payout below 200bp: hedge cards admit sides down to 100bp,
+  // where a $500 stake displayed $25,000 against a true $50,000.
+  const p = Math.max(0.0001, bp / 10000);
   return Math.floor(stakeCents / p); // CENTS, floored — a promised payout must never read high
 };
 

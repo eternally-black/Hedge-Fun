@@ -174,7 +174,7 @@ export function RealOrderCard({ api, ctx }: { api: Api; ctx: RealCtx }) {
             {busy === "buy:NO" ? "…" : "Buy NO"}
           </button>
         </div>
-        <div style={{ ...MUTED, marginTop: 8 }}>The stake is the all-in cap: fee included, shares derived.</div>
+        <div style={{ ...MUTED, marginTop: 8 }}>The stake is the order; the platform fee is charged on top of it.</div>
         {result ? <div style={{ marginTop: 10, fontSize: 12 }}>{result}</div> : null}
         {error ? <div style={ERR}>{error}</div> : null}
       </div>
