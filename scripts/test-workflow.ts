@@ -108,19 +108,22 @@ async function main() {
     });
     assert.strictEqual(relayer7.status, "CONFIRMED");
 
-    // 8. DONE + verify still true = idempotent done (no new run even with different inputs).
-    const r8 = await startWorkflow(prisma, spec("b", log, { inputs: { attemptId: "att-2", amountMicro: "999" } }));
+    // 8. DONE + SAME inputs + verify still true = idempotent done (no new run).
+    const r8 = await startWorkflow(prisma, spec("b", log));
     assert.strictEqual(r8.status, "done");
     assert.strictEqual(log.length, 1);
 
-    // 9. DONE + verify false (new deposit epoch) = fresh run with a NEW runId and envelope.
-    verified.value = false;
-    const r9 = await startWorkflow(prisma, spec("b", log));
+    // 9. DONE + DIFFERENT inputs = a fresh run EVEN THOUGH verify still answers true. The row is
+    // the per-kind slot, so its txHash/inputs belong to the PREVIOUS run — "still verified" is the
+    // old operation's verdict, not the new one's. The old rule ("done, even with different inputs")
+    // was the second-withdrawal bug: a new amount/recipient was answered "done" and nothing moved.
+    const r9 = await startWorkflow(prisma, spec("b", log, { inputs: { attemptId: "att-2", amountMicro: "999" } }));
     assert.strictEqual(r9.status, "pending_signature");
     if (r9.status !== "pending_signature") throw new Error("unreachable");
     assert.notStrictEqual(r9.runId, runId, "new run id");
     assert.strictEqual(log.length, 2, "fresh generator built");
     const run2 = r9.runId;
+    verified.value = false; // the new run has landed nothing yet — chain truth is false again
 
     // 10. Lost live session (restart/TTL) mid-signature: the run RESTARTS with a fresh envelope —
     // the stored one is unusable by construction (real nonce/deadline would have drifted).

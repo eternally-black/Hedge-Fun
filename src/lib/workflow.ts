@@ -262,7 +262,17 @@ export async function startWorkflow(prisma: PrismaClient, spec: WorkflowSpec): P
 
   switch (row.state) {
     case "DONE": {
-      // Convergence-driven idempotency: still verified → done; effect gone/new run wanted → restart.
+      // Convergence-driven idempotency is only valid for a retry of the SAME operation. The row is
+      // the per-kind SLOT, so its txHash and inputs belong to the PREVIOUS run — verifying a NEW
+      // request (other amount, other recipient, other funding attempt) against them asks "did the
+      // old run land?", which is yes, and reports the new operation done without it ever running.
+      // A second withdrawal/wrap/redeem after a completed first one was answered exactly that way
+      // (and REDEEM's onDone then booked a payout that never happened). Different inputs → the old
+      // run's verdict is irrelevant → straight to a fresh run.
+      const sameInputs =
+        JSON.stringify(sortKeys(row.inputs)) === JSON.stringify(sortKeys(safeJson(spec.inputs)));
+      if (!sameInputs) return freshRun(prisma, spec, { state: row.state, runId: row.runId });
+      // Still verified → done; effect gone/new run wanted → restart.
       try {
         if (await spec.verify()) return { status: "done" };
       } catch {
@@ -383,7 +393,14 @@ export function runScoped(spec: WorkflowSpec, verdict: () => Promise<TxVerdict>)
     ...spec,
     verify: async () => {
       const v = await ask();
-      return v === "unknown" ? spec.verify() : v === "landed";
+      if (v !== "unknown") return v === "landed";
+      // "unknown" with a resetNeedsProof spec: the balance fallback cannot tell this run's transfer
+      // from a concurrent trade lowering the same balance — a buy of >= the withdrawal amount in
+      // that window converges a withdrawal that never happened and the card reads "Sent". Only the
+      // relayer's own verdict may confirm these; holding SUBMITTING is honest (the mirror of the
+      // definitelyNotDone hold below), and scripts/resolve-workflow.ts is the operator's exit.
+      if (spec.resetNeedsProof) return false;
+      return spec.verify();
     },
     definitelyNotDone: async () => {
       const v = await ask();
