@@ -52,8 +52,14 @@ const FAIL_ALERT_AT = 3;
 const failStreaks: Record<string, number> = {};
 function subsystemFailed(name: string, e: unknown): void {
   failStreaks[name] = (failStreaks[name] ?? 0) + 1;
-  void captureToGlitchTip(e, { subsystem: name });
+  // Capture and page at the SAME threshold, once per streak. Capturing every blip looked free
+  // until GlitchTip's own alert webhook started forwarding each event to Telegram: a chronic
+  // upstream hiccup (Gamma 500s on deep pages, once per few hours) becomes a cry-wolf feed that
+  // buries the one alert that matters. A single transient failure lives in the container logs
+  // (every catch above already console.warns it); a STREAK is a problem and pages exactly once,
+  // with the recovery message below closing the loop.
   if (failStreaks[name] === FAIL_ALERT_AT) {
+    void captureToGlitchTip(e, { subsystem: name, consecutive: String(FAIL_ALERT_AT) });
     void sendOpsTelegram(`🚨 poller: ${name} failed ${FAIL_ALERT_AT} consecutive times: ${(e as Error).message ?? String(e)}`);
   }
 }
