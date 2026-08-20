@@ -251,7 +251,10 @@ async function tick() {
     if (rs.winnersPending > 0) console.warn(`[real-settle] ${rs.winnersPending} won position(s) not yet redeemed on chain`);
     const expired = await expireStaleIntents(prisma);
     if (expired > 0) console.log(`[real-settle] expired ${expired} unsigned intent(s)`);
-    subsystemOk("real-settle");
+    // Per-row failures no longer unwind the pass, so they no longer reach the catch below — report
+    // them here or a deterministic bad row degrades into a silent counter forever.
+    if (rs.errors > 0) subsystemFailed("real-settle", new Error(`${rs.errors} position(s) failed to settle`));
+    else subsystemOk("real-settle");
   } catch (e) {
     console.warn("[real-settle] error:", (e as Error).message);
     subsystemFailed("real-settle", e);

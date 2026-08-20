@@ -5,6 +5,7 @@ import { prisma } from "../src/lib/prisma";
 import { randomCode } from "../src/lib/refcode";
 import { validateSignedSellOrder, bookExitFills, classifyPostResponse, type SignedOrderWire } from "../src/lib/orders";
 import { settleResolvedRealPositions } from "../src/lib/real-settle";
+import { centsFromMicro } from "../src/lib/quote";
 
 const DW = "0x" + "aa".repeat(20);
 const EW = "0x" + "bb".repeat(20);
@@ -298,7 +299,7 @@ async function main() {
     // made", while the history sheet (which derives status from the remainder) showed it.
     assert.strictEqual(dustRow.settlementStatus, "SETTLED", "a sold-out position is settled");
     assert.strictEqual(dustRow.result, "LOSS", "the LEDGER's outcome: this sale realized less than it cost");
-    assert.strictEqual(dustRow.pnlCents, Number((dustRow.realizedPnlMicro ?? 0n) / 10_000n), "cents match the micros");
+    assert.strictEqual(dustRow.pnlCents, centsFromMicro(dustRow.realizedPnlMicro ?? 0n), "cents match the micros (floored)");
     assert.ok(dustRow.settledAt, "and it carries the moment it ended");
 
     // ---- 9. Server-side settlement of a RESOLVED position. A win is booked on PROOF that the
@@ -350,6 +351,11 @@ async function main() {
     assert.strictEqual(wonRow.result, "WIN");
     assert.strictEqual(wonRow.pnlCents, 91, "so the results inbox and the reveal can show it");
     assert.strictEqual(wonRow.seenAt, null, "unseen — that is what makes it a notification");
+    // The collectible economy settles HERE for real bets — the paper settle job filters mode:PAPER,
+    // so this is the only place a REAL win can earn its shard/artifact progress.
+    const grant = await prisma.shardGrant.findUnique({ where: { betId: wonBet.id } });
+    assert.ok(grant, "a REAL win earns a shard grant");
+    assert.strictEqual(grant.counted, true, "and it counts toward the artifact roll-up");
 
     // Idempotent: a second pass finds no remainder and books nothing.
     const again = await settleResolvedRealPositions(prisma, async () => 0n);
@@ -363,6 +369,9 @@ async function main() {
   } finally {
     await prisma.fill.deleteMany({ where: { attempt: { userId: user.id } } });
     await prisma.orderAttempt.deleteMany({ where: { userId: user.id } });
+    // Children before parents: ShardGrant FK → Bet (real wins now earn shards on settle).
+    await prisma.shardGrant.deleteMany({ where: { userId: user.id } });
+    await prisma.collectibleBalance.deleteMany({ where: { userId: user.id } });
     await prisma.bet.deleteMany({ where: { userId: user.id } });
     await prisma.dailyCounter.deleteMany({ where: { userId: user.id } });
     await prisma.market.deleteMany({ where: { polymarketId: { startsWith: tag } } });

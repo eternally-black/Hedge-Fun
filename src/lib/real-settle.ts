@@ -8,6 +8,8 @@ import { planRedeem, type RedeemCandidate } from "./redeem";
 import { erc1155BalanceOf } from "./polygon";
 import { CONDITIONAL_TOKENS } from "./wallet-ops";
 import { SHARE_TICK_MICRO } from "./config";
+import { awardShard } from "./shards";
+import { centsFromMicro } from "./quote";
 
 // Close a resolved position's remainder and realize it. Winner: $1/share. CANCELED (this repo's
 // INVALID resolution): an invalid binary CTF market pays [1,1], so EVERY share of either side
@@ -35,6 +37,7 @@ export async function consumeResolvedPosition(
     const proceeds = won ? (canceled ? rem / 2n : rem) : 0n;
     const basis = filled > 0n ? (((b.spendMicro ?? 0n) + (b.feeMicro ?? 0n)) * rem) / filled : 0n;
     const realized = (b.realizedPnlMicro ?? 0n) + proceeds - basis;
+    const result = realized > 0n ? ("WIN" as const) : realized < 0n ? ("LOSS" as const) : ("PUSH" as const);
     await tx.bet.update({
       where: { id: b.id },
       data: {
@@ -45,11 +48,15 @@ export async function consumeResolvedPosition(
         // exited at a profit on a market that later resolved against it is a win for the person who
         // took it. PUSH is reserved for the exactly-flat case — an invalid market usually is not.
         settlementStatus: "SETTLED",
-        result: realized > 0n ? "WIN" : realized < 0n ? "LOSS" : "PUSH",
-        pnlCents: Number(realized / 10_000n),
+        result,
+        pnlCents: centsFromMicro(realized),
         settledAt: new Date(),
       },
     });
+    // The collectible economy settles here for REAL bets — the paper settle job filters mode:PAPER,
+    // so this call is the ONLY place a real win can earn its shard. Same rule as scripts/settle.ts:
+    // capped for DECK, uncapped for FEED; idempotent on ShardGrant.betId.
+    if (result === "WIN") await awardShard(tx, b.userId, b.id, b.createdAt, { bypassCap: b.source === "FEED" });
     return true;
   });
 }
@@ -67,10 +74,15 @@ export type TokenBalanceProbe = (wallet: string, tokenId: string) => Promise<big
 export async function settleResolvedRealPositions(
   prisma: PrismaClient,
   tokenBalance: TokenBalanceProbe = (wallet, tokenId) => erc1155BalanceOf(CONDITIONAL_TOKENS, wallet, tokenId),
-): Promise<{ lost: number; won: number; dust: number; winnersPending: number }> {
+): Promise<{ lost: number; won: number; dust: number; winnersPending: number; errors: number }> {
   const bets = await prisma.bet.findMany({
     where: {
       mode: "REAL",
+      // PENDING + a real fill, or the settled backlog starves the window: consumed positions are
+      // never deleted, so an unfiltered take:200 with no ORDER BY eventually hands back 200
+      // already-settled rows and a freshly resolved winner never gets scanned again.
+      settlementStatus: "PENDING",
+      filledSharesMicro: { gt: 0n },
       market: { status: { in: ["RESOLVED", "CANCELED"] } },
     },
     select: {
@@ -83,14 +95,28 @@ export async function settleResolvedRealPositions(
         select: { status: true, resolvedOutcome: true, negRisk: true, yesTokenId: true, noTokenId: true },
       },
     },
+    orderBy: { createdAt: "asc" },
     take: 200,
   });
   const open = bets.filter((b) => (b.filledSharesMicro ?? 0n) - (b.closedSharesMicro ?? 0n) > 0n);
-  if (open.length === 0) return { lost: 0, won: 0, dust: 0, winnersPending: 0 };
+  if (open.length === 0) return { lost: 0, won: 0, dust: 0, winnersPending: 0, errors: 0 };
+
+  // One bad row (tx timeout, a constraint trip) must not unwind the pass and block every other
+  // user's settlement — the paper path isolates per-market errors and this pass does the same.
+  let errors = 0;
+  const consume = async (id: string, wonFlag: boolean, canceled: boolean): Promise<boolean> => {
+    try {
+      return await consumeResolvedPosition(prisma, id, wonFlag, canceled);
+    } catch (e) {
+      errors++;
+      console.warn(`[real-settle] settle failed for bet ${id}: ${(e as Error).message}`);
+      return false;
+    }
+  };
 
   const plan = planRedeem(open as unknown as RedeemCandidate[]);
   let lost = 0;
-  for (const l of plan.losses) if (await consumeResolvedPosition(prisma, l.id, false, false)) lost++;
+  for (const l of plan.losses) if (await consume(l.id, false, false)) lost++;
 
   let won = 0;
   let dust = 0;
@@ -103,7 +129,14 @@ export async function settleResolvedRealPositions(
     // a device prompt for three thousandths of a share is not a trade. Written off at zero so it
     // stops holding the position open.
     if (rem < SHARE_TICK_MICRO) {
-      if (await consumeResolvedPosition(prisma, c.id, false, false)) dust++;
+      if (await consume(c.id, false, false)) dust++;
+      continue;
+    }
+    // planRedeem SKIPS a resolved market whose outcome is not written yet (it is neither a loss nor
+    // a bindable winner), so without this guard such a candidate falls through to the winner branch
+    // and a zero token balance alone books it at $1/share. No outcome, no verdict — wait.
+    if (c.market.status !== "CANCELED" && !c.market.resolvedOutcome) {
+      winnersPending++;
       continue;
     }
     const wallet = c.user?.depositWalletAddress;
@@ -126,9 +159,9 @@ export async function settleResolvedRealPositions(
     // The token is gone from a wallet that held it on a market that resolved in its favour: the
     // redeemer burned it and sent the collateral. THAT is when the win is booked.
     const canceled = c.market.status === "CANCELED";
-    if (await consumeResolvedPosition(prisma, c.id, true, canceled)) won++;
+    if (await consume(c.id, true, canceled)) won++;
   }
-  return { lost, won, dust, winnersPending };
+  return { lost, won, dust, winnersPending, errors };
 }
 
 // An ISSUED attempt is an intent nobody signed. The client that asked for it is long gone, but the

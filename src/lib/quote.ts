@@ -184,6 +184,14 @@ export function feePerShareMicro(priceBp: number, feeRateBp: number, feeExpMilli
 const ceilEps = (x: number) => Math.ceil(x - 1e-6);
 const floorEps = (x: number) => Math.floor(x + 1e-6);
 
+// micro-USD → CENTS, floored toward −infinity. `Number(x / 10_000n)` truncates toward ZERO, which
+// rounds gains down (fine) but losses UP (a −1.6¢ loss booked as −1¢) — the one place the repo's
+// "cost up, proceeds down" convention was inverted. Floor is user-pessimistic on both signs.
+export function centsFromMicro(micro: bigint): number {
+  const q = micro / 10_000n;
+  return Number(micro < 0n && micro % 10_000n !== 0n ? q - 1n : q);
+}
+
 export interface AllInQuote {
   sharesMicro: bigint; // micro-shares bought within the budget
   spendMicro: bigint; // notional spent on shares (excl. fee), rounded UP
@@ -227,6 +235,10 @@ export function quoteBuyAllIn(
   let bookRanOut = true;
 
   for (const l of ladder) {
+    // A dust LEVEL is skipped, not fatal: one sub-micro-share ask sitting on top of the book must
+    // not kill the whole quote — on the sell side that read as an uncloseable position. A dust
+    // TAKE from budget exhaustion (below) still ends the walk: there the budget is done, not the book.
+    if (l.size < MICRO_SHARE) continue;
     const p = l.priceBp / 10_000;
     const fps = feePerShareExact(l.priceBp, feeRateBp, feeExpMilli); // unrounded — ceil ONCE at the end
     // What a share costs AGAINST THE BUDGET. feeOnTop puts the fee outside the budget, so only the
@@ -357,6 +369,7 @@ export function quoteSellAllIn(
 
   const MICRO_SHARE = 1e-6;
   let remaining = Number(sharesToSellMicro) / 1_000_000; // shares; float internally, integers out
+  if (ladder.length === 0) return null;
   let sold = 0;
   let proceeds = 0;
   let fee = 0;
@@ -364,6 +377,9 @@ export function quoteSellAllIn(
   let bookRanOut = true;
 
   for (const l of ladder) {
+    // A dust LEVEL is skipped, not fatal — the mirror of the buy walk, and the worse half: a
+    // sub-micro-share bid on top of the book made the EXIT quote null and the position uncloseable.
+    if (l.size < MICRO_SHARE) continue;
     const p = l.priceBp / 10_000;
     const fps = feePerShareExact(l.priceBp, feeRateBp, feeExpMilli); // unrounded — round ONCE at the end
     const take = Math.min(l.size, remaining);

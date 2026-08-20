@@ -3,8 +3,9 @@
 // possible — the route wires the SDK; this module is what the tests pin.
 import { createHash } from "node:crypto";
 import type { PrismaClient, OrderAttempt } from "@prisma/client";
-import { costBasisMicro, feePerShareMicro } from "./quote";
+import { centsFromMicro, costBasisMicro, feePerShareMicro } from "./quote";
 import { SHARE_TICK_MICRO } from "./config";
+import { awardShard } from "./shards";
 // Aliased: `utcDay` is also a LOCAL const inside the bookers, and the zero-fill release below runs
 // before that declaration — an unaliased import would resolve into its temporal dead zone.
 import { utcDay as utcDayOf } from "./time";
@@ -491,8 +492,31 @@ export async function bookEntryFills(
     // money that was already realized. Reset the LOT to this fill and adopt the side actually
     // bought. realizedPnlMicro is deliberately NOT reset — it is the account's running history,
     // not this lot's basis. Unreachable with zero fills: the fresh.length===0 return above.
+    // Sub-tick dust counts as "no position" here for the same reason it does in the intent route's
+    // admission gate (tradableRemainder): the two predicates disagreeing let an entry increment into
+    // a dust lot with a stale side, and EXIT then signs a SELL for a token the user does not hold.
     const reopening =
-      priorBet !== null && (priorBet.filledSharesMicro ?? 0n) - (priorBet.closedSharesMicro ?? 0n) <= 0n;
+      priorBet !== null && (priorBet.filledSharesMicro ?? 0n) - (priorBet.closedSharesMicro ?? 0n) < SHARE_TICK_MICRO;
+
+    // A reopen on a market that no longer trades is not a re-entry — it is a LATE fill for a lot
+    // that has already been settled (and possibly redeemed on chain). Resetting the row would clear
+    // the settlement stamp, real-settle would see a fresh remainder on a resolved market with a
+    // zero token balance, and the same shares would be booked a second time at $1/share. The fills
+    // are already in the ledger; leave the position settled and hand the attempt to ops.
+    if (reopening && priorBet !== null) {
+      const mkt = await tx.market.findUnique({ where: { id: attempt.marketId }, select: { status: true } });
+      if (mkt && mkt.status !== "OPEN") {
+        await tx.orderAttempt.update({
+          where: { id: attempt.id },
+          data: {
+            state: outcome,
+            betId: priorBet.id,
+            error: "late_fill_after_market_close: booked to Fill ledger only, settled position not reopened",
+          },
+        });
+        return;
+      }
+    }
 
     // The position aggregate — one REAL row per (user, market). stakeCents keeps the swiped
     // all-in INTENT; actuals live in the micro fields (PnL derives from these, never stakeCents).
@@ -748,12 +772,19 @@ export async function bookExitFills(
           ? {
               settlementStatus: "SETTLED" as const,
               result: realizedTotal > 0n ? ("WIN" as const) : realizedTotal < 0n ? ("LOSS" as const) : ("PUSH" as const),
-              pnlCents: Number(realizedTotal / 10_000n),
+              pnlCents: centsFromMicro(realizedTotal),
               settledAt: new Date(),
             }
           : {}),
       },
     });
+
+    // A profitable sold-out REAL position is the ledger's WIN, and the paper settle job
+    // (mode:PAPER) will never see this row — this is where its shard is earned. Idempotent on
+    // ShardGrant.betId, so a reopened lot on the same market can never earn a second one.
+    if (closedOut && realizedTotal > 0n) {
+      await awardShard(tx, bet.userId, bet.id, bet.createdAt, { bypassCap: bet.source === "FEED" });
+    }
 
     // A clamp means the exchange sold MORE than we thought the position held: the Fill rows carry
     // the exchange's number, the aggregate carries the remainder, and the two now disagree. That
@@ -836,30 +867,42 @@ export async function trueUpAttemptFee(
     const filledShare = bet.filledSharesMicro ?? 0n;
     const closedShare = filledShare > 0n ? (bet.closedSharesMicro ?? 0n) : 0n;
 
+    // An entry-fee correction reprices the cost basis (basis IS spendMicro + feeMicro), so every
+    // FUTURE exit picks it up for free. The shares already closed have no future exit left to pick
+    // it up: bookExitFills computed their realizedDelta against the fee that was on the row at the
+    // time, and that number is now known to be wrong. Restate exactly the closed fraction — a fully
+    // closed lot would otherwise swallow the whole correction, and a position entered at a
+    // 20_000µ¢ under-estimate and closed flat would keep reporting zero PnL on what was really a
+    // 20_000µ¢ loss. Floor-divides like the exit's own prorate, so the correction never claims
+    // more than the closed slice actually bore. (Exit: a higher charged close fee lowers realized
+    // PnL by exactly that much.)
+    const newRealized = isExit
+      ? (bet.realizedPnlMicro ?? 0n) - applied
+      : closedShare > 0n
+        ? (bet.realizedPnlMicro ?? 0n) - (applied * closedShare) / filledShare
+        : (bet.realizedPnlMicro ?? 0n);
+
     // Explicit SET, not { increment }: these columns are NULL on rows that never got there and
     // SQL NULL + x = NULL (the rule the close test pinned). Safe — the row was read in THIS tx.
     await tx.bet.update({
       where: { id: bet.id },
-      data: isExit
-        ? {
-            // A higher charged close fee lowers realized PnL by exactly that much.
-            closeFeeMicro: (bet.closeFeeMicro ?? 0n) + applied,
-            realizedPnlMicro: (bet.realizedPnlMicro ?? 0n) - applied,
-          }
-        : // An entry-fee correction reprices the cost basis (basis IS spendMicro + feeMicro), so
-          // every FUTURE exit picks it up for free. The shares already closed have no future exit
-          // left to pick it up: bookExitFills computed their realizedDelta against the fee that was
-          // on the row at the time, and that number is now known to be wrong. Restate exactly the
-          // closed fraction — a fully closed lot would otherwise swallow the whole correction, and
-          // a position entered at a 20_000µ¢ under-estimate and closed flat would keep reporting
-          // zero PnL on what was really a 20_000µ¢ loss. Floor-divides like the exit's own prorate,
-          // so the correction never claims more than the closed slice actually bore.
-          {
-            feeMicro: (bet.feeMicro ?? 0n) + applied,
-            ...(closedShare > 0n
-              ? { realizedPnlMicro: (bet.realizedPnlMicro ?? 0n) - (applied * closedShare) / filledShare }
-              : {}),
-          },
+      data: {
+        ...(isExit
+          ? { closeFeeMicro: (bet.closeFeeMicro ?? 0n) + applied, realizedPnlMicro: newRealized }
+          : {
+              feeMicro: (bet.feeMicro ?? 0n) + applied,
+              ...(closedShare > 0n ? { realizedPnlMicro: newRealized } : {}),
+            }),
+        // The stamped verdict must follow the money it was stamped from: /api/results reads
+        // pnlCents/result while /api/history reads realizedPnlMicro. A true-up that restates one
+        // and not the other shows a WIN in the inbox and a loss in the history for the same close.
+        ...(bet.settlementStatus === "SETTLED" && newRealized !== (bet.realizedPnlMicro ?? 0n)
+          ? {
+              result: newRealized > 0n ? ("WIN" as const) : newRealized < 0n ? ("LOSS" as const) : ("PUSH" as const),
+              pnlCents: centsFromMicro(newRealized),
+            }
+          : {}),
+      },
     });
     return applied;
   });

@@ -114,9 +114,13 @@ export async function settleMarket(
               settledAt: new Date(),
             },
           });
-          await tx.virtualBalance.update({
+          // upsert, like the settled branch below: a missing balance row would throw P2025 and
+          // abort the whole market's Serializable transaction — every bet on it stuck PENDING,
+          // retried forever. A row that never existed has no hold to release.
+          await tx.virtualBalance.upsert({
             where: { userId: bet.userId },
-            data: { lockedCents: { decrement: bet.stakeCents } },
+            create: { userId: bet.userId, balanceCents: 0, lockedCents: 0 },
+            update: { lockedCents: { decrement: bet.stakeCents } },
           });
           voided++;
           continue;

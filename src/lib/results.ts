@@ -38,6 +38,9 @@ type ResultBet = Prisma.BetGetPayload<{ select: typeof resultBetSelect }>;
 function outcomeLabel(b: ResultBet): string {
   if (b.market.resolvedOutcome === "YES") return `Resolved ${b.market.outcomeYesLabel}`;
   if (b.market.resolvedOutcome === "NO") return `Resolved ${b.market.outcomeNoLabel}`;
+  // A REAL position sold out before resolution is SETTLED while the market is still undecided —
+  // that is the exit's verdict, not a void. Only VOID/INVALID rows should read as voided.
+  if (b.settlementStatus === "SETTLED") return "Closed early";
   return "Voided"; // INVALID / null (canceled market -> push)
 }
 

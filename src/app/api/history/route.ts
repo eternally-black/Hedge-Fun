@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 import type { HistoryResponse } from "@/lib/api-types";
 import { SHARE_TICK_MICRO } from "@/lib/config";
+import { centsFromMicro } from "@/lib/quote";
 import { categoryOf, gameOf } from "@/lib/deck-mix";
 
 // Prediction history: the user's bets joined with market info. PENDING (awaiting resolution)
@@ -99,8 +100,8 @@ export async function GET(req: Request) {
     stakeCents: b.stakeCents,
     lockedPriceBp: b.lockedPriceBp,
     status: mode === "REAL" ? realStatus : b.settlementStatus === "PENDING" ? "PENDING" : b.result,
-    // micro-USD → cents. Truncates sub-cent dust, which is display-only: the ledger keeps the micros.
-    pnlCents: mode === "REAL" ? Number(realizedMicro / 10_000n) : b.pnlCents,
+    // micro-USD → cents, floored (centsFromMicro): display-only — the ledger keeps the micros.
+    pnlCents: mode === "REAL" ? centsFromMicro(realizedMicro) : b.pnlCents,
     resolutionDeadline: b.market.resolutionDeadline.toISOString(),
     startsAt: b.market.startsAt?.toISOString() ?? null,
     createdAt: b.createdAt.toISOString(),

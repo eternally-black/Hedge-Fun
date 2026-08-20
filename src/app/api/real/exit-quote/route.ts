@@ -16,7 +16,7 @@ import { hasRealConsent } from "@/lib/real";
 import { rateLimit } from "@/lib/ratelimit";
 import { getBook } from "@/lib/clob";
 import { getMarketFee } from "@/lib/fees";
-import { costBasisMicro, quoteSellAllIn } from "@/lib/quote";
+import { centsFromMicro, costBasisMicro, quoteSellAllIn } from "@/lib/quote";
 import { SHARE_TICK_MICRO, QUOTES_RATE_PER_MIN, EXIT_QUOTES_MAX_IDS } from "@/lib/config";
 import type { ExitQuoteRow, ExitQuotesResponse } from "@/lib/api-types";
 
@@ -69,13 +69,13 @@ export async function GET(req: Request) {
         if (!q) return null; // no bids — nothing to sell into, so there is no honest number to show
 
         const basis = costBasisMicro(bet.spendMicro ?? 0n, bet.feeMicro ?? 0n, bet.filledSharesMicro ?? 0n, shares);
-        // micro-USD → cents by BigInt division (truncates toward zero), the same conversion
-        // /api/history uses for realized P&L — so the live number and the settled one round alike.
+        // micro-USD → cents, floored toward −infinity (centsFromMicro) — the same conversion
+        // /api/history and settlement use, so the live number and the settled one round alike.
         return {
           betId: bet.id,
           sharesMicro: shares.toString(),
-          proceedsCents: Number(q.netMicro / 10_000n),
-          pnlCents: Number((q.netMicro - basis) / 10_000n),
+          proceedsCents: centsFromMicro(q.netMicro),
+          pnlCents: centsFromMicro(q.netMicro - basis),
           priceBp: q.vwapBp,
           partial: q.exhaustedBook, // the bids ran out: this values only what the book can absorb
         };
