@@ -15,7 +15,7 @@ import { serverSecureClient } from "@/lib/polymarket-server";
 import { createWithdrawal, fetchSupportedAssets, fetchWithdrawalStatus } from "@/lib/bridge";
 import { bridgeOutSpec, type BridgeOutInputs } from "@/lib/bridge-out";
 import { relayerVerdict } from "@/lib/relayer-verdict";
-import { runScoped, startWorkflow } from "@/lib/workflow";
+import { runScoped, startWorkflow, tryConverge } from "@/lib/workflow";
 import { erc20BalanceOf, PUSD_ADDRESS } from "@/lib/polygon";
 import { isAddress as isSolanaAddress } from "@solana/kit";
 
@@ -104,8 +104,29 @@ export async function POST(req: Request) {
   const existing = await prisma.walletWorkflow.findUnique({
     where: { userId_kind: { userId: user.id, kind: "BRIDGE_OUT" } },
   });
-  if (existing && (existing.state === "PENDING_SIGNATURE" || existing.state === "SUBMITTING")) {
+  if (existing && existing.state === "PENDING_SIGNATURE") {
     return NextResponse.json({ error: "withdrawal_in_flight" }, { status: 409 });
+  }
+  if (existing && existing.state === "SUBMITTING") {
+    // A SUBMITTING run whose browser is gone has no driver: the card's GET only reads, and this
+    // POST used to 409 before asking the engine anything — so a withdrawal that had LANDED held
+    // the slot forever (live, 2026-08-19). Converge against the RUN'S OWN inputs (never the new
+    // request's); only a run that is genuinely still in flight keeps the 409.
+    const prior = existing.inputs as unknown as BridgeOutInputs | null;
+    const converged =
+      prior?.bridgeAddress && existing.runId
+        ? await tryConverge(
+            prisma,
+            runScoped(bridgeOutSpec(user.id, signerAddress, client, prior), () =>
+              relayerVerdict(prisma, user.id, "BRIDGE_OUT", client),
+            ),
+            existing.runId,
+          )
+        : false;
+    if (!converged) {
+      return NextResponse.json({ error: "withdrawal_in_flight" }, { status: 409 });
+    }
+    existing.state = "DONE"; // converged: fall through — the reuse check below sees a terminal row
   }
 
   // REUSE before minting. A bridge address is a live one-shot forwarder: it takes whatever lands on

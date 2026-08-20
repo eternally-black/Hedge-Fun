@@ -180,7 +180,11 @@ async function run(
   return { status: "submitting", runId: row.runId!, transactionId: txId, error: null };
 }
 
-async function tryConverge(prisma: PrismaClient, spec: WorkflowSpec, runId: string): Promise<boolean> {
+// Exported for /api/real/withdraw: a SUBMITTING run whose browser is gone has NO driver — the
+// card's GET only reads, and the withdraw POST used to 409 on the slot before asking the engine
+// anything, so a withdrawal that had LANDED held the slot forever (live, 2026-08-19: a completed
+// $2 bridge-out blocked every later withdrawal until an operator edited the row by hand).
+export async function tryConverge(prisma: PrismaClient, spec: WorkflowSpec, runId: string): Promise<boolean> {
   try {
     if (!(await spec.verify())) return false;
   } catch {
