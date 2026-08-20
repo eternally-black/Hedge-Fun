@@ -19,6 +19,34 @@ export async function register() {
     throw new Error(`[boot] missing required env in production: ${missing.join(", ")}`);
   }
 
+  // Real-money contract. Every one of these fails OPEN or SILENT at runtime: sameOrigin() returns
+  // true with APP_ORIGIN unset; a locus that is not exactly "browser" posts orders from the
+  // geoblocked VPS and every swipe 409s; missing REAL_CREDS_KEY 503s every money route; a browser
+  // locus without the reconcile pair permanently loses any order whose browser dies before
+  // reporting. A misconfigured deploy must go red HERE, not be discovered one 409 at a time by the
+  // first paying tester. (The deploy script's drift check compares key NAMES only — an empty value
+  // passes it clean.)
+  const realRequired = [
+    "APP_ORIGIN",
+    "REAL_CREDS_KEY",
+    "POLYMARKET_BUILDER_API_KEY",
+    "POLYMARKET_BUILDER_SECRET",
+    "POLYMARKET_BUILDER_PASSPHRASE",
+  ];
+  const realMissing = realRequired.filter((k) => !process.env[k]);
+  if (process.env.REAL_ORDER_LOCUS !== "browser") {
+    realMissing.push('REAL_ORDER_LOCUS (must be exactly "browser" — the VPS is geoblocked)');
+  } else {
+    if (!process.env.REAL_RECONCILE_URL) realMissing.push("REAL_RECONCILE_URL (required with browser locus)");
+    if (!process.env.REAL_RECONCILE_SECRET) realMissing.push("REAL_RECONCILE_SECRET (required with browser locus)");
+  }
+  if (realMissing.length) {
+    await captureToGlitchTip(new Error(`[boot] real-money env incomplete: ${realMissing.join(", ")}`), {
+      boot: "real-env-check",
+    });
+    throw new Error(`[boot] real-money env incomplete: ${realMissing.join(", ")}`);
+  }
+
   // Soft: without the secret the referral device anti-fraud guard + cross-browser attribution
   // fall back to no-ops (fail-safe, not a crash) — but that's a silent security/attribution loss,
   // so make it visible in the logs.

@@ -68,7 +68,7 @@ COPY --from=build --chown=nextjs:nodejs /app/dist/poller.cjs ./dist/poller.cjs
 
 # --- Prisma: copy the FULL @prisma scope (client + engines + CLI deps) + .prisma (generated
 #     client/engine) + the prisma CLI + schema. This is the documented minimal set for both
-#     @prisma/client at runtime (app + poller) AND the migrate service's `prisma db push`.
+#     @prisma/client at runtime (app + poller) AND the migrate service's `prisma migrate deploy`.
 #     ~180MB total vs the 2GB full tree; the standalone trace can miss the engine .so, so we
 #     copy these explicitly. ---
 COPY --from=build --chown=nextjs:nodejs /app/node_modules/.prisma ./node_modules/.prisma

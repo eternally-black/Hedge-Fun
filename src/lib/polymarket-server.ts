@@ -30,6 +30,12 @@ function relaySigner(address: string) {
 const CLIENT_TTL_MS = 5 * 60 * 1000;
 const clientCache = new Map<string, { at: number; client: ServerClient }>();
 
+// Expired entries hold DECRYPTED CLOB credentials and were never removed — the map grew one entry
+// per real-money user for the process lifetime. Swept on access; live entries are untouched.
+function sweepClients(now: number): void {
+  for (const [k, v] of clientCache) if (now - v.at >= CLIENT_TTL_MS) clientCache.delete(k);
+}
+
 // null = not configured yet (missing builder env, user creds, or wallet) — callers 503, never throw.
 export async function serverSecureClient(prisma: PrismaClient, user: User): Promise<ServerClient | null> {
   const key = process.env.POLYMARKET_BUILDER_API_KEY;
@@ -38,6 +44,7 @@ export async function serverSecureClient(prisma: PrismaClient, user: User): Prom
   if (!key || !secret || !passphrase) return null;
   if (!user.embeddedWalletAddress || !user.depositWalletAddress) return null;
 
+  sweepClients(Date.now());
   const cached = clientCache.get(user.id);
   if (cached && Date.now() - cached.at < CLIENT_TTL_MS) return cached.client;
 

@@ -9,6 +9,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 import { isRealMoneyEligible, hasRealConsent, sameOrigin } from "@/lib/real";
+import { rateLimit } from "@/lib/ratelimit";
 import { captureToGlitchTip, sendOpsTelegram } from "@/lib/glitchtip";
 import { serverSecureClient } from "@/lib/polymarket-server";
 import { relayerVerdict } from "@/lib/relayer-verdict";
@@ -49,6 +50,11 @@ export async function POST(req: Request) {
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   if (!hasRealConsent(user)) return NextResponse.json({ error: "consent_required" }, { status: 403 });
   if (!sameOrigin(req)) return NextResponse.json({ error: "bad_origin" }, { status: 403 });
+  // Generous — the relay loop legitimately POSTs several times per run — but bounded: every start
+  // can reach the relayer and the chain RPC.
+  if (!rateLimit(`real-workflow:${user.id}`, 60, 60_000)) {
+    return NextResponse.json({ error: "rate_limited" }, { status: 429 });
+  }
   const wallet = user.depositWalletAddress;
   const signerAddress = user.embeddedWalletAddress;
   if (!wallet || !signerAddress) return NextResponse.json({ error: "no_deposit_wallet" }, { status: 409 });

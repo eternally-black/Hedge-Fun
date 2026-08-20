@@ -25,13 +25,18 @@ function hmac(value: string): Uint8Array<ArrayBuffer> {
   return out;
 }
 
-// First entry of x-forwarded-for is the originating client; later entries are proxy hops.
+// LAST entry of x-forwarded-for, not first: the leftmost entries are whatever the CLIENT sent and
+// are only meaningful when every hop is honest. The rightmost value is the one our own proxy wrote
+// (Caddy ≥2.5 additionally drops client-supplied XFF from untrusted peers, so in this topology the
+// header holds exactly one entry — the real client). Reading the first entry made the rate-limit
+// key and signupIpHash attacker-chosen behind any proxy that appends instead of replacing.
 // Falls back to x-real-ip, then a sentinel (so hashing never throws on a missing header).
 export function clientIp(headers: Headers): string {
   const xff = headers.get("x-forwarded-for");
   if (xff) {
-    const first = xff.split(",")[0]?.trim();
-    if (first) return first;
+    const parts = xff.split(",").map((s) => s.trim()).filter(Boolean);
+    const last = parts[parts.length - 1];
+    if (last) return last;
   }
   return headers.get("x-real-ip")?.trim() ?? "0.0.0.0";
 }

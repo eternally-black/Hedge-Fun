@@ -7,6 +7,7 @@ import { Prisma, type FundingAttempt } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 import { isRealMoneyEligible, hasRealConsent, sameOrigin } from "@/lib/real";
+import { rateLimit } from "@/lib/ratelimit";
 import { captureToGlitchTip } from "@/lib/glitchtip";
 import { erc20BalanceOf, PUSD_ADDRESS, USDCE_ADDRESS } from "@/lib/polygon";
 
@@ -36,6 +37,10 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "consent_required" }, { status: 403 });
   }
   if (!sameOrigin(req)) return NextResponse.json({ error: "bad_origin" }, { status: 403 });
+  // Two chain reads per call — bounded so a loop cannot exhaust the shared RPC.
+  if (!rateLimit(`real-funding:${user.id}`, 10, 60_000)) {
+    return NextResponse.json({ error: "rate_limited" }, { status: 429 });
+  }
 
   const wallet = user.depositWalletAddress;
   if (!wallet) {
