@@ -1,6 +1,7 @@
 import type { StreakState } from "@prisma/client";
 import { prisma } from "./prisma";
 import { utcDay, diffDays } from "./time";
+import { runSerializable } from "./tx";
 import { RECOVERY_WINDOW_DAYS } from "./config";
 
 // ---------------------------------------------------------------------------
@@ -200,7 +201,12 @@ export async function recoverStreak(
   userId: string,
   at: Date = new Date(),
 ): Promise<{ recovered: boolean; reason?: "no_streak" | "not_recoverable" | "window_expired" | "no_artifact"; currentLevel: number }> {
-  return prisma.$transaction(async (tx) => {
+  // Serializable, not the default isolation: the artifact spend below is a read-then-write (check
+  // `artifacts >= 1`, then decrement). Under Read Committed two concurrent recover calls both pass
+  // the check and both decrement, driving the balance negative and recovering twice for one
+  // artifact. Same pattern, same fix as the artifact spend in topup.ts. The body re-reads
+  // everything inside the transaction, so a P2034 retry is safe.
+  return runSerializable(async (tx) => {
     const streak = await tx.streak.findUnique({ where: { userId } });
     if (!streak) return { recovered: false, reason: "no_streak", currentLevel: 0 };
     if (streak.state !== "BURNED_RECOVERABLE")

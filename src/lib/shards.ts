@@ -49,14 +49,24 @@ export async function awardShard(
 
   // Daily cap check via per-day counter — DECK only. Feed bets (bypassCap) skip it: always counted,
   // and they don't read/increment shardCount, so they stay off the deck's daily-cap ledger entirely.
+  //
+  // Claim the slot with the bound IN THE WHERE, not read-then-increment. This function runs inside
+  // the CALLER's transaction and two of the three callers (orders.ts bookExitFills, real-settle.ts
+  // consumeResolvedPosition) open theirs at the default isolation, where two concurrent awards both
+  // read the same shardCount and both pass a cap that had room for one. Deciding and counting in a
+  // single statement holds at any isolation level.
   let counted = true;
   if (!bypassCap) {
-    const counter = await tx.dailyCounter.upsert({
+    await tx.dailyCounter.upsert({
       where: { userId_utcDay: { userId, utcDay: day } },
       create: { userId, utcDay: day, shardCount: 0 },
       update: {},
     });
-    counted = counter.shardCount < SHARD_DAILY_CAP;
+    const claimed = await tx.dailyCounter.updateMany({
+      where: { userId, utcDay: day, shardCount: { lt: SHARD_DAILY_CAP } },
+      data: { shardCount: { increment: 1 } },
+    });
+    counted = claimed.count > 0;
   }
 
   await tx.shardGrant.create({ data: { userId, betId, utcDay: day, counted } });
@@ -66,23 +76,29 @@ export async function awardShard(
     return { shardAwarded: false, artifactsCreated: 0, shards: bal0.shards, artifacts: bal0.artifacts };
   }
 
-  if (!bypassCap) {
-    await tx.dailyCounter.update({
-      where: { userId_utcDay: { userId, utcDay: day } },
-      data: { shardCount: { increment: 1 } },
-    });
-  }
-
-  const next = rollUp(bal0.shards, bal0.artifacts, 1);
-  await tx.collectibleBalance.update({
+  // Same hazard as the cap, bigger payout: applying rollUp's ABSOLUTE result would write a balance
+  // computed from `bal0`, read before this statement. Two concurrent awards both reading 19 shards
+  // both write {shards: 0, artifacts: +1} — two artifacts minted from 21 shards, and an artifact
+  // buys a TOPUP_GRANT_CENTS top-up. Increment (atomic everywhere), then convert the overflow with
+  // the threshold in the WHERE so only one of the racers can take it. rollUp stays the pure model
+  // of the same rule (and its unit tests in test-engine.ts).
+  const bal = await tx.collectibleBalance.update({
     where: { userId },
-    data: { shards: next.shards, artifacts: next.artifacts },
+    data: { shards: { increment: 1 } },
+    select: { shards: true, artifacts: true },
   });
+  const converted =
+    bal.shards >= SHARDS_PER_ARTIFACT
+      ? await tx.collectibleBalance.updateMany({
+          where: { userId, shards: { gte: SHARDS_PER_ARTIFACT } },
+          data: { shards: { decrement: SHARDS_PER_ARTIFACT }, artifacts: { increment: 1 } },
+        })
+      : { count: 0 };
 
   return {
     shardAwarded: true,
-    artifactsCreated: next.artifactsCreated,
-    shards: next.shards,
-    artifacts: next.artifacts,
+    artifactsCreated: converted.count,
+    shards: bal.shards - converted.count * SHARDS_PER_ARTIFACT,
+    artifacts: bal.artifacts + converted.count,
   };
 }
