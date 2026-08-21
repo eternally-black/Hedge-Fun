@@ -345,8 +345,24 @@ export async function placeRealOrder(
   // A refusal comes back as ok:false with a message rather than as a throw.
   if (posted.ok === false) throw new Error(`post_rejected: ${posted.message ?? ""}`);
   if (!posted.orderId) throw new Error("post_no_order_id");
-  return (await api("/api/real/posted", {
-    method: "POST",
-    body: JSON.stringify({ intentId: intent.intentId, orderId: posted.orderId }),
-  })) as { status: string; filledSharesMicro?: string };
+  // The order is LIVE from this line on, and the browser is holding the only copy of its id. A
+  // failure REPORTING it is not a failed order, but it used to throw and the card rendered it as
+  // one — telling the user their money did not move while it was filling, and inviting a retry.
+  // Retry the report once, then hand back the status the card already has honest copy for
+  // ("sent, outcome not yet confirmed"). The orphan sweep still resolves the attempt against the
+  // exchange within ~15 minutes; this only stops a lost response from reading as a loss.
+  const report = async () =>
+    (await api("/api/real/posted", {
+      method: "POST",
+      body: JSON.stringify({ intentId: intent.intentId, orderId: posted.orderId }),
+    })) as { status: string; filledSharesMicro?: string };
+  try {
+    return await report();
+  } catch {
+    try {
+      return await report();
+    } catch {
+      return { status: "submitting" };
+    }
+  }
 }

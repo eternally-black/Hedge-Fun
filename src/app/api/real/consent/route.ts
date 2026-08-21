@@ -68,7 +68,10 @@ export async function DELETE(req: Request) {
   }
   const user = auth.user;
 
-  if (!isRealMoneyEligible(user)) return NextResponse.json({ error: "real_disabled" }, { status: 403 });
+  // No eligibility gate on revocation, deliberately: opting OUT must never require being opted IN.
+  // Gating it meant a user removed from the allowlist kept a live consent record they could not
+  // withdraw — the mirror of the rule /api/real/positions and /withdraw already follow, where a
+  // flipped allowlist must not trap someone with their own money or their own consent.
   if (!sameOrigin(req)) return NextResponse.json({ error: "bad_origin" }, { status: 403 });
 
   // Revoking clears the version AND drops the user out of real mode: leaving realMode true with

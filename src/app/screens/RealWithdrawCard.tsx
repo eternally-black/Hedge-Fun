@@ -3,7 +3,7 @@
 // The money-out screen. The bridge address is SINGLE-PURPOSE — it forwards whatever lands on it to
 // the recipient it was created for — so a retry must never mint a second one: the server answers
 // `withdrawal_in_flight` and this card keeps pointing at the run that already exists.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { withdrawViaBridge, type Api, type RealCtx } from "@/lib/real-client";
 
 type BridgeAsset = { chainId: string; chainName: string; symbol: string; tokenAddress: string; minUsd: number };
@@ -91,6 +91,11 @@ export function RealWithdrawCard({ api, ctx }: { api: Api; ctx: RealCtx }) {
   // terms are shown, and the run starts on a second, deliberate click. Any edit below clears it, so
   // a confirmation can never belong to different terms than the ones it was granted for.
   const [confirming, setConfirming] = useState(false);
+  // When the read-back was armed. A double-tap puts the second click on the re-rendered button
+  // before a human could possibly have read the terms it just revealed, which turns a two-step
+  // confirmation for an irreversible transfer back into one click. The dwell below is what makes
+  // the second click a decision rather than a reflex.
+  const armedAt = useRef(0);
 
   const refresh = useCallback(async () => {
     try {
@@ -160,9 +165,12 @@ export function RealWithdrawCard({ api, ctx }: { api: Api; ctx: RealCtx }) {
     if (!confirming) {
       setError("");
       setNote("");
+      armedAt.current = Date.now();
       setConfirming(true);
       return;
     }
+    // Too fast to have read the read-back panel: ignore rather than spend.
+    if (Date.now() - armedAt.current < 700) return;
     setConfirming(false);
     setBusy(true);
     setError("");
