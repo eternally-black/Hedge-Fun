@@ -126,7 +126,20 @@ export async function POST(req: Request) {
     if (!converged) {
       return NextResponse.json({ error: "withdrawal_in_flight" }, { status: 409 });
     }
-    existing.state = "DONE"; // converged: fall through — the reuse check below sees a terminal row
+    // Converged means the prior run LANDED. Do NOT fall through into a new withdrawal: this POST is
+    // most likely the user retrying the very transfer that just completed — the card renders a lost
+    // response as a plain failure (RealWithdrawCard), so pressing the button again is the natural
+    // next move. Falling through minted a fresh forwarder and started a second run, and the retry
+    // could not even be recognised as a duplicate downstream: `pusdBaseline` is re-read on every
+    // POST, so an identical amount+recipient retry still fails startWorkflow's sameInputs check and
+    // reaches freshRun. Report the completed run instead; a genuinely new withdrawal is one more
+    // POST away, now against a terminal row that the reuse/mint path handles normally.
+    return NextResponse.json({
+      bridgeAddress: prior!.bridgeAddress,
+      amountMicro: prior!.amountMicro,
+      status: "done",
+      converged: true,
+    });
   }
 
   // REUSE before minting. A bridge address is a live one-shot forwarder: it takes whatever lands on

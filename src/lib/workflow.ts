@@ -282,6 +282,15 @@ export async function startWorkflow(prisma: PrismaClient, spec: WorkflowSpec): P
       } catch {
         return { status: "done" }; // can't verify right now — don't burn a run on it
       }
+      // A restart from DONE RE-EXECUTES the operation, so a false verify() must mean "the effect is
+      // gone", not "we could not tell". For a resetNeedsProof spec runScoped answers false for BOTH:
+      // an unreachable relayer probe — the routine case during an outage — is indistinguishable from
+      // a run that never landed, and re-driving BRIDGE_OUT with identical inputs bridges the same
+      // pUSD twice. Same discipline as the SUBMITTING branch: only a POSITIVE "it did not happen"
+      // releases the slot.
+      if (spec.resetNeedsProof && !(await spec.definitelyNotDone().catch(() => false))) {
+        return { status: "done" };
+      }
       return freshRun(prisma, spec, { state: row.state, runId: row.runId });
     }
     case "FAILED":
