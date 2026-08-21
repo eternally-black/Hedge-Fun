@@ -22,6 +22,7 @@ import {
   type SignedOrderWire,
 } from "@/lib/orders";
 import { postOrder } from "@polymarket/client/actions";
+import { rateLimit } from "@/lib/ratelimit";
 import { SWIPE_CAP } from "@/lib/config";
 import { utcDay } from "@/lib/time";
 import { releaseSwipeSlot } from "@/lib/orders";
@@ -36,6 +37,13 @@ export async function POST(req: Request) {
   if (!isRealMoneyEligible(user)) return NextResponse.json({ error: "real_disabled" }, { status: 403 });
   if (!hasRealConsent(user)) return NextResponse.json({ error: "consent_required" }, { status: 403 });
   if (!sameOrigin(req)) return NextResponse.json({ error: "bad_origin" }, { status: 403 });
+  // The one money route without a bound, while /intent (30/min) upstream of it has one. Every call
+  // reaches an exchange post under this user's credentials, so leaving it open lets a scripted
+  // client outrun its own intents. Matched to the intent limit: legitimate traffic is one submit
+  // per intent.
+  if (!rateLimit(`real-submit:${user.id}`, 30, 60_000)) {
+    return NextResponse.json({ error: "rate_limited" }, { status: 429 });
+  }
   const depositWallet = user.depositWalletAddress;
   const embeddedWallet = user.embeddedWalletAddress;
   if (!depositWallet || !embeddedWallet) return NextResponse.json({ error: "no_deposit_wallet" }, { status: 409 });
@@ -271,10 +279,6 @@ export async function POST(req: Request) {
 
   const rr = response as Record<string, unknown> | null;
   const externalOrderId = rr && typeof rr.orderId === "string" ? rr.orderId : null;
-  await prisma.orderAttempt.updateMany({
-    where: { id: attempt.id, state: "SUBMITTING" },
-    data: { state: "POSTED", postResponse: (response ?? undefined) as never, externalOrderId },
-  });
 
   // Classify BEFORE booking (S6 review critical: the real matched response carries scalar
   // making/taking amounts, not a fills array — a shape-guess parser read it as zero-fill and
@@ -288,6 +292,30 @@ export async function POST(req: Request) {
       ? { rateBp: params.feeRateBp, expMilli: params.feeExpMilli }
       : null;
   const outcome = classifyPostResponse(response, attempt.dir === "EXIT" ? "EXIT" : "ENTRY", attempt.id, fee);
+
+  // A POSTED row with no externalOrderId is invisible to BOTH sweeps: discoverOrphanAttempts scans
+  // {state: SUBMITTING, externalOrderId: null} and reconcileStuckAttempts scans {externalOrderId:
+  // {not: null}}. Nothing selects the intersection, so such a row sits forever with the money
+  // possibly spent while the partial unique index keeps holding that market's slot. Advance to
+  // POSTED only when the row can still be resolved from there — either there is an id to ask the
+  // exchange about, or the verdict is terminal and the booking below moves the row off POSTED in
+  // the same request. Otherwise leave it SUBMITTING, which is precisely the shape the orphan sweep
+  // was built to adopt or kill.
+  if (externalOrderId === null && (outcome.kind === "pending" || outcome.kind === "unknown")) {
+    await prisma.orderAttempt.updateMany({
+      where: { id: attempt.id, state: "SUBMITTING" },
+      data: {
+        postResponse: (response ?? undefined) as never,
+        error: "posted without an order id — orphan discovery owns it",
+      },
+    });
+    return NextResponse.json({ status: "submitting", error: "post_no_order_id" });
+  }
+
+  await prisma.orderAttempt.updateMany({
+    where: { id: attempt.id, state: "SUBMITTING" },
+    data: { state: "POSTED", postResponse: (response ?? undefined) as never, externalOrderId },
+  });
 
   if (outcome.kind === "pending" || outcome.kind === "unknown") {
     return NextResponse.json({ status: "posted", outcome: outcome.kind });

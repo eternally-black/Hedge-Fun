@@ -85,7 +85,12 @@ async function pageTrades(
     const paginator = listAccountTrades(client as never, { tokenId: attempt.tokenId });
     const first = await paginator.firstPage();
     rows.push(...first.items);
-    if (first.hasMore && first.nextCursor) {
+    // hasMore with no usable cursor is a SHORT read, not a complete one — there is nothing to
+    // resume from. Falling through to `complete: true` breaks this function's own contract above:
+    // both callers turn "no trade found" into something terminal (kill the attempt, book zero
+    // fills), so a fill sitting on the unread page would be discarded with the money already spent.
+    if (first.hasMore && !first.nextCursor) return { rows, complete: false };
+    if (first.hasMore) {
       let pages = 1;
       let more = false;
       for await (const page of paginator.from(first.nextCursor)) {
@@ -320,6 +325,9 @@ export function realProbes(prisma: PrismaClient): { probe: OrderProbe; discover:
         };
         const openHit = scan(first.items);
         if (openHit) return openHit;
+        // Same short read as pageTrades: more pages exist but no cursor to reach them, so the scan
+        // is not exhaustive and its silence must not read as "our order is not resting".
+        if (first.hasMore && !first.nextCursor) incomplete = true;
         if (first.hasMore && first.nextCursor) {
           let pages = 1;
           for await (const page of paginator.from(first.nextCursor)) {

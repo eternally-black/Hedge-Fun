@@ -16,6 +16,7 @@ import { serverSecureClient } from "@/lib/polymarket-server";
 import { type SignedOrderWire } from "@/lib/orders";
 import { reconcileAttempt } from "@/lib/reconcile";
 import { realProbes, verifyReportedOrder } from "@/lib/order-probe";
+import { rateLimit } from "@/lib/ratelimit";
 
 export async function POST(req: Request) {
   const user = await authUser(req);
@@ -23,6 +24,13 @@ export async function POST(req: Request) {
   if (!isRealMoneyEligible(user)) return NextResponse.json({ error: "real_disabled" }, { status: 403 });
   if (!hasRealConsent(user)) return NextResponse.json({ error: "consent_required" }, { status: 403 });
   if (!sameOrigin(req)) return NextResponse.json({ error: "bad_origin" }, { status: 403 });
+  // Every other money route bounds itself; this one drives an exchange read-back (verifyReportedOrder)
+  // under the user's own CLOB credentials on each call, so an unthrottled loop of made-up order ids
+  // burns that account's API quota — and losing it breaks booking and reconciliation while real
+  // orders are live. Generous enough for the legitimate retry (a dropped response is re-reported).
+  if (!rateLimit(`real-posted:${user.id}`, 30, 60_000)) {
+    return NextResponse.json({ error: "rate_limited" }, { status: 429 });
+  }
   const depositWallet = user.depositWalletAddress;
   const embeddedWallet = user.embeddedWalletAddress;
   if (!depositWallet || !embeddedWallet) return NextResponse.json({ error: "no_deposit_wallet" }, { status: 409 });
