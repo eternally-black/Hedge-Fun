@@ -52,6 +52,16 @@ echo "[deploy] syncing repo (compose/Caddyfile/this script track main)"
 git fetch --prune origin
 git reset --hard origin/main     # mirror main; NOT used to build — only to keep infra files in sync
 
+# Re-exec from the file we just synced. bash reads a script LAZILY, by byte offset: the reset above
+# can rewrite deploy.sh underneath the running shell, and any change in its length makes execution
+# resume mid-line in the new file — arbitrary command fragments running as the deploy user, halfway
+# through a production deploy. The flag makes this happen exactly once.
+if [ -z "${HF_DEPLOY_REEXEC:-}" ]; then
+  export HF_DEPLOY_REEXEC=1
+  echo "[deploy] re-exec from synced deploy.sh"
+  exec bash "$0" "$@"
+fi
+
 # Load .env so GHCR_USER / GHCR_TOKEN (read:packages PAT) are available for the login.
 set -a; . ./.env; set +a
 notify INFO "deploy started → $(git rev-parse --short HEAD)"
@@ -136,6 +146,16 @@ echo "[deploy] (re)creating services (migrate service re-runs deploy as a no-op 
 # --wait: success means READY (healthchecks green), not merely started. A service that
 # never turns healthy fails the deploy loudly instead of leaving a zombie prod.
 docker compose up -d --remove-orphans --wait --wait-timeout 180
+
+STEP="caddy reload"
+# The validation above proved the Caddyfile is good; nothing was making it LIVE. The file is a bind
+# mount (./Caddyfile:/etc/caddy/Caddyfile), and `docker compose up -d` recreates a container when its
+# CONFIG changes — a mount's contents changing is not that — so every Caddyfile edit since this
+# script was written was validated and then silently ignored by the running ingress. Reload it
+# explicitly; fall back to a recreate if the admin API is not answering.
+echo "[deploy] reloading Caddy config"
+docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile \
+  || docker compose up -d --force-recreate caddy
 
 STEP="prune"
 echo "[deploy] pruning dangling images"

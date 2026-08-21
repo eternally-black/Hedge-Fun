@@ -70,7 +70,12 @@ export async function refreshDeck(hours = DECK_FETCH_HORIZON_HOURS, limit = 100)
         bookTsAt: m.bookTsAt ? new Date(m.bookTsAt) : null,
         startsAt: m.startsAt ? new Date(m.startsAt) : null,
         resolutionDeadline: new Date(m.resolutionDeadline),
-        status: m.status,
+        // status is deliberately NOT written on update. fetchBlitzDeck filters to status === "OPEN"
+        // (polymarket.ts), so this only ever wrote back "OPEN" — and writing it unconditionally
+        // regresses a market the poller has already settled: a stale/lagging Gamma payload flips a
+        // RESOLVED or CANCELED row back to OPEN while resolvedOutcome stays set, which breaks
+        // planRedeem's terminal guard and re-admits a decided market to the deck. Terminal
+        // transitions belong to the poller; create (above) still stamps the initial status.
         lastPolledAt: new Date(),
       },
     });

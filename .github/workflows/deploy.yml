@@ -119,7 +119,13 @@ jobs:
           port: ${{ secrets.SSH_PORT }}
           # Pull + up only now (no build on the box) — 10m is plenty.
           command_timeout: 10m
-          script: cd /opt/hedgefun && bash deploy.sh
+          # Sync the repo BEFORE opening deploy.sh, not from inside it. bash reads a script lazily,
+          # by byte offset, so a deploy whose commit changes deploy.sh had the file rewritten under
+          # the running shell — and any change in length made execution resume mid-line in the new
+          # file. deploy.sh now re-execs itself for the same reason; doing it here too means the
+          # very first deploy that carries that change is already safe. The reset inside deploy.sh
+          # becomes a no-op.
+          script: cd /opt/hedgefun && git fetch --prune origin && git reset --hard origin/main && bash deploy.sh
 
   # ---------------------------------------------------------------------------
   # Failure alert. A failed upstream job SKIPS dependent jobs, so an in-job failure

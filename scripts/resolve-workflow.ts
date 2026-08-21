@@ -35,6 +35,16 @@ async function main(): Promise<void> {
     console.error(`row is ${row.state}, not SUBMITTING — nothing to resolve`);
     process.exit(1);
   }
+  // "failed" means VERIFIABLY NEVER MOVED — it releases the slot, and /api/real/withdraw may then
+  // reuse the already-minted bridge address, so a wrong verdict here pays the same withdrawal twice.
+  // A non-null txHash is a relayer handle: the submission was handed off, and only the relayer can
+  // say it never left. Refuse unless a human states explicitly that they checked.
+  if (verdict === "failed" && row.txHash !== null && !noteParts.includes("--i-verified-no-tx")) {
+    console.error(`refusing: this run has a relayer handle (txHash=${row.txHash}).`);
+    console.error("Check it with the relayer/explorer. If it verifiably never landed, re-run with");
+    console.error("  --i-verified-no-tx  as part of the note.");
+    process.exit(1);
+  }
   const note = `operator resolved: ${verdict}${noteParts.length ? ` — ${noteParts.join(" ")}` : ""}`;
   // CAS on the exact run observed: if a live advance moves the row meanwhile, the human re-reads.
   const res = await prisma.walletWorkflow.updateMany({
