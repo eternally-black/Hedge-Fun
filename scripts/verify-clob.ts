@@ -101,30 +101,41 @@ async function main() {
   }
   console.log(`   ✓ 200-token batch accepted; ${covered}/200 covered, ${missing.length} omitted (sample re-verified bookless)`);
 
-  // From here on, work only with pairs where BOTH tokens came back — bookless pairs prove nothing
-  // about matching.
-  const livePairs = pairs.slice(0, 100).filter((p) => byAssetId.has(p.yesTokenId) && byAssetId.has(p.noTokenId));
+  // From here on, work only with pairs where BOTH tokens came back WITH LEVELS. Presence is not
+  // liveness — an explicit both-sides-empty entry is a dead book that toTokenBook nulls (see clob.ts),
+  // and filtering on presence let a husk into the matching checks and cried false drift on 2026-08-24.
+  const hasLevels = (b?: { asks?: unknown[]; bids?: unknown[] }) => !!b && (b.asks?.length ?? 0) + (b.bids?.length ?? 0) > 0;
+  const livePairs = pairs.slice(0, 100).filter((p) => hasLevels(byAssetId.get(p.yesTokenId)) && hasLevels(byAssetId.get(p.noTokenId)));
   assert.ok(livePairs.length >= 5, `need >=5 fully-live pairs for the matching checks (got ${livePairs.length})`);
 
   // 3. Order is NOT assumed: request a shuffled subset and assert every token still gets ITS OWN
   //    book via asset_id matching (a positional implementation fails this whenever orders differ).
+  //    Liveness is not the property under test here — matching is; a book may die between step 2
+  //    and this call.
   console.log("3. asset_id matching under a shuffled request...");
-  const subset = livePairs.slice(0, 10).flatMap((p) => [p.yesTokenId, p.noTokenId]);
+  const subsetPairs = livePairs.slice(0, 10);
+  const subset = subsetPairs.flatMap((p) => [p.yesTokenId, p.noTokenId]);
   const shuffled = [...subset].sort(() => Math.random() - 0.5);
   const books = await getBooks(shuffled);
-  for (const id of subset) {
-    const book = books.get(id);
-    assert.ok(book, `book present for token ${id.slice(0, 12)}…`);
-    assert.strictEqual(book!.tokenId, id, "each token got its OWN book (asset_id match, not position)");
+  const returned = subset.filter((id) => books.get(id));
+  assert.ok(
+    returned.length >= subset.length - 4,
+    `matching collapse: only ${returned.length}/${subset.length} tokens resolved (tolerating <=4 mid-flight teardowns, but this is a wholesale failure)`,
+  );
+  for (const id of returned) {
+    assert.strictEqual(books.get(id)!.tokenId, id, "each token got its OWN book (asset_id match, not position)");
   }
-  console.log(`   ✓ ${subset.length} tokens resolved to their own books regardless of request order`);
+  console.log(`   ✓ ${returned.length}/${subset.length} tokens resolved to their own books regardless of request order`);
 
   // 4. Both tokens of a binary resolve to TWO DISTINCT books.
   console.log("4. both tokens of one binary -> two distinct books...");
-  const one = livePairs[0]!;
-  const yes = (await getBooks([one.yesTokenId])).get(one.yesTokenId);
-  const no = (await getBooks([one.noTokenId])).get(one.noTokenId);
-  assert.ok(yes && no, `both books exist for "${one.question.slice(0, 50)}"`);
+  // Pick a pair PROVEN live in step 3 — the two single getBooks calls below answer from the step-3
+  // flush's cache (BOOK_CACHE_TTL_MS), so this stays consistent with what step 3 saw.
+  const one = subsetPairs.find((p) => books.get(p.yesTokenId) && books.get(p.noTokenId));
+  assert.ok(one, "need at least one pair with both books live in step 3");
+  const yes = (await getBooks([one!.yesTokenId])).get(one!.yesTokenId);
+  const no = (await getBooks([one!.noTokenId])).get(one!.noTokenId);
+  assert.ok(yes && no, `both books exist for "${one!.question.slice(0, 50)}"`);
   assert.notStrictEqual(yes!.tokenId, no!.tokenId, "distinct asset_ids");
   assert.ok(yes!.asks.length + yes!.bids.length > 0, "YES book has levels");
   assert.ok(no!.asks.length + no!.bids.length > 0, "NO book has levels");
