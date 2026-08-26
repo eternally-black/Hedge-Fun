@@ -23,7 +23,7 @@ import {
   type S2Match,
 } from "./s2match";
 import { extractEntities } from "./nlu";
-import { priceIsContested } from "../polymarket";
+import { priceIsContested, isCompositeSideLabel } from "../polymarket";
 import { authoritativePrices } from "../depth";
 import type { BetSide, HedgeSuggestion, HedgePickersResponse } from "../api-types";
 import {
@@ -136,8 +136,11 @@ export async function getPickers(): Promise<HedgePickersResponse> {
       g = { slug: r.leagueSlug, label: r.leagueLabel, teams: new Set() };
       byLeague.set(r.leagueSlug, g);
     }
-    if (r.yesLabel.trim()) g.teams.add(r.yesLabel.trim());
-    if (r.noLabel.trim()) g.teams.add(r.noLabel.trim());
+    // A composite side ("Rodez Aveyron Football or draw" — the NO side of a one-sided football
+    // moneyline) is an outcome set, not a team, so it is never offered as something to support. Its
+    // team is listed anyway: the same match's other market carries that club as its own YES side.
+    if (r.yesLabel.trim() && !isCompositeSideLabel(r.yesLabel)) g.teams.add(r.yesLabel.trim());
+    if (r.noLabel.trim() && !isCompositeSideLabel(r.noLabel)) g.teams.add(r.noLabel.trim());
   }
   const leagues = [...byLeague.values()]
     .map((g) => ({ slug: g.slug, label: g.label, teams: [...g.teams].sort((a, b) => a.localeCompare(b)) }))

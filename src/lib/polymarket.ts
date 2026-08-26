@@ -120,6 +120,48 @@ function toBp(x: number): number {
   return Math.round(x * 10000);
 }
 
+// Polymarket's football moneyline is ONE-SIDED: "Will CA Platense win on 2026-08-27?" with Yes/No
+// outcomes — 100 of 100 sampled live 2026-08-26 — one market per team plus a draw market, all three
+// under one event, "CA Platense vs. Instituto AC Cordoba". Yes/No is unusable downstream: the deck
+// badges it as a shapeless card, and the S2 hedge needs two NAMED sides (the pickers list them, the
+// matcher scores the user's team against them, the AGAINST bet takes one). Both names live in the
+// EVENT, so that is where we read them: YES is the team the question asks about, NO is "<opponent> or
+// draw" — exactly what the NO side pays on, draws included, which is also the honest hedge for a fan
+// ("if they don't win, you're covered"). The draw market names no team, so its question never matches
+// here, it keeps Yes/No, and the shape gate in fetchSportsMarkets drops it — nobody supports a draw.
+//
+// Deliberately NOT guessing: if the question names someone the event doesn't list, the labels stay as
+// they were and the market simply never reaches S2. A wrong side name here would be a hedge pointed
+// at the wrong team.
+const WIN_QUESTION = /^will\s+(.+?)\s+win\b/i;
+
+function teamKey(s: string): string {
+  return s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+export function namedSidesFromEvent(question: string, eventTitle: string | undefined): { yes: string; no: string } | null {
+  const q = WIN_QUESTION.exec(question.trim());
+  if (!q || !eventTitle) return null;
+  const sides = eventTitle.split(/\s+vs\.?\s+/i).map((s) => s.trim()).filter(Boolean);
+  if (sides.length !== 2) return null;
+  const subject = teamKey(q[1]);
+  const i = sides.findIndex((s) => teamKey(s) === subject);
+  if (i === -1) return null;
+  // ponytail: "or draw" is redundant in a sport that cannot draw — never false (NO pays on any
+  // non-win), just wordy. Name the drawless sports here if a card ever reads badly.
+  return { yes: sides[i], no: `${sides[1 - i]}${COMPOSITE_SIDE_SUFFIX}` };
+}
+
+// The NO side above names an OUTCOME SET ("Rodez Aveyron Football or draw"), not a team. It is the
+// honest label for what that side buys, and the matcher is happy to score a query against it — but a
+// team PICKER must not offer it as something to support. Both teams of a match have their own
+// "Will X win?" market, so the pure YES labels already cover every supportable entity.
+export const COMPOSITE_SIDE_SUFFIX = " or draw";
+
+export function isCompositeSideLabel(label: string): boolean {
+  return label.trim().toLowerCase().endsWith(COMPOSITE_SIDE_SUFFIX);
+}
+
 // Map a raw Gamma market to our cache shape. Returns null if unusable (missing id,
 // endDate, or a non-Yes/No outcome pair we can't interpret).
 export function mapMarket(m: GammaMarket): MarketCache | null {
@@ -134,9 +176,25 @@ export function mapMarket(m: GammaMarket): MarketCache | null {
   // outcome index 0 = the YES side, index 1 = the NO side; the labels carry the display names.
   // Multi-outcome markets (>2) are still rejected — we don't model n-way bets.
   if (!outcomes || outcomes.length !== 2) return null;
-  const yesLabel = (outcomes[0] ?? "").trim();
-  const noLabel = (outcomes[1] ?? "").trim();
+  let yesLabel = (outcomes[0] ?? "").trim();
+  let noLabel = (outcomes[1] ?? "").trim();
   if (!yesLabel || !noLabel || yesLabel === noLabel) return null;
+
+  // The market's own topic labels (Gamma include_tag=true) — the only place a club-vs-club match
+  // states its sport. Read once: the naming below is gated on it, and `league` is derived from it.
+  const tags = (m.tags ?? []).map((t) => t.label ?? "").filter(Boolean);
+  const cat = categoryOf({ question: m.question ?? "", outcomeYesLabel: yesLabel, outcomeNoLabel: noLabel, tags });
+
+  // Name the sides of a one-sided sports moneyline (see namedSidesFromEvent). Gated on the SPORT
+  // classification on purpose: "Will Trump win Ohio?" under an event titled "Trump vs. Harris" is the
+  // same shape and must keep its Yes/No — an election has no draw and no fan to hedge.
+  if ((cat === "sports" || cat === "esports") && yesLabel.toLowerCase() === "yes" && noLabel.toLowerCase() === "no") {
+    const named = namedSidesFromEvent(m.question ?? "", m.events?.[0]?.title);
+    if (named) {
+      yesLabel = named.yes;
+      noLabel = named.no;
+    }
+  }
 
   let yesPriceBp: number | null = null;
   let noPriceBp: number | null = null;
@@ -196,12 +254,7 @@ export function mapMarket(m: GammaMarket): MarketCache | null {
     bookTsAt: null,
     // Named HERE, where the tags exist. A cached row keeps the name; nothing downstream can re-derive
     // it, because the question of a club-vs-club match never says which sport it is.
-    league: gameOf({
-      question: m.question,
-      outcomeYesLabel: yesLabel,
-      outcomeNoLabel: noLabel,
-      tags: (m.tags ?? []).map((t) => t.label ?? "").filter(Boolean),
-    }),
+    league: gameOf({ question: m.question, outcomeYesLabel: yesLabel, outcomeNoLabel: noLabel, tags }, cat),
     // Kick-off ONLY. startDate is the listing date — months old on a long-dated market — and it used
     // to land here under the name "startsAt", which reads as a fact about the game and is not one.
     startsAt: gameStart(m.gameStartTime),
@@ -760,16 +813,17 @@ export interface SportsMarketRaw {
 //    soccer_first_corner 18 …). A prop is also the WRONG instrument: "my team loses" pays on the
 //    match result, not on the corner count or the handicap margin.
 //
-// Result, measured over the FULL 10 days: 4326 markets in 53 requests / 14 s, every walk finishing
-// instead of truncating. Coverage went from ~2 hours of fixtures to the whole horizon.
+// Result, measured over the FULL 10 days: every walk FINISHES instead of truncating, ~11 s for the
+// lot, and the index holds 3142 match markets (2188 of them football) where the universe scan
+// reached 98. Coverage went from ~2 hours of fixtures to the whole horizon.
+// What that costs downstream, so it is not a surprise: the sports pass now upserts ~2800 rows a run
+// (was ~90), and every S2 read path — pickers, search, accept re-derivation — walks that same index.
 //
-// Soccer (tag 100350) is deliberately NOT here: its moneylines are Yes/No ("Will CA Platense win on
-// 2026-08-27?", 100/100 sampled), which the two-entity gate below drops, so fetching them costs 38
-// requests for nothing. Soccer only ever reached the index through prop markets, which is exactly
-// what this list is removing.
-// ponytail: soccer needs a Yes/No-moneyline path (the AGAINST side is just NO on that market) —
-// add {tagId: 100350} back the same day that lands.
+// Football leads the list because it is what this audience actually watches. Its moneylines are
+// Yes/No and only become two-sided because mapMarket names them off the event (see
+// namedSidesFromEvent) — before that it reached the index only through corner props.
 const S2_SPORT_TAGS: { tagId: number; name: string }[] = [
+  { tagId: 100350, name: "Soccer" },
   { tagId: 64, name: "Esports" }, // umbrella: CS2, LoL, Dota 2, Valorant …
   { tagId: 28, name: "Basketball" },
   { tagId: 864, name: "Tennis" },
@@ -816,9 +870,20 @@ export async function fetchSportsMarkets(opts: { hours?: number; maxRequests?: n
     const cache = mapMarket(r);
     if (!cache || cache.status !== "OPEN" || cache.yesPriceBp === null || cache.noPriceBp === null) continue;
     if (shapeOf(cache) !== "named") continue; // entity-vs-entity only (the AGAINST-side needs two teams)
-    const cat = categoryOf(cache);
+    // Classify against the market's TAGS, not the cache row. A club-vs-club market names no sport in
+    // its own text — "Will Pau FC win on 2026-08-28?" against "Rodez Aveyron Football" — so a tagless
+    // read calls it "other" and drops it. Measured while wiring football in: 10 matches survived the
+    // tagless classifier out of ~2000, and the 10 were the ones whose club name happens to contain
+    // the word "Football". The tag list is where Polymarket states the discipline.
+    const tagged = {
+      question: cache.question,
+      outcomeYesLabel: cache.outcomeYesLabel,
+      outcomeNoLabel: cache.outcomeNoLabel,
+      tags: (r.tags ?? []).map((t) => t.label ?? "").filter(Boolean),
+    };
+    const cat = categoryOf(tagged);
     if (cat !== "sports" && cat !== "esports") continue;
-    if (isContextPoor(cache) || isUnnamedMatch(cache)) continue; // drop jargon totals / unnamed disciplines
+    if (isContextPoor(cache) || isUnnamedMatch({ ...tagged, league: cache.league })) continue; // jargon totals / unnamed disciplines
     const ev = r.events?.[0];
     out.push({
       cache,
@@ -829,7 +894,10 @@ export async function fetchSportsMarkets(opts: { hours?: number; maxRequests?: n
       eventTicker: ev?.ticker ?? null,
       seriesTitle: ev?.series?.[0]?.title ?? ev?.title ?? null,
       category: cat,
-      league: gameOf(cache, cat),
+      // The row's OWN name first: mapMarket read it off the market's tags, which is the only place a
+      // club-vs-club match states its sport. gameOf on the cache alone sees no tags, so re-deriving
+      // here is a downgrade — it is the fallback for rows cached before tagging, nothing more.
+      league: cache.league ?? gameOf(tagged, cat),
     });
   }
   return out;
