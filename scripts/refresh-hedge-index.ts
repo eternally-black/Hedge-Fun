@@ -20,7 +20,7 @@
 // until the display-staleness bound. Unevaluated rows (missing token ids, CLOB outage) are left
 // untouched: unproven is not untradable.
 import { PrismaClient } from "@prisma/client";
-import { fetchMajorsMarkets, fetchSportsMarkets } from "../src/lib/polymarket";
+import { fetchMajorsMarkets, fetchSportsMarkets, type SportsMarketRaw } from "../src/lib/polymarket";
 import { parseStrikeMarket, type HedgeAsset } from "../src/lib/hedge/parse";
 import { S2_SIDE_FLOOR_BP, S2_SIDE_CEIL_BP } from "../src/lib/config";
 import { evalMarketDepthBatch, type MarketDepth } from "../src/lib/depth";
@@ -95,9 +95,22 @@ export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
   // polymarketIds the depth gate EVALUATED this run and found untradable (both passes share it;
   // stamped once at the end). Null depth (missing token ids, CLOB outage) is NOT a rejection.
   const rejectedIds: string[] = [];
+  // A discovery fetch that dies must not take the rest of the run with it. Before this, one Gamma
+  // page that outlived its retries threw straight out of the loop below, so ETH failing meant SOL
+  // was never fetched, the S2 sports pass never ran, and — worst of it — the s2Eligible demotion at
+  // the bottom never ran either, leaving decided matches suggestible for as long as the failure
+  // lasted (prod 2026-08-26: three ticks, 15 minutes). Now each fetch is contained and the run still
+  // THROWS at the end, so the poller's failure streak keeps meaning exactly what it meant.
+  const fetchErrors: string[] = [];
 
   for (const tag of MAJOR_TAGS) {
-    const rows = await fetchMajorsMarkets(tag.tagId);
+    let rows;
+    try {
+      rows = await fetchMajorsMarkets(tag.tagId);
+    } catch (e) {
+      fetchErrors.push(`${tag.slug}: ${(e as Error).message}`);
+      continue;
+    }
     const a = (stats.byAsset[tag.asset] ??= { discovered: 0, parsed: 0, skipped: 0 });
     // Depth-evaluate the whole tag batch up front — the micro-batch cache in clob.ts coalesces the
     // per-market book reads into a handful of union /books calls. Null = unquotable this run.
@@ -192,7 +205,14 @@ export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
   // Discover upcoming NAMED sports/esports markets, keep the ones inside the S2 price band (a live/
   // decided price collapse is dropped; a pre-match favourite stays), and enrich MarketMeta so the
   // pickers + free-text matcher can turn them into AGAINST hedges. Same upsert idiom as the crypto pass.
-  const sports = await fetchSportsMarkets();
+  let sports: SportsMarketRaw[] = [];
+  let sportsFetched = false;
+  try {
+    sports = await fetchSportsMarkets();
+    sportsFetched = true;
+  } catch (e) {
+    fetchErrors.push(`sports: ${(e as Error).message}`);
+  }
   stats.sports.discovered = sports.length;
   const sportsDepths = await evalMarketDepthBatch(
     sports.map((s) => ({ key: s.cache.polymarketId, yesTokenId: s.cache.yesTokenId, noTokenId: s.cache.noTokenId })),
@@ -294,13 +314,23 @@ export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
   // (price collapsed out of band) or a market Gamma stopped returning. Clearing the flag is what
   // pulls it out of loadS2Candidates (pickers/search) AND deriveS2ForAccept — so a stale sports
   // market can no longer be suggested or accepted (F2). `notIn: []` matches all rows, which is the
-  // correct behaviour when nothing was eligible this run (demote everything).
-  const cleared = await prisma.marketMeta.updateMany({
-    where: { s2Eligible: true, marketId: { notIn: eligibleMarketIds } },
-    data: { s2Eligible: false },
-  });
-  stats.sports.clearedStale = cleared.count;
+  // correct behaviour when nothing was eligible this run (demote everything) — but ONLY when the
+  // fetch actually spoke for the pool. If Gamma never answered, "nothing was eligible" is ignorance,
+  // not a verdict, and demoting on it would empty the S2 index on every upstream hiccup.
+  if (sportsFetched) {
+    const cleared = await prisma.marketMeta.updateMany({
+      where: { s2Eligible: true, marketId: { notIn: eligibleMarketIds } },
+      data: { s2Eligible: false },
+    });
+    stats.sports.clearedStale = cleared.count;
+  }
 
+  // Everything recoverable has landed; now be loud about what didn't.
+  if (fetchErrors.length > 0) {
+    throw new Error(
+      `hedge-index partial (S1 upserted=${stats.upserted}, S2 eligible=${stats.sports.eligible}): ${fetchErrors.join("; ")}`,
+    );
+  }
   return stats;
 }
 

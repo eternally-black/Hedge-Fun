@@ -230,6 +230,11 @@ export function mapMarket(m: GammaMarket): MarketCache | null {
 //
 // A REAL outage still throws after the attempts are spent, and a 4xx (a genuinely bad query) throws
 // immediately — retrying can't heal a contract problem. Both keep subsystemFailed meaningful.
+//
+// 2026-08-26 — what this retry CANNOT heal, and why the walk below exists. The page that paged the
+// on-call (tag_id=39, offset=700) is not congestion: past a certain offset the query itself is too
+// slow for Gamma's own budget, so every attempt re-rolls the same loss on the same cold query. See
+// gammaWalkByEndDate — the fix is to stop asking for deep offsets, not to ask again harder.
 // Three retries, JITTERED. Both numbers are measured, not guessed (2026-08-19, 4 concurrent paging
 // walkers): clob.ts's flat [250, 500] left 1 page unhealed per 3 runs, because every walker that
 // took a 500 in the same burst also retried in the same millisecond and re-collided. Spreading the
@@ -287,6 +292,104 @@ async function gammaGet(path: string): Promise<GammaMarket[]> {
 
 const GAMMA_PAGE = 100; // Gamma caps `limit` at 100/request regardless of what we ask.
 const MAX_PAGES = 15; // backstop: never page forever (15 * 100 = 1500 markets scanned).
+
+// ─── Walking a whole pool without deep offsets ───────────────────────────────────────────────────
+// Gamma answers the FIRST few pages of /markets cheaply and the deep ones at the edge of its own
+// timeout. Measured live 2026-08-26 against tag 39 (ethereum, 748 open markets), cold cache keys,
+// sequential, 5 runs per offset:
+//   offset   0 / 100 / 200 -> 0.19–0.46 s, 0 of 15 failed
+//   offset 300 ... 700     -> 1.1–1.8 s,   6 of 25 failed, each killed at a hard ~2.15 s ceiling
+//                             with HTTP 500 {"type":"internal error"}
+// That cliff is the incident: the hedge index walked tag 39 to offset=700, the retry re-ran the SAME
+// cold deep query four times (so four re-rolls of one ~25% loss, not four chances at a blip), and the
+// throw took down the whole refresh — the remaining tags, the S2 sports pass and the s2Eligible
+// demotion never ran, three ticks in a row.
+//
+// So: don't use offsets at all. Results are endDate-ascending and end_date_min is INCLUSIVE
+// (verified live: end_date_min=2026-08-28T16:00:00Z returns all 23 markets whose endDate IS that
+// instant), so each request takes ONE page at offset=0 and the next one re-anchors at the last row's
+// endDate, deduping the re-read boundary rows by conditionId. The far tail then costs what the near
+// head costs: cursor=2026-12-31T17:00:00Z at offset=0 returned in 0.30 s the rows the offset walk
+// could only reach at offset=700 — a whole tag now walks in ~2.5 s instead of ~15 s.
+//
+// Dropping the offsets also fixes a SILENT LOSS that predates the 500s. Gamma's `order=endDate` has
+// no tiebreaker, so tied rows come back in an arbitrary order that differs between requests, and any
+// page boundary landing inside a tie group can skip rows. Measured live 2026-08-26 on tag 818, both
+// methods run twice (each self-consistent: 0 drift): the offset walk and an early 3-page-window
+// version of this walk returned DIFFERENT market sets — 2-3 rows each way, all inside one 22-market
+// tie group at 2026-08-29T16:00:00Z. Re-anchoring at every page removes every boundary a tie can
+// straddle, so nothing is lost while a tie group fits in one page.
+//
+// The one thing a time cursor cannot step over is a pile-up: MORE markets sharing one endDate than a
+// page holds. It happens — the sports fetch has >300 markets ending at the same top of the hour. So
+// a cursor that cannot advance pages DEEPER instead of giving up: deep offsets are a cost (and, in a
+// pile-up, the tie-skip risk is Gamma's to own), truncation is a lie. Nothing else reaches for them.
+//
+// And a pile-up can outgrow the API itself. Gamma refuses offset > 2000 outright — verified live
+// 2026-08-26: offset=2000 -> 200, offset=2001 -> 422. Saturday football clears that bar on its own:
+// 2026-08-29T14:00:00Z holds >=2000 open markets under tag Sports, >=2000 under tag Soccer ALONE
+// (kickoff is the endDate, and every match carries a dozen prop markets). No filter this endpoint
+// offers can split one instant further, so those markets are simply unreachable — we step over the
+// instant and SAY SO, rather than 422 the walk or spin on an offset Gamma will never serve.
+//
+// This also retires a silent truncation that was weeks away: the old maxPages=8 capped a tag at 800
+// markets and tag 39 was already at 748 — the tail past the cap would have dropped out of the index
+// with every light still green. Exhausting the request bound here is at least SAID out loud.
+const WALK_REQUESTS = 20; // ~2000 markets/walk at 100 a page, minus the re-read boundary rows
+const GAMMA_MAX_OFFSET = 2000; // past this Gamma answers 422, not a page (measured — see above)
+
+export async function gammaWalkByEndDate(
+  params: Record<string, string | string[]>, // an array repeats the key — Gamma ORs repeated params
+  endDateMin: string,
+  opts: { maxRequests?: number; get?: (p: string) => Promise<GammaMarket[]> } = {},
+): Promise<GammaMarket[]> {
+  const maxRequests = opts.maxRequests ?? WALK_REQUESTS;
+  const get = opts.get ?? gammaGet;
+  const seen = new Set<string>();
+  const out: GammaMarket[] = [];
+  let cursor = endDateMin;
+  let offset = 0;
+  let requests = 0;
+
+  while (requests < maxRequests) {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) for (const one of Array.isArray(v) ? v : [v]) qs.append(k, one);
+    qs.set("end_date_min", cursor);
+    qs.set("order", "endDate");
+    qs.set("ascending", "true");
+    qs.set("limit", String(GAMMA_PAGE));
+    qs.set("offset", String(offset));
+    const raw = await get(`/markets?${qs.toString()}`);
+    requests++;
+    let lastEnd: string | null = null;
+    for (const r of raw) {
+      if (r.endDate) lastEnd = r.endDate; // ascending, so the last one wins
+      if (r.conditionId) {
+        if (seen.has(r.conditionId)) continue; // the boundary instant is re-read by design
+        seen.add(r.conditionId);
+      }
+      out.push(r);
+    }
+    if (raw.length < GAMMA_PAGE) return out; // short page = the pool ends here
+
+    if (lastEnd !== null && lastEnd > cursor) {
+      cursor = lastEnd; // re-anchor: the next page starts at this instant, ties and all
+      offset = 0;
+    } else if (offset + GAMMA_PAGE <= GAMMA_MAX_OFFSET) {
+      offset += GAMMA_PAGE; // a pile-up on ONE instant — the only case that needs an offset
+    } else {
+      // The pile-up is bigger than Gamma will paginate. The rest of this instant cannot be read by
+      // anyone; step past it (1 s is finer than any endDate Gamma publishes) so the walk continues.
+      const next = Date.parse(cursor);
+      if (!Number.isFinite(next)) return out;
+      console.warn(`[gamma] ${cursor} holds more markets than Gamma will page (offset ceiling ${GAMMA_MAX_OFFSET}) — the rest of that instant is unreachable`);
+      cursor = new Date(next + 1000).toISOString();
+      offset = 0;
+    }
+  }
+  console.warn(`[gamma] walk hit its ${maxRequests}-request bound at end_date_min=${cursor} (${out.length} markets) — pool truncated`);
+  return out;
+}
 
 // Degenerate-price gate: drop cards priced so lopsided they're not worth swiping.
 // A sports/esports match that's live or over collapses to ~99.95%/0.05% ("100% / 0%"),
@@ -587,49 +690,36 @@ function num(...vals: (number | string | undefined)[]): number | null {
   return null;
 }
 
-// Fetch all OPEN, future-resolving markets under one Gamma tag id. `maxPages` bounds the scan
-// (default 8 = up to 800 markets/tag). Returns only markets mapMarket accepts (binary, has an id).
+// Fetch all OPEN, future-resolving markets under one Gamma tag id. `maxRequests` bounds the walk
+// (default ~2000 markets/tag; the deepest major is at 764). Returns only markets mapMarket accepts.
 export async function fetchMajorsMarkets(
   tagId: number,
-  opts: { maxPages?: number } = {},
+  opts: { maxRequests?: number } = {},
 ): Promise<MajorsMarketRaw[]> {
-  const maxPages = opts.maxPages ?? 8;
-  const now = new Date();
   const out: MajorsMarketRaw[] = [];
+  const raw = await gammaWalkByEndDate(
+    { tag_id: String(tagId), active: "true", closed: "false" },
+    new Date().toISOString(),
+    { maxRequests: opts.maxRequests },
+  );
 
-  for (let page = 0; page < maxPages; page++) {
-    const qs = new URLSearchParams({
-      tag_id: String(tagId),
-      active: "true",
-      closed: "false",
-      end_date_min: now.toISOString(),
-      order: "endDate",
-      ascending: "true",
-      limit: String(GAMMA_PAGE),
-      offset: String(page * GAMMA_PAGE),
+  for (const r of raw) {
+    const cache = mapMarket(r);
+    // OPEN only, like fetchBlitzDeck and fetchSportsMarkets: Gamma's active/closed flags lag its
+    // own resolution state, and a row read as RESOLVED here carries NO outcome — persisted, it
+    // fails the poller's pending scan (status OPEN) AND planRedeem's outcome guard, so every bet
+    // on it would sit PENDING forever with the stake held.
+    if (!cache || cache.status !== "OPEN") continue;
+    const ev = r.events?.[0];
+    out.push({
+      cache,
+      slug: r.slug ?? null,
+      liquidityNum: num(r.liquidityNum, r.liquidity),
+      volumeNum: num(r.volumeNum, r.volume),
+      eventSlug: ev?.slug ?? null,
+      eventTicker: ev?.ticker ?? null,
+      seriesTitle: ev?.series?.[0]?.title ?? ev?.title ?? null,
     });
-    const raw = await gammaGet(`/markets?${qs.toString()}`);
-    if (raw.length === 0) break;
-
-    for (const r of raw) {
-      const cache = mapMarket(r);
-      // OPEN only, like fetchBlitzDeck and fetchSportsMarkets: Gamma's active/closed flags lag its
-      // own resolution state, and a row read as RESOLVED here carries NO outcome — persisted, it
-      // fails the poller's pending scan (status OPEN) AND planRedeem's outcome guard, so every bet
-      // on it would sit PENDING forever with the stake held.
-      if (!cache || cache.status !== "OPEN") continue;
-      const ev = r.events?.[0];
-      out.push({
-        cache,
-        slug: r.slug ?? null,
-        liquidityNum: num(r.liquidityNum, r.liquidity),
-        volumeNum: num(r.volumeNum, r.volume),
-        eventSlug: ev?.slug ?? null,
-        eventTicker: ev?.ticker ?? null,
-        seriesTitle: ev?.series?.[0]?.title ?? ev?.title ?? null,
-      });
-    }
-    if (raw.length < GAMMA_PAGE) break; // last page
   }
   return out;
 }
@@ -654,52 +744,93 @@ export interface SportsMarketRaw {
   league: string | null; // from deck-mix gameOf (e.g. "NBA", "CS2"); null when not specifically known
 }
 
+// ─── What S2 asks Gamma for ──────────────────────────────────────────────────────────────────────
+// Discovery used to scan the ENTIRE market universe for 10 days and keep the ~2% that are named
+// matches. Measured 2026-08-26: that pool is 18k+ markets and does not end — the walk ran out of its
+// budget ~2 hours into a 240-hour window, so the index only ever held tonight's fixtures, silently.
+// Two Gamma filters fix that at the source, before a byte is downloaded:
+//
+//  - tag_id, one walk per sport. There is NO exclusion filter — `exclude_tag_id` is ignored and a
+//    comma list is a 422 (both measured) — so "everything except X" is impossible and "only these"
+//    is the only way to not fetch a sport at all. NFL and MLB are therefore simply absent from this
+//    list: dead weight for this audience, and now never requested.
+//  - sports_market_types, repeated (Gamma ORs repeated params; a comma list returns nothing). Every
+//    match carries a dozen prop markets — corners, exact score, odd/even kills — and they were 76%
+//    of what S2 indexed (measured on 443 live candidates: spreads 171, lol_odd_even_total_kills 44,
+//    soccer_first_corner 18 …). A prop is also the WRONG instrument: "my team loses" pays on the
+//    match result, not on the corner count or the handicap margin.
+//
+// Result, measured over the FULL 10 days: 4326 markets in 53 requests / 14 s, every walk finishing
+// instead of truncating. Coverage went from ~2 hours of fixtures to the whole horizon.
+//
+// Soccer (tag 100350) is deliberately NOT here: its moneylines are Yes/No ("Will CA Platense win on
+// 2026-08-27?", 100/100 sampled), which the two-entity gate below drops, so fetching them costs 38
+// requests for nothing. Soccer only ever reached the index through prop markets, which is exactly
+// what this list is removing.
+// ponytail: soccer needs a Yes/No-moneyline path (the AGAINST side is just NO on that market) —
+// add {tagId: 100350} back the same day that lands.
+const S2_SPORT_TAGS: { tagId: number; name: string }[] = [
+  { tagId: 64, name: "Esports" }, // umbrella: CS2, LoL, Dota 2, Valorant …
+  { tagId: 28, name: "Basketball" },
+  { tagId: 864, name: "Tennis" },
+  { tagId: 517, name: "Cricket" },
+  { tagId: 279, name: "UFC" },
+  { tagId: 683, name: "Boxing" },
+  { tagId: 100088, name: "Hockey" },
+];
+const S2_MARKET_TYPES = ["moneyline", "child_moneyline"]; // the match result, and the per-map one
+
 // Fetch OPEN, future-resolving NAMED sports/esports markets within `hours` (default 10 days — the
-// pickers want UPCOMING matches, a longer leash than the blitz deck). `maxPages` bounds the scan.
-export async function fetchSportsMarkets(opts: { hours?: number; maxPages?: number } = {}): Promise<SportsMarketRaw[]> {
+// pickers want UPCOMING matches, a longer leash than the blitz deck). `maxRequests` bounds EACH
+// tag's walk (the deepest, esports, took 7).
+export async function fetchSportsMarkets(opts: { hours?: number; maxRequests?: number } = {}): Promise<SportsMarketRaw[]> {
   const hours = opts.hours ?? 240; // 10 days
-  const maxPages = opts.maxPages ?? 15;
   const now = new Date();
   const max = new Date(now.getTime() + hours * 3_600_000);
   const out: SportsMarketRaw[] = [];
+  const raw: GammaMarket[] = [];
+  const seen = new Set<string>(); // a market can carry two of our tags — index it once
 
-  for (let page = 0; page < maxPages; page++) {
-    const qs = new URLSearchParams({
-      active: "true",
-      closed: "false",
-      enableOrderBook: "true",
-      include_tag: "true", // same reason as the deck fetch — the league name comes from the tags
-      end_date_min: now.toISOString(),
-      end_date_max: max.toISOString(),
-      order: "endDate",
-      ascending: "true",
-      limit: String(GAMMA_PAGE),
-      offset: String(page * GAMMA_PAGE),
-    });
-    const raw = await gammaGet(`/markets?${qs.toString()}`);
-    if (raw.length === 0) break;
-
-    for (const r of raw) {
-      const cache = mapMarket(r);
-      if (!cache || cache.status !== "OPEN" || cache.yesPriceBp === null || cache.noPriceBp === null) continue;
-      if (shapeOf(cache) !== "named") continue; // entity-vs-entity only (the AGAINST-side needs two teams)
-      const cat = categoryOf(cache);
-      if (cat !== "sports" && cat !== "esports") continue;
-      if (isContextPoor(cache) || isUnnamedMatch(cache)) continue; // drop jargon totals / unnamed disciplines
-      const ev = r.events?.[0];
-      out.push({
-        cache,
-        slug: r.slug ?? null,
-        liquidityNum: num(r.liquidityNum, r.liquidity),
-        volumeNum: num(r.volumeNum, r.volume),
-        eventSlug: ev?.slug ?? null,
-        eventTicker: ev?.ticker ?? null,
-        seriesTitle: ev?.series?.[0]?.title ?? ev?.title ?? null,
-        category: cat,
-        league: gameOf(cache, cat),
-      });
+  for (const tag of S2_SPORT_TAGS) {
+    const rows = await gammaWalkByEndDate(
+      {
+        tag_id: String(tag.tagId),
+        active: "true",
+        closed: "false",
+        enableOrderBook: "true",
+        include_tag: "true", // same reason as the deck fetch — the league name comes from the tags
+        end_date_max: max.toISOString(),
+        sports_market_types: S2_MARKET_TYPES,
+      },
+      now.toISOString(),
+      { maxRequests: opts.maxRequests ?? 60 },
+    );
+    for (const r of rows) {
+      if (r.conditionId && seen.has(r.conditionId)) continue;
+      if (r.conditionId) seen.add(r.conditionId);
+      raw.push(r);
     }
-    if (raw.length < GAMMA_PAGE) break; // last page
+  }
+
+  for (const r of raw) {
+    const cache = mapMarket(r);
+    if (!cache || cache.status !== "OPEN" || cache.yesPriceBp === null || cache.noPriceBp === null) continue;
+    if (shapeOf(cache) !== "named") continue; // entity-vs-entity only (the AGAINST-side needs two teams)
+    const cat = categoryOf(cache);
+    if (cat !== "sports" && cat !== "esports") continue;
+    if (isContextPoor(cache) || isUnnamedMatch(cache)) continue; // drop jargon totals / unnamed disciplines
+    const ev = r.events?.[0];
+    out.push({
+      cache,
+      slug: r.slug ?? null,
+      liquidityNum: num(r.liquidityNum, r.liquidity),
+      volumeNum: num(r.volumeNum, r.volume),
+      eventSlug: ev?.slug ?? null,
+      eventTicker: ev?.ticker ?? null,
+      seriesTitle: ev?.series?.[0]?.title ?? ev?.title ?? null,
+      category: cat,
+      league: gameOf(cache, cat),
+    });
   }
   return out;
 }
