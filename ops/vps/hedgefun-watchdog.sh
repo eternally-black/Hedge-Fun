@@ -133,18 +133,25 @@ check_service() { # check_service <proj> <svc> <class>; returns 0 if ok
   if [ -n "$action" ]; then
     if budget_ok "$key" "$max" "$win"; then
       budget_spend "$key"
+      local done
+      case "$action" in restart) done=restarted ;; unpause) done=unpaused ;; *) done="brought up" ;; esac
       case "$action" in
         restart) docker restart "$cid" >/dev/null 2>&1 || true ;;
         unpause) docker unpause "$cid" >/dev/null 2>&1 || true ;;
         up)      ( cd "$dir" && docker compose up -d "$svc" >/dev/null 2>&1 ) || true ;;
       esac
+      # Every self-heal is said out loud, budget count included. report_ok below speaks only on the
+      # way out of a REPORTED break, and a container that is back to "starting" within 10 s is never
+      # reported broken — so on 2026-09-02 the poller was restarted three times in ten minutes with
+      # no message at all; only the external heartbeat monitor noticed.
+      notify WARN "$proj/$svc was $status/$health — $done ($(wc -l < "$STATE_DIR/restarts.$key")/$max in the last $((win/60)) min)"
       sleep 10
       cid=$(docker ps --filter "label=com.docker.compose.project=$proj" \
                       --filter "label=com.docker.compose.service=$svc" -q | head -1)
       if [ -n "$cid" ]; then
         health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid" 2>/dev/null || echo none)
         if [ "$health" = healthy ] || [ "$health" = none ] || [ "$health" = starting ]; then
-          report_ok "$key" "$proj/$svc was $status/unhealthy — ${action}ed, now up"
+          report_ok "$key" "$proj/$svc was $status/unhealthy — $done, now up"
           return 0
         fi
       fi

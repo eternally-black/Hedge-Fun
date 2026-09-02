@@ -20,6 +20,7 @@
 // time) lives in the callers, which read the honest fetchedAtMs off every book.
 
 import { BOOK_CACHE_TTL_MS } from "./config";
+import { boundedTimeoutMs, deadlineLeftMs } from "./deadline";
 import { normalizeAsks, normalizeBids, type BookLevel } from "./quote";
 
 // Thrown when the CLOB can't answer (HTTP error, timeout, transport failure) AND there is no cached
@@ -82,7 +83,7 @@ function parseLevels(levels: RawBook["asks"]): BookLevel[] {
 // shape through the same code path the flush uses). `tokenIds` must already be <= CHUNK.
 export async function postBooks(tokenIds: string[]): Promise<RawBook[]> {
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  const t = setTimeout(() => ctrl.abort(), boundedTimeoutMs(TIMEOUT_MS)); // clamped to a caller's wall-clock budget (src/lib/deadline.ts)
   try {
     const res = await fetch(`${BASE}/books`, {
       method: "POST",
@@ -108,6 +109,13 @@ class ClobStatusError extends Error {
 async function postBooksWithRetry(tokenIds: string[]): Promise<RawBook[]> {
   let lastErr: Error | null = null;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    // Under a caller's wall-clock budget (src/lib/deadline.ts) a spent budget ends the ladder here:
+    // the hedge index reads ~30 /books batches AFTER its last Gamma page, so without this a CLOB
+    // outage would stretch a budgeted run by minutes the budget never saw.
+    const left = deadlineLeftMs();
+    if (left !== undefined && left <= 0) {
+      throw new ClobUnavailableError(`CLOB time budget exhausted before /books${lastErr ? ` (last: ${lastErr.message})` : ""}`);
+    }
     if (attempt > 0) await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS[attempt - 1]));
     try {
       return await postBooks(tokenIds);

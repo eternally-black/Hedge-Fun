@@ -98,8 +98,9 @@ services:
     networks:
       - internal
     logging: *bounded-logs
-    # Liveness: the poller touches a heartbeat file after each Gamma-bound subsystem succeeds
-    # and at the end of each clean tick (scripts/poller.ts beat()).
+    # Liveness: the poller touches a heartbeat file as a tick makes progress — after the lease,
+    # after each upstream-bound subsystem succeeds, before the settle sweep and at the end of a
+    # clean tick (scripts/poller.ts beat()).
     # Fail if it's missing or stale — older than 3x the 60s poll interval. NOTE: plain
     # Docker does NOT restart a container on a failing healthcheck (that is Swarm-only) —
     # the unhealthy status is acted on by ops/vps/hedgefun-watchdog.sh (`docker restart`).

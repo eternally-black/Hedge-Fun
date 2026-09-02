@@ -1,6 +1,7 @@
 // Minimal Polygon JSON-RPC over fetch — the poller stays zero-EVM-deps (no viem/ethers; plan §2.5).
 // Balance reads pin the "finalized" tag: deposit detection must never act on reorg-able state.
 // publicnode is the one free RPC the spike verified for useful access (poly-spike, 2026-08-12).
+import { boundedTimeoutMs, deadlineLeftMs } from "./deadline";
 
 const RPC = process.env.POLYGON_RPC_URL ?? "https://polygon-bor-rpc.publicnode.com";
 
@@ -11,13 +12,18 @@ export const USDCE_ADDRESS = "0x2791bca1f2de4661ed88a30c99a7a9449aa84174";
 
 export type BalanceReader = (token: string, holder: string) => Promise<bigint>;
 
-// One fetch+parse for every read — same errors, same 10s bound, whatever the method.
+// One fetch+parse for every read — same errors, same 10s bound, whatever the method. Under a caller's
+// wall-clock budget (withDeadline, src/lib/deadline.ts) a spent budget refuses the call and a live one
+// clamps the bound: the settle sweep's chain probes (up to 25 × 3 calls × 10 s) would otherwise
+// outlast the poller's 180 s heartbeat under an RPC outage, exactly as the Gamma walk did on 2026-09-02.
 async function rpc(method: string, params: unknown[]): Promise<unknown> {
+  const left = deadlineLeftMs();
+  if (left !== undefined && left <= 0) throw new Error(`time budget exhausted before polygon rpc ${method}`);
   const res = await fetch(RPC, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-    signal: AbortSignal.timeout(10_000),
+    signal: AbortSignal.timeout(boundedTimeoutMs(10_000)),
   });
   if (!res.ok) throw new Error(`polygon rpc ${res.status}`);
   const body = (await res.json()) as { result?: unknown; error?: { message?: string } };

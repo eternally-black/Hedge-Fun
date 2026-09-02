@@ -8,7 +8,8 @@ import { PrismaClient } from "@prisma/client";
 import { writeFileSync } from "node:fs";
 import { tmpdir, hostname } from "node:os";
 import { join } from "node:path";
-import { fetchResolution, withGammaDeadline } from "../src/lib/polymarket";
+import { fetchResolution } from "../src/lib/polymarket";
+import { withDeadline } from "../src/lib/deadline";
 import { conditionResolution, type ChainOutcome } from "../src/lib/polygon";
 import { DECK_FETCH_HORIZON_HOURS } from "../src/lib/deck-mix";
 import { DECK_MIN_SERVABLE } from "../src/lib/config";
@@ -46,17 +47,27 @@ let chainProbesLeft = 0;
 // (the F1 stale-cache snipe) is re-priced/closed within one window, cheap enough not to hammer Gamma.
 // The accept-time price-band gate (src/lib/hedge/accept.ts) closes the intra-window remainder.
 const HEDGE_INDEX_EVERY_N_TICKS = 5;
-// Wall-clock budgets for the Gamma reads of a subsystem (withGammaDeadline in polymarket.ts). Measured
-// 2026-09-02: a deck refresh takes 1–10 s, a warm hedge-index run 15–35 s, a cold-start one (empty
-// caches, ~3100 sports rows) 63 s. During that day's Gamma outage (15:12–15:30Z, slow 500s) the run
-// took 209–323 s: the heartbeat crossed its 180 s staleness bound mid-tick and the watchdog restarted
-// the poller three times into the same outage. Worst case with these budgets: deck 45 s (no beat if
-// it fails) + index 120 s + one in-flight request 15 s = 180 s, and the container only turns
-// unhealthy after three 30 s checks in a row see the file older than 180 s — so a restart needs
-// 240 s without a beat, which no budgeted tick can produce. A budget hit is an ordinary subsystem
-// failure (the previous deck / index rows stay; no partial writes).
+// Wall-clock budgets for a subsystem's upstream reads (withDeadline, src/lib/deadline.ts — honoured by
+// the Gamma, CLOB and Polygon RPC readers). Measured 2026-09-02: a deck refresh takes 1–10 s, a warm
+// hedge-index run 15–35 s, a cold-start one (empty caches, ~3100 sports rows) 63 s. During that day's
+// Gamma outage (15:12–15:30Z, slow 500s) the run took 209–323 s: the heartbeat crossed its 180 s
+// staleness bound mid-tick and the watchdog restarted the poller three times into the same outage.
+// The RPC consumers are bounded the same way — N pending markets × a Gamma retry ladder plus up to 25
+// chain probes × 3 calls × 10 s in the settle sweep, and a sequential balance read per open real
+// position after it — because under an RPC outage those are unbounded by count too.
+// The container only turns unhealthy after three 30 s checks in a row see the file older than 180 s,
+// so a restart needs 240 s without a beat. Beats land after the lease, after each successful upstream
+// subsystem, before the settle sweep and at the end of a clean tick, so the longest no-beat spans are
+// deck 45 + index 120 = 165 s (plus the index's DB upserts, which a budget cannot cut) and settle 60 +
+// funding 30 + real-settle 45 + the 20 s reconcile call = 155 s (plus DB). A request under a budget is
+// clamped to what is left of it, so an in-flight request never extends the span. A budget hit is an
+// ordinary subsystem failure — the previous deck / index rows stay, nothing partial is written,
+// unsettled markets and unread balances wait a tick.
 const DECK_GAMMA_BUDGET_MS = 45_000;
 const HEDGE_INDEX_GAMMA_BUDGET_MS = 120_000;
+const SETTLE_BUDGET_MS = 60_000;
+const FUNDING_BUDGET_MS = 30_000;
+const REAL_SETTLE_BUDGET_MS = 45_000;
 // Market cache GC cadence. Every 5th tick ≈ every 5 minutes: fast enough to drain a large backlog
 // in a few hours (PRUNE_MAX_ROWS per run), slow enough that the anti-join scan is not a per-minute
 // cost in the steady state, where it finds nothing. Deliberately OFFSET from the hedge index above
@@ -95,8 +106,9 @@ function subsystemOk(name: string): void {
 // Settlement-backlog alert throttle: one Telegram send per hour max while overdue persists.
 let backlogLastAlertAt = 0;
 
-// Liveness signal: touched after each Gamma-bound subsystem SUCCEEDS (deck, hedge index) and at the
-// end of every clean tick. The compose healthcheck fails the container when this file is stale
+// Liveness signal: touched as a tick makes progress — after the lease is written, after each
+// upstream-bound subsystem SUCCEEDS (deck, hedge index), before the settle sweep and at the end of
+// every clean tick. The compose healthcheck fails the container when this file is stale
 // (mtime older than ~3x the interval) so a wedged-but-not-exited loop gets restarted instead of
 // sitting "up" with settlement dead. The mid-tick touches exist because a tick that is merely slow
 // on upstream retries is not wedged: on 2026-09-02 a Gamma outage stretched the hedge-index run to
@@ -111,6 +123,14 @@ function beat(): void {
   } catch (e) {
     console.warn("[poll] heartbeat write failed:", (e as Error).message);
   }
+}
+
+// Per-subsystem timings for the tick's log line. The 2026-09-02 diagnosis had to reconstruct how
+// long the hedge index ran from neighbouring log lines; now every tick says so itself. Lease, prune,
+// reconcile and the backlog check are unmarked — they are the remainder of the total.
+let tickMarks: string[] = [];
+function mark(label: string, since: number): void {
+  tickMarks.push(`${label} ${((Date.now() - since) / 1000).toFixed(1)}s`);
 }
 
 let running = true;
@@ -194,6 +214,7 @@ export async function mapLimit<T>(items: T[], limit: number, fn: (t: T) => Promi
 
 async function tick() {
   tickCount++;
+  tickMarks = [];
   // Single-runner lease: funding watch, prune and the S2 clear-pass must not double-run when two
   // poller processes are up (a deploy overlap, say). The lease outlives a tick by one interval so
   // a crashed holder frees it by itself.
@@ -201,12 +222,16 @@ async function tick() {
     console.warn("[poller] another runner holds the lease — skipping tick");
     return;
   }
+  // A lease row just got written: the DB is up and the loop is moving, so the heartbeat span starts
+  // here rather than at the previous tick's end — that gap would include the inter-tick sleep.
+  beat();
+  let t = Date.now();
   // Keep the deck cache warm so swipes lock fresh prices and expired markets drop (M4).
   // Pull the OUTER window (max per-category horizon) to match the deck route — otherwise the
   // longer-horizon sports/esports half never gets price refreshes and shows stale (often 50/50)
   // odds. fetchBlitzDeck still drops each market past its own category horizon.
   try {
-    const r = await withGammaDeadline(DECK_GAMMA_BUDGET_MS, () => refreshDeck(DECK_FETCH_HORIZON_HOURS, 100));
+    const r = await withDeadline(DECK_GAMMA_BUDGET_MS, () => refreshDeck(DECK_FETCH_HORIZON_HOURS, 100));
     // Log the SERVABLE count next to the upserted one. Reporting only "refreshed N" is what hid a
     // multi-week outage: N stayed at 100 the whole time the deck was empty, because every one of
     // those 100 expired within minutes. The alarm below is deliberately loud and greppable —
@@ -224,6 +249,7 @@ async function tick() {
     console.warn("[deck] refresh error:", (e as Error).message);
     subsystemFailed("deck", e);
   }
+  mark("deck", t);
 
   // Hedge market index (S1 crypto majors + S2 sports/esports) — SLOWER sibling cadence (every Nth
   // tick). Runs on the FIRST tick after boot then every HEDGE_INDEX_EVERY_N_TICKS ticks, so a fresh
@@ -231,8 +257,9 @@ async function tick() {
   // (a market resolved-early on Polymarket gets re-priced/closed here); F2's clear-pass drops rows
   // that fell out of the fetch/band. A refresh failure is transient — log and keep the tick alive.
   if ((tickCount - 1) % HEDGE_INDEX_EVERY_N_TICKS === 0) {
+    t = Date.now();
     try {
-      const hs = await withGammaDeadline(HEDGE_INDEX_GAMMA_BUDGET_MS, () => refreshHedgeIndex());
+      const hs = await withDeadline(HEDGE_INDEX_GAMMA_BUDGET_MS, () => refreshHedgeIndex());
       console.log(
         `[hedge-index] S1 parsed=${hs.parsed}/${hs.discovered} | S2 eligible=${hs.sports.eligible}/${hs.sports.discovered} cleared=${hs.sports.clearedStale}`,
       );
@@ -242,6 +269,7 @@ async function tick() {
       console.warn("[hedge-index] refresh error:", (e as Error).message);
       subsystemFailed("hedge-index", e);
     }
+    mark("index", t);
   }
 
   // Market cache GC. The cache is append-only otherwise: settlement only touches markets that have
@@ -283,20 +311,37 @@ async function tick() {
     select: { id: true, polymarketId: true, source: true, resolutionDeadline: true, startsAt: true },
     orderBy: { resolutionDeadline: "asc" }, // oldest first — they get the chain-probe budget
   });
+  // The DB just answered twice and the loop reached the sweep: that is progress, so the heartbeat
+  // span restarts here — the deck and index budgets on one side of it, the sweep's on the other.
+  beat();
+  t = Date.now();
   if (markets.length) {
     console.log(`[poll] ${markets.length} market(s) with pending bets`);
+    // Oldest deadlines first, so a budget hit leaves the NEWEST markets for the next tick. The head is
+    // stable across ticks, so a market that can never resolve would starve the tail — that is the
+    // backlog alarm's case below, not a reason to rotate the order.
     let settleErrors = 0;
+    let refused = 0; // budget spent before the market was even read — not a failure of that market
     chainProbesLeft = CHAIN_PROBES_PER_TICK;
-    await mapLimit(markets, CONCURRENCY, settleOne, () => { settleErrors++; });
-    if (settleErrors > 0) subsystemFailed("settle", new Error(`${settleErrors} settle item error(s) this tick`));
-    else subsystemOk("settle");
+    await withDeadline(SETTLE_BUDGET_MS, () =>
+      mapLimit(markets, CONCURRENCY, settleOne, (e) => {
+        if (/time budget exhausted/.test((e as Error).message)) refused++;
+        else settleErrors++;
+      }),
+    );
+    if (refused > 0) console.warn(`[settle] budget hit — ${refused}/${markets.length} market(s) not reached this tick`);
+    if (settleErrors + refused > 0) {
+      subsystemFailed("settle", new Error(`${settleErrors} settle item error(s), ${refused} not reached this tick`));
+    } else subsystemOk("settle");
   }
+  mark("settle", t);
 
   // Deposit watcher (plan §2.5): delta-based funding detection every tick; the lib applies the
   // tiered per-attempt cadence itself, so calling it each tick is cheap. RPC errors surface as a
   // subsystem failure only when NOTHING could be checked — per-attempt errors are counted inside.
+  t = Date.now();
   try {
-    const f = await watchFunding(prisma, undefined, new Date(), rpcChain);
+    const f = await withDeadline(FUNDING_BUDGET_MS, () => watchFunding(prisma, undefined, new Date(), rpcChain));
     if (f.checked + f.errors > 0) {
       console.log(`[funding] checked ${f.checked}, detected ${f.detected}, funded ${f.funded}, errors ${f.errors}`);
     }
@@ -306,6 +351,7 @@ async function tick() {
     console.warn("[funding] watcher error:", (e as Error).message);
     subsystemFailed("funding", e);
   }
+  mark("funding", t);
 
   // REAL positions on markets that have already resolved. A LOST one redeems to zero, so it needs
   // no signature and no relayer — waiting for the user to open a developer console and press REDEEM
@@ -316,8 +362,9 @@ async function tick() {
   // The same pass clears intents nobody signed — one such row holds the market's in-flight slot and
   // the intent route only expires it when a NEW intent arrives for that same market, which never
   // comes if the reason nobody retried is that the button correctly disappeared.
+  t = Date.now();
   try {
-    const rs = await settleResolvedRealPositions(prisma);
+    const rs = await withDeadline(REAL_SETTLE_BUDGET_MS, () => settleResolvedRealPositions(prisma));
     if (rs.lost + rs.won + rs.dust > 0)
       console.log(`[real-settle] booked ${rs.won} won, ${rs.lost} lost, ${rs.dust} sub-tick remnant(s)`);
     if (rs.winnersPending > 0) console.warn(`[real-settle] ${rs.winnersPending} won position(s) not yet redeemed on chain`);
@@ -332,6 +379,7 @@ async function tick() {
     console.warn("[real-settle] error:", (e as Error).message);
     subsystemFailed("real-settle", e);
   }
+  mark("real-settle", t);
 
   // Stuck real-order attempts (S8): ambiguous submissions must reach ops, never silently rot.
   try {
@@ -385,6 +433,7 @@ async function tick() {
   // Streak sweep — only streaks that can actually transition (M1): ACTIVE that missed a
   // day, or BURNED_RECOVERABLE whose window has expired. Everything else is a no-op the
   // read-path handles. Avoids one transaction per user per tick.
+  t = Date.now();
   const twoDaysAgo = new Date(Date.now() - 2 * 86_400_000).toISOString().slice(0, 10);
   const due = await prisma.streak.findMany({
     where: {
@@ -406,6 +455,7 @@ async function tick() {
   }
   if (streakErrors > 0) subsystemFailed("streak", new Error(`${streakErrors} streak sweep error(s)`));
   else subsystemOk("streak");
+  mark("streak", t);
 
   // Backlog: a PENDING bet >6h past its market's resolutionDeadline means settlement is
   // not keeping up (or resolution fetch is broken) — the heartbeat alone would stay green.
@@ -462,11 +512,15 @@ async function loop() {
     const start = Date.now();
     try {
       await tick();
-      // The end-of-tick beat lands only on a clean tick, and the mid-tick beats (see beat()) only
-      // after a subsystem SUCCEEDS — a tick that fails everywhere (a wedged DB pool, say) still lets
-      // the file go stale so the healthcheck restarts us rather than masking a persistent failure.
+      // The end-of-tick beat lands only on a clean tick, and the mid-tick beats (see beat()) only on
+      // progress — a lease written, a subsystem succeeded, the sweep reached — so a tick that fails
+      // everywhere (a wedged DB pool, say) still lets the file go stale and the healthcheck restarts
+      // us rather than masking a persistent failure.
       beat();
-      // Dead-man ping: external uptime check; no-op without POLLER_HC_URL.
+      // Dead-man ping for the external uptime check (Kuma push, 300 s window): deliberately NOT in
+      // beat() — the file says "alive", this says "a tick completed end to end", and a crashloop or a
+      // tick that throws every time past the mid-tick beats must still turn it red. With the budgets
+      // above a healthy tick stays far under the window. No-op without POLLER_HC_URL.
       const hc = process.env.POLLER_HC_URL;
       if (hc) fetch(hc, { signal: AbortSignal.timeout(5000) }).catch(() => {});
     } catch (e) {
@@ -474,6 +528,7 @@ async function loop() {
       void captureToGlitchTip(e, { subsystem: "tick" });
     }
     const elapsed = Date.now() - start;
+    console.log(`[poll] tick #${tickCount} ${(elapsed / 1000).toFixed(1)}s${tickMarks.length ? ` — ${tickMarks.join(", ")}` : ""}`);
     await new Promise((r) => setTimeout(r, Math.max(0, POLL_INTERVAL_MS - elapsed)));
   }
 }
