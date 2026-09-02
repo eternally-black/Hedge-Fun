@@ -74,9 +74,14 @@ export async function getSnapshot(address: string, opts: { force?: boolean } = {
   if (!opts.force) {
     rebuildInFlight.set(address, p);
     // Clear the slot once settled (success OR failure) so the next stale read rebuilds afresh.
-    void p.finally(() => {
+    // then(clear, clear), NOT `void p.finally(clear)`: .finally() returns a NEW promise that rejects
+    // whenever p rejects, and with nobody awaiting that one a Helius/Jupiter outage was an unhandled
+    // rejection — the route answered its 502 and the process died with it (caught by
+    // scripts/test-hedge-wallet-verified.ts, which links a wallet with no exposure upstream).
+    const clear = () => {
       if (rebuildInFlight.get(address) === p) rebuildInFlight.delete(address);
-    });
+    };
+    void p.then(clear, clear);
   }
   return p;
 }
