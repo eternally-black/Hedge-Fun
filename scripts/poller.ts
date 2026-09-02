@@ -426,6 +426,15 @@ async function tick() {
 
 async function loop() {
   console.log("poller started. interval", POLL_INTERVAL_MS, "ms");
+  // Heartbeat before the first tick: the file means "alive and making progress", and before the
+  // first tick completes the process is alive by definition. The cold-start tick (deck + the full
+  // hedge index) outlasts the healthcheck's start_period, which failed `compose up --wait` on
+  // 2026-09-02. A wedged first tick is still caught by the 180s staleness bound.
+  try {
+    writeFileSync(HEARTBEAT_FILE, new Date().toISOString());
+  } catch (e) {
+    console.warn("[poll] initial heartbeat write failed:", (e as Error).message);
+  }
   while (running) {
     const start = Date.now();
     try {
