@@ -36,8 +36,9 @@ deploy.sh
 hedgefun_ci
 hedgefun_ci.pub
 
-# Not part of the image
-mobile
+# Not part of the image. mobile/ itself STAYS in the context: scripts/test-side-labels.ts imports
+# ../mobile/src/format for the web/mobile drift check and next build type-checks scripts/.
+mobile/node_modules
 .claude
 .scratch
 ops
