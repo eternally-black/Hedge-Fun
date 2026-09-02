@@ -101,11 +101,27 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "below_minimum", minUsd: asset.minUsd }, { status: 409 });
   }
 
-  const existing = await prisma.walletWorkflow.findUnique({
+  let existing = await prisma.walletWorkflow.findUnique({
     where: { userId_kind: { userId: user.id, kind: "BRIDGE_OUT" } },
   });
+  // A run parked in PENDING_SIGNATURE while waiting for the device signature used to hold the slot
+  // forever if the user rejected the prompt or closed the tab: no expiry is set until the SUBMITTING
+  // fence, the card's GET only reads, the client refuses to re-enter a stale BRIDGE_OUT run, and the
+  // operator tool only handles SUBMITTING rows. Superseding is safe because BRIDGE_OUT is a
+  // single-call run — nothing reaches the relayer before the SUBMITTING fence — and the engine
+  // itself restarts such rows when the live session is gone. A late signature goes stale on the
+  // runId check. The already-minted bridge address is reused when the destination matches.
   if (existing && existing.state === "PENDING_SIGNATURE") {
-    return NextResponse.json({ error: "withdrawal_in_flight" }, { status: 409 });
+    const superseded = await prisma.walletWorkflow.updateMany({
+      where: { userId: user.id, kind: "BRIDGE_OUT", state: "PENDING_SIGNATURE", runId: existing.runId },
+      data: { state: "FAILED", error: "abandoned at the signature prompt — superseded by a new withdrawal request" },
+    });
+    if (superseded.count === 0) {
+      return NextResponse.json({ error: "withdrawal_in_flight" }, { status: 409 });
+    }
+    existing = await prisma.walletWorkflow.findUnique({
+      where: { userId_kind: { userId: user.id, kind: "BRIDGE_OUT" } },
+    });
   }
   if (existing && existing.state === "SUBMITTING") {
     // A SUBMITTING run whose browser is gone has no driver: the card's GET only reads, and this
