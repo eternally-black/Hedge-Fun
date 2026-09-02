@@ -1,7 +1,7 @@
 // Root — the native twin of src/app/page.tsx: auth gate, boot ritual, screen state machine,
 // persistent HUD + bottom nav, toast, and the top-up sheet. Server data is rendered as-is.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ActivityIndicator, Platform, StatusBar as RNStatusBar, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Platform, StatusBar as RNStatusBar, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { usePrivy } from "@privy-io/expo";
 import { useApi, statusOf } from "./api";
@@ -123,7 +123,22 @@ export default function Root() {
       <Hud me={me} onGM={goHome} onBalance={openTopup} onBell={goResults} />
       <View style={styles.body}>
         {screen === "home" && <HomeScreen me={me} api={api} onRefreshMe={refreshMe} onEnterDeck={goDeck} />}
-        {screen === "deck" && <DeckScreen me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openTopup} />}
+        {/* Real-money accounts must not be handed the paper deck: the server follows the account's
+            mode for history/results, so swipes here would write PAPER bets while /api/history reads
+            REAL — two economies on one screen. Send them to the web app instead. */}
+        {screen === "deck" && me?.real?.mode === "REAL" ? (
+          <View style={styles.realNotice}>
+            <Text style={styles.realNoticeTitle}>Real-money mode is on</Text>
+            <Text style={styles.realNoticeBody}>
+              Trade with real money in the web app — the Android deck plays the paper game.
+            </Text>
+            <TouchableOpacity style={styles.realNoticeBtn} onPress={goHome} accessibilityRole="button">
+              <Text style={styles.realNoticeBtnText}>Back to home</Text>
+            </TouchableOpacity>
+          </View>
+        ) : screen === "deck" ? (
+          <DeckScreen me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openTopup} />
+        ) : null}
         {screen === "hedge" && <HedgeScreen me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openTopup} />}
         {screen === "results" && <ResultsScreen api={api} onSeen={markResultsSeen} />}
         {screen === "profile" && <ProfileScreen me={me} api={api} onLogout={doLogout} onToast={flashToast} />}
@@ -160,4 +175,16 @@ const styles = StyleSheet.create({
     borderRadius: 14, paddingVertical: 12, paddingHorizontal: 16, alignItems: "center",
   },
   toastText: { color: colors.text, fontSize: 13 },
+  realNotice: {
+    flex: 1, alignItems: "center", justifyContent: "center", padding: 24,
+    backgroundColor: colors.panel, borderWidth: 1, borderColor: colors.line,
+    borderRadius: 18, margin: 16,
+  },
+  realNoticeTitle: { color: colors.text, fontSize: 20, fontWeight: "900", textAlign: "center" },
+  realNoticeBody: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 8, textAlign: "center", maxWidth: 280 },
+  realNoticeBtn: {
+    marginTop: 18, paddingVertical: 12, paddingHorizontal: 24, borderRadius: 14,
+    backgroundColor: colors.energy, alignItems: "center",
+  },
+  realNoticeBtnText: { color: "#fff", fontSize: 14, fontWeight: "800" },
 });

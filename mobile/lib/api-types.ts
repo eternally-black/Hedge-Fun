@@ -89,6 +89,25 @@ export interface QuotesResponse {
   quotes: QuoteRow[];
 }
 
+// ─── GET /api/real/exit-quote?ids=<betId,...> ──────────────────────────────────────────────────
+// Auth: Bearer + real consent (NOT eligibility — a restricted user may always value and leave a
+// position). What the named REAL positions are worth if sold at market right now. Quoted off the
+// same book walk, fee and pro-rata basis the sale itself books, so the number shown before a close
+// is the number realized after it. A position with no live number (book unreachable, no bids,
+// market no longer OPEN, remainder below one share tick) is simply ABSENT from `quotes` — the
+// client shows nothing rather than a stale figure. Poll at most 1/s.
+export interface ExitQuoteRow {
+  betId: string;
+  sharesMicro: string; // micro-shares this quote is for (the remainder, floored to a share tick)
+  proceedsCents: number; // what the user RECEIVES after the platform fee, truncated to the cent
+  pnlCents: number; // proceeds − the fee-inclusive cost basis of those shares; negative = a loss
+  priceBp: number; // sell VWAP for the whole remainder, in bp (rounded down — payout side)
+  partial: boolean; // the bids ran out: the numbers value only what the book can absorb today
+}
+export interface ExitQuotesResponse {
+  quotes: ExitQuoteRow[];
+}
+
 // ─── GET /api/feed ─────────────────────────────────────────────────────────────────────────────
 // Auth: Bearer. The post-cap "лента": an endless, crypto-first stream of near-50% binary markets
 // (all tiers), minus any the user already bet. Cursor-paginated for infinite scroll — pass the prior
@@ -179,19 +198,31 @@ export interface LoginMarkResponse {
 // Auth: Bearer. The user's bets + market info. PENDING first, then settled by recency.
 export interface HistoryRow {
   id: string;
+  marketId: string; // an EXIT is placed against the market — the sheet's Close button needs it
   question: string;
+  category: string | null; // server-derived, see DeckCard.category
+  league?: string | null; // server-derived, see DeckCard.league — the sport a row names in its subtitle
   sideLabel: string; // the label of the side the user bet (team / Over / Up / Yes)
   side: BetSide; // drives badge color
   stakeCents: number;
   lockedPriceBp: number;
   status: BetStatus;
   pnlCents: number | null; // null while PENDING
-  resolutionDeadline: string; // ISO-8601
+  // ISO-8601. For a MATCH this is Gamma's endDate, which equals KICK-OFF (measured 2026-08-19 over
+  // 172 live sport markets: endDate === gameStartTime on every one) — the market then trades in-play
+  // and resolves hours later. Compare with startsAt before calling it a resolution time.
+  resolutionDeadline: string;
+  startsAt?: string | null; // ISO-8601 kick-off; null for crypto/Yes-No, which have no game
   createdAt: string; // ISO-8601
+  settledAt?: string | null; // ISO-8601; null while the bet is still PENDING
+  // REAL positions only: there is a remainder the signer can actually sell (it works in 4-decimal
+  // shares, so a sub-tick remnant is unsellable and must not be offered as closable).
+  closable?: boolean;
 }
 export interface HistoryResponse {
   rows: HistoryRow[];
   pendingCount: number;
+  nextCursor: string | null; // opaque; pass back as ?cursor= for the next page; null = no more
 }
 
 // ─── GET /api/results ──────────────────────────────────────────────────────────────────────────
@@ -209,6 +240,11 @@ export interface ResultRow {
   pnlCents: number; // settled P&L (negative on a loss, 0 on push)
   deltaCents: number; // alias of pnlCents — the balance delta this result applied
   shards: number; // shards granted for this bet (0 or 1)
+  // What the call COST, so a settled row can be opened and read like an open one: the two lists
+  // share a component, and the expanded detail is the same detail in both.
+  stakeCents: number;
+  lockedPriceBp: number;
+  createdAt: string; // ISO-8601 — when the call was made
   settledAt: string; // ISO-8601
   seen: boolean; // seenAt != null
   // DEPRECATED (2026-08-03). Marked a settlement made on Solana-anchored data — only ever true for
@@ -223,6 +259,7 @@ export interface ResultRow {
 export interface ResultsResponse {
   rows: ResultRow[];
   unreadCount: number;
+  nextCursor: string | null; // opaque; pass back as ?cursor= for the next page; null = no more
 }
 
 // ─── POST /api/results/seen ──────────────────────────────────────────────────────────────────────
@@ -269,6 +306,21 @@ export interface MeResponse {
     recoverableUntil: string | null; // ISO-8601, null unless BURNED_RECOVERABLE
     todayWeekday: number; // 0=Mon..6=Sun — which GM-grid column is today
     windowStartWeekday: number; // 0=Mon..6=Sun — where this user's 7-day window starts
+  };
+  // Everything the Paper/Real switch in the profile needs, and nothing that costs an RPC call:
+  // /api/me is read on every screen, so the on-chain pUSD balance deliberately lives on the real
+  // screen's own endpoints instead. `termsVersion` is the CURRENT text; when it differs from
+  // `consentVersion` the user has agreed to something older and must accept again before real mode
+  // will turn on, which is the whole reason the version is stored at all.
+  real: {
+    consentAt: string | null; // ISO-8601 — when they accepted, null if never
+    consentVersion: string | null; // which text they accepted
+    termsVersion: string; // which text they would be shown now
+    mode: "PAPER" | "REAL"; // which economy the app is currently rendering
+    depositWallet: string | null; // provisioned Polymarket deposit wallet, null until setup runs
+    stakeCents: number; // what ONE real swipe spends — the user's own setting, not the paper stake
+    minStakeCents: number; // the floor the UI must not let them go under
+    maxStakeCents: number; // fat-finger ceiling
   };
   loginMarkedToday: boolean;
   unreadResults: number; // settled bets the user hasn't seen yet (seenAt IS NULL) — drives the HUD bell

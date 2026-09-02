@@ -167,10 +167,10 @@ function CardFace({ card, stakeCents, dimmed = false }: { card: DeckCardT; stake
         {stakeCents !== null && (
           <View style={styles.payoutRow}>
             <Text style={styles.payoutText}>
-              {usd(stakeCents)} on <Text style={{ color: colors.yes, fontWeight: "700" }}>{labels.yes}</Text> → win ${winPayout(card.yesPriceBp, stakeCents)}
+              {usd(stakeCents)} on <Text style={{ color: colors.yes, fontWeight: "700" }}>{labels.yes}</Text> → win {usd(winPayout(card.yesPriceBp, stakeCents))}
             </Text>
             <Text style={styles.payoutText}>
-              <Text style={{ color: colors.no, fontWeight: "700" }}>{labels.no}</Text> → win ${winPayout(card.noPriceBp, stakeCents)}
+              <Text style={{ color: colors.no, fontWeight: "700" }}>{labels.no}</Text> → win {usd(winPayout(card.noPriceBp, stakeCents))}
             </Text>
           </View>
         )}

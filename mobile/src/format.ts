@@ -10,14 +10,28 @@ export const cents = (bp: number) => {
 };
 
 export const num = (n: number) => n.toLocaleString("en-US");
-export const usd = (c: number) => `$${Math.round(c / 100).toLocaleString("en-US")}`;
+// Money, EXACT to the cent and never rounded UP — a verbatim port of web's usd(). It used to round
+// to whole dollars, which was fine while every amount in the game was one ($200 balance, $10 stake)
+// and became a lie the moment real money arrived: an $0.89 win rendered as "+$1". Whole amounts
+// still print whole, so the paper economy looks exactly as it did; anything with cents prints them.
+// Truncation, not rounding: a gain must never read larger than it is.
+export const usd = (cents: number) => {
+  const neg = cents < 0;
+  const abs = Math.abs(Math.trunc(cents));
+  const whole = Math.floor(abs / 100).toLocaleString("en-US");
+  const rest = abs % 100;
+  return `${neg ? "−" : ""}$${rest === 0 ? whole : `${whole}.${String(rest).padStart(2, "0")}`}`;
+};
 
-// Virtual-$ payout (whole dollars) if this side wins: stake at price p buys stake/p of $1 shares.
-// Mirrors settle.ts share math (payout = stake*10000/priceBp). stakeCents comes from /api/me
-// (me.stakeCents) — the client never hardcodes the stake.
+// Payout in CENTS if this side wins: stake of `stakeCents` at price p (bp/10000) buys stake/p of
+// $1 shares. Mirrors settle.ts share math (payout = stake*10000/priceBp). stakeCents comes from
+// /api/me (me.stakeCents) — the client never hardcodes the stake.
 export const winPayout = (bp: number, stakeCents: number) => {
-  const p = Math.max(0.02, bp / 10000);
-  return Math.round(stakeCents / 100 / p);
+  // 1bp floor — a div-by-zero guard only, matching settle.ts computePnl's own clamp. The old 2%
+  // floor silently understated every payout below 200bp: hedge cards admit sides down to 100bp,
+  // where a $500 stake displayed $25,000 against a true $50,000.
+  const p = Math.max(0.0001, bp / 10000);
+  return Math.floor(stakeCents / p); // CENTS, floored — a promised payout must never read high
 };
 
 // Category accent + label. Web classifies locally (it imports deck-mix); this client deliberately
@@ -230,9 +244,10 @@ export function resultMeta(status: ResultRow["status"]): { accent: string; glyph
   return { accent: "#4d9bff", glyph: "↩", tag: "Void" };
 }
 
-// Signed dollar delta from cents, with a real minus glyph. Push shows "Refund".
+// Signed delta, EXACT to the cent — usd() already truncates and carries the minus glyph, so this
+// only adds the plus. It used to round to whole dollars of its own accord, which is why an $0.89
+// win still read "+$1" in the results inbox. Push shows "Refund".
 export function deltaStr(status: ResultRow["status"], c: number): string {
   if (status === "PUSH") return "Refund";
-  const d = Math.round(c / 100);
-  return d >= 0 ? `+$${d.toLocaleString("en-US")}` : `−$${Math.abs(d).toLocaleString("en-US")}`;
+  return c >= 0 ? `+${usd(c)}` : `−${usd(-c)}`;
 }

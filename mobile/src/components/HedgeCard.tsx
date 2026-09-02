@@ -121,7 +121,7 @@ export const HedgeCard = memo(function HedgeCard({
                   {discovery ? "Bet" : "Hedge"} {usd(s.proposedStakeCents)} on {s.sideLabel}
                 </Text>
                 <Text style={styles.acceptSub}>
-                  to win <Text style={{ color: sideColor, fontFamily: "monospace", fontWeight: "700" }}>${payout}</Text>
+                  to win <Text style={{ color: sideColor, fontFamily: "monospace", fontWeight: "700" }}>{usd(payout)}</Text>
                 </Text>
               </>
             )}
