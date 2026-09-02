@@ -87,7 +87,7 @@ async function main() {
       marketId: market.id,
       asset: "SOL",
       tagSlug: "solana",
-      strikeCents: 20_000,
+      strikeCents: 9_000, // $90 against a $75 spot — inside the S1 30% band (HEDGE_S1_STRIKE_BAND_BP)
       direction: "UP",
       parsedDeadline: market.resolutionDeadline,
       // Hermeticity (F5): matchS1 offers only the TOP-liquidity market per asset (perAsset=1), so on
@@ -245,7 +245,7 @@ async function main() {
       marketId: marketY.id,
       asset: "SOL",
       tagSlug: "solana",
-      strikeCents: 30_000,
+      strikeCents: 6_000, // $60 against a $75 spot — inside the S1 30% band
       direction: "UP",
       parsedDeadline: marketY.resolutionDeadline,
       // Above market's 2_000_000_000 so marketY is the top SOL pick at F's derive time (perAsset=1).

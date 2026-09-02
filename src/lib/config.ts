@@ -137,6 +137,10 @@ export const HEDGE_MAX_STAKE_CENTS = 50_000; // $500.00 — cap any single paper
 export const HEDGE_MIN_NOTIONAL_CENTS = 500; // $5.00
 // A candidate market must resolve at least this far out to be a usable hedge (not seconds away).
 export const HEDGE_MIN_LEAD_MS = 30 * 60_000; // 30 minutes
+// A hedge must expire while the exposure still exists — a long-dated row is a lottery ticket, not a hedge.
+export const HEDGE_S1_MAX_HORIZON_MS = 90 * 86_400_000; // 90 days
+// A strike more than 30% from spot is a lottery ticket, not a hedge.
+export const HEDGE_S1_STRIKE_BAND_BP = 3_000; // 30%
 // Accept-time side-price sanity band (F1). The suggestion pipeline already band-filters at DERIVE
 // time (matchS1 uses the SAME 1–99% band; S2 uses [S2_SIDE_FLOOR_BP, S2_SIDE_CEIL_BP]; the fallback
 // uses the tighter contested gate), so a bad price normally drops out as a 404 stale. This is the

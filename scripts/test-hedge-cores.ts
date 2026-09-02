@@ -151,18 +151,25 @@ import {
     splAggregateCents: 50_000,
     totalNotionalCents: 162_500,
   };
+  // SOL spot is $75 (7500c) — strikes must sit inside the 30% band (5250–9750c) to be eligible, so
+  // the fixtures that used to carry nonsense five-figure-dollar strikes now carry real ones.
   const markets: IndexedMarket[] = [
-    { marketId: "m-up", asset: "SOL", direction: "UP", strikeCents: 10_000_000, deadlineMs: h(2), liquidityCents: 500_000, yesPriceBp: 4000, noPriceBp: 6000 },
-    { marketId: "m-down", asset: "SOL", direction: "DOWN", strikeCents: 5_000_000, deadlineMs: h(3), liquidityCents: 100_000, yesPriceBp: 3000, noPriceBp: 7000 },
-    { marketId: "m-soon", asset: "SOL", direction: "UP", strikeCents: 9_000_000, deadlineMs: now + HEDGE_MIN_LEAD_MS - 1, liquidityCents: 999_999, yesPriceBp: 4000, noPriceBp: 6000 },
+    { marketId: "m-up", asset: "SOL", direction: "UP", strikeCents: 8_500, deadlineMs: h(2), liquidityCents: 500_000, yesPriceBp: 4000, noPriceBp: 6000 },
+    { marketId: "m-down", asset: "SOL", direction: "DOWN", strikeCents: 6_000, deadlineMs: h(3), liquidityCents: 100_000, yesPriceBp: 3000, noPriceBp: 7000 },
+    { marketId: "m-soon", asset: "SOL", direction: "UP", strikeCents: 9_000, deadlineMs: now + HEDGE_MIN_LEAD_MS - 1, liquidityCents: 999_999, yesPriceBp: 4000, noPriceBp: 6000 },
     { marketId: "m-btc", asset: "BTC", direction: "UP", strikeCents: 6_000_000_0, deadlineMs: h(4), liquidityCents: 900_000, yesPriceBp: 4000, noPriceBp: 6000 },
+    // Highest liquidity of all, but 60% above spot and 200 days out — must NOT be the pick.
+    { marketId: "m-far", asset: "SOL", direction: "UP", strikeCents: 12_000, deadlineMs: h(200 * 24), liquidityCents: 999_999_999, yesPriceBp: 4000, noPriceBp: 6000 },
+    // Two in-band markets with equal (low) liquidity — the one closer to spot ($75) wins between them.
+    { marketId: "m-near", asset: "SOL", direction: "DOWN", strikeCents: 7_000, deadlineMs: h(5), liquidityCents: 50_000, yesPriceBp: 3000, noPriceBp: 7000 },
+    { marketId: "m-farish", asset: "SOL", direction: "DOWN", strikeCents: 9_000, deadlineMs: h(6), liquidityCents: 50_000, yesPriceBp: 3000, noPriceBp: 7000 },
   ];
 
   const cands = matchS1(exposure, markets, now, { perAsset: 1 });
   assert.strictEqual(cands.length, 2, "one major + one proxy");
 
   const major = cands.find((c) => c.kind === "S1_MAJOR")!;
-  assert.strictEqual(major.marketId, "m-up", "major hedge picks the highest-liquidity SOL market (not the too-soon one)");
+  assert.strictEqual(major.marketId, "m-up", "major hedge picks the highest-liquidity in-band SOL market (not the too-soon or far-strike one)");
   assert.strictEqual(major.side, "NO", "hedging a long vs an UP market -> NO side");
   assert.strictEqual(major.sidePriceBp, 6000, "locks the NO price");
   assert.strictEqual(major.hedgedAsset, "SOL");
@@ -173,6 +180,14 @@ import {
   assert.strictEqual(proxy.side, "YES", "DOWN market -> YES side benefits from a fall");
   assert.strictEqual(proxy.hedgedNotionalCents, 50_000, "proxy hedges the SPL aggregate");
   assert.strictEqual(proxy.isProxy, true);
+
+  // The far-strike, far-dated, highest-liquidity market must never be picked.
+  assert.ok(!cands.some((c) => c.marketId === "m-far"), "far-strike / far-dated market is not a hedge");
+
+  // Equal-liquidity in-band markets: the strike closer to spot wins.
+  const nearOnly = matchS1(exposure, markets.filter((m) => m.marketId === "m-near" || m.marketId === "m-farish"), now, { perAsset: 1 });
+  assert.strictEqual(nearOnly[0]!.marketId, "m-near", "closer strike beats a farther one at equal liquidity");
+  console.log("OK: S1 hedges stay near spot and inside the horizon");
 
   // No BTC holding -> no BTC candidate even though a BTC market exists.
   assert.ok(!cands.some((c) => c.marketId === "m-btc"), "no holding -> no BTC hedge");
