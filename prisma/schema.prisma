@@ -11,7 +11,7 @@ datasource db {
 generator client {
   provider      = "prisma-client-js"
   // "native" keeps local dev working (Windows/WSL); the Debian target is the
-  // engine the Docker runtime image (node:22-bookworm-slim, glibc) needs.
+  // engine the Docker runtime image (node:24-bookworm-slim, glibc) needs.
   binaryTargets = ["native", "debian-openssl-3.0.x"]
 }
 

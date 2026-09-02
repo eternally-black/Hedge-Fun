@@ -1,0 +1,10 @@
+# copytruncate because notify.sh holds no fd — appends per call — and we never want a rename to lose a line.
+/var/log/hedgefun-notify.log {
+  weekly
+  rotate 8
+  compress
+  delaycompress
+  missingok
+  notifempty
+  copytruncate
+}

@@ -74,6 +74,15 @@ timedatectl set-ntp true 2>/dev/null || true
 # --- state/backup dirs -------------------------------------------------------
 mkdir -p /var/lib/hedgefun "$HEDGEFUN_DIR/backups"
 chmod 700 "$HEDGEFUN_DIR/backups"
+# deploy.sh runs backup.sh as the deploy user; a root-owned 0700 dir makes the pre-migration
+# dump EPERM and aborts every deploy after the first. Hand it to the deploy account.
+chown "$(stat -c %U:%G "$HEDGEFUN_DIR")" "$HEDGEFUN_DIR/backups"
+# notify.sh appends with `|| true`, so a root-owned file silently drops every deploy-user alert.
+touch /var/log/hedgefun-notify.log
+chown "$(stat -c %U:%G "$HEDGEFUN_DIR")" /var/log/hedgefun-notify.log
+chmod 664 /var/log/hedgefun-notify.log
+# Install the logrotate config for the alert log.
+install -m 0644 "$(dirname "$0")/logrotate-hedgefun-notify" /etc/logrotate.d/hedgefun-notify
 # /var/lib/hedgefun is shared: root writes the watchdog lock here from systemd, and deploy.sh writes
 # its in-progress marker here as the DEPLOY user over SSH from CI. This installer runs as root, so
 # without the chown the directory ends up root-owned and the next deploy dies on

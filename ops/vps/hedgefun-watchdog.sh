@@ -5,9 +5,9 @@
 # the thing that actually closes that gap: `docker restart` for unhealthy, `compose up -d`
 # for exited/missing, with restart budgets so it can never become a crashloop machine.
 #
-# WATCHDOG_OBSERVE=1 (default, set in /opt/hedgefun/.env) => alert-only, no restarts.
-# Flip to 0 after the burn-in period. Restart budgets: 3/10min per service; db-class
-# services get exactly 1 attempt per hour — a recovering Postgres must not be power-cycled.
+# WATCHDOG_OBSERVE=0 (default) => self-healing on. WATCHDOG_OBSERVE=1 is the opt-in
+# observe-only mode for burn-in (alerts, no restarts). Restart budgets: 3/10min per service;
+# db-class services get exactly 1 attempt per hour — a recovering Postgres must not be power-cycled.
 set -u
 
 HEDGEFUN_DIR="${HEDGEFUN_DIR:-/opt/hedgefun}"
@@ -37,7 +37,7 @@ envval() { # envval KEY -> value from environment or /opt/hedgefun/.env (never s
   printf '%s' "$v"
 }
 
-OBSERVE="$(envval WATCHDOG_OBSERVE)"; OBSERVE="${OBSERVE:-1}"
+OBSERVE="$(envval WATCHDOG_OBSERVE)"; OBSERVE="${OBSERVE:-0}"
 HC_URL="$(envval WATCHDOG_HC_URL)"
 
 notify() { bash "$NOTIFY" "$1" "$2" || true; }
@@ -90,7 +90,7 @@ report_ok dockerd "dockerd is back"
 SERVICES=(
   "hedgefun:app:std" "hedgefun:poller:std" "hedgefun:db:db" "hedgefun:caddy:std"
   "glitchtip:web:std" "glitchtip:postgres:db" "glitchtip:valkey:std" "glitchtip:tg-bridge:std"
-  "glitchtip:kuma:std" "glitchtip:caddy:std"
+  "glitchtip:worker:std" "glitchtip:kuma:std" "glitchtip:caddy:std"
 )
 
 svc_dir() { [ "$1" = hedgefun ] && echo "$HEDGEFUN_DIR" || echo "$GLITCHTIP_DIR"; }

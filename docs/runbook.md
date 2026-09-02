@@ -13,7 +13,8 @@ compose services (`docker-compose.yml`):
 - **app** — `node server.js` (Next.js standalone). No host port; Caddy proxies to
   `app:3000` over the internal net. Healthcheck: `/api/me` returns 401/200 = alive.
 - **poller** — `node dist/poller.cjs`. F4 settlement loop. Healthcheck: heartbeat file
-  fresher than 180s (3× the 60s tick); stale → `restart: unless-stopped` fires.
+  fresher than 180s (3× the 60s tick); stale → the watchdog (`ops/vps/hedgefun-watchdog.sh`)
+  restarts the container (Compose never restarts on a healthcheck).
 - **migrate** — one-shot `npx prisma migrate deploy`, exits 0. app/poller `depends_on` it
   via `service_completed_successfully`, so they never start against an un-migrated DB.
 - **db** — `postgres:16-alpine`, internal-only (no published port), `pgdata` volume.
@@ -74,12 +75,13 @@ re-deploys. No-op on every subsequent deploy and on a fresh DB.
   start if the boot env check fails (missing `NEXT_PUBLIC_PRIVY_APP_ID` /
   `PRIVY_APP_SECRET` / `DATABASE_URL` → throws, see `src/instrumentation.ts`). If the new
   image is bad, roll back (above).
-- **Poller wedged** — heartbeat healthcheck restarts it automatically when the heartbeat
-  goes stale (>180s). If it keeps flapping: `docker compose logs poller`.
+- **Poller wedged** — the watchdog (`ops/vps/hedgefun-watchdog.sh`) restarts it when the
+  heartbeat goes stale (>180s). If it keeps flapping: `docker compose logs poller`.
 - **Bets stuck "Awaiting resolution"** — `fetchResolution` must query `closed=true`
   (Gamma hides closed markets); a regression there leaves bets unsettled. Check the canary
-  (below) and `src/lib/polymarket.ts`. Re-run settlement: `docker compose logs poller`,
-  and `npm run settle` if a manual pass is needed.
+  (below) and `src/lib/polymarket.ts`. Settlement runs inside every poller tick — force a
+  pass with `docker compose restart poller` and watch `docker compose logs -f poller` for
+  `[settle]` lines.
 - **CI deploy job fails in ~2s** — almost always **Actions billing/minutes on the
   PERSONAL account**. Set a spending limit / enable GitHub Pro. A Team org does **not**
   cover a personal repo — billing follows the account that owns the repo.
@@ -123,9 +125,10 @@ What fires when:
   (`ops/cloudflare-uptime/`) is an optional third layer; healthchecks.io is an optional
   substitute for Kuma push monitors.
 
-Staged rollout: watchdog ships in observe mode (`WATCHDOG_OBSERVE=1`); after burn-in,
-flip to `0` in `/opt/hedgefun/.env`. `AUTO_REBOOT` (VPS2 `/opt/ops/.env`) is armed
-**last**, only after the staged failure drill in `ops/vps2/README.md`.
+Staged rollout: the watchdog ships self-healing (`WATCHDOG_OBSERVE=0`); `1` is the opt-in
+observe-only mode for a burn-in and must be back at `0` while real money is live.
+`AUTO_REBOOT` (VPS2 `/opt/ops/.env`) is armed **last**, only after the staged failure drill
+in `ops/vps2/README.md`.
 
 ## Backup & restore
 

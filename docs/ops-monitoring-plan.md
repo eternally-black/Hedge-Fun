@@ -37,7 +37,7 @@ Owner checklist: `ops/README.md`. VPS2 runbook: `ops/vps2/README.md`.
 | Latent bug | compose comments claim unhealthy → restart; **plain Docker never restarts on a failing healthcheck** (Swarm-only), and `docker compose up -d <svc>` is a **no-op** for a running-but-unhealthy container (both advisors) — the fix must be an explicit `docker restart` |
 | Domain | `app.hedgeyour.fun` → Caddy (auto-TLS), sole ingress |
 | Repo | private → GH Actions minutes limited; **no new cron workflows** |
-| Deploy | push to `main` → GH Actions → GHCR → ssh `bash deploy.sh` (root; `git reset --hard origin/main` syncs infra files). Pull/migrate failure leaves the old stack running (fails safe) |
+| Deploy | push to `main` → GH Actions → GHCR → ssh `bash deploy.sh` (runs as the unprivileged `deploy` user; `git reset --hard origin/main` syncs infra files). Host hardening (`install-ops.sh`) is applied via passwordless sudo when available. Pull/migrate failure leaves the old stack running (fails safe) |
 | Next.js | 16.2.9; `onRequestError` hook available; `src/middleware.ts` runs on the **edge** runtime (Sentry must not statically import into it) |
 | Poller | 60 s tick; heartbeat written only after a completed loop pass; esbuild-bundled to `dist/poller.cjs`; the runtime image ships **without** general node_modules for it (Prisma only) — bundling `@sentry/node` is a risk we avoid entirely (see S3) |
 | App image | runs as UID 1001 — root-owned named volumes are not writable by it (Sol); we avoid needing one |

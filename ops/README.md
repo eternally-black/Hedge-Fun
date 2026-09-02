@@ -48,5 +48,6 @@ client-owned, cannot-be-automated setup. Two hosts: **VPS1** (the app,
 - GlitchTip: trigger a deliberate app error → tg-bridge delivers it.
 - Kuma: *Send test notification* on each monitor; stop the poller for 6 min → push
   dead-man fires; start it back.
-- Watchdog burn-in: leave `WATCHDOG_OBSERVE=1` for a week, then flip to `0`.
+- Watchdog burn-in: the watchdog ships self-healing (`WATCHDOG_OBSERVE=0`); `1` is the
+  opt-in observe-only mode for a burn-in and must be back at `0` while real money is live.
 - Staged reboot drill (before ever arming `AUTO_REBOOT`): see `ops/vps2/README.md`.
