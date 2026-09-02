@@ -4,6 +4,8 @@
 // fill that did not happen — an ambiguous exchange response says exactly that.
 import { useCallback, useEffect, useState } from "react";
 import { placeRealOrder, type Api, type RealCtx } from "@/lib/real-client";
+import { centsFromMicro } from "@/lib/quote";
+import { usd, usdFromMicro } from "../ui";
 
 type DeckCard = { id: string; question: string; yesPriceBp?: number; noPriceBp?: number };
 type PositionRow = {
@@ -52,10 +54,9 @@ const FIELD = {
 import { realErrText, realResultText } from "./real-copy";
 
 const short = (q: string, max = 60) => (q.length <= max ? q : `${q.slice(0, max - 1)}…`);
-const usd = (micro: string) => `$${(Number(micro) / 1e6).toFixed(2)}`;
 const signedUsd = (micro: string) => {
-  const v = Number(micro) / 1e6;
-  return `${v < 0 ? "−" : "+"}$${Math.abs(v).toFixed(2)}`;
+  const c = centsFromMicro(BigInt(micro));
+  return `${c < 0 ? "−" : "+"}${usd(Math.abs(c))}`;
 };
 const shares = (micro: string) => (Number(micro) / 1e6).toFixed(4);
 
@@ -158,7 +159,7 @@ export function RealOrderCard({ api, ctx }: { api: Api; ctx: RealCtx }) {
                 <div style={{ marginTop: 4, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                   <span style={MUTED}>{p.side}</span>
                   {open ? <span style={MUTED}>{shares(p.openSharesMicro)} open</span> : null}
-                  <span style={MUTED}>{usd(p.spendMicro)} in</span>
+                  <span style={MUTED}>{usdFromMicro(p.spendMicro)} in</span>
                   <span style={MUTED}>{signedUsd(p.realizedPnlMicro)} realized</span>
                   <span style={MUTED}>{p.status.toLowerCase()}</span>
                   {open ? (

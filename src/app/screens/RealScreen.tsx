@@ -7,6 +7,7 @@ import { usePrivy, useWallets } from "@privy-io/react-auth";
 import { provisionReal, runRealWorkflow, type RealCtx, type WorkflowKind } from "@/lib/real-client";
 import { RealOrderCard } from "./RealOrderCard";
 import { RealWithdrawCard } from "./RealWithdrawCard";
+import { usdFromMicro } from "../ui";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
@@ -56,7 +57,6 @@ function errText(e: unknown): string {
   return code || (e instanceof Error ? e.message : String(e));
 }
 const short = (a: string) => (a.length <= 14 ? a : `${a.slice(0, 6)}…${a.slice(-4)}`);
-const usdFromMicro = (micro: string) => `$${(Number(micro) / 1e6).toFixed(2)}`;
 
 export function RealScreen({ api }: { api: Api }) {
   const { wallets } = useWallets();

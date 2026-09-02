@@ -1,7 +1,7 @@
 "use client";
 
 import { memo } from "react";
-import { type Me, num, usd } from "../ui";
+import { type Me, num, usd, usdFromMicro } from "../ui";
 
 // Top HUD: points / streak / virtual-$ chips + the shard→artifact progress strip.
 // Ported from app design. Points pop animates on a +N event (pop prop). memo'd + stable
@@ -42,7 +42,7 @@ export const Hud = memo(function Hud({ me, pop, realPusdMicro, onShards, onGM, o
                 {isReal
                   ? realPusdMicro == null
                     ? "—"
-                    : `$${(Number(realPusdMicro) / 1e6).toFixed(2)}`
+                    : usdFromMicro(realPusdMicro)
                   : me
                     ? usd(me.cashCents)
                     : "—"}

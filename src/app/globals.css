@@ -31,6 +31,8 @@
   -webkit-user-select: none;
   -webkit-touch-callout: none;
 }
+/* Addresses must be copyable by hand when the clipboard API is unavailable. */
+.selectable { user-select: text; -webkit-user-select: text; -webkit-touch-callout: default; }
 
 html,
 body {

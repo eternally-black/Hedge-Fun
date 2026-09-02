@@ -8,7 +8,7 @@
 // It replaces the paper Top-Up affordance in real mode rather than sitting beside it — a screen that
 // offers "free top-up" next to "send real USDC" invites exactly the wrong tap.
 import { useEffect, useState } from "react";
-import type { Me } from "../ui";
+import { type Me, usdFromMicro } from "../ui";
 import { useRealCtx } from "../useRealCtx";
 import { runRealWorkflow } from "@/lib/real-client";
 import { DepositSheet } from "./DepositSheet";
@@ -102,7 +102,7 @@ export function RealDepositPanel({ me, api, pusdMicro, onToast }: {
         Real balance
       </div>
       <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 34, color: "var(--gold)", lineHeight: 1.05 }}>
-        {pusdMicro == null ? "—" : `$${(Number(pusdMicro) / 1e6).toFixed(2)}`}
+        {pusdMicro == null ? "—" : usdFromMicro(pusdMicro)}
       </div>
       <div style={{ ...MUTED, marginTop: 4 }}>Spendable now. Deposits appear here once they confirm on chain.</div>
 

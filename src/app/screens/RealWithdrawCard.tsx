@@ -5,6 +5,7 @@
 // `withdrawal_in_flight` and this card keeps pointing at the run that already exists.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { withdrawViaBridge, type Api, type RealCtx } from "@/lib/real-client";
+import { usdFromMicro } from "../ui";
 
 type BridgeAsset = { chainId: string; chainName: string; symbol: string; tokenAddress: string; minUsd: number };
 type WorkflowInfo = { state: string; stepIndex: number; error: string | null };
@@ -55,7 +56,6 @@ const FIELD = {
 } as const;
 
 const short = (s: string, max = 22) => (s.length <= max ? s : `${s.slice(0, 8)}…${s.slice(-6)}`);
-const usd = (micro: string) => `$${(Number(micro) / 1e6).toFixed(2)}`;
 
 function errText(e: unknown): string {
   const body = (e as { body?: { error?: string; minUsd?: number } }).body;
@@ -280,7 +280,7 @@ export function RealWithdrawCard({ api, ctx }: { api: Api; ctx: RealCtx }) {
           <div style={LABEL}>Check before sending</div>
           {/* The address is rendered IN FULL and wrapped — a truncated one hides exactly the middle
               characters an address-swapping clipboard attack changes. This is irreversible. */}
-          <div style={{ fontSize: 13, marginTop: 4, wordBreak: "break-all", fontFamily: "monospace" }}>
+          <div className="selectable" style={{ fontSize: 13, marginTop: 4, wordBreak: "break-all", fontFamily: "monospace" }}>
             {recipient.trim()}
           </div>
           <div style={{ ...MUTED, marginTop: 4 }}>
@@ -317,7 +317,7 @@ export function RealWithdrawCard({ api, ctx }: { api: Api; ctx: RealCtx }) {
             {workflow?.state === "FAILED" ? "Last withdrawal — failed" : inFlight ? "In flight" : "Sent"}
           </div>
           <div style={{ fontSize: 13, marginTop: 4 }}>
-            {usd(withdrawal.amountMicro)} → {short(withdrawal.recipient)}
+            {usdFromMicro(withdrawal.amountMicro)} → {short(withdrawal.recipient)}
           </div>
           <div style={MUTED}>bridge {short(withdrawal.bridgeAddress)}</div>
           <div style={MUTED}>

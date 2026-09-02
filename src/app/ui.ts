@@ -3,6 +3,7 @@
 
 import { categoryOf, gameOf, type Category } from "@/lib/deck-mix";
 import { STAKE_CENTS } from "@/lib/config";
+import { centsFromMicro } from "@/lib/quote";
 import type { DeckCard, MeResponse } from "@/lib/api-types";
 
 // The screens consume the API contract directly (src/lib/api-types.ts) — single source of truth,
@@ -32,6 +33,11 @@ export const usd = (cents: number) => {
   const rest = abs % 100;
   return `${neg ? "−" : ""}$${rest === 0 ? whole : `${whole}.${String(rest).padStart(2, "0")}`}`;
 };
+
+// micro-USD → display, EXACT to the cent and never rounded UP — the same truncation as usd().
+// The five hand-rolled `$${(Number(micro) / 1e6).toFixed(2)}` copies rounded to nearest, so a
+// 1.99999 pUSD balance read "$2.00". Real balances truncate like paper does.
+export const usdFromMicro = (micro: string | bigint) => usd(centsFromMicro(BigInt(micro)));
 
 // Payout in CENTS if this side wins: stake of `stakeCents` at price p (bp/10000)
 // buys stake/p of $1 shares. Mirrors settle.ts share math (payout = stake*10000/priceBp). bp is the

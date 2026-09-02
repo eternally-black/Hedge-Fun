@@ -180,7 +180,7 @@ export function DepositSheet({ api, pusdMicro, onClose, onToast }: {
                 color: "var(--text)",
               }}
             >
-              <div style={{ fontSize: 13, fontFamily: "monospace", wordBreak: "break-all", lineHeight: 1.4 }}>
+              <div className="selectable" style={{ fontSize: 13, fontFamily: "monospace", wordBreak: "break-all", lineHeight: 1.4 }}>
                 {picked.address}
               </div>
               <div style={{ ...CAPS, marginTop: 6, color: "var(--gold)" }}>Tap to copy</div>

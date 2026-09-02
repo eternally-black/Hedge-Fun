@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { cents, usd, countdown, deltaStr, resultMeta } from "../ui";
 import type { ExitQuoteRow } from "@/lib/api-types";
 
@@ -53,6 +53,8 @@ export function PredictionRow({
   // a button in a list is not, and this one sells a position at market. The arm resets itself so a
   // half-pressed row does not sit primed under someone's thumb.
   const [armed, setArmed] = useState(false);
+  const armTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(armTimer.current), []);
 
   const sideColor = row.side === "YES" ? "var(--yes)" : "var(--no)";
   const settled = row.status !== "PENDING";
@@ -159,9 +161,10 @@ export function PredictionRow({
               if (closing) return;
               if (!armed) {
                 setArmed(true);
-                window.setTimeout(() => setArmed(false), 4000);
+                armTimer.current = window.setTimeout(() => setArmed(false), 4000);
                 return;
               }
+              window.clearTimeout(armTimer.current);
               setArmed(false);
               void onClosePosition(row);
             }}

@@ -6,7 +6,7 @@
 // Consent is a ONE-TIME notice, not a gate the user re-reads on every flip: once the current terms
 // version is accepted the toggle moves freely in both directions. Turning it OFF is never gated by
 // anything at all — getting back to play money must always work.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { Me } from "../ui";
 import { useRealCtx } from "../useRealCtx";
@@ -67,6 +67,10 @@ export function RealModeCard({ me, api, onRefresh, onToast, pusdMicro }: {
   // defensively for that reason: hook order cannot depend on a conditional return.
   const [ready, setReady] = useState<boolean | null>(null);
   const [activating, setActivating] = useState(false);
+  // Unmount guard for the activation poll: a user who navigates away mid-poll must not get
+  // setState calls on a dead component for the next 30s.
+  const alive = useRef(true);
+  useEffect(() => () => { alive.current = false; }, []);
   const realOn = me?.real?.mode === "REAL";
   const hasWallet = Boolean(me?.real?.depositWallet);
   const readReady = useCallback(
@@ -138,16 +142,22 @@ export function RealModeCard({ me, api, onRefresh, onToast, pusdMicro }: {
     setError(null);
     try {
       const outcome = await runRealWorkflow(api, ctx, "APPROVALS");
-      if (outcome.status === "failed") setError("Couldn't activate trading. Try again.");
+      if (outcome.status === "failed") {
+        // Nothing was submitted, so there is nothing to poll for — reporting the failure and
+        // then polling for 30s read as a spinner that ignored its own error.
+        setError("Couldn't activate trading. Try again.");
+        return;
+      }
       // The relayer confirms a beat after it accepts the batch, so the first answer is usually
       // still "not granted". Poll briefly rather than leaving a blocker over a wallet that is
       // already good — and bounded, so a batch that never lands ends as a visible blocker rather
       // than a spinner that never stops.
       for (let i = 0; i < 10; i++) {
+        if (!alive.current) return;
         if ((await readReady(true)) === true) break;
         await new Promise((resolve) => setTimeout(resolve, 3000));
       }
-      await onRefresh();
+      if (alive.current) await onRefresh();
     } catch (e) {
       setError((e as { body?: { error?: string } }).body?.error ?? "Couldn't activate trading. Try again.");
     } finally {

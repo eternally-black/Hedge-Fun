@@ -125,7 +125,7 @@ export function AdminLeaderboardTable({ rows }: { rows: AdminLeaderboardRow[] })
               <Td>
                 {r.twitterHandle ? (
                   <a
-                    href={`https://twitter.com/${r.twitterHandle}`}
+                    href={`https://twitter.com/${encodeURIComponent(r.twitterHandle)}`}
                     target="_blank"
                     rel="noopener noreferrer"
                     style={{ color: "var(--energy)", textDecoration: "none", fontWeight: 600 }}
