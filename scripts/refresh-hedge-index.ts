@@ -20,7 +20,7 @@
 // until the display-staleness bound. Unevaluated rows (missing token ids, CLOB outage) are left
 // untouched: unproven is not untradable.
 import { PrismaClient } from "@prisma/client";
-import { fetchMajorsMarkets, fetchSportsMarkets } from "../src/lib/polymarket";
+import { fetchMajorsMarkets, fetchSportsMarkets, type MarketCache } from "../src/lib/polymarket";
 import { parseStrikeMarket, type HedgeAsset } from "../src/lib/hedge/parse";
 import { S2_SIDE_FLOOR_BP, S2_SIDE_CEIL_BP } from "../src/lib/config";
 import { evalMarketDepthBatch, type MarketDepth } from "../src/lib/depth";
@@ -81,6 +81,47 @@ export interface HedgeIndexStats {
   };
 }
 
+// Shared upsert for BOTH refresh passes (S1 crypto + S2 sports). The two blocks were byte-identical
+// copies of refresh-deck's upsert, and the fixes that landed there (no status on update, league
+// backfill) reached neither copy; one function keeps them honest.
+export async function upsertIndexedMarket(m: MarketCache, depth: MarketDepth): Promise<{ id: string }> {
+  return prisma.market.upsert({
+    where: { polymarketId: m.polymarketId },
+    create: {
+      polymarketId: m.polymarketId,
+      question: m.question,
+      category: m.category,
+      league: m.league, // which sport / which game — from Gamma's tags, see MarketCache.league
+      outcomeYesLabel: m.outcomeYesLabel,
+      outcomeNoLabel: m.outcomeNoLabel,
+      yesPriceBp: m.yesPriceBp,
+      noPriceBp: m.noPriceBp,
+      ...depthColumns(m, depth),
+      startsAt: m.startsAt ? new Date(m.startsAt) : null,
+      resolutionDeadline: new Date(m.resolutionDeadline),
+      status: m.status,
+    },
+    update: {
+      league: m.league, // backfills rows cached before tags were read
+      outcomeYesLabel: m.outcomeYesLabel,
+      outcomeNoLabel: m.outcomeNoLabel,
+      yesPriceBp: m.yesPriceBp,
+      noPriceBp: m.noPriceBp,
+      ...depthColumns(m, depth),
+      startsAt: m.startsAt ? new Date(m.startsAt) : null,
+      resolutionDeadline: new Date(m.resolutionDeadline),
+      // status is deliberately NOT written on update. Every fetcher feeding this script filters to
+      // status === "OPEN", so this only ever wrote back "OPEN" — and writing it unconditionally
+      // regresses a market the poller has already settled: a stale/lagging Gamma payload flips a
+      // RESOLVED or CANCELED row back to OPEN while resolvedOutcome stays set, which breaks
+      // planRedeem's terminal guard and re-admits a decided market to the deck. Terminal
+      // transitions belong to the poller; create (above) still stamps the initial status.
+      lastPolledAt: new Date(),
+    },
+    select: { id: true },
+  });
+}
+
 export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
   const stats: HedgeIndexStats = {
     discovered: 0,
@@ -132,35 +173,7 @@ export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
       }
 
       // Upsert the base Market cache row (mirrors refresh-deck) so the poller can settle it.
-      const market = await prisma.market.upsert({
-        where: { polymarketId: m.polymarketId },
-        create: {
-          polymarketId: m.polymarketId,
-          question: m.question,
-          category: m.category,
-          outcomeYesLabel: m.outcomeYesLabel,
-          outcomeNoLabel: m.outcomeNoLabel,
-          yesPriceBp: m.yesPriceBp,
-          noPriceBp: m.noPriceBp,
-          ...depthColumns(m, depth),
-          startsAt: m.startsAt ? new Date(m.startsAt) : null,
-          resolutionDeadline: new Date(m.resolutionDeadline),
-          status: m.status,
-        },
-        update: {
-          question: m.question,
-          outcomeYesLabel: m.outcomeYesLabel,
-          outcomeNoLabel: m.outcomeNoLabel,
-          yesPriceBp: m.yesPriceBp,
-          noPriceBp: m.noPriceBp,
-          ...depthColumns(m, depth),
-          startsAt: m.startsAt ? new Date(m.startsAt) : null,
-          resolutionDeadline: new Date(m.resolutionDeadline),
-          status: m.status,
-          lastPolledAt: new Date(),
-        },
-        select: { id: true },
-      });
+      const market = await upsertIndexedMarket(m, depth);
 
       // Upsert the enrichment. asset from the parse when confident, else the tag's asset (coverage).
       const meta = {
@@ -218,35 +231,7 @@ export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
     const leagueLabel = s.league;
     const leagueSlug = leagueLabel ? slugify(leagueLabel) : null;
 
-    const market = await prisma.market.upsert({
-      where: { polymarketId: m.polymarketId },
-      create: {
-        polymarketId: m.polymarketId,
-        question: m.question,
-        category: m.category,
-        outcomeYesLabel: m.outcomeYesLabel,
-        outcomeNoLabel: m.outcomeNoLabel,
-        yesPriceBp: m.yesPriceBp,
-        noPriceBp: m.noPriceBp,
-        ...depthColumns(m, depth),
-        startsAt: m.startsAt ? new Date(m.startsAt) : null,
-        resolutionDeadline: new Date(m.resolutionDeadline),
-        status: m.status,
-      },
-      update: {
-        question: m.question,
-        outcomeYesLabel: m.outcomeYesLabel,
-        outcomeNoLabel: m.outcomeNoLabel,
-        yesPriceBp: m.yesPriceBp,
-        noPriceBp: m.noPriceBp,
-        ...depthColumns(m, depth),
-        startsAt: m.startsAt ? new Date(m.startsAt) : null,
-        resolutionDeadline: new Date(m.resolutionDeadline),
-        status: m.status,
-        lastPolledAt: new Date(),
-      },
-      select: { id: true },
-    });
+    const market = await upsertIndexedMarket(m, depth);
 
     const meta = {
       s2Eligible: true,

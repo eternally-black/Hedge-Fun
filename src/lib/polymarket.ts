@@ -651,7 +651,7 @@ export interface SportsMarketRaw {
   eventTicker: string | null;
   seriesTitle: string | null;
   category: "sports" | "esports"; // from deck-mix categoryOf
-  league: string | null; // from deck-mix gameOf (e.g. "NBA", "CS2"); null when not specifically known
+  league: string | null; // from Gamma's tags first (MarketCache.league), falls back to deck-mix gameOf (e.g. "NBA", "CS2"); null when not specifically known
 }
 
 // Fetch OPEN, future-resolving NAMED sports/esports markets within `hours` (default 10 days — the
@@ -696,7 +696,7 @@ export async function fetchSportsMarkets(opts: { hours?: number; maxPages?: numb
         eventTicker: ev?.ticker ?? null,
         seriesTitle: ev?.series?.[0]?.title ?? ev?.title ?? null,
         category: cat,
-        league: gameOf(cache, cat),
+        league: cache.league ?? gameOf(cache, cat),
       });
     }
     if (raw.length < GAMMA_PAGE) break; // last page
