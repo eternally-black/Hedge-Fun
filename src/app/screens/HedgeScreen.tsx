@@ -1,6 +1,7 @@
 "use client";
 
 import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { useLinkAccount } from "@privy-io/react-auth";
 import {
   type Me,
   bgGrad,
@@ -162,6 +163,22 @@ export function HedgeScreen({
     void fetchWallet(addr);
   }, [address, fetchWallet]);
 
+  // Connect through Privy (Phantom etc.) instead of pasting: the wallet signs Privy's challenge, so
+  // the server marks the link VERIFIED and the withdraw form may offer it as a destination. A paste
+  // stays read-only. Privy's modal owns the UX; we only post the address it hands back.
+  const { linkWallet: linkViaPrivy } = useLinkAccount({
+    onSuccess: ({ linkedAccount }) => {
+      if (linkedAccount?.type === "wallet" && linkedAccount.chainType === "solana") void fetchWallet(linkedAccount.address);
+    },
+    onError: (error) => {
+      if (error !== "exited_link_flow") onToast("Couldn't connect the wallet — paste the address instead");
+    },
+  });
+  const connectWallet = useCallback(() => {
+    if (linkBusy) return;
+    linkViaPrivy({ walletChainType: "solana-only", description: "Connect the Solana wallet you hedge with" });
+  }, [linkBusy, linkViaPrivy]);
+
   // Refresh from the exposure panel — the form is closed, so a failure has no inline error to show:
   // surface it as a toast instead of failing silently.
   const refreshWallet = useCallback(() => {
@@ -279,7 +296,7 @@ export function HedgeScreen({
       ) : walletLinked === null ? (
         <CenterNote>Reading your hedges…</CenterNote>
       ) : walletLinked === false ? (
-        <WalletIntro address={address} busy={linkBusy} error={linkError} onAddress={setAddress} onSubmit={linkWallet} />
+        <WalletIntro address={address} busy={linkBusy} error={linkError} onAddress={setAddress} onSubmit={linkWallet} onConnect={connectWallet} />
       ) : (
         <>
           {exposure && (
@@ -293,7 +310,7 @@ export function HedgeScreen({
           )}
           {walletFormOpen && (
             <div style={{ background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 18, padding: "14px 16px", marginTop: 10 }}>
-              <WalletForm address={address} busy={linkBusy} error={linkError} onAddress={setAddress} onSubmit={linkWallet} />
+              <WalletForm address={address} busy={linkBusy} error={linkError} onAddress={setAddress} onSubmit={linkWallet} onConnect={connectWallet} />
             </div>
           )}
 
@@ -898,12 +915,14 @@ function WalletIntro({
   error,
   onAddress,
   onSubmit,
+  onConnect,
 }: {
   address: string;
   busy: boolean;
   error: LinkError | null;
   onAddress: (v: string) => void;
   onSubmit: () => void;
+  onConnect: () => void;
 }) {
   return (
     <div style={{ background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 18, padding: "18px 16px", marginTop: 16 }}>
@@ -916,7 +935,7 @@ function WalletIntro({
         rule, not hedge math.
       </p>
       <div style={{ marginTop: 14 }}>
-        <WalletForm address={address} busy={busy} error={error} onAddress={onAddress} onSubmit={onSubmit} />
+        <WalletForm address={address} busy={busy} error={error} onAddress={onAddress} onSubmit={onSubmit} onConnect={onConnect} />
       </div>
     </div>
   );
@@ -930,12 +949,14 @@ function WalletForm({
   error,
   onAddress,
   onSubmit,
+  onConnect,
 }: {
   address: string;
   busy: boolean;
   error: LinkError | null;
   onAddress: (v: string) => void;
   onSubmit: () => void;
+  onConnect: () => void; // Privy wallet-connect: the linked wallet is VERIFIED, a paste is read-only
 }) {
   return (
     <div>
@@ -967,6 +988,21 @@ function WalletForm({
       >
         {busy ? "Reading wallet…" : "Link wallet"}
       </button>
+      <button
+        type="button"
+        onClick={busy ? undefined : onConnect}
+        disabled={busy}
+        style={{
+          width: "100%", marginTop: 8, padding: "11px 14px", borderRadius: 14, fontFamily: "var(--nf)",
+          fontWeight: 700, fontSize: 13, cursor: busy ? "default" : "pointer",
+          border: "1px solid var(--line)", background: "var(--panel2)", color: "var(--text)", opacity: busy ? 0.6 : 1,
+        }}
+      >
+        Connect wallet (Phantom)
+      </button>
+      <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 6, lineHeight: 1.4 }}>
+        A connected wallet is verified and can be offered as a withdrawal destination. A pasted address is read-only.
+      </div>
     </div>
   );
 }

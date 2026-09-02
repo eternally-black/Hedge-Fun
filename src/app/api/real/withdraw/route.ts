@@ -250,17 +250,18 @@ export async function GET(req: Request) {
   // The asset list rides along so the browser needs no second endpoint; a bridge outage degrades
   // it to an empty list rather than failing the read.
   const assets = await fetchSupportedAssets().catch(() => []);
-  // Autofill convenience, NOT a default to trust with money: a linked hedge wallet only proves the
-  // user typed that address once, not that they control it. The EVM side is the account's own
-  // signer, which is the honest default for an EVM destination. Either way the field stays editable
-  // and the user confirms the destination themselves.
+  // Autofill convenience, NOT a default to trust with money: only a hedge wallet the user LINKED
+  // through Privy (the wallet signed Privy's challenge — HedgeWallet.verifiedAt) is offered; a
+  // pasted address only proves the user typed it once, and a money destination must not come from
+  // a paste. The EVM side is the account's own signer, which is the honest default for an EVM
+  // destination. Either way the field stays editable and the user confirms the destination.
   const connected = {
     evm: user.embeddedWalletAddress,
     solana:
       (
         await prisma.hedgeWallet.findFirst({
-          where: { userId: user.id },
-          orderBy: { createdAt: "desc" },
+          where: { userId: user.id, verifiedAt: { not: null } },
+          orderBy: { createdAt: "desc" }, // the newest verified LINK — not whichever was last re-checked
           select: { address: true },
         })
       )?.address ?? null,

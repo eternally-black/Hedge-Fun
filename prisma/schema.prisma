@@ -614,11 +614,15 @@ model PollerLease {
 // A read-only Solana address the user linked for wallet-hedge suggestions (S1). We never ask for
 // keys. Multiple addresses per user are allowed later; unique per (user, address) for now.
 model HedgeWallet {
-  id        String   @id @default(cuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id])
-  address   String // base58 Solana address (validated at link time)
-  createdAt DateTime @default(now())
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id])
+  address    String // base58 Solana address (validated at link time)
+  createdAt  DateTime  @default(now())
+  // Set when the address is one of the user's Privy-LINKED Solana wallets (the wallet signed Privy's
+  // challenge). A pasted address only proves the user typed it once; only a verified one may be
+  // offered as a withdraw destination (/api/real/withdraw GET `connected.solana`).
+  verifiedAt DateTime?
 
   @@unique([userId, address])
   @@index([address])

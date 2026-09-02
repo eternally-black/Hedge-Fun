@@ -405,6 +405,10 @@ export interface HedgeWalletResponse {
   splAggregateCents: number; // Σ long-tail SPL notional (the proxy-hedge basis)
   snapshotFetchedAt: string; // ISO-8601 (cache freshness)
   pnlAvailable: boolean; // false => Birdeye degraded => no avg-cost narrative lines
+  // true => the address is one of the caller's Privy-LINKED Solana wallets (it signed Privy's
+  // challenge). A pasted address is false. Only a verified wallet is offered as a withdraw
+  // destination (GET /api/real/withdraw `connected.solana`).
+  verified: boolean;
 }
 
 // ─── GET /api/hedge/wallet ─────────────────────────────────────────────────────────────────────────

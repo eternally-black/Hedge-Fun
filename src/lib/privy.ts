@@ -38,6 +38,20 @@ export function embeddedEvmWallet(pu: PrivyUser): string | null {
   return embedded ? embedded.address.toLowerCase() : null;
 }
 
+// The external Solana wallets the user LINKED through Privy (Phantom etc.). A linked wallet signed
+// Privy's challenge, so its address is proven, not typed — the difference between a hedge wallet
+// that may be offered as a withdraw destination and one that may not (HedgeWallet.verifiedAt).
+// Base58 is case-sensitive: returned exactly as Privy reports them.
+export function linkedSolanaWallets(pu: PrivyUser): string[] {
+  // Same candidate set as embeddedEvmWallet: `pu.wallet` and every linked wallet account.
+  const candidates: Array<{ address: string; chainType?: string }> = [];
+  if (pu.wallet) candidates.push(pu.wallet);
+  for (const acct of pu.linkedAccounts ?? []) {
+    if (acct.type === "wallet") candidates.push(acct);
+  }
+  return candidates.filter((w) => w.chainType === "solana").map((w) => w.address);
+}
+
 // Read identity fields from the Privy user's linked accounts.
 export function extractIdentity(pu: PrivyUser): {
   authProvider: "EMAIL" | "TWITTER";
