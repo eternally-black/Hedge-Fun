@@ -19,6 +19,7 @@
     "postinstall": "prisma generate",
     "poll": "tsx scripts/poller.ts",
     "build:poller": "esbuild scripts/poller.ts --bundle --platform=node --target=node24 --format=cjs --external:@prisma/client --external:.prisma --outfile=dist/poller.cjs",
+    "build:backfill-streak-x2": "esbuild scripts/backfill-streak-x2.ts --bundle --platform=node --target=node24 --format=cjs --external:@prisma/client --external:.prisma --outfile=dist/backfill-streak-x2.cjs",
     "refresh-deck": "tsx scripts/refresh-deck.ts",
     "refresh-hedge-index": "tsx scripts/refresh-hedge-index.ts",
     "verify:polymarket": "tsx scripts/verify-polymarket.ts",

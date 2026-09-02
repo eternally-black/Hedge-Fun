@@ -41,6 +41,7 @@ RUN npm run build
 # Bundle the poller (+ its src/lib deps) into one CJS file. Its ONLY runtime require is
 # @prisma/client (verified) — so the runtime needs that, not the 2GB dep tree.
 RUN npm run build:poller
+RUN npm run build:backfill-streak-x2
 
 ############################
 # 3. runtime — minimal, non-root. The big win (per Next docs): the standalone output ALREADY
@@ -65,6 +66,10 @@ COPY --from=build --chown=nextjs:nodejs /app/public ./public
 
 # --- Poller: the bundled CJS only (no src/, no tsx, no devDeps) ---
 COPY --from=build --chown=nextjs:nodejs /app/dist/poller.cjs ./dist/poller.cjs
+# One-off: the x2 streak-bonus backfill, run once after the deploy that materialised the bonus
+# (docker compose exec -T app node dist/backfill-streak-x2.cjs — see the runbook). Bundled the
+# same way as the poller because the image ships no src/ and no tsx.
+COPY --from=build --chown=nextjs:nodejs /app/dist/backfill-streak-x2.cjs ./dist/backfill-streak-x2.cjs
 
 # --- Prisma: copy the FULL @prisma scope (client + engines + CLI deps) + .prisma (generated
 #     client/engine) + the prisma CLI + schema. This is the documented minimal set for both

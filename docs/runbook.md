@@ -76,6 +76,13 @@ re-deploys. No-op on every subsequent deploy and on a fresh DB.
 it does not DROP them and re-add them in the generated file if it does —
 `scripts/test-schema-guards.ts` fails the DB suite otherwise.
 
+**One-off: x2 streak-bonus backfill (2026-09-02).** The x2 bonus became a STREAK_X2 ledger row
+written when a window completes; users already at level 7+ have no row yet. After the first
+deploy that contains it, run once on VPS1 from `/opt/hedgefun`:
+`docker compose exec -T app node dist/backfill-streak-x2.cjs`. Idempotent (skips users who
+already hold a STREAK_X2 row), prints the rows written. Without it every user at level 7+ sees
+their bonus vanish until their next window completes.
+
 ## Incident playbook
 
 - **Site down after deploy** — `docker compose ps` / `docker compose logs app`. App won't
