@@ -3,7 +3,6 @@
 import { memo, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { ResultRow } from "@/lib/api-types";
 import { catOfResult, resultMeta, usd } from "../ui";
-import { STAKE_CENTS } from "@/lib/config";
 import { useCardSwipe } from "../useCardSwipe";
 import { PREVIEW_SCALE, PREVIEW_Y, RISE_MS } from "../DeckCard";
 
@@ -171,7 +170,7 @@ const RevealCardFace = memo(function RevealCardFace({ row }: { row: ResultRow })
   const isVoid = row.status === "PUSH";
   const badge = isWin ? "WON" : isVoid ? "REFUNDED" : "MISSED";
   // Exact to the cent, and the sign is explicit: a win of 89 cents is "+$0.89", not "+$1".
-  const deltaStr = isVoid ? usd(STAKE_CENTS) : `${row.deltaCents >= 0 ? "+" : ""}${usd(row.deltaCents)}`;
+  const deltaStr = isVoid ? usd(row.stakeCents) : `${row.deltaCents >= 0 ? "+" : ""}${usd(row.deltaCents)}`;
   const sideColor = row.side === "YES" ? "var(--yes)" : "var(--no)";
   // Gold shard line only when shards were actually collected. An over-cap win (shards=0) still won
   // the payout, so show that — never "+0 ◆ collected".
@@ -179,7 +178,7 @@ const RevealCardFace = memo(function RevealCardFace({ row }: { row: ResultRow })
   const foot = gotShards
     ? `+${row.shards} ◆ shard${row.shards === 1 ? "" : "s"} collected`
     : isWin ? "Nice call — virtual payout banked"
-    : isVoid ? `Market voided · your ${usd(STAKE_CENTS)} stake was returned`
+    : isVoid ? `Market voided · your ${usd(row.stakeCents)} stake was returned`
     : "So close — no payout this time";
 
   return (

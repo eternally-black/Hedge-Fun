@@ -22,6 +22,7 @@ import { type Card, type Me, type Screen } from "./ui";
 import { useRealCtx } from "./useRealCtx";
 import { APP_SURFACE_ID } from "./appSurface";
 import { placeRealOrder } from "@/lib/real-client";
+import { realErrText, realResultText, RETRYABLE_REAL_ERRORS } from "./screens/real-copy";
 import { DECK_MIN_LEAD_MS, QUOTE_POLL_MS, STAKE_CENTS, REAL_BALANCE_POLL_MS } from "@/lib/config";
 import type { QuotesResponse, ResultRow, ResultsResponse, SwipeResponse } from "@/lib/api-types";
 
@@ -112,11 +113,14 @@ function App() {
   const { ctx: realCtx } = useRealCtx(me);
   // Refs, not values, for the same reason meRef exists here: the swipe callback must keep a stable
   // identity across the frequent /api/me refreshes, or the keyed DeckCard is handed new props every
-  // refresh and re-mounts mid-gesture.
+  // refresh and re-mounts mid-gesture. Written in an effect (after commit), not during render, so
+  // it's safe under concurrent rendering — same rationale as meRef above.
   const realCtxRef = useRef(realCtx);
-  realCtxRef.current = realCtx;
   const realModeRef = useRef(realMode);
-  realModeRef.current = realMode;
+  useEffect(() => {
+    realCtxRef.current = realCtx;
+    realModeRef.current = realMode;
+  }, [realCtx, realMode]);
   // Spendable pUSD, read from chain via /api/real/wallet. Only fetched in real mode: paper must not
   // pay for an RPC round-trip it never shows.
   const [realPusdMicro, setRealPusdMicro] = useState<string | null>(null);
@@ -433,6 +437,13 @@ function App() {
       req
         .then((r) => {
           refreshMe(); // stats only (points/shards/balance/skip counter); never the deck
+          // A swipe that bought nothing must not look like one that filled. The real path returns
+          // an order result, not a SwipeResponse — "killed" (no fill), "posted" or "submitting"
+          // (outcome unknown) all need an honest toast, never the paper cap logic below.
+          if (action !== "SKIP" && realModeRef.current) {
+            const res = r as { status: string; filledSharesMicro?: string };
+            if (res.status !== "filled") flashToast(realResultText(res));
+          }
           // The swipe that spends the LAST point swipe (count == cap, not over) is the moment we hand
           // off to the feed — arm the one-shot panel. (Skips don't count; dev never caps.)
           // The cap handoff is a PAPER concept: the swipe counter and the feed panel belong to the
@@ -445,39 +456,47 @@ function App() {
         })
         .catch((e) => {
           const status = (e as { status?: number }).status;
-          // 403 = daily swipe cap hit (raced past the client gate). The bet wasn't stored;
-          // refreshMe pulls used>=cap, which flips capReached and shows the limit screen.
-          if (status === 403) { flashToast("Daily limit reached — back at 00:00 UTC"); void refreshMe(); }
-          // 402 = no free cash for a swipe (we pre-gate, so this means a race). The swipe tx rolled
-          // back (no bet row), so the market re-enters a future deck — the card isn't lost. Skips
-          // never 402 anymore (always free).
-          else if (status === 402) { flashToast("No free cash left"); void refreshMe(); }
+          const body = (e as { body?: { error?: string; freshPriceBp?: number } }).body;
           // 409 price_moved = the book moved against the user between the quote they saw and the
           // re-quote at lock time. Nothing was stored, so UNDO the optimistic advance: put the card
           // back on top carrying the FRESH price, and let them decide again at the honest number.
           // Every other 409 (already bet / expired / untradable) is terminal — the card stays gone.
-          else if (status === 409) {
-            const body = (e as { body?: { error?: string; freshPriceBp?: number } }).body;
-            if (body?.error === "price_moved" && typeof body.freshPriceBp === "number") {
-              const fresh = body.freshPriceBp;
-              setDeck((d) => {
-                if (d.some((c) => c.id === card.id)) return d; // already back (double-tap race)
-                const restored: Card = action === "YES"
-                  ? { ...card, yesPriceBp: fresh }
-                  : { ...card, noPriceBp: fresh };
-                return [restored, ...d];
-              });
-              flashToast("Price moved — swipe again to confirm");
-            }
-            // The wallet has no trading permissions yet, so the intent refused before anything was
-            // signed or spent. Same treatment as a moved price: the card comes back, because
-            // nothing happened to it — and the toast names the one place that fixes it. Without
-            // this branch the card simply vanished and the swipe looked like it had worked.
-            else if (body?.error === "approvals_required") {
-              setDeck((d) => (d.some((c) => c.id === card.id) ? d : [card, ...d]));
-              flashToast("Activate trading in Profile first");
-            }
+          if (status === 409 && body?.error === "price_moved" && typeof body.freshPriceBp === "number") {
+            const fresh = body.freshPriceBp;
+            setDeck((d) => {
+              if (d.some((c) => c.id === card.id)) return d; // already back (double-tap race)
+              const restored: Card = action === "YES"
+                ? { ...card, yesPriceBp: fresh }
+                : { ...card, noPriceBp: fresh };
+              return [restored, ...d];
+            });
+            flashToast("Price moved — swipe again to confirm");
           }
+          // The wallet has no trading permissions yet, so the intent refused before anything was
+          // signed or spent. Same treatment as a moved price: the card comes back, because
+          // nothing happened to it — and the toast names the one place that fixes it. Without
+          // this branch the card simply vanished and the swipe looked like it had worked.
+          else if (status === 409 && body?.error === "approvals_required") {
+            setDeck((d) => (d.some((c) => c.id === card.id) ? d : [card, ...d]));
+            flashToast("Activate trading in Profile first");
+          }
+          // REAL mode, any other error: nothing was signed or spent for a retryable code, so the
+          // card comes back and the user may swipe again; every other code is terminal for this
+          // card. Always toast the honest reason and refresh stats.
+          else if (realModeRef.current && action !== "SKIP") {
+            if (body?.error && RETRYABLE_REAL_ERRORS.has(body.error)) {
+              setDeck((d) => (d.some((c) => c.id === card.id) ? d : [card, ...d]));
+            }
+            flashToast(realErrText(e));
+            void refreshMe();
+          }
+          // 403 = daily swipe cap hit (raced past the client gate). The bet wasn't stored;
+          // refreshMe pulls used>=cap, which flips capReached and shows the limit screen.
+          else if (status === 403) { flashToast("Daily limit reached — back at 00:00 UTC"); void refreshMe(); }
+          // 402 = no free cash for a swipe (we pre-gate, so this means a race). The swipe tx rolled
+          // back (no bet row), so the market re-enters a future deck — the card isn't lost. Skips
+          // never 402 anymore (always free).
+          else if (status === 402) { flashToast("No free cash left"); void refreshMe(); }
           else console.error(e);
         });
     },

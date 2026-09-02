@@ -49,13 +49,7 @@ const FIELD = {
   border: "1px solid var(--line)",
 } as const;
 
-// The three the operator will actually hit; everything else shows its raw code, because inventing
-// friendly prose for an unknown money error is how a real problem gets read as a typo.
-const KNOWN: Record<string, string> = {
-  stake_too_small: "below the market's minimum order size",
-  no_liquidity: "the book cannot fill this size",
-  geo_blocked: "trading is blocked from this location",
-};
+import { realErrText, realResultText } from "./real-copy";
 
 const short = (q: string, max = 60) => (q.length <= max ? q : `${q.slice(0, max - 1)}…`);
 const usd = (micro: string) => `$${(Number(micro) / 1e6).toFixed(2)}`;
@@ -64,34 +58,6 @@ const signedUsd = (micro: string) => {
   return `${v < 0 ? "−" : "+"}$${Math.abs(v).toFixed(2)}`;
 };
 const shares = (micro: string) => (Number(micro) / 1e6).toFixed(4);
-
-function errText(e: unknown): string {
-  const code = (e as { body?: { error?: string } }).body?.error;
-  if (!code) return e instanceof Error ? e.message : String(e);
-  return KNOWN[code] ?? code;
-}
-
-function resultText(res: { status: string; filledSharesMicro?: string }): string {
-  switch (res.status) {
-    case "filled":
-    case "partial":
-      return `${res.status} — ${shares(res.filledSharesMicro ?? "0")} shares`;
-    case "killed":
-      return "no fill — the market slot is free again";
-    case "posted":
-      return "posted, awaiting the exchange — the reconciler books it when the trade record lands";
-    // NOT the same promise. "posted" carries an exchange order id, so the reconciler resolves it
-    // from the trade records. "submitting" means the outcome is unknown and the row has NO order
-    // id, which every reconcile scan filters out (`externalOrderId: { not: null }`) — that used to
-    // mean a human. It no longer does: the orphan sweep asks the exchange whether an order of ours
-    // exists on that token and either adopts it or kills the attempt, and the stuck-attempt watcher
-    // still pages ops for anything that survives it.
-    case "submitting":
-      return "sent, outcome not yet confirmed — the exchange itself is checked within minutes";
-    default:
-      return `status: ${res.status}`;
-  }
-}
 
 export function RealOrderCard({ api, ctx }: { api: Api; ctx: RealCtx }) {
   const [cards, setCards] = useState<DeckCard[]>([]);
@@ -106,7 +72,7 @@ export function RealOrderCard({ api, ctx }: { api: Api; ctx: RealCtx }) {
     const [deck, pos] = await Promise.all([
       api("/api/deck").catch(() => null),
       api("/api/real/positions").catch((e: unknown) => {
-        setError(errText(e));
+        setError(realErrText(e));
         return null;
       }),
     ]);
@@ -123,10 +89,10 @@ export function RealOrderCard({ api, ctx }: { api: Api; ctx: RealCtx }) {
     setResult("");
     setError("");
     try {
-      setResult(resultText(await placeRealOrder(api, ctx, input)));
+      setResult(realResultText(await placeRealOrder(api, ctx, input)));
       setDollars("");
     } catch (e) {
-      setError(errText(e));
+      setError(realErrText(e));
     } finally {
       setBusy(null);
       await refresh();

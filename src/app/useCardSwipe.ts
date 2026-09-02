@@ -48,7 +48,11 @@ export function useCardSwipe(opts: {
   const [fly, setFly] = useState<SwipeDir | null>(null);
   const start = useRef<{ x: number; y: number; t: number; moved: boolean } | null>(null);
   const flyTimer = useRef<number | undefined>(undefined);
-  useEffect(() => () => window.clearTimeout(flyTimer.current), []);
+  const unflyTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => {
+    window.clearTimeout(flyTimer.current);
+    window.clearTimeout(unflyTimer.current);
+  }, []);
 
   const reset = () => setDrag({ active: false, dx: 0, dy: 0, dir: null, progress: 0 });
 
@@ -82,6 +86,10 @@ export function useCardSwipe(opts: {
       reset();
       // Hand off mid-fling so the next card starts rising at the 50% point (overlap), matching the deck.
       flyTimer.current = window.setTimeout(() => onCommit(dir), Math.round(FLY_MS / 2));
+      // Clear the fling once the animation has finished. A consumed card is unmounted before this
+      // fires (keyed by id / index), so only a card the caller refused to consume — a gated act() —
+      // ever sees it, and it springs back visible instead of sitting invisible and ungrabbable.
+      unflyTimer.current = window.setTimeout(() => setFly(null), FLY_MS + 60);
     } else {
       reset(); // sprung back
     }

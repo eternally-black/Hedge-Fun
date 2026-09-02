@@ -49,6 +49,9 @@ export function FeedScreen({
   const loadingRef = useRef(false);
   const doneRef = useRef(false);
   const cursorRef = useRef<string | null>(null);
+  // Every card id already appended to the feed. The updater ran lazily under a transition, so the
+  // old `appended` read stale and the loop burned pages; dedupe against this instead.
+  const seen = useRef(new Set<string>());
 
   const containerRef = useRef<HTMLDivElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
@@ -66,17 +69,11 @@ export function FeedScreen({
         const q = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
         const res = (await api(`/api/feed${q}`)) as FeedResponse;
         cursorRef.current = res.nextCursor;
-        let appended = 0;
-        startTransition(() => {
-          setItems((prev) => {
-            const have = new Set(prev.map((c) => c.id));
-            const fresh = res.cards.filter((c) => !have.has(c.id));
-            appended = fresh.length;
-            return fresh.length ? [...prev, ...fresh] : prev;
-          });
-        });
+        const fresh = res.cards.filter((c) => !seen.current.has(c.id));
+        for (const c of fresh) seen.current.add(c.id);
+        if (fresh.length) startTransition(() => setItems((prev) => [...prev, ...fresh]));
         if (res.nextCursor === null) { doneRef.current = true; setDone(true); break; }
-        if (appended > 0) break; // got cards — stop; the observer will ask again when the user scrolls
+        if (fresh.length > 0) break; // got cards — stop; the observer will ask again when the user scrolls
       }
     } catch (e) {
       console.error(e);
