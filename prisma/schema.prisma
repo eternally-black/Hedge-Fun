@@ -594,6 +594,18 @@ model LeaderboardSnapshot {
   @@map("leaderboard_snapshots")
 }
 
+// Single-row lease for the settlement poller (one runner at a time). One row, id 1; the poller
+// tick runs only while it holds the lease; the lease outlives a tick by one interval so a crashed
+// holder frees it by itself (expiresAt passes and the next runner takes over).
+model PollerLease {
+  id        Int      @id @default(1)
+  holder    String
+  expiresAt DateTime
+  updatedAt DateTime @updatedAt
+
+  @@map("poller_lease")
+}
+
 // ============================================================ HEDGE ENGINE (phase 2, workstream A)
 
 // A read-only Solana address the user linked for wallet-hedge suggestions (S1). We never ask for

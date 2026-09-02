@@ -6,7 +6,7 @@
 // Rule: thrown error = transient -> backoff/retry; a returned decision = commit it.
 import { PrismaClient } from "@prisma/client";
 import { writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, hostname } from "node:os";
 import { join } from "node:path";
 import { fetchResolution } from "../src/lib/polymarket";
 import { conditionResolution, type ChainOutcome } from "../src/lib/polygon";
@@ -22,11 +22,22 @@ import { refreshDeck } from "./refresh-deck";
 import { pruneMarkets } from "./prune-markets";
 import { refreshHedgeIndex } from "./refresh-hedge-index";
 import { pruneReferralClicks } from "../src/lib/refclick";
+import { acquirePollerLease } from "../src/lib/poller-lease";
 
 const prisma = new PrismaClient();
 
 const POLL_INTERVAL_MS = 60_000;
 const CONCURRENCY = 4;
+
+// Chain-probe budget per tick. Each probe is one eth_call round (3 calls) against a public RPC;
+// a backlog of undecided markets must not hammer it. The oldest markets (by resolutionDeadline)
+// get the budget first; the rest wait for the next tick.
+const CHAIN_PROBES_PER_TICK = 25;
+// Sports grace after the resolution deadline (kick-off): a match lasts a few hours and cannot have
+// resolved during it, so probing the chain for its whole duration is wasted RPC. Three hours past
+// kick-off is when a real resolution could first appear.
+const SPORT_CHAIN_GRACE_MS = 3 * 3_600_000;
+let chainProbesLeft = 0;
 
 // The hedge market index (crypto S1 + sports/esports S2) rides the SAME poller as the deck (spec §2:
 // "same poller cadence") but on a SLOWER sibling cadence — it's a heavier Gamma pull (majors tags +
@@ -100,7 +111,7 @@ export function chainToResolution(outcome: ChainOutcome | null): Resolution {
   return { kind: "open" };
 }
 
-async function settleOne(market: { id: string; polymarketId: string; source: string; resolutionDeadline: Date }) {
+async function settleOne(market: { id: string; polymarketId: string; source: string; resolutionDeadline: Date; startsAt: Date | null }) {
   let resolution: Resolution = toResolution(await fetchResolution(market.polymarketId)); // may throw -> transient
   // Gamma is not the authority on resolution — the Conditional Tokens contract is, and it is
   // measurably AHEAD. Measured on our own positions 2026-08-19: markets flipped 5, 6, 7 and 16
@@ -109,17 +120,21 @@ async function settleOne(market: { id: string; polymarketId: string; source: str
   // "awaiting result" about money the user had been paid, and offered to sell a position that no
   // longer existed. So once the deadline has passed and Gamma still says open, ask the contract
   // that pays the money. POLYMARKET only: a synthetic id (TXODDS) is not a conditionId.
+  // Sports get a grace period past kick-off (their deadline) — a match cannot resolve during play.
   if (
     resolution.kind === "open" &&
     market.source === "POLYMARKET" &&
-    market.resolutionDeadline.getTime() <= Date.now()
+    Date.now() >= market.resolutionDeadline.getTime() + (market.startsAt ? SPORT_CHAIN_GRACE_MS : 0)
   ) {
-    // ponytail: one RPC read (3 eth_calls) per stuck market per tick, unbounded by count — fine at
-    // today's volume (the scan reports a single market with pending bets), and the honest upgrade is
-    // to cap the oldest N per tick if a backlog of undecided markets ever makes this a rate limit.
-    resolution = chainToResolution(await conditionResolution(market.polymarketId)); // may throw -> transient
-    if (resolution.kind !== "open") {
-      console.log(`[settle] ${market.polymarketId.slice(0, 16)}… resolved from CHAIN (Gamma still open)`);
+    // Budgeted: the oldest markets (sorted by resolutionDeadline before mapLimit) get the
+    // CHAIN_PROBES_PER_TICK probes first; the rest stay open for the next tick. A public RPC
+    // must not see one round per stuck market per tick, unbounded by count.
+    if (chainProbesLeft > 0) {
+      chainProbesLeft--;
+      resolution = chainToResolution(await conditionResolution(market.polymarketId)); // may throw -> transient
+      if (resolution.kind !== "open") {
+        console.log(`[settle] ${market.polymarketId.slice(0, 16)}… resolved from CHAIN (Gamma still open)`);
+      }
     }
   }
   if (resolution.kind === "open") return;
@@ -153,6 +168,14 @@ export async function mapLimit<T>(items: T[], limit: number, fn: (t: T) => Promi
 
 async function tick() {
   tickCount++;
+  // Single-runner lease: funding watch, prune and the S2 clear-pass must not double-run when two
+  // poller processes are up (a deploy overlap, say). The lease outlives a tick by one interval so
+  // a crashed holder frees it by itself.
+  const holder = `${hostname()}:${process.pid}`;
+  if (!(await acquirePollerLease(prisma, holder, 2 * POLL_INTERVAL_MS))) {
+    console.warn("[poller] another runner holds the lease — skipping tick");
+    return;
+  }
   // Keep the deck cache warm so swipes lock fresh prices and expired markets drop (M4).
   // Pull the OUTER window (max per-category horizon) to match the deck route — otherwise the
   // longer-horizon sports/esports half never gets price refreshes and shows stale (often 50/50)
@@ -221,15 +244,22 @@ async function tick() {
   // never paper-settle (settleMarket filters mode internally) but their markets MUST get the
   // status flip or REDEEM can never bind (K3 S6/S7 HIGH-1); the market-status predicate bounds
   // the scan — once terminal, the market drops out even while real bets stay PENDING.
-  const pending = await prisma.bet.findMany({
+  // groupBy runs server-side; the old findMany+distinct materialised every pending bet in the
+  // client to derive a market list.
+  const pendingGroups = await prisma.bet.groupBy({
+    by: ["marketId"],
     where: { settlementStatus: "PENDING", market: { status: "OPEN" } },
-    distinct: ["marketId"],
-    select: { market: { select: { id: true, polymarketId: true, source: true, resolutionDeadline: true } } },
   });
-  const markets = pending.map((p) => p.market);
+  const ids = pendingGroups.map((g) => g.marketId);
+  const markets = await prisma.market.findMany({
+    where: { id: { in: ids }, status: "OPEN" },
+    select: { id: true, polymarketId: true, source: true, resolutionDeadline: true, startsAt: true },
+    orderBy: { resolutionDeadline: "asc" }, // oldest first — they get the chain-probe budget
+  });
   if (markets.length) {
     console.log(`[poll] ${markets.length} market(s) with pending bets`);
     let settleErrors = 0;
+    chainProbesLeft = CHAIN_PROBES_PER_TICK;
     await mapLimit(markets, CONCURRENCY, settleOne, () => { settleErrors++; });
     if (settleErrors > 0) subsystemFailed("settle", new Error(`${settleErrors} settle item error(s) this tick`));
     else subsystemOk("settle");
@@ -371,7 +401,14 @@ async function tick() {
         { mode: "REAL", market: { status: "OPEN" } },
         { mode: "REAL", market: { status: "RESOLVED", resolvedOutcome: null } },
       ],
-      market: { resolutionDeadline: { lt: new Date(Date.now() - 6 * 3_600_000) } },
+      // A sports deadline is kick-off, so a match that takes longer than the game itself to settle
+      // is not a backlog — twelve hours covers the match plus the resolver's lag.
+      market: {
+        OR: [
+          { startsAt: null, resolutionDeadline: { lt: new Date(Date.now() - 6 * 3_600_000) } },
+          { startsAt: { not: null }, resolutionDeadline: { lt: new Date(Date.now() - 12 * 3_600_000) } },
+        ],
+      },
     },
     orderBy: { market: { resolutionDeadline: "asc" } },
     select: { market: { select: { resolutionDeadline: true, polymarketId: true } } },

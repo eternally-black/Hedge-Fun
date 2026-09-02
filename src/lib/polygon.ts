@@ -78,8 +78,11 @@ export async function erc1155BalanceOf(token: string, owner: string, tokenId: st
 // payoutDenominator(bytes32) = 0xdd34de67, payoutNumerators(bytes32,uint256) = 0x0504c814 — both
 // derived from their signatures, pinned here the way wallet-ops pins its calldata.
 // Denominator 0 = not reported yet. Otherwise the numerators say who was paid: index 0 is the YES
-// outcome, index 1 the NO one, and BOTH positive is the invalid/split resolution (payout [1,1]),
-// which pays every share of either side half a dollar.
+// outcome, index 1 the NO one. A payout to BOTH is the invalid/split resolution ONLY when the split
+// is exactly [1,1] (every share of either side redeems for half a dollar). An UNEQUAL split — a
+// [2,1]/3 report, say — is not a void we know how to book: real-settle would book rem/2 per share,
+// which is wrong for anything but [1,1]. So an unequal split stays OPEN and the overdue alarm pages
+// a human; the [1,1] assumption is now checked, not assumed.
 // Same address wallet-ops grants operator rights on; pinned here so this module stays import-free.
 const CONDITIONAL_TOKENS_ADDRESS = "0x4d97dcd97ec945f40cf65f87097ace5ea0476045";
 
@@ -93,7 +96,11 @@ export async function conditionResolution(conditionId: string): Promise<ChainOut
     ethCall(CONDITIONAL_TOKENS_ADDRESS, "0x0504c814" + id + "0".padStart(64, "0")).then(BigInt),
     ethCall(CONDITIONAL_TOKENS_ADDRESS, "0x0504c814" + id + "1".padStart(64, "0")).then(BigInt),
   ]);
-  if (yes > 0n && no > 0n) return "INVALID";
+  if (yes > 0n && no > 0n) {
+    if (yes === no) return "INVALID";
+    console.warn(`[polygon] ${conditionId} paid an unequal split ${yes}/${no}: not bookable as INVALID, left unresolved`);
+    return null;
+  }
   if (yes > 0n) return "YES";
   if (no > 0n) return "NO";
   return null; // reported with nothing payable — not a resolution we know how to book
