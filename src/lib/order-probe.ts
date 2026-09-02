@@ -10,9 +10,12 @@
 // it), and the position stayed invisible while the money was gone. A FAK cannot match later, so
 // the trades naming it are the whole story: when the order record is unavailable, they answer.
 import type { PrismaClient } from "@prisma/client";
-import { fetchOrder, listAccountTrades, listOpenOrders } from "@polymarket/client/actions";
-import { serverSecureClient } from "./polymarket-server";
+import type { serverSecureClient } from "./polymarket-server";
 import { captureToGlitchTip } from "./glitchtip";
+// The SDK is loaded on first use, not at import — a test can import this module and inject its
+// own exchange reads; the bundled app and poller resolve the dynamic import at build time.
+const sdk = () => import("@polymarket/client/actions");
+const server = () => import("./polymarket-server");
 import type {
   OrderDiscovery,
   OrderProbe,
@@ -82,7 +85,7 @@ async function pageTrades(
 ): Promise<{ rows: unknown[]; complete: boolean }> {
   const rows: unknown[] = [];
   try {
-    const paginator = listAccountTrades(client as never, { tokenId: attempt.tokenId });
+    const paginator = (await sdk()).listAccountTrades(client as never, { tokenId: attempt.tokenId });
     const first = await paginator.firstPage();
     rows.push(...first.items);
     // hasMore with no usable cursor is a SHORT read, not a complete one — there is nothing to
@@ -135,6 +138,12 @@ export async function verifyReportedOrder(
   attempt: ReconcilableAttempt,
   orderId: string,
   depositWallet: string,
+  // The exchange reads are injectable so the gate order can be unit-tested without the SDK —
+  // production callers pass nothing.
+  deps: {
+    fetchOrder?: (client: NonNullable<ServerClient>, args: { orderId: string }) => Promise<unknown>;
+    pageTrades?: (client: NonNullable<ServerClient>, attempt: ReconcilableAttempt) => Promise<{ rows: unknown[]; complete: boolean }>;
+  } = {},
 ): Promise<ReportedOrderVerdict> {
   const signed = attempt.signedOrder as unknown as SignedOrderWire | null;
   if (!signed || typeof signed !== "object") return { ok: false, reason: "mismatch", detail: "no_signed_order" };
@@ -142,7 +151,7 @@ export async function verifyReportedOrder(
 
   let raw: Record<string, unknown> | null = null;
   try {
-    const fetched = await fetchOrder(client as never, { orderId });
+    const fetched = await (deps.fetchOrder ?? (async (c: NonNullable<ServerClient>, a: { orderId: string }) => (await sdk()).fetchOrder(c as never, a)))(client, { orderId });
     raw = fetched && typeof fetched === "object" ? (fetched as Record<string, unknown>) : null;
   } catch (e) {
     noteFailure("fetchOrder(reported)", attempt.id, e);
@@ -173,7 +182,7 @@ export async function verifyReportedOrder(
   // are a tight one: a trade that names this id as its TAKER order, on the token this attempt
   // signed for, after the intent existed, in an account only these credentials can read. A client
   // cannot fabricate that — it would have to make the exchange print someone else's trade.
-  const { rows, complete } = await pageTrades(client, attempt);
+  const { rows, complete } = await (deps.pageTrades ?? pageTrades)(client, attempt);
   const floorMs = attempt.createdAt.getTime() - CLOCK_SKEW_MS;
   const named = rows.some((row) => {
     const t = row as Record<string, unknown>;
@@ -204,7 +213,7 @@ export function realProbes(prisma: PrismaClient): { probe: OrderProbe; discover:
     if (cached) return cached;
     const user = await prisma.user.findUnique({ where: { id: userId } });
     const entry = {
-      client: user ? await serverSecureClient(prisma, user) : null,
+      client: user ? await (await server()).serverSecureClient(prisma, user) : null,
       depositWallet: user?.depositWalletAddress?.toLowerCase() ?? null,
     };
     clients.set(userId, entry);
@@ -220,7 +229,7 @@ export function realProbes(prisma: PrismaClient): { probe: OrderProbe; discover:
     // pass — it costs the sizeMatched cross-check, and the trades below carry the rest.
     let order: Record<string, unknown> | null = null;
     try {
-      const raw = await fetchOrder(client as never, { orderId });
+      const raw = await (await sdk()).fetchOrder(client as never, { orderId });
       order = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
     } catch (e) {
       noteFailure("fetchOrder", attempt.id, e);
@@ -311,7 +320,7 @@ export function realProbes(prisma: PrismaClient): { probe: OrderProbe; discover:
       // Step 1 — resting orders. Ours are FAK and should never rest, but this is the cheap exact
       // case and it costs one page in the common (empty) situation.
       try {
-        const paginator = listOpenOrders(client as never, { tokenId: attempt.tokenId });
+        const paginator = (await sdk()).listOpenOrders(client as never, { tokenId: attempt.tokenId });
         const first = await paginator.firstPage();
         // A live order of OUR OWN wallet on this token that the identity test rejects is ambiguity,
         // never proof that our order does not exist.
@@ -367,7 +376,7 @@ export function realProbes(prisma: PrismaClient): { probe: OrderProbe; discover:
       for (const orderId of candidates.slice(0, MAX_CANDIDATES)) {
         let raw: Record<string, unknown> | null = null;
         try {
-          const fetched = await fetchOrder(client as never, { orderId });
+          const fetched = await (await sdk()).fetchOrder(client as never, { orderId });
           raw = fetched && typeof fetched === "object" ? (fetched as Record<string, unknown>) : null;
         } catch (e) {
           noteFailure("fetchOrder(candidate)", attempt.id, e);

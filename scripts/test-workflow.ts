@@ -225,6 +225,70 @@ async function main() {
     const s5 = await startWorkflow(prisma, scoped("s5", { verify: async () => false }));
     assert.strictEqual(s5.status, "pending_signature", "unknown falls back to the base predicate");
 
+    // 12c. BRIDGE_OUT convergence — the branches that decide whether a withdrawal can be paid twice.
+    // A resetNeedsProof spec never releases its slot on a guess: with the relayer probe unreachable
+    // ("unknown") the balance predicates are not trusted in either direction, and only a terminal
+    // relayer failure (a handle the relayer itself declared dead) releases it.
+    const bridgeVerdict = { value: "unknown" as TxVerdict };
+    const bridgeInputs = { bridgeAddress: "0xbridge", amountMicro: "1000000", wallet: "0xw" };
+    const bridgeSpec = (marker: string, over: Partial<WorkflowSpec> = {}) =>
+      runScoped(
+        spec(marker, undefined, {
+          kind: "BRIDGE_OUT",
+          inputs: bridgeInputs,
+          verify: async () => false, // balance never dropped — would re-drive if trusted
+          definitelyNotDone: async () => true, // balance never moved — would release if trusted
+          resetNeedsProof: true,
+          ...over,
+        }),
+        async () => bridgeVerdict.value,
+      );
+
+    // 12c-i. DONE + same inputs + unknown verdict → HOLD: the row stays DONE even though the base
+    // definitelyNotDone says true.
+    await prisma.walletWorkflow.upsert({
+      where: { userId_kind: { userId: user.id, kind: "BRIDGE_OUT" } },
+      create: { userId: user.id, kind: "BRIDGE_OUT", state: "DONE", runId: "bridge-run-1", stepIndex: 0, inputs: bridgeInputs as never, answers: [] as never },
+      update: { state: "DONE", runId: "bridge-run-1", inputs: bridgeInputs as never, txHash: null, error: null, expiresAt: null },
+    });
+    const doneHold = await startWorkflow(prisma, bridgeSpec("bridge-done-hold"));
+    assert.strictEqual(doneHold.status, "done", "DONE + same inputs + unknown verdict holds the slot");
+    const doneRowAfter = await prisma.walletWorkflow.findUniqueOrThrow({ where: { userId_kind: { userId: user.id, kind: "BRIDGE_OUT" } } });
+    assert.strictEqual(doneRowAfter.state, "DONE", "row stays DONE");
+
+    // 12c-ii. DONE + a terminal relayer FAILURE → the run verifiably never landed → released.
+    bridgeVerdict.value = "failed";
+    const doneRelease = await startWorkflow(prisma, bridgeSpec("bridge-done-release"));
+    assert.strictEqual(doneRelease.status, "pending_signature", "a failed verdict releases a DONE slot");
+    if (doneRelease.status !== "pending_signature") throw new Error("unreachable");
+    assert.notStrictEqual(doneRelease.runId, "bridge-run-1", "new run id after release");
+
+    // 12c-iii. Expired SUBMITTING + txHash null + unknown verdict → HOLD with the operator message.
+    bridgeVerdict.value = "unknown";
+    await prisma.walletWorkflow.update({
+      where: { userId_kind: { userId: user.id, kind: "BRIDGE_OUT" } },
+      data: { state: "SUBMITTING", txHash: null, expiresAt: new Date(Date.now() - 1000), error: null },
+    });
+    const hold = await startWorkflow(prisma, bridgeSpec("bridge-hold"));
+    assert.strictEqual(hold.status, "submitting", "expired SUBMITTING with no relayer handle holds the slot");
+    if (hold.status !== "submitting") throw new Error("unreachable");
+    assert.ok(hold.error && hold.error.includes("operator must resolve"), "operator message set");
+    const heldRow = await prisma.walletWorkflow.findUniqueOrThrow({ where: { userId_kind: { userId: user.id, kind: "BRIDGE_OUT" } } });
+    assert.strictEqual(heldRow.state, "SUBMITTING", "row stays SUBMITTING");
+    assert.strictEqual(heldRow.runId, doneRelease.runId, "same run held");
+
+    // 12c-iv. Expired SUBMITTING WITH a relayer handle + terminal failure → released into a fresh run.
+    await prisma.walletWorkflow.update({
+      where: { userId_kind: { userId: user.id, kind: "BRIDGE_OUT" } },
+      data: { txHash: "0xdeadbeef" },
+    });
+    bridgeVerdict.value = "failed";
+    const release = await startWorkflow(prisma, bridgeSpec("bridge-release"));
+    assert.strictEqual(release.status, "pending_signature", "a failed verdict on a handled run releases an expired SUBMITTING slot");
+    if (release.status !== "pending_signature") throw new Error("unreachable");
+    assert.notStrictEqual(release.runId, heldRow.runId, "new run id after release");
+    console.log("OK: BRIDGE_OUT convergence — DONE/SUBMITTING hold on an unknown verdict, release only on a terminal failure");
+
     // 13. Encrypted CLOB-creds roundtrip with AAD binding.
     const originalKey = process.env.REAL_CREDS_KEY;
     process.env.REAL_CREDS_KEY = "ab".repeat(32);
