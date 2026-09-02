@@ -19,6 +19,10 @@ import type { DeviceFingerprint } from "../src/lib/refclick"; // type-only: eras
 // refclick, so the dynamic import below is the first time it loads — with the env already in place.
 process.env.REFERRAL_HASH_SECRET = process.env.REFERRAL_HASH_SECRET || "test-referral-secret";
 process.env.REFERRAL_DEVICE_GUARD = "1";
+// The fixtures below create users WITHOUT stored signup hashes on purpose (the guard's own cases
+// supply fingerprints explicitly); strict mode would reject those as device_unknown before the
+// idempotency/retroactivity seams under test are reached, so it is off here.
+process.env.REFERRAL_DEVICE_GUARD_STRICT = "0";
 
 async function mkUser(tag: string, signup?: DeviceFingerprint | null) {
   return prisma.user.create({

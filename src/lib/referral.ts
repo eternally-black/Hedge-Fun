@@ -3,7 +3,7 @@ import { prisma } from "./prisma";
 import { utcDay } from "./time";
 import { writePoints } from "./points";
 import { REFERRAL_INVITEE_BONUS, REFERRAL_INVITER_RATE } from "./config";
-import { resolveUserDevice, sameDevice, type DeviceFingerprint } from "./refclick";
+import { resolveUserDevice, sameDevice, deviceGuardActive, deviceGuardStrictMode, type DeviceFingerprint } from "./refclick";
 import { runSerializable } from "./tx";
 
 // Capture the inviter<->invitee relationship at signup. The invitee can only ever
@@ -15,9 +15,11 @@ import { runSerializable } from "./tx";
 //   1. Same User row (inviterId === inviteeId).
 //   2. Same embedded wallet (User.embeddedWalletAddress): strong, per-user, request-free — the
 //      same human re-using their Privy wallet across two accounts. Always checked.
-//   3. Same device fingerprint (ipHash+uaHash), when the caller supplies the invitee's current
-//      device hashes AND we can resolve the inviter's device — the same phone spinning up a
-//      second account. Fail-safe: hashes unavailable (no REFERRAL_HASH_SECRET) -> skipped.
+//   3. Same device fingerprint (ipHash), when the caller supplies the invitee's current device
+//      hashes AND we can resolve the inviter's device — the same phone spinning up a second
+//      account. Fail-CLOSED: when the guard is active and strict mode is on, a missing device
+//      (no stored hashes) rejects rather than skips — a pre-guard account must not silently
+//      bypass the guard. Kill-switch REFERRAL_DEVICE_GUARD_STRICT=0 restores the old skip.
 // Any guard that trips returns referralId:null (no Referral row, no SIGNUP event) so neither the
 // inviter accrual nor the invitee bonus can ever fire for a self-referral.
 export async function captureReferral(
@@ -51,10 +53,15 @@ export async function captureReferral(
   // Guard 3 — same signup device. Compares the inviter's and invitee's device captured at signup
   // (User.signupIpHash/signupUaHash), resolved symmetrically. Falls back to the invitee's CURRENT
   // request device (opts.inviteeDevice) when their stored signup device is null (a pre-guard account,
-  // or REFERRAL_HASH_SECRET added after they signed up). Fail-safe: any missing piece -> skip (never
-  // crashes; the wallet guard above still applies). On by default when REFERRAL_HASH_SECRET is set.
+  // or REFERRAL_HASH_SECRET added after they signed up). Fail-CLOSED: when the guard is active and
+  // strict mode is on, a missing device (no stored hashes) rejects rather than skips — a pre-guard
+  // account must not silently bypass the guard. Kill-switch REFERRAL_DEVICE_GUARD_STRICT=0 restores
+  // the old skip. On by default when REFERRAL_HASH_SECRET is set.
   const inviterDevice = await resolveUserDevice(inviterId);
   const inviteeDevice = (await resolveUserDevice(inviteeId)) ?? opts?.inviteeDevice ?? null;
+  if (deviceGuardActive() && deviceGuardStrictMode && (!inviterDevice || !inviteeDevice)) {
+    return { referralId: null, reason: "device_unknown" };
+  }
   if (inviterDevice && inviteeDevice && sameDevice(inviterDevice, inviteeDevice)) {
     return { referralId: null, reason: "self_device" };
   }

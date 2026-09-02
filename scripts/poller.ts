@@ -21,6 +21,7 @@ import { evaluateStreak } from "../src/lib/streak";
 import { refreshDeck } from "./refresh-deck";
 import { pruneMarkets } from "./prune-markets";
 import { refreshHedgeIndex } from "./refresh-hedge-index";
+import { pruneReferralClicks } from "../src/lib/refclick";
 
 const prisma = new PrismaClient();
 
@@ -205,6 +206,14 @@ async function tick() {
     } catch (e) {
       console.warn("[prune] error:", (e as Error).message);
       subsystemFailed("prune", e);
+    }
+    try {
+      const n = await pruneReferralClicks();
+      if (n > 0) console.log(`[prune] ${n} referral click(s) older than 24h`);
+      subsystemOk("prune-clicks");
+    } catch (e) {
+      console.warn("[prune] referral-click error:", (e as Error).message);
+      subsystemFailed("prune-clicks", e);
     }
   }
 
