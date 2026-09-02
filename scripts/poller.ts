@@ -47,13 +47,16 @@ let chainProbesLeft = 0;
 // The accept-time price-band gate (src/lib/hedge/accept.ts) closes the intra-window remainder.
 const HEDGE_INDEX_EVERY_N_TICKS = 5;
 // Wall-clock budgets for the Gamma reads of a subsystem (withGammaDeadline in polymarket.ts). Measured
-// 2026-09-02: a deck refresh takes 1–10 s, a hedge-index run 15–35 s. During that day's Gamma outage
-// (15:12–15:30Z, slow 500s) the same run took 209–323 s: the heartbeat crossed its 180 s staleness
-// bound mid-tick and the watchdog restarted the poller three times into the same outage. With these
-// budgets a tick's Gamma time is at most 45 + 90 s plus one in-flight request, under the bound, and a
-// budget hit is an ordinary subsystem failure (the previous deck / index rows stay; no partial writes).
+// 2026-09-02: a deck refresh takes 1–10 s, a warm hedge-index run 15–35 s, a cold-start one (empty
+// caches, ~3100 sports rows) 63 s. During that day's Gamma outage (15:12–15:30Z, slow 500s) the run
+// took 209–323 s: the heartbeat crossed its 180 s staleness bound mid-tick and the watchdog restarted
+// the poller three times into the same outage. Worst case with these budgets: deck 45 s (no beat if
+// it fails) + index 120 s + one in-flight request 15 s = 180 s, and the container only turns
+// unhealthy after three 30 s checks in a row see the file older than 180 s — so a restart needs
+// 240 s without a beat, which no budgeted tick can produce. A budget hit is an ordinary subsystem
+// failure (the previous deck / index rows stay; no partial writes).
 const DECK_GAMMA_BUDGET_MS = 45_000;
-const HEDGE_INDEX_GAMMA_BUDGET_MS = 90_000;
+const HEDGE_INDEX_GAMMA_BUDGET_MS = 120_000;
 // Market cache GC cadence. Every 5th tick ≈ every 5 minutes: fast enough to drain a large backlog
 // in a few hours (PRUNE_MAX_ROWS per run), slow enough that the anti-join scan is not a per-minute
 // cost in the steady state, where it finds nothing. Deliberately OFFSET from the hedge index above
