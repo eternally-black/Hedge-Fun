@@ -3,7 +3,7 @@
 // Needs DATABASE_URL (Docker DB). Run: npx tsx scripts/test-poller-lease.ts
 import assert from "node:assert";
 import { prisma } from "../src/lib/prisma";
-import { acquirePollerLease } from "../src/lib/poller-lease";
+import { acquirePollerLease, releasePollerLease } from "../src/lib/poller-lease";
 
 async function main() {
   const holderA = `test-a-${process.pid}`;
@@ -23,7 +23,12 @@ async function main() {
     await prisma.pollerLease.update({ where: { id: 1 }, data: { expiresAt: new Date(Date.now() - 1) } });
     assert.strictEqual(await acquirePollerLease(prisma, holderB, 60_000), true, "B takes over after expiry");
 
-    console.log("OK: poller lease — one holder at a time, renewable, expires on its own");
+    // C5: the holder releases on shutdown and a successor acquires immediately; a non-holder cannot release.
+    assert.strictEqual(await releasePollerLease(prisma, holderB), true, "B releases its own lease");
+    assert.strictEqual(await acquirePollerLease(prisma, holderA, 60_000), true, "A acquires right after the release");
+    assert.strictEqual(await releasePollerLease(prisma, holderB), false, "B no longer holds it, so it cannot release");
+
+    console.log("OK: poller lease — one holder at a time, renewable, expires on its own, released on shutdown");
   } finally {
     await prisma.pollerLease.deleteMany();
   }

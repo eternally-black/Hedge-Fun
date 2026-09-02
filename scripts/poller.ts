@@ -22,7 +22,7 @@ import { refreshDeck } from "./refresh-deck";
 import { pruneMarkets } from "./prune-markets";
 import { refreshHedgeIndex } from "./refresh-hedge-index";
 import { pruneReferralClicks } from "../src/lib/refclick";
-import { acquirePollerLease } from "../src/lib/poller-lease";
+import { acquirePollerLease, releasePollerLease } from "../src/lib/poller-lease";
 
 const prisma = new PrismaClient();
 
@@ -92,6 +92,10 @@ let backlogLastAlertAt = 0;
 const HEARTBEAT_FILE = process.env.POLLER_HEARTBEAT_FILE ?? join(tmpdir(), "poller-heartbeat");
 
 let running = true;
+// One identity per process: the lease is acquired under it every tick and released under it on
+// shutdown. A recreated container has a new pid, so without the release the successor idles until
+// the TTL runs out — measured at two skipped ticks on the 2026-09-02 deploy.
+const POLLER_HOLDER = `${hostname()}:${process.pid}`;
 
 export function toResolution(m: Awaited<ReturnType<typeof fetchResolution>>): Resolution {
   if (!m) return { kind: "open" };
@@ -171,8 +175,7 @@ async function tick() {
   // Single-runner lease: funding watch, prune and the S2 clear-pass must not double-run when two
   // poller processes are up (a deploy overlap, say). The lease outlives a tick by one interval so
   // a crashed holder frees it by itself.
-  const holder = `${hostname()}:${process.pid}`;
-  if (!(await acquirePollerLease(prisma, holder, 2 * POLL_INTERVAL_MS))) {
+  if (!(await acquirePollerLease(prisma, POLLER_HOLDER, 2 * POLL_INTERVAL_MS))) {
     console.warn("[poller] another runner holds the lease — skipping tick");
     return;
   }
@@ -480,7 +483,11 @@ if (runAsDaemon) {
     process.on(sig, () => {
       console.log(`\n${sig} -> stopping…`);
       running = false;
-      prisma.$disconnect().then(() => process.exit(0));
+      // Hand the lease back before going, bounded so a slow DB cannot outlast the stop grace.
+      void Promise.race([
+        releasePollerLease(prisma, POLLER_HOLDER).catch(() => false),
+        new Promise((resolve) => setTimeout(resolve, 1500)),
+      ]).then(() => prisma.$disconnect().then(() => process.exit(0)));
     });
   }
 

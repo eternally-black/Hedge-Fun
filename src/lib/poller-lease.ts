@@ -27,3 +27,13 @@ export async function acquirePollerLease(
     return false;
   }
 }
+
+// Release the lease on shutdown so a recreated container (new pid) can acquire immediately.
+// Only the holder may release; expiring the row (not deleting it) keeps the single-row invariant.
+export async function releasePollerLease(prisma: PrismaClient, holder: string): Promise<boolean> {
+  const updated = await prisma.pollerLease.updateMany({
+    where: { id: 1, holder },
+    data: { expiresAt: new Date(0) },
+  });
+  return updated.count === 1;
+}
