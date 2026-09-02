@@ -1,8 +1,9 @@
-import type { StreakState } from "@prisma/client";
+import type { Prisma, StreakState } from "@prisma/client";
 import { prisma } from "./prisma";
 import { utcDay, diffDays } from "./time";
 import { runSerializable } from "./tx";
 import { RECOVERY_WINDOW_DAYS } from "./config";
+import { writePoints } from "./points";
 
 // ---------------------------------------------------------------------------
 // Pure transition core (DB-free, unit-testable). Given current streak state and
@@ -73,6 +74,31 @@ export function evaluateBurn(
 // ---------------------------------------------------------------------------
 // DB-backed operations.
 // ---------------------------------------------------------------------------
+
+// Materialise the x2 bonus the moment a 7-day window completes (level 7/14/21...). The bonus is a
+// fact about seven days the user already earned; recomputing it from the live level meant a lost
+// streak silently took it back. The ledger already has the row type for it. Idempotent: both
+// callers run inside the transaction that inserts the day's unique StreakEvent, so a window can be
+// awarded at most once.
+async function awardX2Window(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  day: string,
+  levelAfter: number,
+): Promise<void> {
+  if (levelAfter <= 0 || levelAfter % 7 !== 0) return;
+  const swipeDays = await tx.pointsLedger.groupBy({
+    by: ["utcDay"],
+    where: { userId, type: "SWIPE", utcDay: { lte: day } },
+    _sum: { amount: true },
+    orderBy: { utcDay: "desc" },
+    take: 7,
+  });
+  const sum = swipeDays.reduce((acc, g) => acc + (g._sum.amount ?? 0), 0);
+  if (sum > 0) {
+    await writePoints(tx, { userId, type: "STREAK_X2", amount: sum, utcDay: day, metadata: { level: levelAfter } });
+  }
+}
 
 // Qualify today for the streak. The day = the GM tap (login + opening the app are one
 // action in the MVP — see H1: the separate deck-open leg was dead, so it's collapsed).
@@ -156,6 +182,7 @@ export async function qualifyDay(
         },
         update: {},
       });
+      await awardX2Window(tx, userId, day, next.currentLevel);
     }
 
     return { qualifiedToday, state: next.state, currentLevel: next.currentLevel };
@@ -248,6 +275,7 @@ export async function recoverStreak(
       },
       update: {},
     });
+    await awardX2Window(tx, userId, day, newLevel);
     return { recovered: true, currentLevel: newLevel };
   });
 }

@@ -8,6 +8,7 @@ import assert from "node:assert";
 import { prisma } from "../src/lib/prisma";
 import { randomCode } from "../src/lib/refcode";
 import { qualifyDay, evaluateStreak, recoverStreak } from "../src/lib/streak";
+import { writePoints, effectivePoints } from "../src/lib/points";
 import { RECOVERY_WINDOW_DAYS } from "../src/lib/config";
 
 const D = (s: string) => new Date(`${s}T12:00:00.000Z`); // noon UTC so utcDay() is unambiguous
@@ -78,6 +79,41 @@ async function main() {
   assert.strictEqual(lostRec.recovered, false, "cannot recover a LOST streak");
   assert.strictEqual(lostRec.reason, "not_recoverable", "LOST is not recoverable");
 
+  // ---- x2 bonus materialisation: a completed 7-day window writes a STREAK_X2 row, and a later
+  // LOST streak does NOT take it back ----
+  const tag4 = `${tag}-x2`;
+  const u4 = await prisma.user.create({
+    data: { privyId: `did:privy:${tag4}`, authProvider: "EMAIL", referralCode: randomCode(),
+      virtualBalance: { create: { balanceCents: 100000 } }, collectibleBalance: { create: {} },
+      streak: { create: {} } },
+  });
+  // Seven consecutive days, one SWIPE point written before each tap.
+  for (let i = 1; i <= 7; i++) {
+    const day = `2026-07-0${i}`;
+    await writePoints(prisma, { userId: u4.id, type: "SWIPE", amount: 1, utcDay: day });
+    const q = await qualifyDay(u4.id, D(day));
+    assert.strictEqual(q.currentLevel, i, `day ${i} -> level ${i}`);
+  }
+  // After the 7th tap, a STREAK_X2 row with amount 7 exists.
+  const x2row = await prisma.pointsLedger.findFirst({ where: { userId: u4.id, type: "STREAK_X2" } });
+  assert.ok(x2row, "STREAK_X2 row written at level 7");
+  assert.strictEqual(x2row!.amount, 7, "STREAK_X2 amount = 7 (one point per swipe-day)");
+
+  // Force the streak to LOST (burn, then sweep past the recovery window).
+  const b4 = await evaluateStreak(u4.id, D("2026-07-09")); // gap 2 -> burn
+  assert.strictEqual(b4!.state, "BURNED_RECOVERABLE", "u4 burned");
+  const pastWindow4 = new Date(b4!.recoverableUntil!.getTime() + 86_400_000);
+  const lost4 = await evaluateStreak(u4.id, pastWindow4);
+  assert.strictEqual(lost4!.state, "LOST", "u4 lost");
+  assert.strictEqual(lost4!.currentLevel, 0, "LOST resets level to 0");
+
+  // The STREAK_X2 row still exists and effectivePoints still includes it.
+  const x2after = await prisma.pointsLedger.findFirst({ where: { userId: u4.id, type: "STREAK_X2" } });
+  assert.ok(x2after, "STREAK_X2 row survives a LOST streak");
+  const ep4 = await effectivePoints(prisma, u4.id);
+  assert.strictEqual(ep4.bonusFromX2, 7, "bonus still counted after LOST");
+  assert.strictEqual(ep4.total, 14, "total = 7 swipe + 7 bonus after LOST");
+
   // ---- REGRESSION (F7/P-10): GM tap after a missed day must BURN, not silently restart at 1 ----
   // The bug: qualifyDay ran applyQualify with no preceding evaluateStreak, so an ACTIVE streak with
   // a gap>=2 (user missed exactly one day and taps GM before the /me or poller burn-sweep) reset to
@@ -111,15 +147,16 @@ async function main() {
   assert.strictEqual(u3rec.currentLevel, 4, "recovery resumes at n+1 = 4 (level was preserved)");
 
   // cleanup
-  for (const id of [user.id, u2.id, u3.id]) {
+  for (const id of [user.id, u2.id, u3.id, u4.id]) {
     await prisma.streakEvent.deleteMany({ where: { userId: id } });
     await prisma.streak.deleteMany({ where: { userId: id } });
     await prisma.collectibleBalance.deleteMany({ where: { userId: id } });
     await prisma.virtualBalance.deleteMany({ where: { userId: id } });
+    await prisma.pointsLedger.deleteMany({ where: { userId: id } });
   }
-  await prisma.user.deleteMany({ where: { id: { in: [user.id, u2.id, u3.id] } } });
+  await prisma.user.deleteMany({ where: { id: { in: [user.id, u2.id, u3.id, u4.id] } } });
 
-  console.log("OK: ACTIVE->BURN->LOST transitions + recovery (spend artifact, resume n+1, window-gated); missed-day GM tap burns + stays recoverable");
+  console.log("OK: ACTIVE->BURN->LOST transitions + recovery (spend artifact, resume n+1, window-gated); missed-day GM tap burns + stays recoverable; x2 materialised + survives LOST");
 }
 
 main().catch((e) => { console.error("FAIL:", e); process.exit(1); }).finally(() => prisma.$disconnect());
