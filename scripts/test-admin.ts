@@ -33,13 +33,13 @@ async function main() {
     { type: "SWIPE" as const, amount: 1, utcDay: old2 },
     { type: "SWIPE" as const, amount: 1, utcDay: today },
   ];
-  const ctx = { currentLevel: 0, state: "ACTIVE" as const }; // level 0 -> no x2, totals = raw sums
-  assert.strictEqual(scorePoints(rows, ctx, "u1").total, 3, "all-time = 3");
-  assert.strictEqual(scorePoints(rows.filter((r) => r.utcDay === today), ctx, "u1").total, 1, "today = 1");
+  const ctx = { currentLevel: 0 }; // level 0 -> no x2, totals = raw sums
+  assert.strictEqual(scorePoints(rows, ctx).total, 3, "all-time = 3");
+  assert.strictEqual(scorePoints(rows.filter((r) => r.utcDay === today), ctx).total, 1, "today = 1");
 
   const weekCutoff = new Date(Date.now() - 6 * 86_400_000).toISOString().slice(0, 10);
   assert.strictEqual(
-    scorePoints(rows.filter((r) => r.utcDay >= weekCutoff), ctx, "u1").total,
+    scorePoints(rows.filter((r) => r.utcDay >= weekCutoff), ctx).total,
     1,
     "this week = 1 (old days excluded)",
   );

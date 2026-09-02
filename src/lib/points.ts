@@ -1,14 +1,14 @@
 import type { Prisma, PointsType } from "@prisma/client";
 import { diffDays } from "./time";
 
-type StreakState = "ACTIVE" | "BURNED_RECOVERABLE" | "LOST";
-
 // Any Prisma client or transaction handle.
 type Db = Prisma.TransactionClient | import("@prisma/client").PrismaClient;
 
 // --- Write a RAW points row. Idempotent via DB unique constraints:
 //   SWIPE: unique betId (1 point per bet, ever).
-//   LOGIN/STREAK_X2: unique [userId, type, utcDay] (one per day).
+//   LOGIN: gated by LoginMark's [userId, utcDay] unique inside recordLogin's transaction
+//     (there is NO ledger-level unique on [userId, type, utcDay]).
+//   STREAK_X2: reserved.
 // A duplicate write throws P2002 — callers that may retry should swallow it. ---
 export async function writePoints(
   db: Db,
@@ -56,13 +56,11 @@ export interface ScoreResult {
 // Pure scoring core. DB-free so it's unit-testable. The ONLY x2 consumer besides leaderboard SQL.
 export function scorePoints(
   rows: { type: PointsType; amount: number; utcDay: string }[],
-  streak: { currentLevel: number; state: StreakState },
-  _userId: string, // kept for signature parity with callers/leaderboard; not used by the scoring math
+  streak: { currentLevel: number },
 ): ScoreResult {
-  const breakdown = { SWIPE: 0, LOGIN: 0, REFERRAL: 0, STREAK_X2: 0, TOPUP_SPEND: 0 } as Record<
-    PointsType,
-    number
-  >;
+  // Typed initialiser: a compile error the moment PointsType grows — a new enum member must be
+  // handled here, not silently yield NaN via a cast.
+  const breakdown: Record<PointsType, number> = { SWIPE: 0, LOGIN: 0, REFERRAL: 0, STREAK_X2: 0, TOPUP_SPEND: 0 };
   const swipeByDay = new Map<string, number>();
   for (const r of rows) {
     breakdown[r.type] += r.amount;
@@ -126,15 +124,16 @@ export async function effectivePoints(
   userId: string,
 ): Promise<ScoreResult> {
   const [rows, streak] = await Promise.all([
-    db.pointsLedger.findMany({
+    // Same input to the scorer in a fraction of the bytes; the scorer only ever needs per-day sums.
+    db.pointsLedger.groupBy({
+      by: ["type", "utcDay"],
       where: { userId },
-      select: { type: true, amount: true, utcDay: true },
+      _sum: { amount: true },
     }),
     db.streak.findUnique({ where: { userId } }),
   ]);
   return scorePoints(
-    rows,
-    { currentLevel: streak?.currentLevel ?? 0, state: streak?.state ?? "ACTIVE" },
-    userId,
+    rows.map((g) => ({ type: g.type, utcDay: g.utcDay, amount: g._sum.amount ?? 0 })),
+    { currentLevel: streak?.currentLevel ?? 0 },
   );
 }

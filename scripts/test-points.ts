@@ -23,7 +23,7 @@ function swipeWindow(end: string, n: number, perDay: number) {
     { type: "LOGIN" as const, amount: 1, utcDay: "2026-06-24" },
     { type: "REFERRAL" as const, amount: 20, utcDay: "2026-06-24" },
   ];
-  const r = scorePoints(rows, { currentLevel: 6, state: "ACTIVE" }, "u1");
+  const r = scorePoints(rows, { currentLevel: 6 });
   assert.strictEqual(r.breakdown.SWIPE, 18, "level6 raw swipe = 18");
   assert.strictEqual(r.bonusFromX2, 0, "level6: window not complete -> no x2");
   assert.strictEqual(r.total, 18 + 1 + 20, "level6 total = raw, login+referral raw");
@@ -37,7 +37,7 @@ function swipeWindow(end: string, n: number, perDay: number) {
     { type: "LOGIN" as const, amount: 1, utcDay: "2026-06-24" },
     { type: "REFERRAL" as const, amount: 20, utcDay: "2026-06-24" },
   ];
-  const r = scorePoints(rows, { currentLevel: 7, state: "ACTIVE" }, "u1");
+  const r = scorePoints(rows, { currentLevel: 7 });
   assert.strictEqual(r.breakdown.SWIPE, 21, "level7 raw swipe = 21");
   assert.strictEqual(r.bonusFromX2, 21, "level7: window doubled -> +21 bonus");
   // swipe 21->42, login 1 + referral 20 untouched.
@@ -48,7 +48,7 @@ function swipeWindow(end: string, n: number, perDay: number) {
 //    Earliest 7 swipe-days double; day 8 stays raw -> not continuous.
 {
   const rows = swipeWindow("2026-06-24", 8, 3); // 8 days * 3 = 24 raw
-  const r = scorePoints(rows, { currentLevel: 8, state: "ACTIVE" }, "u1");
+  const r = scorePoints(rows, { currentLevel: 8 });
   assert.strictEqual(r.breakdown.SWIPE, 24, "level8 raw swipe = 24");
   // 7 days doubled (21->42) + 1 day raw (3) = 45; bonus = 45 - 24 = 21 (one window only).
   assert.strictEqual(r.bonusFromX2, 21, "level8: still one window -> +21, not continuous");
@@ -58,7 +58,7 @@ function swipeWindow(end: string, n: number, perDay: number) {
 // 4. ACTIVE strategy, level-14 streak: TWO completed windows -> 14 swipe-days double.
 {
   const rows = swipeWindow("2026-06-24", 14, 3); // 14 * 3 = 42 raw
-  const r = scorePoints(rows, { currentLevel: 14, state: "ACTIVE" }, "u1");
+  const r = scorePoints(rows, { currentLevel: 14 });
   assert.strictEqual(r.breakdown.SWIPE, 42, "level14 raw swipe = 42");
   assert.strictEqual(r.bonusFromX2, 42, "level14: two windows -> all 14 days double");
   assert.strictEqual(r.total, 84, "level14 total = 84");
@@ -71,7 +71,7 @@ function swipeWindow(end: string, n: number, perDay: number) {
     { type: "SWIPE" as const, amount: 5, utcDay: "2026-01-01" }, // ancient, outside streak
     ...swipeWindow("2026-06-24", 7, 3), // 21 raw in the just-completed window
   ];
-  const r = scorePoints(rows, { currentLevel: 7, state: "ACTIVE" }, "u1");
+  const r = scorePoints(rows, { currentLevel: 7 });
   assert.strictEqual(r.breakdown.SWIPE, 26, "raw swipe = 5 + 21 = 26");
   assert.strictEqual(r.bonusFromX2, 21, "only the in-window 21 doubles; the ancient 5 stays raw");
   assert.strictEqual(r.total, 47, "level7+ancient total = (5) + (42) = 47");

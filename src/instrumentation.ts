@@ -47,13 +47,13 @@ export async function register() {
     throw new Error(`[boot] real-money env incomplete: ${realMissing.join(", ")}`);
   }
 
-  // Soft: without the secret the referral device anti-fraud guard + cross-browser attribution
-  // fall back to no-ops (fail-safe, not a crash) — but that's a silent security/attribution loss,
-  // so make it visible in the logs.
+  // Referral anti-fraud guard. Without the secret the device guard is silently disabled — the
+  // only live referral anti-fraud control. Fail the boot like the real-money vars above.
   if (!process.env.REFERRAL_HASH_SECRET) {
-    console.warn(
-      "[boot] REFERRAL_HASH_SECRET unset — referral device anti-fraud and cross-browser attribution are DISABLED",
-    );
+    await captureToGlitchTip(new Error("[boot] REFERRAL_HASH_SECRET unset — the referral anti-fraud guard would be silently disabled"), {
+      boot: "referral-env-check",
+    });
+    throw new Error("[boot] REFERRAL_HASH_SECRET unset — the referral anti-fraud guard would be silently disabled");
   }
 
   // Soft: without the builder code the bridge deposit proxy silently drops X-Builder-Code and

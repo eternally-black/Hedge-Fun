@@ -259,6 +259,14 @@ export async function maybeQualifyReferralOnSwipe(
   inviteeId: string,
   params: ReferralRewardParams = DEFAULT_REWARD_PARAMS,
 ): Promise<void> {
+  // The count ran on every swipe of every user — bail out first when there's no referral or it's
+  // already qualified.
+  const ref = await prisma.referral.findUnique({
+    where: { inviteeId },
+    select: { id: true, qualifiedAt: true },
+  });
+  if (!ref || ref.qualifiedAt) return;
+
   // Deliberately mode-agnostic (owner Q1 2026-08-13: real swipes fully participate) — a REAL bet
   // counts toward the qualification threshold like a paper one. The check only FIRES from the
   // paper swipe route today; step 6's fill path must call this too or real-only invitees never qualify.

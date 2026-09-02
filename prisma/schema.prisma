@@ -314,6 +314,7 @@ model Market {
   @@index([status, resolutionDeadline]) // deck assembly
   @@index([status, resolvedAt]) // settlement scan
   @@index([source, status, resolutionDeadline]) // per-source scans (the ?sport= filter it was added for is gone)
+  @@index([resolutionDeadline]) // prune-markets anti-join
   @@map("markets")
 }
 
@@ -385,6 +386,8 @@ model Bet {
   @@index([userId, utcDay])
   @@index([userId, settlementStatus, seenAt]) // unread-results scan (/api/me unreadResults, /api/results/seen)
   @@index([userId, hedgeSuggestionId]) // idempotent hedge-accept lookup (re-accept -> existing bet)
+  @@index([userId, createdAt]) // /api/history sorts by createdAt after filtering on userId
+  @@index([userId, settledAt]) // /api/results sorts by settledAt after filtering on userId
   @@map("bets")
 }
 

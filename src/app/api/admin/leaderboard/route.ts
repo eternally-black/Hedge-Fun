@@ -19,11 +19,24 @@ export async function GET(req: Request) {
   if (!isAdmin(user)) return NextResponse.json({ error: "forbidden" }, { status: 403 });
 
   // Same live-query shape as the public leaderboard (no snapshot at MVP scale), enriched with the
-  // columns the admin tool needs. One ledger fetch feeds all three time windows.
+  // columns the admin tool needs. One ledger fetch feeds all three time windows. The raw ledger
+  // grows ~11 rows per user per day; the scorer only needs per-day sums.
   const [rows, streaks, users] = await Promise.all([
-    prisma.pointsLedger.findMany({ select: { userId: true, type: true, amount: true, utcDay: true, createdAt: true } }),
+    prisma.pointsLedger.groupBy({
+      by: ["userId", "type", "utcDay"],
+      _sum: { amount: true },
+      _max: { createdAt: true },
+    }),
     prisma.streak.findMany({ select: { userId: true, currentLevel: true, state: true } }),
-    prisma.user.findMany({ select: { id: true, twitterHandle: true, lastSeenAt: true, createdAt: true } }),
+    prisma.user.findMany({
+      where: {
+        OR: [
+          { pointsLedger: { some: {} } },
+          { createdAt: { gt: new Date(Date.now() - 30 * 86_400_000) } },
+        ],
+      },
+      select: { id: true, twitterHandle: true, lastSeenAt: true, createdAt: true },
+    }),
   ]);
 
   const today = utcDay();
@@ -32,14 +45,15 @@ export async function GET(req: Request) {
   const rowsByUser = new Map<string, LedgerRow[]>();
   for (const r of rows) {
     const arr = rowsByUser.get(r.userId);
-    if (arr) arr.push(r);
-    else rowsByUser.set(r.userId, [r]);
+    const row: LedgerRow = { type: r.type, amount: r._sum.amount ?? 0, utcDay: r.utcDay, createdAt: r._max.createdAt ?? new Date(0) };
+    if (arr) arr.push(row);
+    else rowsByUser.set(r.userId, [row]);
   }
   const streakByUser = new Map(streaks.map((s) => [s.userId, s]));
 
   const scored: Omit<AdminLeaderboardRow, "rank">[] = users.map((u) => {
     const s = streakByUser.get(u.id);
-    const streakCtx = { currentLevel: s?.currentLevel ?? 0, state: s?.state ?? ("ACTIVE" as const) };
+    const streakCtx = { currentLevel: s?.currentLevel ?? 0 };
     const all = rowsByUser.get(u.id) ?? [];
 
     // ponytail: windowed scorePoints is APPROXIMATE. The x2 streak heuristic anchors to the latest
@@ -47,9 +61,9 @@ export async function GET(req: Request) {
     // can over/under-apply the streak bonus vs the true historical window. All-time is exact. Accepted:
     // this is an internal "who's hot" signal, not the user-facing economy. Upgrade path if it ever
     // matters: score raw per-window (sum breakdown.SWIPE) without the multiplier.
-    const pointsAll = scorePoints(all, streakCtx, u.id).total;
-    const pointsWeek = scorePoints(all.filter((r) => r.utcDay >= weekCutoff), streakCtx, u.id).total;
-    const pointsToday = scorePoints(all.filter((r) => r.utcDay === today), streakCtx, u.id).total;
+    const pointsAll = scorePoints(all, streakCtx).total;
+    const pointsWeek = scorePoints(all.filter((r) => r.utcDay >= weekCutoff), streakCtx).total;
+    const pointsToday = scorePoints(all.filter((r) => r.utcDay === today), streakCtx).total;
 
     // lastSeenAt is set only at account creation (privy.ts), so it's stale for activity. The latest
     // ledger row (every swipe/login writes one) is the real activity proxy; fall back to createdAt.

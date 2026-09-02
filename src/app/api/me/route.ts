@@ -4,7 +4,7 @@ import { authUser } from "@/lib/privy";
 import { effectivePoints } from "@/lib/points";
 import { evaluateStreak } from "@/lib/streak";
 import { getReferralStats } from "@/lib/referral";
-import { utcDay, weekdayMon0, streakWindowStartDay } from "@/lib/time";
+import { utcDay, weekdayMon0, streakWindowStartDay, diffDays } from "@/lib/time";
 import {
   SWIPE_CAP,
   SHARDS_PER_ARTIFACT,
@@ -35,8 +35,21 @@ export async function GET(req: Request) {
 
   const dev = isDevUser(user.email);
   const day = utcDay();
-  // Defensive streak sweep on read (idempotent), then fan out the reads in parallel.
-  await evaluateStreak(user.id);
+  // Defensive streak sweep on read (idempotent), then fan out the reads in parallel. The poller
+  // already sweeps every tick; /api/me only needs to catch the row the poller has not reached in
+  // the last minute, which is only possible when the streak is at a day boundary.
+  const streakRow = await prisma.streak.findUnique({
+    where: { userId: user.id },
+    select: { lastQualifiedDay: true, state: true },
+  });
+  if (
+    streakRow &&
+    streakRow.state !== "LOST" &&
+    streakRow.lastQualifiedDay &&
+    diffDays(day, streakRow.lastQualifiedDay) >= 2
+  ) {
+    await evaluateStreak(user.id);
+  }
   const [points, balance, collectibles, streak, counter, loginMark, unreadResults, referrals] = await Promise.all([
     effectivePoints(prisma, user.id),
     prisma.virtualBalance.findUnique({ where: { userId: user.id } }),
