@@ -17,6 +17,8 @@ import {
   REAL_MAX_STAKE_CENTS,
 } from "@/lib/config";
 import { isDevUser } from "@/lib/dev";
+import { effectiveRealMode } from "@/lib/real";
+import { rateLimit } from "@/lib/ratelimit";
 import type { MeResponse } from "@/lib/api-types";
 import { REAL_TERMS_VERSION } from "@/lib/real-terms";
 
@@ -25,6 +27,11 @@ import { REAL_TERMS_VERSION } from "@/lib/real-terms";
 export async function GET(req: Request) {
   const user = await authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+
+  // Generous ceilings against loops, not UX pacing.
+  if (!rateLimit(`me:${user.id}`, 300, 60_000)) {
+    return NextResponse.json({ error: "rate_limited" }, { status: 429 });
+  }
 
   const dev = isDevUser(user.email);
   const day = utcDay();
@@ -43,7 +50,7 @@ export async function GET(req: Request) {
         // Follows the MODE: a real position now settles server-side (real-settle.ts), so a real user
         // has real results to be told about — the bell counting paper ones would be counting a game
         // they are not playing.
-        mode: user.realMode ? "REAL" : "PAPER",
+        mode: effectiveRealMode(user),
         settlementStatus: { in: ["SETTLED", "VOID"] },
         seenAt: null,
       },
@@ -114,10 +121,7 @@ export async function GET(req: Request) {
       consentAt: user.realConsentAt?.toISOString() ?? null,
       consentVersion: user.realConsentVersion ?? null,
       termsVersion: REAL_TERMS_VERSION,
-      mode:
-        user.realMode && user.realConsentAt !== null && user.realConsentVersion === REAL_TERMS_VERSION
-          ? "REAL"
-          : "PAPER",
+      mode: effectiveRealMode(user),
       depositWallet: user.depositWalletAddress ?? null,
       stakeCents: user.realStakeCents,
       minStakeCents: REAL_MIN_STAKE_CENTS,

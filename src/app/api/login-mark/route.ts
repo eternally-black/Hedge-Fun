@@ -5,6 +5,7 @@ import { recordLogin } from "@/lib/login";
 import { qualifyDay } from "@/lib/streak";
 import { captureReferral, accrueReferralForInvitee } from "@/lib/referral";
 import { lookupReferralByDevice, deviceHashes } from "@/lib/refclick";
+import { rateLimit } from "@/lib/ratelimit";
 import type { LoginMarkResponse } from "@/lib/api-types";
 
 // The daily "GM" tap: login bonus + streak day qualification (one action in the MVP).
@@ -13,6 +14,9 @@ import type { LoginMarkResponse } from "@/lib/api-types";
 export async function POST(req: Request) {
   const user = await authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  if (!rateLimit(`login-mark:${user.id}`, 30, 60_000)) {
+    return NextResponse.json({ error: "rate_limited" }, { status: 429 });
+  }
 
   // Referral capture (once). ref = inviter's referralCode from the cookie; if the client sent
   // none (cookie purged / clicked in a different browser than they signed up in), fall back to

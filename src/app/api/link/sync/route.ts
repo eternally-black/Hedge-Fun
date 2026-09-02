@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { authUser, getPrivyUser, extractIdentity } from "@/lib/privy";
+import { rateLimit } from "@/lib/ratelimit";
 
 // POST /api/link/sync — Bearer, no body. Re-reads the caller's Privy linked accounts and writes
 // twitterHandle into our DB. extractIdentity only runs at first login (ensureUser), so a handle
@@ -10,6 +11,9 @@ import { authUser, getPrivyUser, extractIdentity } from "@/lib/privy";
 export async function POST(req: Request) {
   const user = await authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  if (!rateLimit(`link-sync:${user.id}`, 30, 60_000)) {
+    return NextResponse.json({ error: "rate_limited" }, { status: 429 });
+  }
 
   const pu = await getPrivyUser(user.privyId);
   const { twitterHandle } = extractIdentity(pu);

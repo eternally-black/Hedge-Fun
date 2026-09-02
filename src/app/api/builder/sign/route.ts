@@ -38,6 +38,14 @@ const ALLOWED_POST_PATHS = new Set(["/submit", "/order", "/orders", "/auth/api-k
 // that matters, the builder HMAC secret, never appears in a CLOB response at all.
 const DENIED_GET_PATHS = new Set(["/auth/builder-api-key"]);
 
+// The CLOB normalises paths, so the denylist must too: a trailing slash, doubled slash or case
+// change would otherwise bypass the exact-string match below.
+function normalizePath(p: string): string {
+  const noQuery = p.split("?")[0]!.toLowerCase();
+  const collapsed = noQuery.replace(/\/+/g, "/");
+  return collapsed.length > 1 ? collapsed.replace(/\/+$/, "") : collapsed;
+}
+
 // Every refusal, in the log, always. The only reporter this route had was GlitchTip, which returns
 // immediately when SENTRY_DSN is unset — so a 403 here was invisible on the server and showed up in
 // the browser as a bare "Remote signer rejected request with status 403" with no way to tell WHICH
@@ -93,7 +101,7 @@ export async function POST(req: Request) {
   }
 
   const verb = method.toUpperCase();
-  const route = path.split("?")[0];
+  const route = normalizePath(path);
   const allowed =
     (verb === "GET" && !DENIED_GET_PATHS.has(route)) || (verb === "POST" && ALLOWED_POST_PATHS.has(route));
   if (!allowed) {

@@ -8,15 +8,19 @@ import { DECK_MIN_LEAD_MS, STAKE_CENTS } from "@/lib/config";
 import { requoteSideForLock, quoteMovedAgainstUser, sourceHasClobBook } from "@/lib/depth";
 import { isDevUser } from "@/lib/dev";
 import { captureToGlitchTip } from "@/lib/glitchtip";
+import { rateLimit } from "@/lib/ratelimit";
 import type { SwipeRequest, SwipeResponse } from "@/lib/api-types";
 
 // Swipe = paper bet Yes/No on a deck market. Locks the BOUGHT side's price for P&L.
 export async function POST(req: Request) {
   const user = await authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  if (!rateLimit(`swipe:${user.id}`, 120, 60_000)) {
+    return NextResponse.json({ error: "rate_limited" }, { status: 429 });
+  }
 
   const body = (await req.json().catch(() => null)) as Partial<SwipeRequest> | null;
-  if (!body?.marketId || (body.side !== "YES" && body.side !== "NO")) {
+  if (typeof body?.marketId !== "string" || (body.side !== "YES" && body.side !== "NO")) {
     return NextResponse.json({ error: "marketId and side (YES|NO) required" }, { status: 400 });
   }
 

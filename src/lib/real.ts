@@ -1,3 +1,5 @@
+import { REAL_TERMS_VERSION } from "./real-terms";
+
 // Real-money access. There USED to be an env allowlist here (REAL_MONEY_EMAILS /
 // REAL_MONEY_TWITTER) gating the alpha to a couple of hand-picked accounts while the money path was
 // being written against live Polymarket. That gate has served its purpose and is gone: real money is
@@ -19,6 +21,20 @@ export function isRealMoneyEligible(_user: { email: string | null; twitterHandle
 
 export function hasRealConsent(user: { realConsentAt: Date | null }): boolean {
   return user.realConsentAt !== null;
+}
+
+// The persisted realMode flag outlives the consent behind it: a terms bump leaves realMode=true on
+// rows whose acceptance is now stale. /api/me already reports this predicate, and every
+// mode-dependent read (deck/history/results) must agree with it — otherwise the client renders the
+// paper shell while the data routes still serve REAL rows.
+export function effectiveRealMode(user: {
+  realMode: boolean;
+  realConsentAt: Date | null;
+  realConsentVersion: string | null;
+}): "REAL" | "PAPER" {
+  return user.realMode && user.realConsentAt !== null && user.realConsentVersion === REAL_TERMS_VERSION
+    ? "REAL"
+    : "PAPER";
 }
 
 // Same-origin check for money routes (S8): browser-posted state-changing requests must carry our

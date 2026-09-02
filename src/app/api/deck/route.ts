@@ -7,6 +7,8 @@ import { servableUpDown } from "@/lib/updown";
 import { DECK_MIN_LEAD_MS } from "@/lib/config";
 import { priceIsContested } from "@/lib/polymarket";
 import { authoritativePrices, sourceHasClobBook } from "@/lib/depth";
+import { effectiveRealMode } from "@/lib/real";
+import { rateLimit } from "@/lib/ratelimit";
 import type { DeckResponse } from "@/lib/api-types";
 
 // The blitz deck: cached OPEN binary markets, each kept only within ITS category's horizon
@@ -34,6 +36,9 @@ function catFields(m: {
 export async function GET(req: Request) {
   const user = await authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  if (!rateLimit(`deck:${user.id}`, 120, 60_000)) {
+    return NextResponse.json({ error: "rate_limited" }, { status: 429 });
+  }
 
   const now = new Date();
   const max = new Date(now.getTime() + DECK_WINDOW_HOURS * 3_600_000);
@@ -99,7 +104,7 @@ export async function GET(req: Request) {
   // user never sees a card that cannot be swiped, instead of learning it from a rejected order.
   // Paper is untouched: those markets stay swipeable exactly as before.
   const nowMs = now.getTime();
-  const tradable = user.realMode
+  const tradable = effectiveRealMode(user) === "REAL"
     ? candidates.filter((c) => sourceHasClobBook(c.source) && !!c.yesTokenId && !!c.noTokenId)
     : candidates;
   const usable = tradable

@@ -5,6 +5,7 @@ import { categoryOf, gameOf, isContextPoor, isUnnamedMatch, withinCategoryHorizo
 import { servableUpDown } from "@/lib/updown";
 import { DECK_MIN_LEAD_MS, FEED_BAND_BP, FEED_PAGE_SIZE } from "@/lib/config";
 import { authoritativePrices } from "@/lib/depth";
+import { rateLimit } from "@/lib/ratelimit";
 import type { FeedResponse } from "@/lib/api-types";
 
 // The feed ("лента"): what takes over once the daily swipe deck is spent. An endless, CRYPTO-FIRST
@@ -60,6 +61,9 @@ function catFields(m: {
 export async function GET(req: Request) {
   const user = await authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  if (!rateLimit(`feed:${user.id}`, 120, 60_000)) {
+    return NextResponse.json({ error: "rate_limited" }, { status: 429 });
+  }
 
   const now = new Date();
   const max = new Date(now.getTime() + FEED_WINDOW_HOURS * 3_600_000);

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
+import { rateLimit } from "@/lib/ratelimit";
 
 // POST /api/link/unlink — Bearer, no body. Null our twitterHandle for an EMAIL-signup account. The
 // client unlinks from Privy first (usePrivy().unlinkTwitter — this server SDK has no unlink method),
@@ -10,6 +11,9 @@ import { authUser } from "@/lib/privy";
 export async function POST(req: Request) {
   const user = await authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  if (!rateLimit(`link-unlink:${user.id}`, 30, 60_000)) {
+    return NextResponse.json({ error: "rate_limited" }, { status: 429 });
+  }
   if (user.authProvider === "TWITTER") {
     return NextResponse.json({ error: "is_login_method" }, { status: 403 });
   }

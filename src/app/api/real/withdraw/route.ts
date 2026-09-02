@@ -239,6 +239,10 @@ export async function GET(req: Request) {
   const user = await authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   if (!hasRealConsent(user)) return NextResponse.json({ error: "consent_required" }, { status: 403 });
+  // Each poll makes two bridge calls (status + supported assets) — bound the polling loop.
+  if (!rateLimit(`real-withdraw-get:${user.id}`, 60, 60_000)) {
+    return NextResponse.json({ error: "rate_limited" }, { status: 429 });
+  }
 
   const row = await prisma.walletWorkflow.findUnique({
     where: { userId_kind: { userId: user.id, kind: "BRIDGE_OUT" } },

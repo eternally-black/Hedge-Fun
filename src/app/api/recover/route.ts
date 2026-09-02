@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { authUser } from "@/lib/privy";
 import { recoverStreak } from "@/lib/streak";
+import { rateLimit } from "@/lib/ratelimit";
 import type { RecoverResponse } from "@/lib/api-types";
 
 // Spend 1 artifact to revive a burned (recoverable) streak, resuming at n+1 (F7/P-10).
@@ -8,6 +9,9 @@ import type { RecoverResponse } from "@/lib/api-types";
 export async function POST(req: Request) {
   const user = await authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  if (!rateLimit(`recover:${user.id}`, 10, 60_000)) {
+    return NextResponse.json({ error: "rate_limited" }, { status: 429 });
+  }
 
   const result: RecoverResponse = await recoverStreak(user.id);
   if (!result.recovered) {

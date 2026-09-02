@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { authUser } from "@/lib/privy";
 import { topUp, type TopupKind } from "@/lib/topup";
+import { rateLimit } from "@/lib/ratelimit";
 import type { TopupResponse } from "@/lib/api-types";
 
 // Top up Cash by +$200. Body: { kind: "free" | "artifact" }.
@@ -9,6 +10,9 @@ import type { TopupResponse } from "@/lib/api-types";
 export async function POST(req: Request) {
   const user = await authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  if (!rateLimit(`topup:${user.id}`, 30, 60_000)) {
+    return NextResponse.json({ error: "rate_limited" }, { status: 429 });
+  }
 
   const body = (await req.json().catch(() => null)) as { kind?: TopupKind } | null;
   const kind = body?.kind;

@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 import { resultBetSelect, toResultRow } from "@/lib/results";
+import { effectiveRealMode } from "@/lib/real";
+import { rateLimit } from "@/lib/ratelimit";
 import type { ResultsResponse } from "@/lib/api-types";
 
 // Settled-results feed: the user's SETTLED/VOID bets, newest first. Feeds the inbox list and
@@ -9,6 +11,9 @@ import type { ResultsResponse } from "@/lib/api-types";
 export async function GET(req: Request) {
   const user = await authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  if (!rateLimit(`results:${user.id}`, 120, 60_000)) {
+    return NextResponse.json({ error: "rate_limited" }, { status: 429 });
+  }
 
   // Count unread over the FULL set, not the windowed rows — otherwise a user with >100 settled
   // bets whose unseen ones fall outside the latest 100 would show a different badge here than in
@@ -21,7 +26,7 @@ export async function GET(req: Request) {
   // user nothing at all while still showing the position as awaiting a result.
   const [bets, unreadCount] = await Promise.all([
     prisma.bet.findMany({
-      where: { userId: user.id, mode: user.realMode ? "REAL" : "PAPER", settlementStatus: { in: ["SETTLED", "VOID"] } },
+      where: { userId: user.id, mode: effectiveRealMode(user), settlementStatus: { in: ["SETTLED", "VOID"] } },
       orderBy: { settledAt: "desc" },
       take: 100,
       select: resultBetSelect,
@@ -29,7 +34,7 @@ export async function GET(req: Request) {
     prisma.bet.count({
       where: {
         userId: user.id,
-        mode: user.realMode ? "REAL" : "PAPER",
+        mode: effectiveRealMode(user),
         settlementStatus: { in: ["SETTLED", "VOID"] },
         seenAt: null,
       },

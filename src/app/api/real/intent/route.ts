@@ -62,6 +62,14 @@ export async function POST(req: Request) {
   if (dir !== undefined && dir !== "ENTRY" && dir !== "EXIT") {
     return NextResponse.json({ error: "bad_dir" }, { status: 400 });
   }
+  // NaN/Infinity read as "price did not move" in quoteMovedAgainstUser — a NaN quote would let a
+  // moved book through. Absent stays legal: the ops card omits it when the deck row has no price.
+  if (
+    quotedPriceBp !== undefined &&
+    (typeof quotedPriceBp !== "number" || !Number.isFinite(quotedPriceBp) || quotedPriceBp <= 0 || quotedPriceBp >= 10_000)
+  ) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
   const direction = dir === "EXIT" ? "EXIT" : "ENTRY";
 
   // Geo (plan §2.7): the browser-reported verdict is REQUIRED for both arms and recorded on the

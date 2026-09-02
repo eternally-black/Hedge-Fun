@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
+import { effectiveRealMode } from "@/lib/real";
+import { rateLimit } from "@/lib/ratelimit";
 import type { SeenResponse } from "@/lib/api-types";
 
 // Mark all of the user's unseen settled results as seen. No body — it's all-or-nothing (the reveal
@@ -9,11 +11,14 @@ import type { SeenResponse } from "@/lib/api-types";
 export async function POST(req: Request) {
   const user = await authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  if (!rateLimit(`results-seen:${user.id}`, 120, 60_000)) {
+    return NextResponse.json({ error: "rate_limited" }, { status: 429 });
+  }
 
   const { count } = await prisma.bet.updateMany({
     where: {
       userId: user.id,
-      mode: user.realMode ? "REAL" : "PAPER", // marks what the user was actually shown
+      mode: effectiveRealMode(user), // marks what the user was actually shown
       settlementStatus: { in: ["SETTLED", "VOID"] },
       seenAt: null,
     },

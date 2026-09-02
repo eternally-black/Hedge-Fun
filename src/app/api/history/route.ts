@@ -5,6 +5,8 @@ import type { HistoryResponse } from "@/lib/api-types";
 import { SHARE_TICK_MICRO } from "@/lib/config";
 import { centsFromMicro } from "@/lib/quote";
 import { categoryOf, gameOf } from "@/lib/deck-mix";
+import { effectiveRealMode } from "@/lib/real";
+import { rateLimit } from "@/lib/ratelimit";
 
 // Prediction history: the user's bets joined with market info. PENDING (awaiting resolution)
 // first, then most-recently-settled. Returns the REAL side label the user picked (team/Over/Up/
@@ -12,10 +14,13 @@ import { categoryOf, gameOf } from "@/lib/deck-mix";
 export async function GET(req: Request) {
   const user = await authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  if (!rateLimit(`history:${user.id}`, 120, 60_000)) {
+    return NextResponse.json({ error: "rate_limited" }, { status: 429 });
+  }
 
   // Follows the account's MODE: a real-money user opening their history wants their real positions,
   // and showing paper bets under a real-money header is the same lie the mode flag exists to prevent.
-  const mode = user.realMode ? "REAL" : "PAPER";
+  const mode = effectiveRealMode(user);
   const bets = await prisma.bet.findMany({
     where: { userId: user.id, mode },
     // Pending first (settlementStatus PENDING < SETTLED alphabetically is wrong, so order by a

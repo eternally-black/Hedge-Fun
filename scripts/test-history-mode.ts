@@ -9,6 +9,7 @@
 import assert from "node:assert";
 import { PrivyClient } from "@privy-io/server-auth";
 import { randomCode } from "../src/lib/refcode";
+import { REAL_TERMS_VERSION } from "../src/lib/real-terms";
 
 // The stub must be installed BEFORE the route module is imported — authUser resolves through it.
 const STUB_DID = `did:privy:histmode-${process.pid}-${Date.now() & 0xffffff}`;
@@ -78,7 +79,7 @@ async function main() {
     assert.ok(!paperView.some((r) => r.id === realBet.id), "paper mode hides real positions");
 
     // ── REAL mode: the inverse, and a position still holding shares reads as open ──────────────
-    await prisma.user.update({ where: { id: user.id }, data: { realMode: true } });
+    await prisma.user.update({ where: { id: user.id }, data: { realMode: true, realConsentAt: new Date(), realConsentVersion: REAL_TERMS_VERSION } });
     await prisma.bet.update({
       where: { id: realBet.id },
       data: { filledSharesMicro: 10_000_000n, closedSharesMicro: 0n, realizedPnlMicro: 0n },

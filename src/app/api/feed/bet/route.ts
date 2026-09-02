@@ -6,6 +6,7 @@ import { recordSwipe, InsufficientFundsError } from "@/lib/swipe";
 import { DECK_MIN_LEAD_MS, STAKE_CENTS } from "@/lib/config";
 import { requoteSideForLock, quoteMovedAgainstUser, sourceHasClobBook } from "@/lib/depth";
 import { captureToGlitchTip } from "@/lib/glitchtip";
+import { rateLimit } from "@/lib/ratelimit";
 import type { FeedBetRequest, FeedBetResponse } from "@/lib/api-types";
 
 // Feed bet = a paper bet on a FEED market (the post-cap "лента"). Same $10 stake/cash-hold as a
@@ -16,9 +17,12 @@ import type { FeedBetRequest, FeedBetResponse } from "@/lib/api-types";
 export async function POST(req: Request) {
   const user = await authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  if (!rateLimit(`feed-bet:${user.id}`, 120, 60_000)) {
+    return NextResponse.json({ error: "rate_limited" }, { status: 429 });
+  }
 
   const body = (await req.json().catch(() => null)) as Partial<FeedBetRequest> | null;
-  if (!body?.marketId || (body.side !== "YES" && body.side !== "NO")) {
+  if (typeof body?.marketId !== "string" || (body.side !== "YES" && body.side !== "NO")) {
     return NextResponse.json({ error: "marketId and side (YES|NO) required" }, { status: 400 });
   }
 

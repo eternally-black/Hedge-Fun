@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 import { captureReferral, accrueReferralForInvitee } from "@/lib/referral";
 import { lookupReferralByDevice, deviceHashes } from "@/lib/refclick";
+import { rateLimit } from "@/lib/ratelimit";
 import type { CaptureRefResponse } from "@/lib/api-types";
 
 // Referral capture WITHOUT marking the GM day. Sent on app open so attribution lands even if the
@@ -13,6 +14,9 @@ import type { CaptureRefResponse } from "@/lib/api-types";
 export async function POST(req: Request) {
   const user = await authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  if (!rateLimit(`capture-ref:${user.id}`, 30, 60_000)) {
+    return NextResponse.json({ error: "rate_limited" }, { status: 429 });
+  }
 
   let refCode = new URL(req.url).searchParams.get("ref");
   if (!refCode) refCode = await lookupReferralByDevice(req.headers);

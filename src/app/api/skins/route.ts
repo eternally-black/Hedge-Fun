@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { authUser } from "@/lib/privy";
 import { runSkinAction } from "@/lib/skins-store";
+import { rateLimit } from "@/lib/ratelimit";
 import type { SkinActionResponse } from "@/lib/api-types";
 
 // Map a rejection reason to its HTTP status (house style: 400 bad input, 402 insufficient, 409 conflict).
@@ -11,6 +12,9 @@ const STATUS = { unknown_skin: 400, already_owned: 409, not_owned: 409, no_artif
 export async function POST(req: Request) {
   const user = await authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  if (!rateLimit(`skins:post:${user.id}`, 60, 60_000)) {
+    return NextResponse.json({ error: "rate_limited" }, { status: 429 });
+  }
 
   const body = (await req.json().catch(() => null)) as { action?: "unlock" | "equip"; skinId?: string } | null;
   const action = body?.action;
