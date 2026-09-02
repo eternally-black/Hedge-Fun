@@ -4,6 +4,7 @@ import { authUser } from "@/lib/privy";
 import { resultBetSelect, toResultRow } from "@/lib/results";
 import { effectiveRealMode } from "@/lib/real";
 import { rateLimit } from "@/lib/ratelimit";
+import { encodeKeysetCursor, decodeKeysetCursor } from "@/lib/cursor";
 import type { ResultsResponse } from "@/lib/api-types";
 
 // Settled-results feed: the user's SETTLED/VOID bets, newest first. Feeds the inbox list and
@@ -24,24 +25,42 @@ export async function GET(req: Request) {
   // booked and stamped server-side — and the consequence of leaving this paper-only was worse than
   // an empty screen: a market resolved, the collateral landed in the wallet, and the app told the
   // user nothing at all while still showing the position as awaiting a result.
+  const mode = effectiveRealMode(user);
+  const cursor = new URL(req.url).searchParams.get("cursor");
+  const after = cursor ? decodeKeysetCursor(cursor) : null;
+  // Keyset on (settledAt desc, id desc) — a stable total order across pages. Over-fetch by one so
+  // we can tell whether another page exists (51 rows = yes, drop the last and emit a cursor).
   const [bets, unreadCount] = await Promise.all([
     prisma.bet.findMany({
-      where: { userId: user.id, mode: effectiveRealMode(user), settlementStatus: { in: ["SETTLED", "VOID"] } },
-      orderBy: { settledAt: "desc" },
-      take: 100,
+      where: {
+        userId: user.id,
+        mode,
+        settlementStatus: { in: ["SETTLED", "VOID"] },
+        ...(after
+          ? { OR: [{ settledAt: { lt: after.at } }, { settledAt: after.at, id: { lt: after.id } }] }
+          : {}),
+      },
+      orderBy: [{ settledAt: "desc" }, { id: "desc" }],
+      take: 51,
       select: resultBetSelect,
     }),
     prisma.bet.count({
       where: {
         userId: user.id,
-        mode: effectiveRealMode(user),
+        mode,
         settlementStatus: { in: ["SETTLED", "VOID"] },
         seenAt: null,
       },
     }),
   ]);
+  // 51 rows = there is at least one more page. Drop the over-fetched row and remember where the
+  // next page starts (the last row we actually keep).
+  const hasMore = bets.length === 51;
+  if (hasMore) bets.pop();
+  const last = bets[bets.length - 1];
+  const nextCursor = hasMore && last?.settledAt ? encodeKeysetCursor(last.settledAt, last.id) : null;
 
   const rows = bets.map(toResultRow);
-  const body: ResultsResponse = { rows, unreadCount };
+  const body: ResultsResponse = { rows, unreadCount, nextCursor };
   return NextResponse.json(body);
 }

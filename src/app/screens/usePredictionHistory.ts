@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { Me } from "../ui";
 import { useRealCtx } from "../useRealCtx";
 import { placeRealOrder } from "@/lib/real-client";
@@ -38,19 +38,45 @@ export type HistoryRowData = {
 export function usePredictionHistory(api: Api) {
   const [rows, setRows] = useState<HistoryRowData[] | null>(null);
   const [pending, setPending] = useState(0);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  // Guards loadMore against concurrent calls — a double-tap on the button must not append the same
+  // page twice (the cursor would advance past it and the rows would duplicate).
+  const loadingMore = useRef(false);
   // Start at a real timestamp (not 0) so the deadline-passed check in HistoryRow is correct even
   // before/without the ticking clock — a 0 here would make every "AWAITING" row read as still-live.
   const [nowMs, setNowMs] = useState(() => Date.now());
 
   const refresh = useCallback(async () => {
     try {
-      const r = (await api("/api/history")) as { rows: HistoryRowData[]; pendingCount: number };
+      const r = (await api("/api/history")) as { rows: HistoryRowData[]; pendingCount: number; nextCursor: string | null };
       setRows(r.rows);
       setPending(r.pendingCount);
+      setNextCursor(r.nextCursor);
     } catch (e) {
       console.error(e);
     }
   }, [api]);
+
+  // Fetches the next page and appends it. The cursor lives in state so the next call knows where
+  // to continue; a null cursor means the server has no more rows.
+  const loadMore = useCallback(async () => {
+    if (loadingMore.current || nextCursor === null) return;
+    loadingMore.current = true;
+    try {
+      const r = (await api(`/api/history?cursor=${encodeURIComponent(nextCursor)}`)) as {
+        rows: HistoryRowData[];
+        pendingCount: number;
+        nextCursor: string | null;
+      };
+      setRows((cur) => [...(cur ?? []), ...r.rows]);
+      setPending(r.pendingCount);
+      setNextCursor(r.nextCursor);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      loadingMore.current = false;
+    }
+  }, [api, nextCursor]);
 
   useEffect(() => {
     void refresh();
@@ -71,7 +97,7 @@ export function usePredictionHistory(api: Api) {
     return () => window.clearInterval(t);
   }, [needsTick]);
 
-  return { rows, pending, nowMs, refresh };
+  return { rows, pending, nowMs, refresh, hasMore: nextCursor !== null, loadMore };
 }
 
 // Live mark-to-market for the closable rows on screen: what each position would fetch if sold right

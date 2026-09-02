@@ -7,6 +7,7 @@ import { centsFromMicro } from "@/lib/quote";
 import { categoryOf, gameOf } from "@/lib/deck-mix";
 import { effectiveRealMode } from "@/lib/real";
 import { rateLimit } from "@/lib/ratelimit";
+import { encodeKeysetCursor, decodeKeysetCursor } from "@/lib/cursor";
 
 // Prediction history: the user's bets joined with market info. PENDING (awaiting resolution)
 // first, then most-recently-settled. Returns the REAL side label the user picked (team/Over/Up/
@@ -21,12 +22,23 @@ export async function GET(req: Request) {
   // Follows the account's MODE: a real-money user opening their history wants their real positions,
   // and showing paper bets under a real-money header is the same lie the mode flag exists to prevent.
   const mode = effectiveRealMode(user);
+  const cursor = new URL(req.url).searchParams.get("cursor");
+  const after = cursor ? decodeKeysetCursor(cursor) : null;
+  // Keyset on (createdAt desc, id desc) — a stable total order across pages. Over-fetch by one so
+  // we can tell whether another page exists (51 rows = yes, drop the last and emit a cursor).
   const bets = await prisma.bet.findMany({
-    where: { userId: user.id, mode },
+    where: {
+      userId: user.id,
+      mode,
+      ...(after
+        ? { OR: [{ createdAt: { lt: after.at } }, { createdAt: after.at, id: { lt: after.id } }] }
+        : {}),
+    },
     // Pending first (settlementStatus PENDING < SETTLED alphabetically is wrong, so order by a
-    // computed flag): we sort in JS below. Pull a generous recent window.
-    orderBy: { createdAt: "desc" },
-    take: 100,
+    // computed flag): we sort in JS below. The keyset order is the pagination order, not the
+    // display order — the JS sort below re-orders WITHIN the page.
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: 51,
     select: {
       id: true,
       marketId: true, // the EXIT intent is placed against the market, not the bet
@@ -52,6 +64,14 @@ export async function GET(req: Request) {
       },
     },
   });
+
+  // 51 rows = there is at least one more page. Drop the over-fetched row and remember where the
+  // next page starts (the last row we actually keep).
+  const hasMore = bets.length === 51;
+  if (hasMore) bets.pop();
+  const nextCursor = hasMore
+    ? encodeKeysetCursor(bets[bets.length - 1]!.createdAt, bets[bets.length - 1]!.id)
+    : null;
 
   const rows: HistoryResponse["rows"] = bets.map((b) => {
     // A REAL position is "open" while it still holds shares and "done" once the remainder is gone —
@@ -122,6 +142,24 @@ export async function GET(req: Request) {
     return +new Date(b.createdAt) - +new Date(a.createdAt);
   });
 
-  const pendingCount = rows.filter((r) => r.status === "PENDING").length;
-  return NextResponse.json({ rows, pendingCount });
+  // pendingCount is the FULL-set count, not the windowed one — a user at the 10-swipes/day cap
+  // crosses 100 bets in under two weeks, and a count derived from the page would under-report
+  // pending positions that fell outside it. PAPER counts the settlementStatus column directly;
+  // REAL derives "open" from the share remainder (the same rule the row mapper applies above), so
+  // it needs a raw count — Prisma can't express the arithmetic in a where.
+  const pendingCount =
+    mode === "PAPER"
+      ? await prisma.bet.count({ where: { userId: user.id, mode: "PAPER", settlementStatus: "PENDING" } })
+      : Number(
+          (
+            await prisma.$queryRaw<{ n: bigint }[]>`
+              SELECT COUNT(*)::bigint AS n FROM "bets"
+              WHERE "userId" = ${user.id} AND "mode" = 'REAL'
+                AND ("filledSharesMicro" IS NULL OR "filledSharesMicro" = 0
+                     OR "filledSharesMicro" - COALESCE("closedSharesMicro", 0) >= ${SHARE_TICK_MICRO})
+            `
+          )[0]!.n,
+        );
+  const body: HistoryResponse = { rows, pendingCount, nextCursor };
+  return NextResponse.json(body);
 }

@@ -158,7 +158,8 @@ async function main() {
   );
 
   const histBody = await (await history.GET(authed("http://x/api/history"))).json();
-  assert.deepStrictEqual(keysOf(histBody), ["pendingCount","rows"], "/history top-level keys");
+  assert.deepStrictEqual(keysOf(histBody), ["nextCursor","pendingCount","rows"], "/history top-level keys");
+  assert.strictEqual(histBody.nextCursor, null, "/history one page -> nextCursor null");
 
   // login-mark: GM tap response contract.
   const gmBody = await (await loginMark.POST(authed("http://x/api/login-mark", { method: "POST" }))).json();
@@ -201,7 +202,8 @@ async function main() {
 
   // results: empty top-level contract first (no settled bets yet).
   const resEmpty = await (await results.GET(authed("http://x/api/results"))).json();
-  assert.deepStrictEqual(keysOf(resEmpty), ["rows","unreadCount"], "/results top-level keys");
+  assert.deepStrictEqual(keysOf(resEmpty), ["nextCursor","rows","unreadCount"], "/results top-level keys");
+  assert.strictEqual(resEmpty.nextCursor, null, "/results empty -> nextCursor null");
   assert.strictEqual(resEmpty.rows.length, 0, "/results no settled bets yet -> empty");
 
   // Settle the swiped bet (resolve market YES) so /results returns a real ResultRow.

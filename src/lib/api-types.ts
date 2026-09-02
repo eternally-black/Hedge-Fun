@@ -221,6 +221,7 @@ export interface HistoryRow {
 export interface HistoryResponse {
   rows: HistoryRow[];
   pendingCount: number;
+  nextCursor: string | null; // opaque; pass back as ?cursor= for the next page; null = no more
 }
 
 // ─── GET /api/results ──────────────────────────────────────────────────────────────────────────
@@ -257,6 +258,7 @@ export interface ResultRow {
 export interface ResultsResponse {
   rows: ResultRow[];
   unreadCount: number;
+  nextCursor: string | null; // opaque; pass back as ?cursor= for the next page; null = no more
 }
 
 // ─── POST /api/results/seen ──────────────────────────────────────────────────────────────────────

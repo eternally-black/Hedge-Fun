@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ResultsResponse, ResultRow } from "@/lib/api-types";
 import { PredictionRow, type PredictionRowData } from "./PredictionRow";
 
@@ -11,18 +11,43 @@ type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 // counterpart to the reveal overlay — both read /api/results, this one just lists it.
 export function NotificationsScreen({ api, onSeen, onReplay }: { api: Api; onSeen: () => void; onReplay: () => void }) {
   const [rows, setRows] = useState<ResultRow[] | null>(null);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  // Guards loadMore against concurrent calls — a double-tap on the button must not append the same
+  // page twice (the cursor would advance past it and the rows would duplicate).
+  const loadingMore = useRef(false);
 
   // Load the feed, then mark seen. Marking is fire-and-forget (the badge already cleared locally
   // via onSeen); a failed mark just means the badge reappears on next /api/me — acceptable.
   useEffect(() => {
     let alive = true;
     api("/api/results")
-      .then((r) => { if (alive) setRows((r as ResultsResponse).rows); })
+      .then((r) => {
+        if (!alive) return;
+        const res = r as ResultsResponse;
+        setRows(res.rows);
+        setNextCursor(res.nextCursor);
+      })
       .catch(console.error);
     onSeen();
     api("/api/results/seen", { method: "POST" }).catch(() => { /* badge re-syncs from /api/me */ });
     return () => { alive = false; };
   }, [api, onSeen]);
+
+  // Fetches the next page and appends it. The cursor lives in state so the next call knows where
+  // to continue; a null cursor means the server has no more rows.
+  const loadMore = async () => {
+    if (loadingMore.current || nextCursor === null) return;
+    loadingMore.current = true;
+    try {
+      const r = (await api(`/api/results?cursor=${encodeURIComponent(nextCursor)}`)) as ResultsResponse;
+      setRows((cur) => [...(cur ?? []), ...r.rows]);
+      setNextCursor(r.nextCursor);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      loadingMore.current = false;
+    }
+  };
 
   if (!rows) {
     return <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--muted)" }}>Loading…</div>;
@@ -46,6 +71,15 @@ export function NotificationsScreen({ api, onSeen, onReplay }: { api: Api; onSee
         <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 8 }}>
           {/* Nothing here counts down — every row is decided — so one clock read is enough. */}
           {rows.map((n) => <PredictionRow key={n.id} row={toPredictionRow(n)} nowMs={0} />)}
+          {nextCursor !== null && (
+            <button
+              type="button"
+              onClick={() => void loadMore()}
+              style={{ marginTop: 4, padding: "10px 14px", borderRadius: 12, font: "inherit", cursor: "pointer", background: "var(--panel2)", border: "1px solid var(--line)", color: "var(--muted)", fontSize: 13, fontWeight: 700 }}
+            >
+              Load more
+            </button>
+          )}
         </div>
       )}
     </div>

@@ -6,6 +6,7 @@ import { servableUpDown } from "@/lib/updown";
 import { DECK_MIN_LEAD_MS, FEED_BAND_BP, FEED_PAGE_SIZE } from "@/lib/config";
 import { authoritativePrices } from "@/lib/depth";
 import { rateLimit } from "@/lib/ratelimit";
+import { encodeKeysetCursor, decodeKeysetCursor } from "@/lib/cursor";
 import type { FeedResponse } from "@/lib/api-types";
 
 // The feed ("лента"): what takes over once the daily swipe deck is spent. An endless, CRYPTO-FIRST
@@ -20,20 +21,6 @@ const FEED_WINDOW_HOURS = DECK_FETCH_HORIZON_HOURS; // outer bound; per-category
 // rate; a filtered dead-zone just shortens one page (the cursor logic below jumps past it).
 const TAKE_RAW = FEED_PAGE_SIZE * 3;
 
-// Opaque keyset cursor = "<resolutionDeadline ISO>|<id>". base64 so the client treats it as opaque.
-function encodeCursor(deadline: Date, id: string): string {
-  return Buffer.from(`${deadline.toISOString()}|${id}`, "utf8").toString("base64url");
-}
-function decodeCursor(raw: string): { deadline: Date; id: string } | null {
-  try {
-    const [iso, id] = Buffer.from(raw, "base64url").toString("utf8").split("|");
-    const deadline = new Date(iso!);
-    if (!id || Number.isNaN(deadline.getTime())) return null;
-    return { deadline, id };
-  } catch {
-    return null;
-  }
-}
 
 // FEED_BAND_BP on BOTH sides — consumes the AUTHORITATIVE price (book-walked eff where a book
 // exists), so the feed's coin-flip promise is priced off what a side actually costs, not the mid.
@@ -68,7 +55,7 @@ export async function GET(req: Request) {
   const now = new Date();
   const max = new Date(now.getTime() + FEED_WINDOW_HOURS * 3_600_000);
   const cursor = new URL(req.url).searchParams.get("cursor");
-  const after = cursor ? decodeCursor(cursor) : null;
+  const after = cursor ? decodeKeysetCursor(cursor) : null;
 
   const candidates = await prisma.market.findMany({
     where: {
@@ -79,7 +66,7 @@ export async function GET(req: Request) {
         { resolutionDeadline: { gt: new Date(now.getTime() + DECK_MIN_LEAD_MS), lte: max } },
         // Keyset: strictly past the cursor in (resolutionDeadline, id) order — stable, no repeats.
         ...(after
-          ? [{ OR: [{ resolutionDeadline: { gt: after.deadline } }, { resolutionDeadline: after.deadline, id: { gt: after.id } }] }]
+          ? [{ OR: [{ resolutionDeadline: { gt: after.at } }, { resolutionDeadline: after.at, id: { gt: after.id } }] }]
           : []),
       ],
     },
@@ -131,10 +118,10 @@ export async function GET(req: Request) {
   let nextCursor: string | null = null;
   if (usable.length > cut.length) {
     const last = cut[cut.length - 1]!;
-    nextCursor = encodeCursor(last.c.resolutionDeadline, last.c.id);
+    nextCursor = encodeKeysetCursor(last.c.resolutionDeadline, last.c.id);
   } else if (moreInDb) {
     const last = candidates[candidates.length - 1]!;
-    nextCursor = encodeCursor(last.resolutionDeadline, last.id);
+    nextCursor = encodeKeysetCursor(last.resolutionDeadline, last.id);
   }
 
   const body: FeedResponse = {

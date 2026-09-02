@@ -11,7 +11,7 @@ type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 // /api/history (via usePredictionHistory — shared with BalanceSheet). Visual matches the design's
 // history rows.
 export function HistorySheet({ me, api, onClose, onToast }: { me: Me | null; api: Api; onClose: () => void; onToast: (msg: string) => void }) {
-  const { rows, pending, nowMs, refresh } = usePredictionHistory(api);
+  const { rows, pending, nowMs, refresh, hasMore, loadMore } = usePredictionHistory(api);
   const { close, closing } = useClosePosition(api, me, onToast, refresh);
   const exitQuotes = useExitQuotes(api, rows); // live value + P&L for the closable rows, 1s
 
@@ -66,6 +66,15 @@ export function HistorySheet({ me, api, onClose, onToast }: { me: Me | null; api
             {rows.map((r) => (
               <PredictionRow key={r.id} row={toPredictionRow(r)} nowMs={nowMs} onClosePosition={() => close(r)} closing={closing === r.id} exitQuote={exitQuotes[r.id]} />
             ))}
+            {hasMore && (
+              <button
+                type="button"
+                onClick={() => void loadMore()}
+                style={{ marginTop: 4, padding: "10px 14px", borderRadius: 12, font: "inherit", cursor: "pointer", background: "var(--panel2)", border: "1px solid var(--line)", color: "var(--muted)", fontSize: 13, fontWeight: 700 }}
+              >
+                Load more
+              </button>
+            )}
           </div>
         )}
       </div>
