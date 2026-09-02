@@ -685,18 +685,6 @@ export async function bookExitFills(
     const totalFee = fresh.reduce((s, f) => s + f.feeMicro, 0n);
     outcome = fillLabel(bookedShares + totalShares, requestedSharesMicro);
 
-    await tx.fill.createMany({
-      data: fresh.map((f) => ({
-        attemptId: attempt.id,
-        externalFillId: f.externalFillId,
-        sharesMicro: f.sharesMicro,
-        amountMicro: f.amountMicro,
-        feeMicro: f.feeMicro,
-        priceBp: f.priceBp,
-        ts: f.ts,
-      })),
-    });
-
     // The REAL Bet must exist — the intent route guarantees one, but be defensive: a missing
     // position means the close is invalid, so fail the attempt rather than fabricate a row.
     const bet = attempt.betId
@@ -715,11 +703,21 @@ export async function bookExitFills(
 
     // Clamp to the position remainder — the CHECK constraint closedSharesMicro <= filledSharesMicro
     // must never trip on a double receipt (createMany dedup already guards, but belt-and-braces).
+    // Both guards run BEFORE any Fill row is written, so nothing is persisted that the aggregate
+    // cannot account for.
     const filledShares = bet.filledSharesMicro ?? 0n;
     const closedShares = bet.closedSharesMicro ?? 0n;
     const remainder = filledShares - closedShares;
     const sharesToBook = totalShares > remainder ? remainder : totalShares;
     if (sharesToBook <= 0n) {
+      // A booked label is a fact about money that moved. A grown trade set against a closed
+      // position is something to leave loud in reconcile's logs, not something to relabel as a
+      // non-fill — so a FILLED/PARTIAL attempt survives the replay untouched. Anything else is
+      // still an unresolved submission and gets the honest KILLED/no_remainder.
+      if (attempt.state === "FILLED" || attempt.state === "PARTIAL") {
+        outcome = attempt.state;
+        return;
+      }
       await tx.orderAttempt.update({
         where: { id: attempt.id },
         data: { state: "KILLED", error: "no_remainder" },
@@ -727,6 +725,18 @@ export async function bookExitFills(
       outcome = "KILLED";
       return;
     }
+
+    await tx.fill.createMany({
+      data: fresh.map((f) => ({
+        attemptId: attempt.id,
+        externalFillId: f.externalFillId,
+        sharesMicro: f.sharesMicro,
+        amountMicro: f.amountMicro,
+        feeMicro: f.feeMicro,
+        priceBp: f.priceBp,
+        ts: f.ts,
+      })),
+    });
 
     // Prorate proceeds/fee if we're closing less than the fill total (clamp fired).
     const prorate = sharesToBook < totalShares;

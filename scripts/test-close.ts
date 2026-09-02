@@ -361,10 +361,97 @@ async function main() {
     const again = await settleResolvedRealPositions(prisma, async () => 0n);
     assert.strictEqual(again.won, 0, "nothing left to consume");
 
+    // ---- 10. The settle sweep waits for an in-flight EXIT. An EXIT that sold the token but is
+    // not yet booked leaves the balance at 0 because the user sold, not because the redeemer paid;
+    // booking it as a $1 redemption (or a zero-proceeds loss) and then having the sale's fills
+    // arrive against a closed position drops the real proceeds from the ledger.
+    const inflightMarket = await prisma.market.create({
+      data: {
+        polymarketId: `${tag}-inflight`,
+        question: "resolved with an exit in flight",
+        status: "RESOLVED",
+        resolvedOutcome: "YES",
+        yesTokenId: `${tag}-if-yes`,
+        noTokenId: `${tag}-if-no`,
+        resolutionDeadline: new Date(Date.now() - 3_600_000),
+      },
+    });
+    const inflightBet = await prisma.bet.create({
+      data: {
+        userId: user.id,
+        marketId: inflightMarket.id,
+        side: "YES",
+        mode: "REAL",
+        stakeCents: 100,
+        lockedPriceBp: 5000,
+        utcDay,
+        filledSharesMicro: 2_000_000n,
+        spendMicro: 1_000_000n,
+        feeMicro: 10_000n,
+        vwapBp: 5000,
+      },
+    });
+    const inflightAttempt = await prisma.orderAttempt.create({
+      data: {
+        userId: user.id,
+        marketId: inflightMarket.id,
+        dir: "EXIT",
+        side: "YES",
+        tokenId: `${tag}-if-yes`,
+        idempotencyKey: crypto.randomUUID(),
+        approvedParams: {},
+        allInCapMicro: 2_000_000n,
+        maxPriceBp: 4800,
+        state: "POSTED",
+        betId: inflightBet.id,
+      },
+    });
+    const guarded = await settleResolvedRealPositions(prisma, async () => 0n);
+    assert.strictEqual(guarded.inFlight, 1, "the sweep sees the in-flight exit");
+    assert.strictEqual(guarded.won, 0, "and does not book it as a redemption");
+    assert.strictEqual(guarded.lost, 0, "nor as a zero-proceeds loss");
+    let inflightRow = await prisma.bet.findUniqueOrThrow({ where: { id: inflightBet.id } });
+    assert.strictEqual(inflightRow.closedSharesMicro, null, "the position is untouched");
+    assert.strictEqual(inflightRow.settlementStatus, "PENDING", "and still pending");
+
+    // Book the sale: the ledger holds the SALE, not a $1 redemption.
+    const saleState = await bookExitFills(prisma, inflightAttempt, 2_000_000n, [
+      { externalFillId: `${tag}-if-1`, sharesMicro: 2_000_000n, amountMicro: 1_800_000n, feeMicro: 20_000n, priceBp: 9000, ts: new Date() },
+    ]);
+    assert.strictEqual(saleState, "FILLED", "the sale books as FILLED");
+    const swept = await settleResolvedRealPositions(prisma, async () => 0n);
+    assert.strictEqual(swept.inFlight, 0, "the in-flight attempt is gone");
+    assert.strictEqual(swept.won, 0, "and nothing is booked as a redemption");
+    inflightRow = await prisma.bet.findUniqueOrThrow({ where: { id: inflightBet.id } });
+    assert.strictEqual(inflightRow.closedSharesMicro, 2_000_000n, "the sale closed the position");
+    assert.strictEqual(inflightRow.proceedsMicro, 1_800_000n, "proceeds are the sale's, not $1/share");
+    assert.strictEqual(inflightRow.realizedPnlMicro, 770_000n, "PnL = 1.8M − 20k − (1M + 10k)");
+    assert.strictEqual(inflightRow.settlementStatus, "SETTLED", "and it is stamped settled");
+    assert.strictEqual(inflightRow.result, "WIN", "the LEDGER's outcome is the sale's profit");
+
+    // ---- 11. A booked label survives a no-remainder replay. Reconcile re-probes booked attempts
+    // and can hand back a larger trade set; a booked label is a fact about money that moved, so it
+    // must not be relabelled as a non-fill, and no orphan Fill row may be inserted.
+    const reloaded = await prisma.orderAttempt.findUniqueOrThrow({ where: { id: inflightAttempt.id } });
+    assert.strictEqual(reloaded.state, "FILLED", "the attempt is booked");
+    const replayState = await bookExitFills(prisma, reloaded, 2_000_000n, [
+      { externalFillId: `${tag}-if-2`, sharesMicro: 500_000n, amountMicro: 450_000n, feeMicro: 5_000n, priceBp: 9000, ts: new Date() },
+    ]);
+    assert.strictEqual(replayState, "FILLED", "the replay reports the booked label");
+    const reloadedRow = await prisma.orderAttempt.findUniqueOrThrow({ where: { id: reloaded.id } });
+    assert.strictEqual(reloadedRow.state, "FILLED", "the label survives");
+    assert.strictEqual(reloadedRow.error, null, "and no error is stamped");
+    assert.strictEqual(await prisma.fill.count({ where: { attemptId: reloaded.id } }), 1, "the second fill was NOT inserted");
+    inflightRow = await prisma.bet.findUniqueOrThrow({ where: { id: inflightBet.id } });
+    assert.strictEqual(inflightRow.closedSharesMicro, 2_000_000n, "the position is unchanged");
+    assert.strictEqual(inflightRow.proceedsMicro, 1_800_000n, "and so are its proceeds");
+
     console.log("OK: exit validation + close booking, realized PnL exact, replay-safe, clamp holds");
     console.log("OK: a resolved winner books only once the outcome token has left the wallet");
     console.log("OK: a sub-tick remnant is written off so it cannot block the market forever");
     console.log("OK: cumulative EXIT receipts book the delta, label FILLED, close the position exactly");
+    console.log("OK: the settle sweep waits for an in-flight order — a sale is booked as a sale, never as a $1 redemption");
+    console.log("OK: a booked EXIT label survives a no-remainder replay, and nothing is inserted");
     console.log("PASS: close");
   } finally {
     await prisma.fill.deleteMany({ where: { attempt: { userId: user.id } } });

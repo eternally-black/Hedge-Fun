@@ -74,7 +74,7 @@ export type TokenBalanceProbe = (wallet: string, tokenId: string) => Promise<big
 export async function settleResolvedRealPositions(
   prisma: PrismaClient,
   tokenBalance: TokenBalanceProbe = (wallet, tokenId) => erc1155BalanceOf(CONDITIONAL_TOKENS, wallet, tokenId),
-): Promise<{ lost: number; won: number; dust: number; winnersPending: number; errors: number }> {
+): Promise<{ lost: number; won: number; dust: number; winnersPending: number; inFlight: number; errors: number }> {
   const bets = await prisma.bet.findMany({
     where: {
       mode: "REAL",
@@ -90,6 +90,8 @@ export async function settleResolvedRealPositions(
       side: true,
       filledSharesMicro: true,
       closedSharesMicro: true,
+      userId: true,
+      marketId: true,
       user: { select: { depositWalletAddress: true } },
       market: {
         select: { status: true, resolvedOutcome: true, negRisk: true, yesTokenId: true, noTokenId: true },
@@ -98,8 +100,25 @@ export async function settleResolvedRealPositions(
     orderBy: { createdAt: "asc" },
     take: 200,
   });
-  const open = bets.filter((b) => (b.filledSharesMicro ?? 0n) - (b.closedSharesMicro ?? 0n) > 0n);
-  if (open.length === 0) return { lost: 0, won: 0, dust: 0, winnersPending: 0, errors: 0 };
+  const candidates = bets.filter((b) => (b.filledSharesMicro ?? 0n) - (b.closedSharesMicro ?? 0n) > 0n);
+  if (candidates.length === 0) return { lost: 0, won: 0, dust: 0, winnersPending: 0, inFlight: 0, errors: 0 };
+
+  // An EXIT that sold the token but is not yet booked makes the balance read 0 because the user
+  // sold, not because the redeemer paid. Booking it here as a $1 redemption (or a zero-proceeds
+  // loss) and then having the sale's fills arrive against a closed position dropped the real
+  // proceeds from the ledger. So a position with any non-terminal attempt waits; reconcile and
+  // orphan discovery guarantee every attempt reaches a terminal label, so the wait is bounded.
+  const live = await prisma.orderAttempt.findMany({
+    where: {
+      state: { in: ["ISSUED", "SIGNED", "SUBMITTING", "POSTED"] },
+      OR: candidates.map((b) => ({ userId: b.userId, marketId: b.marketId })),
+    },
+    select: { userId: true, marketId: true },
+  });
+  const inFlightKeys = new Set(live.map((a) => `${a.userId}:${a.marketId}`));
+  const open = candidates.filter((b) => !inFlightKeys.has(`${b.userId}:${b.marketId}`));
+  const inFlight = candidates.length - open.length;
+  if (open.length === 0) return { lost: 0, won: 0, dust: 0, winnersPending: 0, inFlight, errors: 0 };
 
   // One bad row (tx timeout, a constraint trip) must not unwind the pass and block every other
   // user's settlement — the paper path isolates per-market errors and this pass does the same.
@@ -161,7 +180,7 @@ export async function settleResolvedRealPositions(
     const canceled = c.market.status === "CANCELED";
     if (await consume(c.id, true, canceled)) won++;
   }
-  return { lost, won, dust, winnersPending, errors };
+  return { lost, won, dust, winnersPending, inFlight, errors };
 }
 
 // An ISSUED attempt is an intent nobody signed. The client that asked for it is long gone, but the

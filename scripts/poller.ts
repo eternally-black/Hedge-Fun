@@ -255,6 +255,7 @@ async function tick() {
     if (rs.lost + rs.won + rs.dust > 0)
       console.log(`[real-settle] booked ${rs.won} won, ${rs.lost} lost, ${rs.dust} sub-tick remnant(s)`);
     if (rs.winnersPending > 0) console.warn(`[real-settle] ${rs.winnersPending} won position(s) not yet redeemed on chain`);
+    if (rs.inFlight > 0) console.log(`[real-settle] ${rs.inFlight} resolved position(s) waiting on an in-flight order`);
     const expired = await expireStaleIntents(prisma);
     if (expired > 0) console.log(`[real-settle] expired ${expired} unsigned intent(s)`);
     // Per-row failures no longer unwind the pass, so they no longer reach the catch below — report
