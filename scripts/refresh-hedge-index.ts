@@ -213,18 +213,31 @@ export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
   // Every market that PASSES the band this run stays/becomes s2Eligible; anything previously eligible
   // but NOT re-affirmed here (dropped from the Gamma fetch, or fell out of the price band because the
   // match started/decided) is demoted below (F2) so it can never surface in a picker/search/accept.
+  // Rows the depth gate could NOT evaluate (CLOB outage) are tracked separately: they are neither
+  // affirmed nor demoted — unproven is not untradable.
   const eligibleMarketIds: string[] = [];
+  const unevaluatedPolymarketIds: string[] = [];
   for (const s of sports) {
     const m = s.cache;
     if (m.yesPriceBp == null || m.noPriceBp == null) continue;
-    if (m.yesPriceBp < S2_SIDE_FLOOR_BP || m.yesPriceBp > S2_SIDE_CEIL_BP) continue;
-    if (m.noPriceBp < S2_SIDE_FLOOR_BP || m.noPriceBp > S2_SIDE_CEIL_BP) continue;
 
     // D10 depth gate (same as the S1 pass): an S2 card's AGAINST side must be actually buyable.
+    // Look the depth up BEFORE the band check so the band judges the executable price, not the mid.
     const depth = sportsDepths.get(m.polymarketId) ?? null;
-    if (!depth || !depth.tradable) {
+    if (depth === null) {
+      unevaluatedPolymarketIds.push(m.polymarketId);
+      continue;
+    }
+    // Band-check on the eff VWAP (the price the accept path will honour); the mid is only the
+    // stand-in when the book gave no executable number.
+    const yesBandPriceBp = depth.yesEffPriceBp ?? m.yesPriceBp;
+    const noBandPriceBp = depth.noEffPriceBp ?? m.noPriceBp;
+    if (yesBandPriceBp < S2_SIDE_FLOOR_BP || yesBandPriceBp > S2_SIDE_CEIL_BP) continue;
+    if (noBandPriceBp < S2_SIDE_FLOOR_BP || noBandPriceBp > S2_SIDE_CEIL_BP) continue;
+
+    if (!depth.tradable) {
       stats.depthDropped++;
-      if (depth) rejectedIds.push(m.polymarketId);
+      rejectedIds.push(m.polymarketId);
       continue;
     }
 
@@ -278,13 +291,25 @@ export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
   // Demote every row that was s2Eligible but did NOT pass this run: a match that started/decided
   // (price collapsed out of band) or a market Gamma stopped returning. Clearing the flag is what
   // pulls it out of loadS2Candidates (pickers/search) AND deriveS2ForAccept — so a stale sports
-  // market can no longer be suggested or accepted (F2). `notIn: []` matches all rows, which is the
-  // correct behaviour when nothing was eligible this run (demote everything).
-  const cleared = await prisma.marketMeta.updateMany({
-    where: { s2Eligible: true, marketId: { notIn: eligibleMarketIds } },
-    data: { s2Eligible: false },
-  });
-  stats.sports.clearedStale = cleared.count;
+  // market can no longer be suggested or accepted (F2). Rows the depth gate could not evaluate
+  // (CLOB outage) keep whatever eligibility they had — unproven is not untradable, and demoting
+  // the whole index on an outage would empty the pickers until the next good run. Only a market
+  // that was evaluated, or that Gamma stopped returning, is demoted.
+  if (sports.length > 0 && unevaluatedPolymarketIds.length === sports.length) {
+    // Nothing could be evaluated this run — a CLOB outage. Skip the demotion entirely.
+    stats.sports.clearedStale = 0;
+    console.warn("[hedge-index] S2 clear-pass skipped: no depth read succeeded this run");
+  } else {
+    const cleared = await prisma.marketMeta.updateMany({
+      where: {
+        s2Eligible: true,
+        marketId: { notIn: eligibleMarketIds },
+        market: { polymarketId: { notIn: unevaluatedPolymarketIds } },
+      },
+      data: { s2Eligible: false },
+    });
+    stats.sports.clearedStale = cleared.count;
+  }
 
   return stats;
 }

@@ -93,6 +93,8 @@ async function loadS2Candidates(nowMs: number): Promise<S2MarketRow[]> {
         },
       },
     },
+    orderBy: { market: { resolutionDeadline: "asc" } }, // soonest matches first — the pickers want upcoming ones
+    take: 2000, // a bounded read; the index is pruned by the poller so the cap is a guard, not a window
   });
 
   const out: S2MarketRow[] = [];

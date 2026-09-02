@@ -57,6 +57,8 @@ export async function loadIndexedMarkets(): Promise<IndexedMarket[]> {
       parsedDeadline: true,
       market: { select: { id: true, yesPriceBp: true, noPriceBp: true, resolutionDeadline: true } },
     },
+    orderBy: { liquidityCents: "desc" }, // most liquid first — the best hedges surface first
+    take: 2000, // a bounded read; the index is pruned by the poller so the cap is a guard, not a window
   });
 
   const out: IndexedMarket[] = [];
