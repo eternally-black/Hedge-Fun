@@ -37,6 +37,7 @@
 import assert from "node:assert";
 import { sideLabels, marketHint, isUpDown, displayQuestion, soccerHint } from "../src/app/ui";
 import { upDownWindow, servableUpDown, MIN_UPDOWN_WINDOW_MIN } from "../src/lib/updown";
+import { mapMarket, namedSidesFromEvent, isCompositeSideLabel } from "../src/lib/polymarket";
 // The RN port, imported to prove the two clients agree (see the drift check at the bottom). Its only
 // import is `import type`, so pulling it in here needs nothing from mobile/node_modules.
 import { soccerHint as mobileSoccerHint } from "../mobile/src/format";
@@ -209,6 +210,51 @@ assert.strictEqual(marketHint(card("Panthers vs. Cardinals: O/U 32.5", "Over", "
   for (const q of cases) {
     assert.strictEqual(mobileSoccerHint(q), soccerHint(q), `web/mobile soccer hint drift on: ${q}`);
   }
+}
+
+// ---- One-sided football moneylines get their sides NAMED from the event (2026-08-26). Polymarket
+// publishes "Will CA Platense win on 2026-08-27?" as Yes/No — one market per team plus a draw — so
+// without this the whole sport reaches the hedge index only through corner props. Both names are in
+// the event title; the NO side is an outcome SET, and is labelled as one.
+{
+  const ev = { title: "CA Platense vs. Instituto AC Cordoba" };
+  const soccerTags = [{ label: "Sports" }, { label: "Games" }, { label: "Soccer" }];
+  const base = {
+    conditionId: "0xabc",
+    endDate: "2026-08-27T23:00:00Z",
+    outcomes: '["Yes","No"]',
+    outcomePrices: '["0.42","0.58"]',
+    events: [ev],
+    tags: soccerTags,
+  };
+
+  const win = mapMarket({ ...base, question: "Will CA Platense win on 2026-08-27?" });
+  assert.ok(win, "a named football moneyline maps");
+  assert.strictEqual(win!.outcomeYesLabel, "CA Platense", "YES is the team the question asks about");
+  assert.strictEqual(win!.outcomeNoLabel, "Instituto AC Cordoba or draw", "NO is what NO actually pays on");
+  assert.strictEqual(win!.league, "Soccer", "the sport comes from the tags, never from the question");
+  assert.ok(isCompositeSideLabel(win!.outcomeNoLabel), "the NO side is marked composite (never a picker team)");
+  assert.ok(!isCompositeSideLabel(win!.outcomeYesLabel));
+
+  // The draw market names no team, so it stays Yes/No and the S2 shape gate drops it.
+  const draw = mapMarket({ ...base, question: "Will CA Platense vs. Instituto AC Cordoba end in a draw?" });
+  assert.strictEqual(draw!.outcomeYesLabel, "Yes", "nobody supports a draw — no side to name");
+
+  // A question naming someone the event does not list is never guessed at: a wrong name here is a
+  // hedge pointed at the wrong team.
+  const stranger = mapMarket({ ...base, question: "Will Boca Juniors win on 2026-08-27?" });
+  assert.strictEqual(stranger!.outcomeYesLabel, "Yes", "unmatched subject keeps Yes/No");
+  assert.strictEqual(namedSidesFromEvent("Will CA Platense win on 2026-08-27?", undefined), null, "no event, no names");
+  assert.strictEqual(namedSidesFromEvent("Will CA Platense win?", "A vs. B vs. C"), null, "three-way title is not a match-up");
+
+  // Same shape OUTSIDE sport keeps Yes/No: an election has no draw and no fan to hedge.
+  const politics = mapMarket({
+    ...base,
+    question: "Will Trump win Ohio?",
+    events: [{ title: "Trump vs. Harris" }],
+    tags: [{ label: "Politics" }, { label: "Elections" }],
+  });
+  assert.strictEqual(politics!.outcomeYesLabel, "Yes", "the naming is gated on the SPORT classification");
 }
 
 console.log("test-side-labels: OK");

@@ -99,7 +99,12 @@ export async function extractEntities(text: string): Promise<NluOutcome> {
       headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
       body: JSON.stringify({
         model: NLU_MODEL,
-        max_tokens: 256,
+        // Reasoning models (DeepSeek v4, and every current small model worth using here) spend
+        // completion tokens on reasoning BEFORE the answer, and max_tokens caps the sum. At 256 the
+        // reasoning ate the whole budget: finish_reason "length", content "" — i.e. the NLU edge
+        // silently fell back on EVERY request. Measured on deepseek-v4-flash-vision-exp with this
+        // exact prompt: 236-468 reasoning tokens, ~20 for the JSON itself. 1024 leaves ~2x headroom.
+        max_tokens: 1024,
         temperature: 0, // extraction, not generation — same text must map to the same entities
         messages: [
           { role: "system", content: SYSTEM_PROMPT },

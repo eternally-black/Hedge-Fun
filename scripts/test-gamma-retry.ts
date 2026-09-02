@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 // The REAL error class, on purpose: the retry classifies with `instanceof`, so a look-alike defined
 // here would test nothing (it silently made the 4xx case retry while this test was being written).
-import { gammaGetWithRetry, GammaStatusError } from "../src/lib/polymarket";
+import { gammaGetWithRetry, gammaWalkByEndDate, GammaStatusError } from "../src/lib/polymarket";
 
 const err = (status: number) => new GammaStatusError(status, "/x");
 const page = (n: number) => Array.from({ length: n }, (_, i) => ({ id: String(i) })) as never;
@@ -84,6 +84,57 @@ async function main() {
     if (raw.length < 100) break;
   }
   assert.equal(seen, 767, "a transient 500 mid-walk must still yield the WHOLE pool, not a truncated one");
+
+  // 7. The offset cliff (prod 2026-08-26, tag_id=39 offset=700): past the cheap zone Gamma's own
+  //    query budget kills the request, so retrying the same deep page just re-rolls the same loss.
+  //    The endDate-cursor walk must therefore (a) never ask for an offset at all while the cursor can
+  //    move, (b) still return the WHOLE pool, and (c) return each market once even though every page
+  //    re-reads the instant it stopped on. The fake below is the real shape: endDate-ascending,
+  //    end_date_min INCLUSIVE, 7 markets per instant (live max: 45), 500 for any offset >= 300.
+  const POOL = Array.from({ length: 748 }, (_, i) => ({
+    conditionId: `c${i}`,
+    endDate: new Date(Date.UTC(2026, 7, 26) + Math.floor(i / 7) * 60_000).toISOString(),
+  }));
+  const offsetsAsked: number[] = [];
+  const typesAsked: string[][] = [];
+  const gamma = async (p: string) => {
+    const q = new URLSearchParams(p.split("?")[1]);
+    const off = Number(q.get("offset"));
+    offsetsAsked.push(off);
+    typesAsked.push(q.getAll("sports_market_types"));
+    if (off >= 300) throw err(500); // the measured cliff
+    const min = q.get("end_date_min") ?? "";
+    return POOL.filter((m) => m.endDate >= min).slice(off, off + Number(q.get("limit"))) as never;
+  };
+  // The array value must REPEAT the key, not join it: Gamma ORs repeated params and 422s a comma
+  //  list, and that is how the S2 fetch asks for both moneyline flavours.
+  const walked = await gammaWalkByEndDate(
+    { tag_id: "39", sports_market_types: ["moneyline", "child_moneyline"] },
+    POOL[0].endDate,
+    { get: gamma },
+  );
+  assert.deepEqual(typesAsked[0], ["moneyline", "child_moneyline"], "an array param must repeat the key");
+  const unique = new Set(walked.map((m) => m.conditionId));
+  assert.equal(unique.size, POOL.length, "the walk must cover the WHOLE pool, deep tail included");
+  assert.equal(walked.length, unique.size, "the re-read boundary instant must be deduped, not duplicated");
+  assert.deepEqual([...new Set(offsetsAsked)], [0], "a cursor that can move needs no offset — that's the whole fix");
+
+  // 8. The one case a time cursor cannot step over: MORE markets share one endDate than a page holds,
+  //    so end_date_min can't advance (live: the sports fetch, >300 markets on one top of the hour —
+  //    it truncated a 576-market pool while this was being written). The walk must page that instant
+  //    deeper and still come back whole, because a short read here is a lie, not a saving.
+  const PILE = Array.from({ length: 400 }, (_, i) => ({ conditionId: `p${i}`, endDate: "2026-09-01T00:00:00.000Z" }));
+  const pileOffsets: number[] = [];
+  const piled = await gammaWalkByEndDate({}, PILE[0].endDate, {
+    get: async (p) => {
+      const q = new URLSearchParams(p.split("?")[1]);
+      const off = Number(q.get("offset"));
+      pileOffsets.push(off);
+      return PILE.slice(off, off + Number(q.get("limit"))) as never;
+    },
+  });
+  assert.equal(piled.length, PILE.length, "a pile-up on one endDate must be paged through, not truncated");
+  assert.deepEqual(pileOffsets, [0, 100, 200, 300, 400], "and it must walk it once, in order, then stop");
 
   console.log("✓ test-gamma-retry: transient 5xx heals, real failure stays loud, paging never truncates");
 
