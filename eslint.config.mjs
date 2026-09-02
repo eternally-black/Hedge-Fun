@@ -10,8 +10,11 @@ const eslintConfig = defineConfig([
   ...nextVitals,
   ...nextTs,
   // "app design/" is the static design handoff (HTML mockups + an old support.js), not app code;
-  // dist/ is the compiled poller. Neither is linted.
-  globalIgnores([".next/**", "out/**", "build/**", "dist/**", "next-env.d.ts", "app design/**"]),
+  // dist/ is the compiled poller. Neither is linted. scripts/stubs/ holds CommonJS test doubles
+  // (the Polymarket SDK stand-in) — the react-hooks rules below apply to every file but the plugin
+  // is only registered for the Next file globs, so a .cjs there fails the run ("could not find
+  // plugin react-hooks"); .scratch/ is the gitignored packet workspace, same story locally.
+  globalIgnores([".next/**", "out/**", "build/**", "dist/**", "next-env.d.ts", "app design/**", "scripts/stubs/**", ".scratch/**"]),
   // Allow intentionally-unused names when prefixed with _ (e.g. kept-for-signature params).
   {
     rules: {
