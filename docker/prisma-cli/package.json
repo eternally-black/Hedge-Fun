@@ -1,0 +1,11 @@
+{
+  "name": "hedgefun-prisma-cli-deps",
+  "private": true,
+  "description": "Exact, lock-pinned transitive deps the prisma CLI config loader needs at runtime (see Dockerfile).",
+  "dependencies": {
+    "effect": "3.21.0",
+    "c12": "3.1.0",
+    "deepmerge-ts": "7.1.5",
+    "empathic": "2.0.0"
+  }
+}

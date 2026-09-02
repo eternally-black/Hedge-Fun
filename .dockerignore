@@ -35,3 +35,9 @@ docker-compose.yml
 deploy.sh
 hedgefun_ci
 hedgefun_ci.pub
+
+# Not part of the image
+mobile
+.claude
+.scratch
+ops

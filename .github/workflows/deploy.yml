@@ -13,6 +13,11 @@ concurrency:
   group: deploy-prod
   cancel-in-progress: false
 
+# Least privilege: read-only repo contents for every job by default. The build job
+# overrides with its own `permissions:` to add `packages: write` for GHCR.
+permissions:
+  contents: read
+
 jobs:
   # ---------------------------------------------------------------------------
   # Test gate: lint + DB-free unit suite + DB-backed money/economy suite.
@@ -117,6 +122,9 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_KEY }}
           port: ${{ secrets.SSH_PORT }}
+          # The VPS host key fingerprint (ssh-keyscan -t ed25519 <host> | ssh-keygen -lf -).
+          # Empty = no verification, so set the secret.
+          fingerprint: ${{ secrets.SSH_HOST_FINGERPRINT }}
           # Pull + up only now (no build on the box) — 10m is plenty.
           command_timeout: 10m
           # Sync the repo BEFORE opening deploy.sh, not from inside it. bash reads a script lazily,

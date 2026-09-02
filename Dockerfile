@@ -77,12 +77,14 @@ COPY --from=build --chown=nextjs:nodejs /app/node_modules/prisma ./node_modules/
 COPY --from=build --chown=nextjs:nodejs /app/prisma ./prisma
 COPY --from=build --chown=nextjs:nodejs /app/package.json ./package.json
 # The prisma CLI's config loader (@prisma/config) needs effect/c12/deepmerge-ts/empathic (~35MB),
-# not traced into the standalone output. Install them in an ISOLATED scratch dir (NOT against our
-# package.json — `npm install <pkg>` there would reinstall the whole 2GB tree) and move them into
-# node_modules. npm resolves their transitives correctly. Also recreate the .bin/prisma symlink
-# (the COPY dereferenced it to a flat file, breaking its WASM paths). Before USER switch.
-RUN mkdir -p /tmp/cli && cd /tmp/cli \
-    && npm install --no-save --ignore-scripts effect@3.21.0 c12@3.1.0 deepmerge-ts@7.1.5 empathic@2.0.0 \
+# not traced into the standalone output. They are lock-pinned in docker/prisma-cli/package-lock.json
+# (bump with `npm install --package-lock-only` in that dir), so the runtime image is reproducible —
+# a bare `npm install` here resolved every transitive fresh on each build. Installed in an ISOLATED
+# scratch dir (NOT against our package.json) and moved into node_modules. Also recreate the
+# .bin/prisma symlink (the COPY dereferenced it to a flat file, breaking its WASM paths). Before
+# USER switch.
+COPY docker/prisma-cli/package.json docker/prisma-cli/package-lock.json /tmp/cli/
+RUN cd /tmp/cli && npm ci --ignore-scripts --no-audit --no-fund \
     && cp -R /tmp/cli/node_modules/. /app/node_modules/ \
     && rm -rf /tmp/cli \
     && cd /app \

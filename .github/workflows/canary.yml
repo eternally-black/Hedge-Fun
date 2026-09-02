@@ -8,6 +8,13 @@ on:
     - cron: "0 9 * * *" # daily 09:00 UTC
   workflow_dispatch:
 
+# Least privilege: read-only repo contents. Never let two canaries overlap.
+permissions:
+  contents: read
+concurrency:
+  group: canary
+  cancel-in-progress: false
+
 jobs:
   verify-polymarket:
     runs-on: ubuntu-latest

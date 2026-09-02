@@ -69,6 +69,13 @@ tables but no `_prisma_migrations` history, so the first `migrate deploy` fails 
 **P3005**; `deploy.sh` detects that, runs `migrate resolve --applied 0_init` once, then
 re-deploys. No-op on every subsequent deploy and on a fresh DB.
 
+**Hand-written guards:** the partial unique indexes `order_attempts_one_inflight` and
+`funding_attempts_one_active`, plus the CHECK constraints `bets_closed_le_filled`,
+`bets_paper_no_real_fields`, `bets_real_fields_nonneg`, and `fills_sane`, are **not** in
+`schema.prisma` (Prisma cannot model them). After `npm run db:migrate` generates SQL, check
+it does not DROP them and re-add them in the generated file if it does —
+`scripts/test-schema-guards.ts` fails the DB suite otherwise.
+
 ## Incident playbook
 
 - **Site down after deploy** — `docker compose ps` / `docker compose logs app`. App won't
