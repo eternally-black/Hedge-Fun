@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 // The REAL error class, on purpose: the retry classifies with `instanceof`, so a look-alike defined
 // here would test nothing (it silently made the 4xx case retry while this test was being written).
-import { gammaGetWithRetry, gammaWalkByEndDate, GammaStatusError } from "../src/lib/polymarket";
+import { gammaGetWithRetry, gammaWalkByEndDate, GammaStatusError, withGammaDeadline } from "../src/lib/polymarket";
 
 const err = (status: number) => new GammaStatusError(status, "/x");
 const page = (n: number) => Array.from({ length: n }, (_, i) => ({ id: String(i) })) as never;
@@ -136,7 +136,40 @@ async function main() {
   assert.equal(piled.length, PILE.length, "a pile-up on one endDate must be paged through, not truncated");
   assert.deepEqual(pileOffsets, [0, 100, 200, 300, 400], "and it must walk it once, in order, then stop");
 
-  console.log("✓ test-gamma-retry: transient 5xx heals, real failure stays loud, paging never truncates");
+  // 9. A Gamma time budget (withGammaDeadline) that has already run out refuses the NEXT read before
+  //    it is attempted — this is what ends a walk within one request during an outage.
+  calls = 0;
+  await assert.rejects(
+    withGammaDeadline(0, () => gammaGetWithRetry("/x", async () => { calls++; return page(100); })),
+    /time budget exhausted/,
+    "an expired budget must refuse the read",
+  );
+  assert.equal(calls, 0, "nothing is fetched past the deadline");
+
+  // 10. A budget that runs out MID-ladder cuts the retries short instead of spending all four.
+  calls = 0;
+  await assert.rejects(
+    withGammaDeadline(300, () => gammaGetWithRetry("/x", async () => { calls++; throw err(500); })),
+    /time budget exhausted/,
+    "the ladder must give up at the deadline",
+  );
+  assert.ok(calls >= 1 && calls < 4, `the ladder must stop early inside the budget (calls=${calls})`);
+
+  // 11. The walk composes with it: page reads go through the retry, so an expired budget ends the
+  //     walk on its next page with the injected fetch never called.
+  calls = 0;
+  await assert.rejects(
+    withGammaDeadline(0, () =>
+      gammaWalkByEndDate({}, "2026-09-01T00:00:00.000Z", {
+        get: (p) => gammaGetWithRetry(p, async () => { calls++; return page(100); }),
+      }),
+    ),
+    /time budget exhausted/,
+    "an expired budget must end the walk",
+  );
+  assert.equal(calls, 0, "the walk must not fetch past the deadline");
+
+  console.log("✓ test-gamma-retry: transient 5xx heals, real failure stays loud, paging never truncates, a time budget ends a walk");
 
 }
 

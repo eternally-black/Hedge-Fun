@@ -8,7 +8,7 @@ import { PrismaClient } from "@prisma/client";
 import { writeFileSync } from "node:fs";
 import { tmpdir, hostname } from "node:os";
 import { join } from "node:path";
-import { fetchResolution } from "../src/lib/polymarket";
+import { fetchResolution, withGammaDeadline } from "../src/lib/polymarket";
 import { conditionResolution, type ChainOutcome } from "../src/lib/polygon";
 import { DECK_FETCH_HORIZON_HOURS } from "../src/lib/deck-mix";
 import { DECK_MIN_SERVABLE } from "../src/lib/config";
@@ -46,6 +46,14 @@ let chainProbesLeft = 0;
 // (the F1 stale-cache snipe) is re-priced/closed within one window, cheap enough not to hammer Gamma.
 // The accept-time price-band gate (src/lib/hedge/accept.ts) closes the intra-window remainder.
 const HEDGE_INDEX_EVERY_N_TICKS = 5;
+// Wall-clock budgets for the Gamma reads of a subsystem (withGammaDeadline in polymarket.ts). Measured
+// 2026-09-02: a deck refresh takes 1–10 s, a hedge-index run 15–35 s. During that day's Gamma outage
+// (15:12–15:30Z, slow 500s) the same run took 209–323 s: the heartbeat crossed its 180 s staleness
+// bound mid-tick and the watchdog restarted the poller three times into the same outage. With these
+// budgets a tick's Gamma time is at most 45 + 90 s plus one in-flight request, under the bound, and a
+// budget hit is an ordinary subsystem failure (the previous deck / index rows stay; no partial writes).
+const DECK_GAMMA_BUDGET_MS = 45_000;
+const HEDGE_INDEX_GAMMA_BUDGET_MS = 90_000;
 // Market cache GC cadence. Every 5th tick ≈ every 5 minutes: fast enough to drain a large backlog
 // in a few hours (PRUNE_MAX_ROWS per run), slow enough that the anti-join scan is not a per-minute
 // cost in the steady state, where it finds nothing. Deliberately OFFSET from the hedge index above
@@ -84,12 +92,23 @@ function subsystemOk(name: string): void {
 // Settlement-backlog alert throttle: one Telegram send per hour max while overdue persists.
 let backlogLastAlertAt = 0;
 
-// Liveness signal: touched at the end of every successful tick. The compose healthcheck
-// fails the container when this file is stale (mtime older than ~3x the interval) so a
-// wedged-but-not-exited loop gets restarted instead of sitting "up" with settlement dead.
+// Liveness signal: touched after each Gamma-bound subsystem SUCCEEDS (deck, hedge index) and at the
+// end of every clean tick. The compose healthcheck fails the container when this file is stale
+// (mtime older than ~3x the interval) so a wedged-but-not-exited loop gets restarted instead of
+// sitting "up" with settlement dead. The mid-tick touches exist because a tick that is merely slow
+// on upstream retries is not wedged: on 2026-09-02 a Gamma outage stretched the hedge-index run to
+// 209–323 s, the file went stale mid-tick and the watchdog restarted a healthy poller three times.
 // ponytail: a file beats a DB heartbeat row here — the healthcheck is just a stat() with no
 // DB creds. Default lives under the OS temp dir so the same path resolves in the container.
 const HEARTBEAT_FILE = process.env.POLLER_HEARTBEAT_FILE ?? join(tmpdir(), "poller-heartbeat");
+
+function beat(): void {
+  try {
+    writeFileSync(HEARTBEAT_FILE, new Date().toISOString());
+  } catch (e) {
+    console.warn("[poll] heartbeat write failed:", (e as Error).message);
+  }
+}
 
 let running = true;
 // One identity per process: the lease is acquired under it every tick and released under it on
@@ -184,7 +203,7 @@ async function tick() {
   // longer-horizon sports/esports half never gets price refreshes and shows stale (often 50/50)
   // odds. fetchBlitzDeck still drops each market past its own category horizon.
   try {
-    const r = await refreshDeck(DECK_FETCH_HORIZON_HOURS, 100);
+    const r = await withGammaDeadline(DECK_GAMMA_BUDGET_MS, () => refreshDeck(DECK_FETCH_HORIZON_HOURS, 100));
     // Log the SERVABLE count next to the upserted one. Reporting only "refreshed N" is what hid a
     // multi-week outage: N stayed at 100 the whole time the deck was empty, because every one of
     // those 100 expired within minutes. The alarm below is deliberately loud and greppable —
@@ -197,6 +216,7 @@ async function tick() {
       console.log(`[deck] refreshed ${r.upserted} markets (${r.servable} servable)`);
     }
     subsystemOk("deck");
+    beat();
   } catch (e) {
     console.warn("[deck] refresh error:", (e as Error).message);
     subsystemFailed("deck", e);
@@ -209,11 +229,12 @@ async function tick() {
   // that fell out of the fetch/band. A refresh failure is transient — log and keep the tick alive.
   if ((tickCount - 1) % HEDGE_INDEX_EVERY_N_TICKS === 0) {
     try {
-      const hs = await refreshHedgeIndex();
+      const hs = await withGammaDeadline(HEDGE_INDEX_GAMMA_BUDGET_MS, () => refreshHedgeIndex());
       console.log(
         `[hedge-index] S1 parsed=${hs.parsed}/${hs.discovered} | S2 eligible=${hs.sports.eligible}/${hs.sports.discovered} cleared=${hs.sports.clearedStale}`,
       );
       subsystemOk("hedge-index");
+      beat();
     } catch (e) {
       console.warn("[hedge-index] refresh error:", (e as Error).message);
       subsystemFailed("hedge-index", e);
@@ -433,18 +454,15 @@ async function loop() {
   // first tick completes the process is alive by definition. The cold-start tick (deck + the full
   // hedge index) outlasts the healthcheck's start_period, which failed `compose up --wait` on
   // 2026-09-02. A wedged first tick is still caught by the 180s staleness bound.
-  try {
-    writeFileSync(HEARTBEAT_FILE, new Date().toISOString());
-  } catch (e) {
-    console.warn("[poll] initial heartbeat write failed:", (e as Error).message);
-  }
+  beat();
   while (running) {
     const start = Date.now();
     try {
       await tick();
-      // Heartbeat only on a clean tick — a failed tick should let the file go stale so the
-      // healthcheck eventually restarts us rather than masking a persistent failure.
-      writeFileSync(HEARTBEAT_FILE, new Date().toISOString());
+      // The end-of-tick beat lands only on a clean tick, and the mid-tick beats (see beat()) only
+      // after a subsystem SUCCEEDS — a tick that fails everywhere (a wedged DB pool, say) still lets
+      // the file go stale so the healthcheck restarts us rather than masking a persistent failure.
+      beat();
       // Dead-man ping: external uptime check; no-op without POLLER_HC_URL.
       const hc = process.env.POLLER_HC_URL;
       if (hc) fetch(hc, { signal: AbortSignal.timeout(5000) }).catch(() => {});

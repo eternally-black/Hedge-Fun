@@ -7,6 +7,7 @@
 //  - Resolution signal = umaResolutionStatus === "resolved" + outcomePrices collapse to 1/0.
 //  - conditionId is the stable id -> our polymarketId.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   isContextPoor,
   isUnnamedMatch,
@@ -297,6 +298,26 @@ export function mapMarket(m: GammaMarket): MarketCache | null {
 const GAMMA_MAX_RETRIES = 3;
 const GAMMA_BACKOFF_MS = [250, 500, 1000];
 
+// A wall-clock budget for every Gamma read made inside `fn`: the retry ladder checks it before each
+// attempt and clamps the request timeout to what is left, so a walk (each page is one gammaGet) and
+// the deck's band loop end within one request of the deadline. Why: on 2026-09-02 15:12–15:30Z
+// Gamma answered slow 500s; a hedge-index run that takes 15–35 s ran 209–323 s, the poller's
+// heartbeat crossed its 180 s staleness bound mid-tick and the watchdog restarted a healthy poller
+// three times into the same outage. A budget hit throws like any other Gamma failure, so the callers'
+// containment (per-tag catch, no S2 clear-pass on a failed sports fetch, no partial deck) is unchanged.
+// AsyncLocalStorage rather than a module variable: the app server shares this module across
+// concurrent requests. A read outside withGammaDeadline has no budget and behaves exactly as before.
+const gammaDeadline = new AsyncLocalStorage<number>();
+
+export function withGammaDeadline<T>(ms: number, fn: () => Promise<T>): Promise<T> {
+  return gammaDeadline.run(Date.now() + ms, fn);
+}
+
+function gammaBudgetLeftMs(): number | undefined {
+  const deadline = gammaDeadline.getStore();
+  return deadline === undefined ? undefined : deadline - Date.now();
+}
+
 // Carries the status so the retry loop can tell congestion from a contract problem without
 // re-parsing a message (clob.ts's ClobStatusError, same job).
 export class GammaStatusError extends Error {
@@ -312,7 +333,9 @@ export async function gammaGetOnce(path: string): Promise<GammaMarket[]> {
   const res = await fetch(`${BASE}${path}`, {
     cache: "no-store",
     headers: { accept: "application/json" },
-    signal: AbortSignal.timeout(15_000), // an upstream hang must not stall a poller tick into its 180 s heartbeat kill
+    // An upstream hang must not stall a poller tick into its 180 s heartbeat kill — and inside a
+    // budget (withGammaDeadline) the request never outlives what is left of it.
+    signal: AbortSignal.timeout(Math.max(1, Math.min(15_000, gammaBudgetLeftMs() ?? 15_000))),
   });
   if (!res.ok) throw new GammaStatusError(res.status, path);
   return (await res.json()) as GammaMarket[];
@@ -324,6 +347,10 @@ export async function gammaGetWithRetry(
 ): Promise<GammaMarket[]> {
   let lastErr: Error | null = null;
   for (let attempt = 0; attempt <= GAMMA_MAX_RETRIES; attempt++) {
+    const left = gammaBudgetLeftMs();
+    if (left !== undefined && left <= 0) {
+      throw new Error(`Gamma time budget exhausted before ${path}${lastErr ? ` (last: ${lastErr.message})` : ""}`);
+    }
     if (attempt > 0) {
       const wait = GAMMA_BACKOFF_MS[attempt - 1] * (0.5 + Math.random()); // de-sync colliding walkers
       await new Promise((r) => setTimeout(r, wait));
