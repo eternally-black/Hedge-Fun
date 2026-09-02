@@ -9,6 +9,22 @@ import { awardShard } from "./shards";
 // Aliased: `utcDay` is also a LOCAL const inside the bookers, and the zero-fill release below runs
 // before that declaration — an unaliased import would resolve into its temporal dead zone.
 import { utcDay as utcDayOf } from "./time";
+import type { Prisma } from "@prisma/client";
+
+// Serialise the writers of one position. READ COMMITTED lets two transactions read the same bets
+// row and both write absolute values; the second commit silently erases the first. A FOR UPDATE on
+// the row at the top of every transaction that writes it makes them queue instead. Prisma has no
+// API for it, so it is raw SQL against the mapped table.
+export async function lockBetRow(
+  tx: Prisma.TransactionClient,
+  where: { id: string } | { userId: string; marketId: string },
+): Promise<void> {
+  if ("id" in where) {
+    await tx.$queryRaw`SELECT id FROM bets WHERE id = ${where.id} FOR UPDATE`;
+  } else {
+    await tx.$queryRaw`SELECT id FROM bets WHERE "userId" = ${where.userId} AND "marketId" = ${where.marketId} AND mode = 'REAL' FOR UPDATE`;
+  }
+}
 
 // Give back a reserved daily-cap slot. /api/real/submit reserves one inside the CAS-claim
 // transaction, so every terminal path that ends with NO position must return it. The counter is
@@ -412,6 +428,9 @@ export async function bookEntryFills(
   let outcome: "FILLED" | "PARTIAL" | "KILLED" = "KILLED";
 
   await prisma.$transaction(async (tx) => {
+    // Serialise against the other position writers (bookExitFills, trueUpAttemptFee,
+    // consumeResolvedPosition) before any read — see lockBetRow.
+    await lockBetRow(tx, { userId: attempt.userId, marketId: attempt.marketId });
     // What this attempt already holds — the base for both the cumulative-receipt delta and the
     // FILLED/PARTIAL label.
     const booked = await tx.fill.aggregate({
@@ -480,8 +499,21 @@ export async function bookEntryFills(
     // creating it (a split receipt must not burn a second swipe of the daily cap).
     const priorBet = await tx.bet.findUnique({
       where: { userId_marketId_mode: { userId: attempt.userId, marketId: attempt.marketId, mode: "REAL" } },
-      select: { id: true, filledSharesMicro: true, closedSharesMicro: true },
+      select: { id: true, filledSharesMicro: true, closedSharesMicro: true, lotSeq: true },
     });
+
+    // A fully closed lot was reopened (counters reset, lotSeq bumped) and reconcileStuckAttempts
+    // still rescans the OLD attempt for 48h; a grown trade set would land on the NEW lot. The
+    // fills are facts about this attempt and are kept (written above); the aggregate now describes
+    // a later lot that never paid for them — the same rule trueUpAttemptFee already applies.
+    const staleLot = priorBet !== null && attempt.lotSeq !== null && attempt.lotSeq !== priorBet.lotSeq;
+    if (staleLot) {
+      await tx.orderAttempt.updateMany({
+        where: { id: attempt.id, state: { in: ["POSTED", "PARTIAL", "FILLED"] } },
+        data: { state: outcome },
+      });
+      return;
+    }
 
     // REOPEN vs add-to-position. The intent route admits an ENTRY whenever the remainder is zero,
     // so this row can be a fully-CLOSED lot from an earlier trade — and, since the block it passed
@@ -610,7 +642,7 @@ export async function bookEntryFills(
       });
       await tx.bet.update({ where: { id: bet.id }, data: { earnedPoint: true } });
     }
-  });
+  }, { timeout: 15_000 }); // a queued FOR UPDATE wait must not trip Prisma's 5s default
 
   return outcome;
 }
@@ -638,6 +670,10 @@ export async function bookExitFills(
   let outcome: "FILLED" | "PARTIAL" | "KILLED" = "KILLED";
 
   await prisma.$transaction(async (tx) => {
+    // Serialise against the other position writers (bookEntryFills, trueUpAttemptFee,
+    // consumeResolvedPosition) before any read — see lockBetRow.
+    if (attempt.betId) await lockBetRow(tx, { id: attempt.betId });
+    else await lockBetRow(tx, { userId: attempt.userId, marketId: attempt.marketId });
     // Aggregate increments are driven ONLY by fills actually INSERTED this call (same replay
     // discipline as the entry booker — the executor's own test surfaced the double-book), and a
     // cumulative receipt books its delta against what the attempt already holds.
@@ -698,6 +734,30 @@ export async function bookExitFills(
         data: { state: "FAILED", error: "no_position" },
       });
       outcome = "KILLED";
+      return;
+    }
+
+    // A fully closed lot was reopened (counters reset, lotSeq bumped) and reconcileStuckAttempts
+    // still rescans the OLD attempt for 48h; a grown trade set would close shares of the NEW lot
+    // against the new basis. The fills are facts about this attempt and are kept; the aggregate now
+    // describes a later lot that never paid for them — the same rule trueUpAttemptFee applies.
+    const staleLot = attempt.lotSeq !== null && attempt.lotSeq !== bet.lotSeq;
+    if (staleLot) {
+      await tx.fill.createMany({
+        data: fresh.map((f) => ({
+          attemptId: attempt.id,
+          externalFillId: f.externalFillId,
+          sharesMicro: f.sharesMicro,
+          amountMicro: f.amountMicro,
+          feeMicro: f.feeMicro,
+          priceBp: f.priceBp,
+          ts: f.ts,
+        })),
+      });
+      await tx.orderAttempt.updateMany({
+        where: { id: attempt.id, state: { in: ["POSTED", "PARTIAL", "FILLED"] } },
+        data: { state: outcome },
+      });
       return;
     }
 
@@ -810,7 +870,7 @@ export async function bookExitFills(
         error: prorate ? `clamped: fill ${totalShares} > remainder ${remainder}` : null,
       },
     });
-  });
+  }, { timeout: 15_000 }); // a queued FOR UPDATE wait must not trip Prisma's 5s default
 
   return outcome;
 }
@@ -828,6 +888,10 @@ export async function trueUpAttemptFee(
   trueFeeMicro: bigint,
 ): Promise<bigint> {
   return prisma.$transaction(async (tx) => {
+    // Serialise against the other position writers (bookEntryFills, bookExitFills,
+    // consumeResolvedPosition) before any read — see lockBetRow.
+    if (attempt.betId) await lockBetRow(tx, { id: attempt.betId });
+    else await lockBetRow(tx, { userId: attempt.userId, marketId: attempt.marketId });
     const fills = await tx.fill.findMany({ where: { attemptId: attempt.id }, orderBy: { createdAt: "asc" } });
     if (fills.length === 0) return 0n;
     const booked = fills.reduce((s, f) => s + f.feeMicro, 0n);
@@ -915,5 +979,5 @@ export async function trueUpAttemptFee(
       },
     });
     return applied;
-  });
+  }, { timeout: 15_000 }); // a queued FOR UPDATE wait must not trip Prisma's 5s default
 }

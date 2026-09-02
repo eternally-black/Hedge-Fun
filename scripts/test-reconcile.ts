@@ -152,6 +152,19 @@ async function main() {
       "ledger and aggregate agree after the true-up",
     );
 
+    // ---- 5b. A terminal verdict with trade records stamps reconciledAt, so the sweep stops
+    // re-probing the attempt every pass: a spy probe must never be asked about it again.
+    const a5stamped = await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a5.id } });
+    assert.notStrictEqual(a5stamped.reconciledAt, null, "terminal trade records stamp reconciledAt");
+    const probedIds: string[] = [];
+    const spy: typeof truth5 = async (a) => {
+      probedIds.push(a.id);
+      return truth5(a);
+    };
+    await reconcileStuckAttempts(prisma, spy, { minAgeMs: 0, limit: 50 });
+    assert.ok(!probedIds.includes(a5.id), "a reconciled attempt is not probed again");
+    console.log("OK: a reconciled attempt is not probed again");
+
     // ---- 6. EXIT: the shares were already booked, so only the fee is wrong — the true-up must
     // move realized PnL by exactly the charged close fee.
     const m6 = await mkMarket("c6");
@@ -223,9 +236,11 @@ async function main() {
       data: { updatedAt: new Date(Date.now() - 49 * 60 * 60_000) },
     });
     const window = { lt: new Date(), gt: new Date(Date.now() - 48 * 60 * 60_000) };
+    // Mirrors the sweep's own predicate: a booked attempt stays eligible only until its terminal
+    // trade records were booked (reconciledAt).
     const eligible = await prisma.orderAttempt.count({
       where: {
-        state: { in: ["POSTED", "FILLED", "PARTIAL"] },
+        OR: [{ state: "POSTED" }, { state: { in: ["FILLED", "PARTIAL"] }, reconciledAt: null }],
         externalOrderId: { not: null },
         updatedAt: window,
       },

@@ -10,6 +10,7 @@ import { CONDITIONAL_TOKENS } from "./wallet-ops";
 import { SHARE_TICK_MICRO } from "./config";
 import { awardShard } from "./shards";
 import { centsFromMicro } from "./quote";
+import { lockBetRow } from "./orders";
 
 // Close a resolved position's remainder and realize it. Winner: $1/share. CANCELED (this repo's
 // INVALID resolution): an invalid binary CTF market pays [1,1], so EVERY share of either side
@@ -29,6 +30,8 @@ export async function consumeResolvedPosition(
   canceled: boolean,
 ): Promise<boolean> {
   return prisma.$transaction(async (tx) => {
+    // Queue behind the other position writers (see lockBetRow) instead of racing them.
+    await lockBetRow(tx, { id: betId });
     const b = await tx.bet.findUnique({ where: { id: betId } });
     if (!b) return false;
     const filled = b.filledSharesMicro ?? 0n;
@@ -58,7 +61,7 @@ export async function consumeResolvedPosition(
     // capped for DECK, uncapped for FEED; idempotent on ShardGrant.betId.
     if (result === "WIN") await awardShard(tx, b.userId, b.id, b.createdAt, { bypassCap: b.source === "FEED" });
     return true;
-  });
+  }, { timeout: 15_000 });
 }
 
 // Book what the server can settle on its own. Two of the three cases need no signature at all: a

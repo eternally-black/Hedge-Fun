@@ -122,6 +122,11 @@ export async function reconcileAttempt(
 
   // The estimate dies here: whatever the receipt guessed, the charged total is now on the ledger.
   await trueUpAttemptFee(prisma, attempt, feeMicro);
+  // The exchange's terminal trade records are the final word: stamp the attempt so the sweep stops
+  // re-probing it every pass for 48h.
+  if (verdict.terminal) {
+    await prisma.orderAttempt.updateMany({ where: { id: attempt.id, state: { in: ["FILLED", "PARTIAL"] } }, data: { reconciledAt: new Date() } });
+  }
   return "booked";
 }
 
@@ -234,10 +239,11 @@ export async function reconcileStuckAttempts(
     // are revisited for ONE reason: their fee is the formula ESTIMATE until the exchange's own
     // trade records replace it (the booking is order-cumulative, so a re-run books a zero delta,
     // and the true-up is idempotent once the ledger carries the charged amount). A SUBMITTING
-    // attempt has no order id to ask about. The 48-hour floor stops settled history from being
-    // rescanned forever.
+    // attempt has no order id to ask about. A booked attempt is revisited only until the exchange's
+    // terminal records replaced the estimate (reconciledAt), and the 48-hour floor stops settled
+    // history from being rescanned forever.
     where: {
-      state: { in: ["POSTED", "FILLED", "PARTIAL"] },
+      OR: [{ state: "POSTED" }, { state: { in: ["FILLED", "PARTIAL"] }, reconciledAt: null }],
       externalOrderId: { not: null },
       updatedAt: { lt: cutoff, gt: new Date(now.getTime() - 48 * 60 * 60_000) },
     },

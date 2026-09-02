@@ -735,6 +735,9 @@ model OrderAttempt {
   signedOrder     Json?
   // The Bet lot this attempt's fills landed in; null on attempts that never booked. See Bet.lotSeq.
   lotSeq          Int?
+  // Set once the exchange's terminal trade records have been booked and the fee trued up; the
+  // stuck-attempt sweep skips such rows.
+  reconciledAt    DateTime?
   externalOrderId String?           @unique
   postResponse    Json? // authoritative receipt, persisted verbatim at post time
   error           String?

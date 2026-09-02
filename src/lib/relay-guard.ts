@@ -237,9 +237,9 @@ export function assertRelayPayload(kind: RelayKind, request: RelayRequest, ctx: 
         throw new Error(`amount_unreadable: ${String(ctx.expectedAmountMicro)}`);
       }
       // EXACTLY one transfer. Pinning target, selector, recipient and amount PER CALL is not enough
-      // on its own: the shape check above admits up to 8 calls, so eight copies of the very transfer
-      // the user approved each pass every per-call test and the Batch debits 8× the approved amount.
-      // bridgeOutSpec builds a single call, so anything else is not our plan.
+      // on its own: the shape check above admits up to MAX_CALLS calls, so nine copies of the very
+      // transfer the user approved each pass every per-call test and the Batch debits 9× the approved
+      // amount. bridgeOutSpec builds a single call, so anything else is not our plan.
       if (calls.length !== 1) throw new Error(`bad_call_shape: BRIDGE_OUT is one transfer, got ${calls.length}`);
       for (const call of calls) {
         const target = String(call.target).toLowerCase();

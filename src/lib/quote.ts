@@ -369,7 +369,6 @@ export function quoteSellAllIn(
 
   const MICRO_SHARE = 1e-6;
   let remaining = Number(sharesToSellMicro) / 1_000_000; // shares; float internally, integers out
-  if (ladder.length === 0) return null;
   let sold = 0;
   let proceeds = 0;
   let fee = 0;

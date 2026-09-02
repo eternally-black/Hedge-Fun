@@ -12,6 +12,7 @@ import {
   matchesExchangeOrder,
   type ExchangeOrderView,
   type SignedOrderWire,
+  bookExitFills,
 } from "../src/lib/orders";
 import { SWIPE_CAP } from "../src/lib/config";
 
@@ -374,6 +375,43 @@ async function main() {
       assert.strictEqual(afterCur.feeMicro, 60_000n, "the matching lot IS corrected");
     }
 
+    // A foreign lot's EXIT must behave the same way: the fills and label land, but the aggregate
+    // (which now describes the NEW lot) is left alone.
+    {
+      const reopenedBet = await prisma.bet.findUniqueOrThrow({
+        where: { userId_marketId_mode: { userId: user.id, marketId: market.id, mode: "REAL" } },
+      });
+      const closedBefore = reopenedBet.closedSharesMicro;
+      const proceedsBefore = reopenedBet.proceedsMicro;
+      const pnlBefore = reopenedBet.realizedPnlMicro;
+      const staleExit = await prisma.orderAttempt.create({
+        data: {
+          userId: user.id,
+          marketId: market.id,
+          dir: "EXIT",
+          side: "YES",
+          tokenId: "tok-1",
+          idempotencyKey: crypto.randomUUID(),
+          approvedParams: {},
+          allInCapMicro: 10_000_000n,
+          maxPriceBp: 5200,
+          state: "POSTED",
+          betId: reopenedBet.id,
+          lotSeq: 0, // the OLD lot number
+        },
+      });
+      const exitResult = await bookExitFills(prisma, staleExit, 1_000_000n, [
+        { externalFillId: `${tag}-stale-exit`, sharesMicro: 1_000_000n, amountMicro: 600_000n, feeMicro: 6_000n, priceBp: 6000, ts: new Date() },
+      ]);
+      assert.strictEqual(exitResult, "FILLED");
+      assert.strictEqual(await prisma.fill.count({ where: { attemptId: staleExit.id } }), 1);
+      assert.strictEqual((await prisma.orderAttempt.findUniqueOrThrow({ where: { id: staleExit.id } })).state, "FILLED");
+      const afterStale = await prisma.bet.findUniqueOrThrow({ where: { id: reopenedBet.id } });
+      assert.strictEqual(afterStale.closedSharesMicro, closedBefore, "a foreign lot's EXIT leaves the aggregate alone");
+      assert.strictEqual(afterStale.proceedsMicro, proceedsBefore, "…and so does its proceeds");
+      assert.strictEqual(afterStale.realizedPnlMicro, pnlBefore, "…and its realized PnL");
+    }
+    console.log("OK: a foreign lot's EXIT keeps its fills and label but leaves the aggregate alone");
     console.log("OK: lot attribution — a reopen advances lotSeq and a foreign lot's true-up is refused");
     console.log("OK: order validation matrix, tolerant fill parsing, on-fill booking, zero-fill slot release");
     console.log("OK: cumulative receipts — delta booking, cumulative FILLED label, aggregate-derived vwap");
