@@ -1,9 +1,59 @@
 // Minimal Polygon JSON-RPC over fetch — the poller stays zero-EVM-deps (no viem/ethers; plan §2.5).
 // Balance reads pin the "finalized" tag: deposit detection must never act on reorg-able state.
-// publicnode is the one free RPC the spike verified for useful access (poly-spike, 2026-08-12).
 import { boundedTimeoutMs, deadlineLeftMs } from "./deadline";
 
-const RPC = process.env.POLYGON_RPC_URL ?? "https://polygon-bor-rpc.publicnode.com";
+// Endpoints in failover order: the keyed primary (POLYGON_RPC_URL — dRPC in prod), the keyed
+// fallbacks (POLYGON_RPC_FALLBACK_URLS, comma-separated — Alchemy in prod) and publicnode last: the
+// one keyless RPC the spike verified for wide eth_getLogs (poly-spike, 2026-08-12). Unset in dev,
+// publicnode alone. Read once at load, like everything else in this module.
+const PUBLIC_RPC = "https://polygon-bor-rpc.publicnode.com";
+const RPC_URLS: string[] = [
+  ...new Set(
+    [process.env.POLYGON_RPC_URL, ...(process.env.POLYGON_RPC_FALLBACK_URLS ?? "").split(","), PUBLIC_RPC]
+      .map((s) => (s ?? "").trim())
+      .filter(Boolean),
+  ),
+];
+
+// Failover rules. A TRANSPORT failure (no answer, timeout, HTTP error, unparseable body) parks the
+// endpoint for a minute — a settle sweep is up to 75 calls, and each must not pay a 10 s timeout on
+// a dead primary — and the next endpoint is tried. A JSON-RPC answer is the chain talking and is
+// never failed over (a revert repeats anywhere), with ONE exception: a refused eth_getLogs RANGE is
+// the tier talking, not the chain (Alchemy Free caps it at 10 blocks; the funding watcher scans up
+// to 9 000). That endpoint never sees eth_getLogs again in this process and keeps serving the rest.
+const COOLDOWN_MS = 60_000;
+const downUntil = new Map<string, number>();
+const noWideLogs = new Set<string>();
+const LOGS_RANGE_REFUSED = /block range|range.*(block|limit)|too (many|large)|limit(ed)? to|exceed/i;
+// Only ever the host in a log line — the key rides in the path.
+const hostOf = (url: string): string => {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "rpc";
+  }
+};
+
+class RpcTransportError extends Error {}
+
+async function rpcOnce(url: string, method: string, params: unknown[]): Promise<unknown> {
+  let body: { result?: unknown; error?: { code?: number; message?: string } };
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      signal: AbortSignal.timeout(boundedTimeoutMs(10_000)),
+    });
+    if (!res.ok) throw new RpcTransportError(`HTTP ${res.status}`);
+    body = (await res.json()) as typeof body;
+  } catch (e) {
+    throw e instanceof RpcTransportError ? e : new RpcTransportError((e as Error).message);
+  }
+  if (body.error) throw new Error(`polygon rpc: ${body.error.message ?? "error"}`);
+  if (body.result === undefined || body.result === null) throw new Error("polygon rpc: empty result");
+  return body.result;
+}
 
 // Spike-verified token addresses (poly-spike/balance.mjs, checked against production 2026-08-12):
 // the bridge lands USDC.e; only pUSD is tradeable collateral (CLOB reports 0 on unwrapped USDC.e).
@@ -12,25 +62,38 @@ export const USDCE_ADDRESS = "0x2791bca1f2de4661ed88a30c99a7a9449aa84174";
 
 export type BalanceReader = (token: string, holder: string) => Promise<bigint>;
 
-// One fetch+parse for every read — same errors, same 10s bound, whatever the method. Under a caller's
-// wall-clock budget (withDeadline, src/lib/deadline.ts) a spent budget refuses the call and a live one
-// clamps the bound: the settle sweep's chain probes (up to 25 × 3 calls × 10 s) would otherwise
-// outlast the poller's 180 s heartbeat under an RPC outage, exactly as the Gamma walk did on 2026-09-02.
+// One read, whatever the method: the endpoints above in order, each under the same 10 s bound. Under
+// a caller's wall-clock budget (withDeadline, src/lib/deadline.ts) a spent budget refuses the next
+// attempt and a live one clamps the bound: the settle sweep's chain probes (up to 25 × 3 calls × 10 s)
+// would otherwise outlast the poller's 180 s heartbeat under an RPC outage, as the Gamma walk did on
+// 2026-09-02 — failover must never turn one outage into three timeouts per call.
 async function rpc(method: string, params: unknown[]): Promise<unknown> {
-  const left = deadlineLeftMs();
-  if (left !== undefined && left <= 0) throw new Error(`time budget exhausted before polygon rpc ${method}`);
-  const res = await fetch(RPC, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-    signal: AbortSignal.timeout(boundedTimeoutMs(10_000)),
-  });
-  if (!res.ok) throw new Error(`polygon rpc ${res.status}`);
-  const body = (await res.json()) as { result?: unknown; error?: { message?: string } };
-  if (body.error || body.result === undefined || body.result === null) {
-    throw new Error(`polygon rpc: ${body.error?.message ?? "empty result"}`);
+  let lastErr: Error | null = null;
+  for (const url of RPC_URLS) {
+    const left = deadlineLeftMs();
+    if (left !== undefined && left <= 0) throw new Error(`time budget exhausted before polygon rpc ${method}`);
+    if ((downUntil.get(url) ?? 0) > Date.now()) continue;
+    if (method === "eth_getLogs" && noWideLogs.has(url)) continue;
+    try {
+      return await rpcOnce(url, method, params);
+    } catch (e) {
+      const err = e as Error;
+      if (err instanceof RpcTransportError) {
+        downUntil.set(url, Date.now() + COOLDOWN_MS);
+        console.warn(`[polygon] ${hostOf(url)} ${method}: ${err.message} — failing over`);
+        lastErr = new Error(`polygon rpc ${err.message}`);
+        continue;
+      }
+      if (method === "eth_getLogs" && LOGS_RANGE_REFUSED.test(err.message)) {
+        noWideLogs.add(url);
+        console.warn(`[polygon] ${hostOf(url)} refuses this eth_getLogs range — not used for logs any more`);
+        lastErr = err;
+        continue;
+      }
+      throw err; // the chain answered (a revert, a bad param): failing over would only repeat it
+    }
   }
-  return body.result;
+  throw lastErr ?? new Error(`polygon rpc: no endpoint available for ${method}`);
 }
 
 async function ethCall(to: string, data: string): Promise<string> {
