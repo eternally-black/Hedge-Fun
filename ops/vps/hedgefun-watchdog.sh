@@ -77,6 +77,32 @@ budget_ok() { # budget_ok <key> <max> <window_secs>
 }
 budget_spend() { now >> "$STATE_DIR/restarts.$1"; }
 
+# --- orphaned docker-proxy reaper ---
+# When dockerd cannot clean up a container ("cannot delete running task ... failed
+# precondition", what a stalled host node produces), its docker-proxy keeps the host port
+# bound. Every later start of the real service then fails with "address already in use",
+# and docker leaves the container running but attached to NO network — which is why the
+# zero-network case below is treated as broken. On 2026-09-08 an orphan on :443 kept the
+# site dark for 14 h after the host recovered. Only a proxy whose host port no running
+# container claims is killed; a live mapping is never touched.
+reap_orphan_proxies() {
+  local claimed pid args hostport killed=0
+  claimed=$(docker ps -q | xargs -r docker inspect \
+      -f '{{range $p, $b := .NetworkSettings.Ports}}{{range $b}}{{.HostPort}} {{end}}{{end}}' 2>/dev/null \
+    | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -u)
+  while read -r pid args; do
+    hostport=$(printf '%s' "$args" | sed -n 's/.*-host-port \([0-9]\{1,\}\).*/\1/p')
+    [ -n "$hostport" ] || continue
+    printf '%s\n' "$claimed" | grep -qx "$hostport" && continue
+    kill "$pid" 2>/dev/null && killed=$((killed + 1))
+  done < <(pgrep -a docker-proxy 2>/dev/null)
+  if [ "$killed" -gt 0 ]; then
+    sleep 2   # let the kernel release the listening socket before the recreate binds it
+    notify WARN "reaped $killed orphaned docker-proxy holding a host port no container claims"
+  fi
+  return 0
+}
+
 # --- step 0: the daemon itself ---
 if ! docker info >/dev/null 2>&1; then
   report_broken dockerd "dockerd is not responding — attempting systemctl restart docker"
@@ -96,20 +122,25 @@ SERVICES=(
 svc_dir() { [ "$1" = hedgefun ] && echo "$HEDGEFUN_DIR" || echo "$GLITCHTIP_DIR"; }
 
 check_service() { # check_service <proj> <svc> <class>; returns 0 if ok
-  local proj="$1" svc="$2" class="$3" dir cid state status health key="$1.$2"
+  local proj="$1" svc="$2" class="$3" dir cid state status health nets key="$1.$2"
   dir=$(svc_dir "$proj")
   [ -f "$dir/docker-compose.yml" ] || return 0   # stack not installed yet — not an error
   cid=$(docker ps -a --filter "label=com.docker.compose.project=$proj" \
                      --filter "label=com.docker.compose.service=$svc" -q | head -1)
   if [ -n "$cid" ]; then
-    state=$(docker inspect -f '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid" 2>/dev/null || echo "gone|none")
+    state=$(docker inspect -f '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{len .NetworkSettings.Networks}}' "$cid" 2>/dev/null || echo "gone|none|0")
   else
-    state="missing|none"
+    state="missing|none|0"
   fi
-  status="${state%%|*}"; health="${state##*|}"
+  status="${state%%|*}"; nets="${state##*|}"
+  health="${state#*|}"; health="${health%%|*}"
 
-  # healthy cases: running + (healthy|none|starting). "restarting" = docker is on it, alert only.
-  if [ "$status" = running ] && { [ "$health" = healthy ] || [ "$health" = none ] || [ "$health" = starting ]; }; then
+  # healthy cases: running + attached + (healthy|none|starting). "restarting" = docker is on it,
+  # alert only. Every service here declares a network, so zero networks is never a healthy state:
+  # it is what a container that failed to start leaves behind, and its healthcheck can still pass
+  # (caddy's did for 14 h on 2026-09-08) because a check inside the container never crosses it.
+  if [ "$status" = running ] && [ "${nets:-0}" -gt 0 ] \
+     && { [ "$health" = healthy ] || [ "$health" = none ] || [ "$health" = starting ]; }; then
     report_ok "$key" "$proj/$svc recovered"
     return 0
   fi
@@ -119,7 +150,11 @@ check_service() { # check_service <proj> <svc> <class>; returns 0 if ok
 
   local action=""
   case "$status" in
-    running)  action="restart" ;;               # running but unhealthy
+    running)
+      # No network => the start failed (usually a host port still held by an orphaned
+      # docker-proxy). `docker restart` re-runs the same failing bind, so free the port
+      # and recreate instead.
+      if [ "${nets:-0}" -eq 0 ]; then action="recreate"; else action="restart"; fi ;;
     paused)   action="unpause" ;;
     restarting) action="" ;;                    # already being restarted by policy
     *)        action="up" ;;                    # exited/dead/created/missing
@@ -134,11 +169,18 @@ check_service() { # check_service <proj> <svc> <class>; returns 0 if ok
     if budget_ok "$key" "$max" "$win"; then
       budget_spend "$key"
       local done
-      case "$action" in restart) done=restarted ;; unpause) done=unpaused ;; *) done="brought up" ;; esac
       case "$action" in
-        restart) docker restart "$cid" >/dev/null 2>&1 || true ;;
-        unpause) docker unpause "$cid" >/dev/null 2>&1 || true ;;
-        up)      ( cd "$dir" && docker compose up -d "$svc" >/dev/null 2>&1 ) || true ;;
+        restart)  done=restarted ;;
+        unpause)  done=unpaused ;;
+        recreate) done="recreated after freeing its host port" ;;
+        *)        done="brought up" ;;
+      esac
+      case "$action" in
+        restart)  docker restart "$cid" >/dev/null 2>&1 || true ;;
+        unpause)  docker unpause "$cid" >/dev/null 2>&1 || true ;;
+        recreate) reap_orphan_proxies
+                  ( cd "$dir" && docker compose up -d --force-recreate "$svc" >/dev/null 2>&1 ) || true ;;
+        up)       ( cd "$dir" && docker compose up -d "$svc" >/dev/null 2>&1 ) || true ;;
       esac
       # Every self-heal is said out loud, budget count included. report_ok below speaks only on the
       # way out of a REPORTED break, and a container that is back to "starting" within 10 s is never
@@ -150,7 +192,9 @@ check_service() { # check_service <proj> <svc> <class>; returns 0 if ok
                       --filter "label=com.docker.compose.service=$svc" -q | head -1)
       if [ -n "$cid" ]; then
         health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid" 2>/dev/null || echo none)
-        if [ "$health" = healthy ] || [ "$health" = none ] || [ "$health" = starting ]; then
+        nets=$(docker inspect -f '{{len .NetworkSettings.Networks}}' "$cid" 2>/dev/null || echo 0)
+        if [ "${nets:-0}" -gt 0 ] \
+           && { [ "$health" = healthy ] || [ "$health" = none ] || [ "$health" = starting ]; }; then
           report_ok "$key" "$proj/$svc was $status/unhealthy — $done, now up"
           return 0
         fi
