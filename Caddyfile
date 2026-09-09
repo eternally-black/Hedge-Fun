@@ -5,5 +5,15 @@ app.hedgeyour.fun {
 	reverse_proxy app:3000
 }
 
+# Container-internal probe, never published to the host. The healthcheck has to traverse
+# caddy -> app to prove the public path works: on 2026-09-08 a caddy that failed to bind
+# :443 came up attached to NO docker network, could not resolve `app`, and reset every
+# inbound TLS connection — while its admin API on :2019 answered happily and kept the
+# container "healthy" for 14 hours. Plain HTTP on purpose: busybox wget cannot send SNI,
+# so an https probe to 127.0.0.1 dies on Caddy's cert selection, not on a real fault.
+:8080 {
+	reverse_proxy app:3000
+}
+
 # GlitchTip + Uptime Kuma live on VPS2 (ops/vps2/) with their own Caddy — monitoring must
 # not share VPS1's failure domain. No monitoring ingress here on purpose.

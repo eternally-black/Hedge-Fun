@@ -134,9 +134,14 @@ services:
     networks:
       - internal
     logging: *bounded-logs
-    # Admin API answering with a loaded config proves the process is alive AND serving.
+    # A request that actually traverses caddy -> app (the :8080 site in the Caddyfile, never
+    # published). The old probe hit caddy's own admin API on :2019, which answers even in a
+    # container with no docker network and no bound host port — exactly the state that kept
+    # the site dark and "healthy" for 14 h on 2026-09-08. This one fails the moment the
+    # upstream is unresolvable, so the watchdog gets told. It does couple caddy's health to
+    # the app's: a down app also marks caddy unhealthy, which costs one bounded restart.
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:2019/config/"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3
