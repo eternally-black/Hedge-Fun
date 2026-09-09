@@ -84,7 +84,7 @@ async function tick(env) {
   const downForMs = now - (downSince || now);
   if (downForMs >= DOWN_ALERT_AFTER_MS && (!lastAlertAt || now - lastAlertAt > ALERT_COOLDOWN_MS)) {
     await env.STATE.put("lastAlertAt", iso(now));
-    await tg(env, `🚨 app.hedgeyour.fun unreachable at network level since ${iso(downSince || now)}`);
+    await tg(env, `🚨 app.hedgeyour.fun unreachable at network level since ${iso(downSince || now)} — ${leverStatus(env)}`);
   }
   if (env.AUTO_REBOOT === "true" && downForMs >= REBOOT_AFTER_MS &&
       (!lastRebootAt || now - lastRebootAt >= REBOOT_LATCH_MS)) {
@@ -93,18 +93,40 @@ async function tick(env) {
   await ping(env);
 }
 
-// Reboot lever. All gates are checked by the caller; here we only confirm the Contabo
-// instance is still running (a VM already restarting/stopped must not be power-cycled),
-// latch FIRST, then request the restart. A KV write failure aborts the reboot — the
-// latch is what prevents a double restart, so it must land before the action.
+// Whether the lever can actually fire belongs in the outage alert itself: reading
+// "unreachable at network level", the on-call has to know in that first message whether to
+// wait for the automation or go open the panel. On 2026-09-08 nothing was armed and nothing
+// said so.
+function leverStatus(env) {
+  if (env.AUTO_REBOOT !== "true") return `auto-reboot DISARMED (AUTO_REBOOT=${env.AUTO_REBOOT ?? "unset"}) — power-cycle it yourself`;
+  if (!env.CONTABO_INSTANCE_ID) return "auto-reboot armed but CONTABO_INSTANCE_ID is unset — it will NOT fire";
+  return `auto-reboot armed, fires at ${REBOOT_AFTER_MS / 60_000} min down`;
+}
+
+// States that mean a deliberate operation is under way: power-cycling then destroys work
+// someone started. Every OTHER state — including "unknown", "error" and a state we could
+// not read — is a reason to try, because the host has already been dark for REBOOT_AFTER_MS.
+// This used to demand exactly "running"; on 2026-09-08 Contabo reported "Unknown" for 14 h,
+// which is precisely the case the lever exists for, and it stood down.
+const DO_NOT_POWER_CYCLE = new Set([
+  "stopped", "installing", "provisioning", "manual_provisioning",
+  "rescue", "reset_password", "uninstalled",
+]);
+
+// Reboot lever. All gates are checked by the caller; here we only stand down for a
+// deliberate operation, latch FIRST, then request the restart. A KV write failure aborts
+// the reboot — the latch is what prevents a double restart, so it must land before the action.
 async function maybeReboot(env) {
   const instanceId = env.CONTABO_INSTANCE_ID;
-  if (!instanceId) return;
+  if (!instanceId) {
+    await tg(env, "⚠️ AUTO_REBOOT is armed but CONTABO_INSTANCE_ID is unset — the lever cannot fire");
+    return;
+  }
   try {
     const token = await contaboToken(env);
     const status = await instanceStatus(env, token, instanceId);
-    if (status !== "running") {
-      await tg(env, `Contabo API error: instance state is "${status}" (not running) — not power-cycling`);
+    if (DO_NOT_POWER_CYCLE.has(String(status || "").toLowerCase())) {
+      await tg(env, `Contabo: instance state is "${status}" — a deliberate operation is under way, not power-cycling`);
       return;
     }
     try {

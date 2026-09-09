@@ -34,6 +34,19 @@ INSTANCE_ID="$(envval CONTABO_INSTANCE_ID)"
 notify() { bash "$NOTIFY" "$1" "$2" || true; }
 now() { date +%s; }
 
+# The lever's readiness belongs in the outage alert itself. On 2026-09-08 AUTO_REBOOT was 0
+# AND CONTABO_INSTANCE_ID was empty, so nothing could ever have fired — and no one reading
+# "VPS1 UNREACHABLE" could tell whether to wait for the automation or go open the panel.
+lever_status() {
+  if [ "$AUTO_REBOOT" != "1" ]; then
+    printf 'auto-reboot DISARMED (AUTO_REBOOT=%s) — power-cycle it yourself' "${AUTO_REBOOT:-unset}"
+  elif [ -z "$INSTANCE_ID" ]; then
+    printf 'auto-reboot armed but CONTABO_INSTANCE_ID is empty — it will NOT fire'
+  else
+    printf 'auto-reboot armed, fires at 10 min down'
+  fi
+}
+
 # Secrets (Contabo credentials, the bearer token, the push URL) go to curl through a config
 # file on stdin — never argv, which is world-readable via /proc/<pid>/cmdline. Config values
 # are quoted, so backslash and double quote have to be escaped for curl's parser.
@@ -71,7 +84,7 @@ else
   # >=2 consecutive probes (~4 min at the 2-min cadence) before the first alert.
   if [ "$down_for" -ge 240 ] && [ $(( t - last_alert )) -ge 1800 ]; then
     echo "$t" > "$ALERT_F"
-    notify CRIT "VPS1 UNREACHABLE at network level for $(( down_for / 60 )) min ($HEALTH_URL)"
+    notify CRIT "VPS1 UNREACHABLE at network level for $(( down_for / 60 )) min ($HEALTH_URL) — $(lever_status)"
   fi
 
   if [ "$AUTO_REBOOT" = "1" ] && [ "$down_for" -ge 600 ] && [ -n "$INSTANCE_ID" ]; then
@@ -96,9 +109,16 @@ else
             | curl -sS --max-time 15 -K - \
               -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
             | grep -o '"status" *: *"[^"]*"' | head -1 | cut -d'"' -f4) || state=""
-          if [ "$state" != "running" ]; then
-            notify WARN "AUTO_REBOOT: instance state is '${state:-unknown}', not 'running' — leaving it alone"
-          else
+          # Stand down only when the state says a deliberate operation is under way —
+          # power-cycling a VM mid-install or in rescue destroys work someone started. Every
+          # other state, INCLUDING "unknown", "error" and a state we could not read, is a
+          # reason to try: the VM has already been dark for 10 minutes. The old check demanded
+          # exactly "running", and on 2026-09-08 Contabo reported "Unknown" for 14 hours —
+          # precisely the case this lever exists for, and it stood down.
+          case "$state" in
+            stopped|installing|provisioning|manual_provisioning|rescue|reset_password|uninstalled)
+            notify WARN "AUTO_REBOOT: instance state is '$state' — a deliberate operation is under way, not power-cycling" ;;
+          *)
             echo "$t" > "$LATCH_F"   # latch BEFORE the action
             code=$(printf 'url = "%s"\nheader = "Authorization: Bearer %s"\n' \
                 "https://api.contabo.com/v1/compute/instances/$INSTANCE_ID/actions/restart" "$(cfgesc "$token")" \
@@ -108,8 +128,8 @@ else
               notify CRIT "AUTO_REBOOT: Contabo restart of VPS1 requested (201 = accepted, not yet recovered). Next auto-reboot no sooner than 6h."
             else
               notify CRIT "AUTO_REBOOT: Contabo restart call returned $code — check the panel NOW"
-            fi
-          fi
+            fi ;;
+          esac
         fi
       else
         notify WARN "AUTO_REBOOT=1 but Contabo credentials incomplete in $ENV_FILE"
