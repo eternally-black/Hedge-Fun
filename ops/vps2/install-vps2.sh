@@ -27,6 +27,8 @@ cp "$OPS_ROOT/notify.sh"                "$OPS/ops/notify.sh"
 cp "$OPS_ROOT/vps/hedgefun-watchdog.sh" "$OPS/ops/vps/hedgefun-watchdog.sh"
 cp "$SRC/uptime-guard.sh"               "$OPS/ops/uptime-guard.sh"
 cp "$SRC/backup-pull.sh"                "$OPS/ops/backup-pull.sh"
+cp "$SRC/replica-check.sh"              "$OPS/ops/replica-check.sh"
+cp "$SRC/standby-setup.sh"              "$OPS/ops/standby-setup.sh"
 if [ ! -f "$OPS/.env" ]; then
   cp "$SRC/ops-env.example" "$OPS/.env"
   chmod 600 "$OPS/.env"
@@ -41,6 +43,21 @@ for unit in "$SRC"/systemd/*.service "$SRC"/systemd/*.timer; do
 done
 [ "$changed" -eq 1 ] && systemctl daemon-reload
 systemctl enable --now vps2-watchdog.timer uptime-guard.timer backup-pull.timer >/dev/null 2>&1
+
+# --- streaming standby -------------------------------------------------------
+# The stack file is always refreshed; the data directory and the tunnel key are not touched.
+# Nothing here starts replicating on its own — standby-setup.sh does that once, deliberately,
+# after the key is authorised on VPS1 and the replication role exists.
+mkdir -p /opt/standby
+cp "$SRC/standby-compose.yml" /opt/standby/docker-compose.yml
+if [ ! -f /root/.ssh/pg_replica ]; then
+  ssh-keygen -t ed25519 -N "" -f /root/.ssh/pg_replica -C "vps2-pg-replica" >/dev/null
+  echo ">>> Generated /root/.ssh/pg_replica. On VPS1, append to /root/.ssh/authorized_keys"
+  echo "    (port forwarding to the database port and nothing else — no shell, no other port):"
+  echo "    restrict,port-forwarding,permitopen=\"127.0.0.1:5432\" $(cat /root/.ssh/pg_replica.pub)"
+fi
+systemctl enable --now pg-tunnel.service >/dev/null 2>&1 || true
+systemctl enable --now replica-check.timer >/dev/null 2>&1
 
 # --- backup-pull ssh key -----------------------------------------------------
 if [ ! -f /root/.ssh/backup_pull ]; then

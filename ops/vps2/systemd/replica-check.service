@@ -1,0 +1,8 @@
+[Unit]
+Description=Is the VPS2 standby actually streaming from VPS1 (a live container proves nothing)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash /opt/ops/ops/replica-check.sh

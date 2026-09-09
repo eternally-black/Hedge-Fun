@@ -1,0 +1,21 @@
+[Unit]
+Description=SSH tunnel to VPS1's Postgres (the standby replica streams through it)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Restart=always
+RestartSec=10
+# -N: open the forward, run nothing. ExitOnForwardFailure turns "local port already taken"
+# into a hard failure instead of a tunnel that silently forwards nothing and a replica that
+# silently stops streaming. On VPS1 this key is pinned to permitopen="127.0.0.1:5432", so it
+# can open this one forward and nothing else — no shell, no other port.
+# Host and port are not secrets; they are the same VPS1 the rest of ops/vps2 already names.
+ExecStart=/usr/bin/ssh -NT \
+  -o ExitOnForwardFailure=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=3 \
+  -o StrictHostKeyChecking=yes -o BatchMode=yes \
+  -i /root/.ssh/pg_replica -p 49222 \
+  -L 127.0.0.1:15432:127.0.0.1:5432 root@84.247.169.158
+
+[Install]
+WantedBy=multi-user.target

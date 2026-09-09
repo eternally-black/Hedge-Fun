@@ -23,6 +23,12 @@ BACKUP_PULL_SOURCE=
 BACKUP_PULL_PORT=49222
 BACKUP_PULL_HC_URL=
 
+# --- streaming standby ---
+# Password of the `replicator` role created on VPS1's Postgres. Read only by
+# standby-setup.sh, for the one-time base backup; after that the standby keeps it in its own
+# primary_conninfo. Rotating it means editing /opt/standby/data/postgresql.auto.conf too.
+PG_REPLICA_PASSWORD=
+
 # --- vps2 watchdog ---
 WATCHDOG_OBSERVE=1
 WATCHDOG_HC_URL=

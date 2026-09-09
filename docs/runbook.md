@@ -164,6 +164,44 @@ failed drill is a failed backup — CRIT to Telegram and no dead-man ping. `pg_r
 stays as the cheap nightly gate; it only parses the archive TOC and exits 0 on a dump whose
 DATA section is corrupt, which is why the weekly drill exists.
 
+### Streaming standby on VPS2 (covers the gap between dumps)
+
+The nightly dump means a total loss of VPS1 costs up to 24 h of transactions. A physical
+streaming standby on VPS2 closes that to seconds, and — unlike a WAL archive — proves the
+copy is replayable every second instead of the morning someone needs it.
+
+Shape: VPS1 publishes Postgres on `127.0.0.1:5432` only; VPS2 reaches it through
+`pg-tunnel.service`, an SSH tunnel whose key is pinned on VPS1 to
+`permitopen="127.0.0.1:5432"` — no shell, no other port, and replication never crosses the
+internet in clear text. The standby runs from `/opt/standby` with host networking, listening
+on `127.0.0.1:5433` only. The primary bounds `max_slot_wal_keep_size=4GB`, so a standby that
+stays away cannot pin WAL until VPS1's disk fills; the slot is invalidated instead and the
+standby needs a fresh base backup (seconds, at this size).
+
+One-time bring-up, in order:
+
+1. Deploy the compose change to VPS1 (publishes the loopback port; recreates `db`).
+2. On VPS2 run `install-vps2.sh` — it generates `/root/.ssh/pg_replica` and prints the
+   `authorized_keys` line. Append that line on VPS1.
+3. On VPS1, once:
+   `CREATE ROLE replicator WITH REPLICATION LOGIN PASSWORD '<pw>';`
+   `SELECT pg_create_physical_replication_slot('standby_vps2');`
+4. Put the same `<pw>` in `/opt/ops/.env` as `PG_REPLICA_PASSWORD` on VPS2.
+5. `bash /opt/ops/ops/standby-setup.sh` — base backup, then the stack comes up in recovery.
+
+Watching it: `replica-check.timer` runs every 5 min and is the only thing that can tell you
+replication has stopped. The container being up proves nothing — a standby whose WAL
+receiver died still answers read-only queries from data that stopped moving, and every
+liveness check calls it healthy. The watchdog covers the container; `replica-check.sh`
+covers `pg_stat_wal_receiver`. Check by hand with
+`bash /opt/ops/ops/replica-check.sh -v`.
+
+**Promotion is deliberate and manual.** `docker compose -f /opt/standby/docker-compose.yml
+exec replica pg_ctl promote` makes the replica a primary; from that moment it diverges from
+VPS1 and there is no way back except a fresh base backup. Never promote to "check if it
+works" — `replica-check.sh` alerts on a promoted standby precisely because an accidental
+promotion looks like nothing is wrong.
+
 ### Encryption (operator step, one time)
 
 Dumps contain user emails, balances and the encrypted CLOB-credential blobs, and they leave

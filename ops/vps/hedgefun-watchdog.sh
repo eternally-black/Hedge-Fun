@@ -12,6 +12,7 @@ set -u
 
 HEDGEFUN_DIR="${HEDGEFUN_DIR:-/opt/hedgefun}"
 GLITCHTIP_DIR="${GLITCHTIP_DIR:-/opt/glitchtip}"
+STANDBY_DIR="${STANDBY_DIR:-/opt/standby}"
 STATE_DIR="${STATE_DIR:-/var/lib/hedgefun}"
 NOTIFY="$HEDGEFUN_DIR/ops/notify.sh"
 ENV_FILE="$HEDGEFUN_DIR/.env"
@@ -117,9 +118,19 @@ SERVICES=(
   "hedgefun:app:std" "hedgefun:poller:std" "hedgefun:db:db" "hedgefun:caddy:std"
   "glitchtip:web:std" "glitchtip:postgres:db" "glitchtip:valkey:std" "glitchtip:tg-bridge:std"
   "glitchtip:worker:std" "glitchtip:kuma:std" "glitchtip:caddy:std"
+  # VPS2's streaming standby. db-class: a replica catching up must not be power-cycled.
+  # This only covers the container being alive — whether it is still STREAMING is
+  # replica-check.sh's job, and no liveness check can answer it.
+  "standby:replica:db"
 )
 
-svc_dir() { [ "$1" = hedgefun ] && echo "$HEDGEFUN_DIR" || echo "$GLITCHTIP_DIR"; }
+svc_dir() {
+  case "$1" in
+    hedgefun) echo "$HEDGEFUN_DIR" ;;
+    standby)  echo "$STANDBY_DIR" ;;
+    *)        echo "$GLITCHTIP_DIR" ;;
+  esac
+}
 
 check_service() { # check_service <proj> <svc> <class>; returns 0 if ok
   local proj="$1" svc="$2" class="$3" dir cid state status health nets key="$1.$2"
