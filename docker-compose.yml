@@ -11,10 +11,19 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
+    # A replication slot with no standby consuming it pins WAL forever and fills the disk.
+    # Bounded, the slot is invalidated instead and the standby needs a fresh basebackup —
+    # cheap at this database's size, and the primary is never the thing that dies.
+    command: ["postgres", "-c", "max_slot_wal_keep_size=4GB"]
     volumes:
       - pgdata:/var/lib/postgresql/data
     networks:
       - internal
+    # Loopback only — never reachable from outside the host. VPS2's standby reaches this
+    # through an SSH tunnel (ops/vps2/pg-tunnel.service), so replication traffic never
+    # crosses the internet in clear text and the port stays shut to everyone else.
+    ports:
+      - "127.0.0.1:5432:5432"
     # Bounded logs on EVERY service (not only daemon.json defaults): daemon defaults apply
     # only to newly-created containers, and db is almost never recreated.
     logging: &bounded-logs
@@ -22,7 +31,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-    # No ports: — never published to the host.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s

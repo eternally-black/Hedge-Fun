@@ -1,0 +1,35 @@
+# Physical streaming standby of VPS1's Postgres, installed at /opt/standby on VPS2.
+#
+# Why a live standby rather than WAL files on disk: it replays continuously, so the copy is
+# proven restorable every second instead of the morning someone needs it. The nightly dump
+# stays as the offsite backup — this covers the ~24 h of transactions between dumps, which
+# is what the 2026-09-08 outage would have cost if VPS1 had not come back.
+#
+# Host networking because the primary is reached through the SSH tunnel on 127.0.0.1:15432
+# (pg-tunnel.service). listen_addresses is pinned to loopback, so the replica itself is not
+# reachable from anywhere but this host — it holds the same money data as the primary.
+services:
+  replica:
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    restart: unless-stopped
+    network_mode: host
+    command: ["postgres", "-c", "listen_addresses=127.0.0.1", "-c", "port=5433", "-c", "hot_standby=on"]
+    # A bind mount, not a named volume: the basebackup is written by a throwaway container
+    # before this stack exists, and a path is unambiguous where a compose-prefixed volume
+    # name is not.
+    volumes:
+      - /opt/standby/data:/var/lib/postgresql/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # In recovery pg_isready answers once the standby accepts read-only connections, which
+    # is exactly the state we want to hold. It says nothing about replication lag — that is
+    # replica-check.sh's job, because a standby frozen an hour behind is still "ready".
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5433"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
