@@ -26,7 +26,7 @@ const nextConfig: NextConfig = {
           {
             key: "Content-Security-Policy-Report-Only",
             value:
-              "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https://auth.privy.io https://*.privy.io https://clob.polymarket.com https://gamma-api.polymarket.com https://bridge.polymarket.com https://polymarket.com https://relayer-v2.polymarket.com https://polygon-bor-rpc.publicnode.com wss://*.privy.io; frame-src https://auth.privy.io https://*.privy.io; frame-ancestors 'none'; report-uri /api/csp-report",
+              "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https://auth.privy.io https://*.privy.io https://clob.polymarket.com https://gamma-api.polymarket.com https://bridge.polymarket.com https://polymarket.com https://relayer-v2.polymarket.com https://polygon-bor-rpc.publicnode.com wss://*.privy.io https://*.walletconnect.com wss://*.walletconnect.com https://*.walletconnect.org wss://*.walletconnect.org; frame-src https://auth.privy.io https://*.privy.io; frame-ancestors 'none'; report-uri /api/csp-report",
           },
         ],
       },
