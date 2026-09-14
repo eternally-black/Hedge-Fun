@@ -5,6 +5,7 @@ import { useLinkAccount, usePrivy } from "@privy-io/react-auth";
 import { type Me, num, usd } from "../ui";
 import { XIcon, TelegramIcon } from "../icons";
 import { RealModeCard } from "./RealModeCard";
+import type { NavKey } from "./BottomNav";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
@@ -19,7 +20,14 @@ const SUPPORT_CONTACTS = [
 // placeholder until /api/history. (No user-facing leaderboard — ranking is admin-only.)
 // Prediction history moved OUT of here and into the bottom nav's second slot: it is the thing a
 // user checks most often after swiping, and it was two taps deep behind a profile screen.
-export function ProfileScreen({ me, api, onRefresh, onLogout, onToast, pusdMicro }: { me: Me | null; api: Api; onRefresh: () => Promise<void>; onLogout: () => void; onToast: (msg: string) => void; pusdMicro: string | null }) {
+// Vault, History and Invite left the bottom bar (four tabs max) and are reached from here.
+const MORE: { key: NavKey; glyph: string; label: string; hint: string }[] = [
+  { key: "history", glyph: "≡", label: "History", hint: "Open and settled calls" },
+  { key: "vault", glyph: "◆", label: "Vault", hint: "Shards and artifacts" },
+  { key: "invite", glyph: "＋", label: "Invite", hint: "Earn 20% of a friend's points" },
+];
+
+export function ProfileScreen({ me, api, onRefresh, onLogout, onToast, pusdMicro, onNav }: { me: Me | null; api: Api; onRefresh: () => Promise<void>; onLogout: () => void; onToast: (msg: string) => void; pusdMicro: string | null; onNav: (s: NavKey) => void }) {
   const handle = me?.user.twitter ?? (me?.user.email ? me.user.email.split("@")[0] : "degen");
   const initials = handle.slice(0, 2).toUpperCase();
   const [resetting, setResetting] = useState(false);
@@ -118,6 +126,19 @@ export function ProfileScreen({ me, api, onRefresh, onLogout, onToast, pusdMicro
         <Tile label="Virtual $" value={me ? usd(me.balanceCents) : "—"} color="var(--yes)" />
         <Tile label="Streak" value={me ? `🔥 ${me.streak.level}d` : "—"} color="var(--text)" />
         <Tile label="◆ Shards" value={me ? `${me.shards}/${me.shardsPerArtifact}` : "—"} color="var(--gold)" />
+      </div>
+
+      <div style={{ marginTop: 16, background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 14, overflow: "hidden" }}>
+        {MORE.map((m, i) => (
+          <button key={m.key} type="button" onClick={() => onNav(m.key)} style={{ margin: 0, font: "inherit", width: "100%", background: "none", border: "none", borderTop: i ? "1px solid var(--line)" : "none", color: "var(--text)", display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", cursor: "pointer", textAlign: "left" }}>
+            <span aria-hidden="true" style={{ fontSize: 18, width: 24, textAlign: "center", color: "var(--muted)" }}>{m.glyph}</span>
+            <span style={{ minWidth: 0, flex: 1 }}>
+              <span style={{ display: "block", fontSize: 14, fontWeight: 700 }}>{m.label}</span>
+              <span style={{ display: "block", fontSize: 12, color: "var(--muted)" }}>{m.hint}</span>
+            </span>
+            <span aria-hidden="true" style={{ color: "var(--muted)" }}>›</span>
+          </button>
+        ))}
       </div>
 
       {me?.dev && (

@@ -749,7 +749,7 @@ function App() {
         {effectiveScreen === "gm" && <GmScreen me={me} busy={busy} onGM={gm} onEnterDeck={goDeck} onRevive={revive} />}
         {effectiveScreen === "vault" && <VaultScreen me={me} api={api} onRefresh={refresh} previewCard={top ?? next} />}
         {effectiveScreen === "invite" && <InviteScreen me={me} />}
-        {effectiveScreen === "you" && <ProfileScreen me={me} api={api} onRefresh={refresh} onLogout={doLogout} onToast={flashToast} pusdMicro={realPusdMicro} />}
+        {effectiveScreen === "you" && <ProfileScreen me={me} api={api} onRefresh={refresh} onLogout={doLogout} onToast={flashToast} pusdMicro={realPusdMicro} onNav={navTo} />}
         {effectiveScreen === "notifications" && <NotificationsScreen api={api} onSeen={markResultsSeen} onReplay={replayReveal} onOpenStock={() => setScreen("portfolio")} />}
         {effectiveScreen === "portfolio" && <PortfolioScreen api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} />}
       </div>

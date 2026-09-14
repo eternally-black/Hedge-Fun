@@ -3,21 +3,20 @@
 import { memo, useEffect, useState } from "react";
 import { type Screen } from "../ui";
 
-// "history" is not a screen: it opens the sheet that lists open and settled prediction calls. Hedge
-// is back in the bar (it is the Stocklana centrepiece: life situations → tokenized-stock legs), and
-// "portfolio" is the tokenized-stock holdings screen.
+// Four tabs (owner rule: never more than four): Deck, Hedge, Stocks (tokenized-stock holdings), You.
+// History (a sheet over the current screen), Vault and Invite are reached from the You screen.
+// "history" is not a screen: it opens the sheet that lists open and settled prediction calls.
 export type NavKey = Screen | "history";
 
 const ITEMS: { key: NavKey; glyph: string; label: string }[] = [
   { key: "deck", glyph: "⚡", label: "Deck" },
   { key: "hedge", glyph: "🛡", label: "Hedge" },
   { key: "portfolio", glyph: "▲", label: "Stocks" },
-  { key: "history", glyph: "≡", label: "History" },
   { key: "feed", glyph: "≋", label: "Feed" }, // DEV-ONLY (testing). Real users reach the feed via the post-cap Deck tab.
-  { key: "vault", glyph: "◆", label: "Vault" },
-  { key: "invite", glyph: "＋", label: "Invite" },
   { key: "you", glyph: "◉", label: "You" },
 ];
+// Screens that live behind the You tab keep it lit.
+const UNDER_YOU: ReadonlySet<Screen> = new Set<Screen>(["you", "vault", "invite"]);
 // NB: GM lives in the top HUD (the streak chip), not here. Deck and Feed share ONE tab — see below.
 
 // Time until the next 00:00 UTC — when the daily swipe cap (DailyCounter utcDay) rolls over and the
@@ -50,7 +49,7 @@ export const BottomNav = memo(function BottomNav({ screen, onNav, deckLocked, de
         const isDeck = it.key === "deck";
         const deckTimer = isDeck && deckLocked; // locked deck → show the reset countdown, still tappable (→ feed)
         // The Deck tab stays lit while you're on the deck OR (for users) the feed it routes into.
-        const active = isDeck ? screen === "deck" || (screen === "feed" && !devFeed) : screen === it.key;
+        const active = isDeck ? screen === "deck" || (screen === "feed" && !devFeed) : it.key === "you" ? UNDER_YOU.has(screen) : screen === it.key;
         const label = deckTimer ? resetIn : it.label;
         return (
           <button
