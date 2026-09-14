@@ -8,13 +8,17 @@ import type { RealCtx } from "@/lib/real-client";
 import type { Me } from "./ui";
 
 export function useRealCtx(me: Me | null): { ctx: RealCtx | null; walletReady: boolean } {
-  const { wallets } = useWallets();
+  const { wallets, ready } = useWallets();
   const { getAccessToken } = usePrivy();
   // useWallets() is the EVM list (Solana lives in useSolanaWallets), so the embedded EVM wallet is
   // the Privy-issued entry. It appears a beat after login, hence the null until it does.
   const embedded = wallets.find((w) => w.walletClientType === "privy");
 
-  if (!embedded) return { ctx: null, walletReady: false };
+  // `ready` is Privy's own "the wallets are ready to be used". Before it, an entry can already be
+  // listed while its signing proxy is still coming up, and the first signature — which is what the
+  // wallet setup asks for — throws from inside the SDK ("Wallet proxy not initialized"). Holding the
+  // ctx back keeps the button at "Waiting for wallet…" for that beat instead of a failed setup.
+  if (!ready || !embedded) return { ctx: null, walletReady: false };
   return {
     ctx: {
       wallet: embedded,

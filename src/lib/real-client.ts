@@ -14,6 +14,7 @@ import {
 } from "@polymarket/client/actions";
 import { privySigner, rehydrateBigints, type EvmWalletLike } from "./real-signer";
 import { assertRelayPayload } from "./relay-guard";
+import { reported, step } from "./client-report";
 
 export type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 export type RealCtx = {
@@ -69,26 +70,36 @@ export async function getRealClient(api: Api, ctx: RealCtx): Promise<SecureClien
   return client;
 }
 
+// Every stage is named: five of the six run on the device or against Polymarket, and a failure there
+// used to reach the server as nothing at all (client-report.ts). "client" covers the device signature
+// that derives the CLOB credentials — the first prompt the wallet ever gets, and where a Privy wallet
+// that is not ready yet throws.
 export async function provisionReal(api: Api, ctx: RealCtx): Promise<{ depositWalletAddress: string }> {
-  const client = await getRealClient(api, ctx);
+  return reported(api, "real/provision", async () => {
+    const client = await step("client", () => getRealClient(api, ctx));
 
-  if (!(await isWalletDeployed(client))) {
-    const handle = await deployDepositWallet(client);
-    await handle.wait();
-  }
+    if (!(await step("deployed-check", () => isWalletDeployed(client)))) {
+      const handle = await step("deploy", () => deployDepositWallet(client));
+      await step("deploy-wait", () => handle.wait());
+    }
 
-  // AccountIdentity: `wallet` is the deposit wallet, `signer` the embedded EOA. The server re-checks
-  // owner() on chain before it binds this address to the user.
-  const depositWalletAddress = client.account.wallet;
-  await api("/api/real/wallet", { method: "POST", body: JSON.stringify({ depositWalletAddress }) });
+    // AccountIdentity: `wallet` is the deposit wallet, `signer` the embedded EOA. The server re-checks
+    // owner() on chain before it binds this address to the user.
+    const depositWalletAddress = client.account.wallet;
+    await step("wallet-bind", () =>
+      api("/api/real/wallet", { method: "POST", body: JSON.stringify({ depositWalletAddress }) }),
+    );
 
-  const creds = client.credentials;
-  await api("/api/real/creds", {
-    method: "POST",
-    body: JSON.stringify({ key: creds.key, secret: creds.secret, passphrase: creds.passphrase }),
+    const creds = client.credentials;
+    await step("creds-store", () =>
+      api("/api/real/creds", {
+        method: "POST",
+        body: JSON.stringify({ key: creds.key, secret: creds.secret, passphrase: creds.passphrase }),
+      }),
+    );
+
+    return { depositWalletAddress };
   });
-
-  return { depositWalletAddress };
 }
 
 export type WorkflowKind = "APPROVALS" | "WRAP" | "REDEEM" | "WITHDRAW" | "BRIDGE_OUT";
@@ -185,13 +196,22 @@ export async function runRealWorkflow(
   kind: WorkflowKind,
   onStep?: (note: string) => void,
 ): Promise<WorkflowOutcome> {
-  return runRelayLoop(api, ctx, kind, { onStep });
+  return reported(api, `real/workflow/${kind}`, () => runRelayLoop(api, ctx, kind, { onStep }));
+}
+
+export function withdrawViaBridge(
+  api: Api,
+  ctx: RealCtx,
+  params: Parameters<typeof withdraw>[2],
+  onStep?: (note: string) => void,
+): ReturnType<typeof withdraw> {
+  return reported(api, "real/withdraw", () => withdraw(api, ctx, params, onStep));
 }
 
 // The money-out leg. /api/real/withdraw mints the single-purpose bridge address AND starts the run,
 // so the loop is entered with that first response — and with that address as the recipient the guard
 // pins, which is what stops a compromised server from retargeting the transfer.
-export async function withdrawViaBridge(
+async function withdraw(
   api: Api,
   ctx: RealCtx,
   params: { chainId: string; tokenAddress: string; recipient: string; amountMicro?: string },
@@ -245,7 +265,15 @@ async function geoVerdict(client: SecureClient): Promise<{ blocked: boolean; clo
   }
 }
 
-export async function placeRealOrder(
+export function placeRealOrder(
+  api: Api,
+  ctx: RealCtx,
+  input: Parameters<typeof placeOrder>[2],
+): ReturnType<typeof placeOrder> {
+  return reported(api, "real/order", () => placeOrder(api, ctx, input));
+}
+
+async function placeOrder(
   api: Api,
   ctx: RealCtx,
   // quotedPriceBp = the price the user actually saw on the card. The server refuses the intent if

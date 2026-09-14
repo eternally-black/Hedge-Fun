@@ -46,6 +46,10 @@ client-owned, cannot-be-automated setup. Two hosts: **VPS1** (the app,
 
 - `bash ops/notify.sh INFO "test from setup"` on each host → lands in Telegram.
 - GlitchTip: trigger a deliberate app error → tg-bridge delivers it.
+- Browser-side failures (Privy signing, the Polymarket SDK's deploy/derive/post — anything that dies
+  on the device before a route of ours runs) arrive via `POST /api/client-report`: one
+  `[client-report] {...}` line in `docker compose logs app` with `privyId`, `where`, `stage`, plus a
+  GlitchTip event tagged `route=client-report`. First place to look when a user says "it just failed".
 - Kuma: *Send test notification* on each monitor; stop the poller for 6 min → push
   dead-man fires; start it back.
 - Watchdog burn-in: the watchdog ships self-healing (`WATCHDOG_OBSERVE=0`); `1` is the

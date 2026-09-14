@@ -11,6 +11,7 @@ import { createPortal } from "react-dom";
 import type { Me } from "../ui";
 import { useRealCtx } from "../useRealCtx";
 import { provisionReal, runRealWorkflow } from "@/lib/real-client";
+import { failText } from "@/lib/client-report";
 import { APP_SURFACE_ID } from "../appSurface";
 import { DepositSheet } from "./DepositSheet";
 import { RealWithdrawCard } from "./RealWithdrawCard";
@@ -127,7 +128,9 @@ export function RealModeCard({ me, api, onRefresh, onToast, pusdMicro }: {
       await provisionReal(api, ctx);
       await onRefresh();
     } catch (e) {
-      setError((e as { body?: { error?: string } }).body?.error ?? "Setup failed. Try again.");
+      // The stage and the error's own words, not a fixed string: the 2026-09-13 failure was only ever
+      // seen as "Setup failed. Try again." in a screenshot, and that names none of the six stages.
+      setError(failText(e, "Setup failed"));
     } finally {
       setBusy(false);
     }
@@ -159,7 +162,7 @@ export function RealModeCard({ me, api, onRefresh, onToast, pusdMicro }: {
       }
       if (alive.current) await onRefresh();
     } catch (e) {
-      setError((e as { body?: { error?: string } }).body?.error ?? "Couldn't activate trading. Try again.");
+      setError(failText(e, "Couldn't activate trading"));
     } finally {
       setActivating(false);
     }

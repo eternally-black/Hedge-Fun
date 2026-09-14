@@ -22,6 +22,7 @@ import { type Card, type Me, type Screen } from "./ui";
 import { useRealCtx } from "./useRealCtx";
 import { APP_SURFACE_ID } from "./appSurface";
 import { placeRealOrder } from "@/lib/real-client";
+import { reportClientError } from "@/lib/client-report";
 import { realErrText, realResultText, RETRYABLE_REAL_ERRORS } from "./screens/real-copy";
 import { DECK_MIN_LEAD_MS, QUOTE_POLL_MS, STAKE_CENTS, REAL_BALANCE_POLL_MS } from "@/lib/config";
 import type { QuotesResponse, ResultRow, ResultsResponse, SwipeResponse } from "@/lib/api-types";
@@ -73,6 +74,21 @@ function ConfigNotice() {
 function App() {
   const { ready, authenticated, login, logout } = usePrivy();
   const api = useApi();
+  // Whatever escapes every catch — a Privy iframe promise, a wallet extension, an effect that threw —
+  // is reported the same way the money paths report theirs (client-report.ts). Without this the
+  // browser is the one place in the system that can fail and leave no record. Signed-in only: the
+  // route wants a bearer to name the user, and an anonymous page has no money path to fail on.
+  useEffect(() => {
+    if (!authenticated) return;
+    const onRejection = (ev: PromiseRejectionEvent) => void reportClientError(api, "window/unhandledrejection", ev.reason);
+    const onError = (ev: ErrorEvent) => void reportClientError(api, "window/error", ev.error ?? ev.message);
+    window.addEventListener("unhandledrejection", onRejection);
+    window.addEventListener("error", onError);
+    return () => {
+      window.removeEventListener("unhandledrejection", onRejection);
+      window.removeEventListener("error", onError);
+    };
+  }, [authenticated, api]);
   const [me, setMe] = useState<Me | null>(null);
   const [deck, setDeck] = useState<Card[]>([]);
   const [screen, setScreen] = useState<Screen>("deck");
