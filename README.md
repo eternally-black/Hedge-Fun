@@ -30,6 +30,14 @@ npm run verify:polymarket # hits live Polymarket, asserts field mapping
 npm run smoke             # full daily loop end-to-end on live DB + live API
 ```
 
+## Tokenized stocks (Stocklana)
+
+The deck also deals **xStocks** (tokenized US equities on Solana): swipe right = buy, left = pass.
+Paper buys hold virtual cash like a bet; **Buy on Solana** builds a Jupiter USDC→xStock swap that the
+user's own Phantom signs — the server books the lot only from the landed transaction. The Hedge tab
+turns a life cost ("$800 on flights this month") into a stock card, and profit alerts land in the inbox.
+Design, evidence and the verify-it-yourself commands: [docs/stocklana.md](docs/stocklana.md).
+
 ## Where the open product rules land (change in one place)
 
 | Open rule | File | Change |

@@ -54,6 +54,15 @@ Liquidity provider decision: **Polymarket** (over Kalshi) — final.
   random markets — labeled **discovery**, never presented as a hedge.
 - Scope guard (client-approved): blue-chip crypto + sports (+ entertainment when metadata allows).
 
+### S3 — Stock leg (Stocklana, 2026-09-14)
+- A life cost or a wallet holding maps to a **tokenized stock** (xStocks on Solana) instead of a market:
+  "$800 on flights this month" → DALx at 10 %; BTC in the wallet → GLDx at 10 %; an energy-basket move
+  (XLEx ≥ +5 %) → a **spotted** card for drivers. Deterministic keyword rules first (13 categories,
+  EN/RU/UK), the team matcher always runs, the NLU edge only when both miss — see
+  `src/lib/hedge/stock-rules.ts` (rules, triggers, copy) and `src/lib/hedge/stock.ts` (cards, accept).
+- Accept = a paper lot (`StockPosition`, source HEDGE) + the ACCEPT event in one transaction; the
+  on-chain path is the same Phantom + Jupiter swap as the deck. Kinds: `S1-stock`, `S3-stock`, `spotted`.
+
 ## 3. Architecture (bird's-eye)
 
 ```mermaid

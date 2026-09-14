@@ -260,13 +260,26 @@ export interface ResultsResponse {
   rows: ResultRow[];
   unreadCount: number;
   nextCursor: string | null; // opaque; pass back as ?cursor= for the next page; null = no more
+  stockAlerts?: StockAlertRow[]; // stock profit alerts (optional: older servers omit, older clients ignore)
 }
+
+// ─── Stock profit alerts — ride the results inbox (Stocklana) ─────────────────────────────────────
+// One row per OPEN tokenized-stock lot that crossed a profit tier (+2/+5/+10% of cost). Not a settled
+// result: nothing is booked and the reveal never plays it — it is a nudge. pnl* are LIVE at read time
+// (stored asset price); tierBp is what fired. Both modes are returned (stock alerts do not follow the
+// Polymarket real-mode switch); `mode` labels each row.
+export interface StockAlertRow { positionId: string; symbol: string; name: string; logoUrl: string | null; mode: "PAPER" | "REAL"; tierBp: number; pnlCents: number; pnlBp: number; costCents: number; alertedAt: string; seen: boolean }
+// POST /api/results/seen body (optional). NO body = bets only (what the shipped mobile client sends).
+// `stockAlerts` acknowledges exactly the (positionId, tierBp) pairs the client displayed — a tier that
+// fired after the client loaded is left unread.
+export interface SeenRequest { scope?: "bets" | "stocks" | "both"; stockAlerts?: { positionId: string; tierBp: number }[] }
 
 // ─── POST /api/results/seen ──────────────────────────────────────────────────────────────────────
 // Auth: Bearer. No body. Marks ALL of the user's unseen settled results as seen (idempotent —
 // only seenAt IS NULL rows are touched). Called when the reveal is dismissed or the inbox is opened.
 export interface SeenResponse {
-  markedSeen: number;
+  markedSeen: number; // bets marked seen (unchanged meaning)
+  markedStockAlertsSeen: number; // stock alert pairs acknowledged (0 unless the body listed them)
 }
 
 // ─── GET /api/me ───────────────────────────────────────────────────────────────────────────────
@@ -329,6 +342,9 @@ export interface MeResponse {
   // client skips the GM/reveal open ritual for new users — straight to the deck so they feel the
   // core loop first. Derived (streak.level===0 && !loginMarkedToday), no extra query.
   isNewUser: boolean;
+  // Open tokenized-stock lots with an unseen profit tier, BOTH modes — the bell adds it to
+  // unreadResults. Optional so a stale client never sees a phantom badge.
+  unreadStockAlerts?: number;
 }
 
 // ─── POST /api/skins ─────────────────────────────────────────────────────────────────────────────
@@ -381,7 +397,10 @@ export interface AdminLeaderboardResponse {
 // ETH). "S1-proxy" = the long-tail SPL aggregate hedged via a SOL short (BASIS RISK — the client MUST
 // label it a proxy, never a hedge). "S2" = a life-event hedge (bet AGAINST a team you support).
 // "fallback" = a discovery card (NOT a hedge — client MUST label it discovery; see isDiscovery).
-export type HedgeSuggestionKind = "S1-major" | "S1-proxy" | "S2" | "fallback";
+// "S1-stock" = a tokenized-stock leg sized off wallet exposure; "S3-stock" = a life-situation
+// (flights/fuel/rent…) → tokenized stock; "spotted" = a live 24h move fired a rule's trigger (no
+// user input needed).
+export type HedgeSuggestionKind = "S1-major" | "S1-proxy" | "S2" | "fallback" | "S1-stock" | "S3-stock" | "spotted";
 
 // ─── POST /api/hedge/wallet ──────────────────────────────────────────────────────────────────────
 // Auth: Bearer. Body: HedgeWalletRequest. Validates the base58 Solana address, links it (read-only —
@@ -432,6 +451,12 @@ export interface HedgeWalletStateResponse {
 // Price semantics (D10 follow-up): yesPriceBp/noPriceBp are the live CLOB VWAP at the card's OWN
 // proposedStakeCents — the exact quote /accept honours — never the Gamma mid; a market that won't
 // quote both sides at that stake is dropped rather than shown at an approximated price.
+// A tokenized stock behind a hedge card (Stocklana). When `stock` is set on a HedgeSuggestion the
+// DeckCard fields are SENTINELS (id "stock:<SYMBOL>", prices 0, deadline "") — render off `stock`,
+// never off the market fields.
+export interface HedgeStockRef { symbol: string; name: string; mint: string; logoUrl: string | null; priceCents: number; change24hBp: number | null; tradable: boolean }
+// The parsed life situation a stock card answers (persisted per user+category, no raw text).
+export interface HedgeSituation { category: string; amountCents: number | null; period: "month" | "week" | "year" | "once" | null; distanceKm: number | null }
 export interface HedgeSuggestion extends DeckCard {
   suggestionId: string; // deterministic; pass to /accept and /event
   kind: HedgeSuggestionKind; // "S1-major" | "S1-proxy" | "S2" | "fallback"
@@ -447,10 +472,17 @@ export interface HedgeSuggestion extends DeckCard {
   matchedEntity?: string | null; // the team/entity the user supports (we bet AGAINST it); null on fallback
   league?: string | null; // league/competition label for an S2 card (e.g. "NBA"); null if unknown/non-S2
   matchConfidence?: number; // 0..1 free-text match confidence (S2 search only; omitted on accept re-derivation)
+  // ── Stock-card extras (present only when `stock` is set) ──
+  stock?: HedgeStockRef; // the tokenized stock behind this card; when set, render off THIS, not the market fields
+  rationale?: string; // server-rendered one-liner (also mirrored into `question` for legacy clients)
+  hedgePctBp?: number; // the product rule applied, 0 ⇒ fixed life-hedge stake
+  situation?: HedgeSituation; // the parsed life situation this card answers
+  triggerChangeBp?: number; // spotted only — the 24h move that fired the rule
 }
 export interface HedgeSuggestionsResponse {
   suggestions: HedgeSuggestion[];
   walletLinked: boolean; // false => prompt the user to link a wallet first
+  stockSuggestions?: HedgeSuggestion[]; // S1-stock legs (additive; old clients ignore)
 }
 
 // ─── GET /api/hedge/pickers ────────────────────────────────────────────────────────────────────────
@@ -475,12 +507,15 @@ export interface HedgePickersResponse {
 // contested markets, honestly flagged as discovery, never a hedge). Errors: 400 (empty / too-long text).
 export interface HedgeSearchRequest {
   text: string; // free text; trimmed, max 200 chars
+  amountCents?: number; // optional stated amount (a chip's amount field); an amount inside the text wins
 }
 export interface HedgeSearchResponse {
   suggestions: HedgeSuggestion[]; // S2 against-hedges (isDiscovery=false) OR fallback cards (isDiscovery=true)
   isDiscovery: boolean; // true => the fallback discovery path; the client MUST label the cards discovery
   matchedEntity: string | null; // the entity we matched the text to (null on fallback)
   usedNlu: boolean; // true => the NLU edge was invoked (below-threshold + key present)
+  stockSuggestions?: HedgeSuggestion[]; // S3-stock cards (additive; old clients ignore)
+  situation?: HedgeSituation | null; // the parsed life situation, echoed back for the client
 }
 
 // ─── POST /api/hedge/accept ──────────────────────────────────────────────────────────────────────
@@ -496,9 +531,10 @@ export interface HedgeAcceptRequest {
   suggestionId: string;
 }
 export interface HedgeAcceptResponse {
-  betId: string;
+  betId: string | null; // null on a stock accept (see positionId)
   stakeCents: number; // the ACTUAL locked stake (may be clamped down to available Cash)
   alreadyAccepted: boolean; // true => idempotent replay, returns the pre-existing bet
+  positionId?: string; // the StockPosition created by a stock accept
 }
 
 // ─── POST /api/hedge/event ───────────────────────────────────────────────────────────────────────
@@ -512,3 +548,65 @@ export interface HedgeEventRequest {
 export interface HedgeEventResponse {
   ok: true;
 }
+
+// ─── GET /api/hedge/spotted ──────────────────────────────────────────────────────────────────────
+// Auth: Bearer. Proactive cards from live 24h moves — no wallet needed. One card per firing rule,
+// capped at HEDGE_SPOTTED_MAX, sized off the user's persisted LifeSituation row for that category
+// when present (else the fixed life-hedge stake). `generatedAt` is ISO-8601.
+export interface HedgeSpottedResponse { suggestions: HedgeSuggestion[]; generatedAt: string }
+
+// ─── STOCKS (xStocks on Solana — Stocklana) ────────────────────────────────────────────────────
+// A tokenized stock card is NOT a DeckCard: it has no YES/NO, never resolves, and its price is spot.
+// Right swipe = BUY (paper from the virtual balance, or REAL via the user's own Phantom + Jupiter),
+// left = PASS (never dealt again), up = skip (session only). qtyBase is a decimal STRING on the wire
+// (raw base units, BigInt server-side). Prices are integer cents per RAW token; uiMultiplierMicro
+// (Token-2022 ScaledUiAmount × 1e6) is for DISPLAY only so shown quantities match the wallet.
+
+// ─── GET /api/stocks/deck ────  Auth: Bearer. Deck-eligible assets with a fresh price, minus the
+// caller's open positions and passes, shuffled. `wallets` = the caller's VERIFIED Solana addresses
+// (gates "Buy on Solana"); `stockConsent` = the caller accepted the current xStocks terms.
+// `tradable` = the mint has a Solana pool deep enough for a small REAL buy; false = paper only (the
+// price is the issuer's reference price) and the client must not offer "Buy on Solana".
+export interface StockDeckCard { id: string; symbol: string; name: string; underlying: string; logoUrl: string | null; mint: string; priceCents: number; change24hBp: number | null; uiMultiplierMicro: number | null; tradingHours: string | null; openNow: boolean; tradable: boolean; pricedAt: string }
+export interface StockDeckResponse { cards: StockDeckCard[]; wallets: string[]; stockConsent: boolean }
+// ─── POST /api/stocks/buy ────  Auth: Bearer. Body: StockBuyRequest. PAPER buy: locks the live price
+// server-side, holds stakeCents against Cash (atomic, like a swipe). requestId (client uuid) makes a
+// retry return the same lot (alreadyBought:true). Errors: 400 (bounds/uuid), 404 asset_not_found,
+// 409 asset_halted | stake_too_small, 402 insufficient_funds, 502 price_unavailable.
+export interface StockBuyRequest { assetId: string; stakeCents: number; requestId: string }
+export interface StockBuyResponse { positionId: string; qtyBase: string; priceCents: number; costCents: number; alreadyBought: boolean }
+// ─── POST /api/stocks/sell ────  Auth: Bearer. PAPER only: closes the lot at the live price, credits
+// P&L, releases the hold. Errors: 404 position_not_found, 409 already_closed, 502 price_unavailable.
+export interface StockSellRequest { positionId: string }
+export interface StockSellResponse { positionId: string; proceedsCents: number; pnlCents: number; priceCents: number }
+// ─── POST /api/stocks/pass ────  Auth: Bearer. Idempotent. Errors: 404 asset_not_found.
+export interface StockPassRequest { assetId: string }
+export type StockPassResponse = { ok: true };
+// ─── GET /api/stocks/portfolio ────  Auth: Bearer. Open + recent closed lots, both modes, priced from
+// the STORED asset price (refreshed every poller tick; `fresh` false when older than the staleness
+// bound). REAL lots are reconciled against the payer's live wallet balance at most every few hours.
+export interface StockPositionRow { id: string; assetId: string; symbol: string; name: string; logoUrl: string | null; mode: "PAPER" | "REAL"; source: "DECK" | "HEDGE"; qtyBase: string; decimals: number; uiMultiplierMicro: number | null; costCents: number; entryPriceCents: number; priceCents: number | null; valueCents: number | null; pnlCents: number | null; fresh: boolean; txSig: string | null; payer: string | null; createdAt: string; closedAt: string | null; closeReason: string | null; proceedsCents: number | null }
+export interface StockTotals { costCents: number; valueCents: number; pnlCents: number }
+export interface StockPendingAttempt { id: string; symbol: string; stakeCents: number; status: "PENDING" | "CONFIRMED" | "EXPIRED" | "FAILED"; sig: string | null; createdAt: string }
+export interface StockPortfolioResponse { open: StockPositionRow[]; closed: StockPositionRow[]; totals: { paper: StockTotals; real: StockTotals }; wallets: string[]; stockConsent: boolean; pendingAttempts: StockPendingAttempt[] }
+// ─── POST /api/stocks/consent ────  Auth: Bearer. Records acceptance of the xStocks terms +
+// self-declaration (not a US person / not in a restricted jurisdiction) at `version`.
+export interface StockConsentRequest { version: number }
+export type StockConsentResponse = { ok: true; version: number };
+// ─── POST /api/stocks/real/tx ────  Auth: Bearer. Builds a Jupiter USDC→xStock swap for the caller's
+// VERIFIED wallet `payer` and records a StockBuyAttempt. Nothing is spent here. Errors: 400, 403
+// stock_consent_required | wallet_not_verified, 404 asset_not_found, 409 asset_halted | price_impact,
+// 502 swap_unavailable.
+// `assetId` OR `symbol` names the asset (a hedge card knows only the symbol).
+export interface StockRealTxRequest { assetId?: string; symbol?: string; stakeCents: number; payer: string; hedgeSuggestionId?: string }
+export interface StockRealTxResponse { attemptId: string; swapTransaction: string; lastValidBlockHeight: number; payer: string; quote: { inAmountMicro: string; outAmountBase: string; minOutBase: string; priceImpactBp: number } }
+// ─── POST /api/stocks/real/sent ────  Auth: Bearer. Stamps the signature on the attempt as soon as
+// the wallet has sent it, so the poller can recover a buy whose tab died before /confirm.
+export interface StockRealSentRequest { attemptId: string; sig: string }
+export type StockRealSentResponse = { ok: true };
+// ─── POST /api/stocks/real/confirm ────  Auth: Bearer. Reads the landed tx from the chain and books
+// the lot ONLY if it matches the attempt (payer, mint, ExactIn amount, minimum output). Idempotent by
+// signature. Errors: 400, 403 (not the caller's attempt/tx), 404 tx_not_found (retry), 409 tx_failed |
+// not_this_buy | attempt_expired, 502 rpc_unavailable.
+export interface StockRealConfirmRequest { attemptId: string; sig: string }
+export interface StockRealConfirmResponse { positionId: string; qtyBase: string; costCents: number; alreadyConfirmed: boolean }
