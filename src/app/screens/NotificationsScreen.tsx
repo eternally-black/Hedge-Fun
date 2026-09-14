@@ -1,16 +1,20 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { ResultsResponse, ResultRow } from "@/lib/api-types";
+import type { ResultsResponse, ResultRow, StockAlertRow as StockAlertRowData } from "@/lib/api-types";
 import { PredictionRow, type PredictionRowData } from "./PredictionRow";
+import { StockAlertRow } from "./StockAlertRow";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
-// The notifications inbox: a calm, scannable feed of every settled call, newest first. Opening it
-// marks everything seen (clears the HUD bell). "Replay" re-runs the dopamine reveal. Lean-back
-// counterpart to the reveal overlay — both read /api/results, this one just lists it.
-export function NotificationsScreen({ api, onSeen, onReplay }: { api: Api; onSeen: () => void; onReplay: () => void }) {
+// The notifications inbox: a calm, scannable feed of every settled call, newest first, plus the
+// "In profit" strip of tokenized-stock lots that crossed a profit tier. Opening it marks everything
+// seen (clears the HUD bell) — stock alerts are acknowledged by the exact (position, tier) pairs the
+// screen received, so a tier that fires while the list is open stays unread. "Replay" re-runs the
+// dopamine reveal. Lean-back counterpart to the reveal overlay — both read /api/results.
+export function NotificationsScreen({ api, onSeen, onReplay, onOpenStock }: { api: Api; onSeen: () => void; onReplay: () => void; onOpenStock?: () => void }) {
   const [rows, setRows] = useState<ResultRow[] | null>(null);
+  const [stockAlerts, setStockAlerts] = useState<StockAlertRowData[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   // Guards loadMore against concurrent calls — a double-tap on the button must not append the same
   // page twice (the cursor would advance past it and the rows would duplicate).
@@ -24,12 +28,20 @@ export function NotificationsScreen({ api, onSeen, onReplay }: { api: Api; onSee
       .then((r) => {
         if (!alive) return;
         const res = r as ResultsResponse;
+        const alerts = res.stockAlerts ?? [];
         setRows(res.rows);
+        setStockAlerts(alerts);
         setNextCursor(res.nextCursor);
+        // Acknowledge what was DELIVERED: bets (all unseen) + exactly the stock alert pairs shown.
+        const body = {
+          scope: "both",
+          stockAlerts: alerts.filter((a) => !a.seen).map((a) => ({ positionId: a.positionId, tierBp: a.tierBp })),
+        };
+        api("/api/results/seen", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
+          .catch(() => { /* badge re-syncs from /api/me */ });
       })
       .catch(console.error);
     onSeen();
-    api("/api/results/seen", { method: "POST" }).catch(() => { /* badge re-syncs from /api/me */ });
     return () => { alive = false; };
   }, [api, onSeen]);
 
@@ -63,11 +75,23 @@ export function NotificationsScreen({ api, onSeen, onReplay }: { api: Api; onSee
         )}
       </div>
 
-      {rows.length === 0 ? (
+      {stockAlerts.length > 0 && (
+        <div style={{ marginTop: 16 }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 8 }}>
+            <div style={{ fontFamily: "var(--df)", fontSize: 18 }}>In profit</div>
+            <div style={{ fontSize: 11, color: "var(--muted)" }}>· {stockAlerts.length}</div>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {stockAlerts.map((a) => <StockAlertRow key={a.positionId} row={a} onOpen={onOpenStock} />)}
+          </div>
+        </div>
+      )}
+
+      {rows.length === 0 && stockAlerts.length === 0 ? (
         <div style={{ textAlign: "center", marginTop: 80, color: "var(--muted)", fontSize: 13 }}>
           Nothing settled yet. Swipe some cards — results land here once markets resolve.
         </div>
-      ) : (
+      ) : rows.length === 0 ? null : (
         <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 8 }}>
           {/* Nothing here counts down — every row is decided — so one clock read is enough. */}
           {rows.map((n) => <PredictionRow key={n.id} row={toPredictionRow(n)} nowMs={0} />)}

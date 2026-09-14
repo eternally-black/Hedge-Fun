@@ -118,7 +118,7 @@ async function main() {
   const acc = await acceptSuggestion(userA.id, sug!.suggestionId);
   assert.strictEqual(acc.alreadyAccepted, false, "first accept is fresh");
   assert.strictEqual(acc.stakeCents, expectedStake, "accepted at the sized stake (full Cash)");
-  const bet = await prisma.bet.findUniqueOrThrow({ where: { id: acc.betId } });
+  const bet = await prisma.bet.findUniqueOrThrow({ where: { id: acc.betId! } });
   assert.strictEqual(bet.source, "HEDGE", "bet source = HEDGE");
   assert.strictEqual(bet.side, "NO", "bet side = NO");
   assert.strictEqual(bet.stakeCents, expectedStake, "bet stake = sized");
@@ -161,7 +161,7 @@ async function main() {
   assert.ok(sugB.proposedStakeCents > lowCash, "proposed exceeds Cash (so the clamp is exercised)");
   const accB = await acceptSuggestion(userB.id, sugB.suggestionId);
   assert.strictEqual(accB.stakeCents, lowCash, "stake clamped down to available Cash");
-  const betB = await prisma.bet.findUniqueOrThrow({ where: { id: accB.betId } });
+  const betB = await prisma.bet.findUniqueOrThrow({ where: { id: accB.betId! } });
   assert.strictEqual(betB.stakeCents, lowCash, "bet stored at the clamped stake");
 
   // ── User C: Cash below the min stake -> InsufficientFundsError, nothing stored. ──────────────────
@@ -262,7 +262,7 @@ async function main() {
   const accF = await acceptSuggestion(userF.id, sugF.suggestionId);
   assert.strictEqual(accF.stakeCents, lowCashF, "F's stake clamped down to available Cash");
   await settleMarket(prisma, marketY.id, { kind: "resolved", resolvedYes: true }); // YES resolves -> NO bet LOSES
-  const betF = await prisma.bet.findUniqueOrThrow({ where: { id: accF.betId } });
+  const betF = await prisma.bet.findUniqueOrThrow({ where: { id: accF.betId! } });
   assert.strictEqual(betF.settlementStatus, "SETTLED", "clamped hedge bet settled");
   assert.strictEqual(betF.result, "LOSS", "NO bet loses when the market resolves YES");
   const vbF = await prisma.virtualBalance.findUniqueOrThrow({ where: { userId: userF.id } });
@@ -276,7 +276,7 @@ async function main() {
   // Runs LAST (after B/C derived): settling flips the market to RESOLVED, which correctly removes
   // it from matching. B's clamped bet settles too — asserted through A only; cleanup covers both.
   await settleMarket(prisma, market.id, { kind: "resolved", resolvedYes: false });
-  const settled = await prisma.bet.findUniqueOrThrow({ where: { id: acc.betId } });
+  const settled = await prisma.bet.findUniqueOrThrow({ where: { id: acc.betId! } });
   assert.strictEqual(settled.settlementStatus, "SETTLED", "hedge bet settled by the standard path");
   assert.strictEqual(settled.result, "WIN", "NO bet wins when the market resolves NO");
   vbA = await prisma.virtualBalance.findUniqueOrThrow({ where: { userId: userA.id } });

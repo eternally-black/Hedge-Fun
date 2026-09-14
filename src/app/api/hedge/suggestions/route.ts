@@ -20,9 +20,11 @@ export async function GET(req: Request) {
 
   try {
     const { items, walletLinked } = await deriveForUser(user.id, { quoteDisplay: true });
+    // Stock legs ride a separate array so the shipped mobile client's list stays market-only.
     const res: HedgeSuggestionsResponse = {
-      suggestions: items.map((i) => i.suggestion),
+      suggestions: items.filter((i) => !i.suggestion.stock).map((i) => i.suggestion),
       walletLinked,
+      stockSuggestions: items.filter((i) => i.suggestion.stock).map((i) => i.suggestion),
     };
     return NextResponse.json(res);
   } catch (e) {

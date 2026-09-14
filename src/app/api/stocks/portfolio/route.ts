@@ -41,6 +41,6 @@ export async function GET(req: Request) {
     }
   }
 
-  const body = await portfolioFor(user.id);
+  const body = await portfolioFor(user);
   return NextResponse.json(body);
 }

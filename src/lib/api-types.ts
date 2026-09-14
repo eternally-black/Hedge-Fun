@@ -587,7 +587,7 @@ export type StockPassResponse = { ok: true };
 export interface StockPositionRow { id: string; assetId: string; symbol: string; name: string; logoUrl: string | null; mode: "PAPER" | "REAL"; source: "DECK" | "HEDGE"; qtyBase: string; decimals: number; uiMultiplierMicro: number | null; costCents: number; entryPriceCents: number; priceCents: number | null; valueCents: number | null; pnlCents: number | null; fresh: boolean; txSig: string | null; payer: string | null; createdAt: string; closedAt: string | null; closeReason: string | null; proceedsCents: number | null }
 export interface StockTotals { costCents: number; valueCents: number; pnlCents: number }
 export interface StockPendingAttempt { id: string; symbol: string; stakeCents: number; status: "PENDING" | "CONFIRMED" | "EXPIRED" | "FAILED"; sig: string | null; createdAt: string }
-export interface StockPortfolioResponse { open: StockPositionRow[]; closed: StockPositionRow[]; totals: { paper: StockTotals; real: StockTotals }; wallets: string[]; pendingAttempts: StockPendingAttempt[] }
+export interface StockPortfolioResponse { open: StockPositionRow[]; closed: StockPositionRow[]; totals: { paper: StockTotals; real: StockTotals }; wallets: string[]; stockConsent: boolean; pendingAttempts: StockPendingAttempt[] }
 // ─── POST /api/stocks/consent ────  Auth: Bearer. Records acceptance of the xStocks terms +
 // self-declaration (not a US person / not in a restricted jurisdiction) at `version`.
 export interface StockConsentRequest { version: number }
@@ -596,7 +596,8 @@ export type StockConsentResponse = { ok: true; version: number };
 // VERIFIED wallet `payer` and records a StockBuyAttempt. Nothing is spent here. Errors: 400, 403
 // stock_consent_required | wallet_not_verified, 404 asset_not_found, 409 asset_halted | price_impact,
 // 502 swap_unavailable.
-export interface StockRealTxRequest { assetId: string; stakeCents: number; payer: string; hedgeSuggestionId?: string }
+// `assetId` OR `symbol` names the asset (a hedge card knows only the symbol).
+export interface StockRealTxRequest { assetId?: string; symbol?: string; stakeCents: number; payer: string; hedgeSuggestionId?: string }
 export interface StockRealTxResponse { attemptId: string; swapTransaction: string; lastValidBlockHeight: number; payer: string; quote: { inAmountMicro: string; outAmountBase: string; minOutBase: string; priceImpactBp: number } }
 // ─── POST /api/stocks/real/sent ────  Auth: Bearer. Stamps the signature on the attempt as soon as
 // the wallet has sent it, so the poller can recover a buy whose tab died before /confirm.

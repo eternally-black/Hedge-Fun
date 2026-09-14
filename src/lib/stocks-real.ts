@@ -83,14 +83,19 @@ export async function recordStockConsent(userId: string, version: number): Promi
 
 export async function buildAttempt(
   user: { id: string; stockConsentVersion: number | null },
-  p: { assetId: string; stakeCents: number; payer: string; hedgeSuggestionId?: string },
+  p: { assetId?: string; symbol?: string; stakeCents: number; payer: string; hedgeSuggestionId?: string },
 ): Promise<StockRealTxResponse> {
   if (!hasStockConsent(user)) throw new StockConsentRequiredError();
   if (!isAddress(p.payer)) throw new WalletNotVerifiedError();
   const wallets = await verifiedWallets(user.id);
   if (!wallets.includes(p.payer)) throw new WalletNotVerifiedError();
 
-  const asset = await prisma.stockAsset.findUnique({ where: { id: p.assetId } });
+  // A deck card names the asset by id; a hedge card only knows the symbol.
+  const asset = p.assetId
+    ? await prisma.stockAsset.findUnique({ where: { id: p.assetId } })
+    : p.symbol
+      ? await prisma.stockAsset.findUnique({ where: { symbol: p.symbol } })
+      : null;
   if (!asset) throw new StockUnavailableError("asset_not_found");
   if (asset.halted) throw new StockUnavailableError("asset_halted");
 

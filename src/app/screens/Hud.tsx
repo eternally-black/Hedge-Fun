@@ -15,7 +15,7 @@ export const Hud = memo(function Hud({ me, pop, realPusdMicro, onShards, onGM, o
   const shards = me?.shards ?? 0;
   const per = me?.shardsPerArtifact ?? 20;
   const shardPct = Math.round((shards / per) * 100);
-  const unread = me?.unreadResults ?? 0;
+  const unread = (me?.unreadResults ?? 0) + (me?.unreadStockAlerts ?? 0); // settled calls + stock profit alerts
 
   return (
     <div style={{ position: "relative", zIndex: 30, padding: "16px 16px 10px", background: "linear-gradient(180deg, color-mix(in srgb, var(--bg) 92%, transparent), transparent)" }}>

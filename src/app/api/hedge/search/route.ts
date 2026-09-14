@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { authUser } from "@/lib/privy";
 import { rateLimit } from "@/lib/ratelimit";
-import { searchS2 } from "@/lib/hedge/s2";
+import { searchLife } from "@/lib/hedge/stock";
 import type { HedgeSearchRequest, HedgeSearchResponse } from "@/lib/api-types";
 
 // The SECONDARY S2 UX: free text -> deterministic alias/FTS match -> (below threshold + key) ONE NLU
@@ -22,12 +22,24 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "text required (1..200 chars)" }, { status: 400 });
   }
 
-  const out = await searchS2(text);
+  // Optional stated amount (a chip's amount field). An amount inside the text wins over it.
+  const rawAmount = body?.amountCents;
+  let amountCents: number | null = null;
+  if (rawAmount != null) {
+    if (!Number.isInteger(rawAmount) || rawAmount < 0 || rawAmount > 10_000_000) {
+      return NextResponse.json({ error: "bad_amount" }, { status: 400 });
+    }
+    amountCents = rawAmount;
+  }
+
+  const out = await searchLife(user.id, text, amountCents);
   const res: HedgeSearchResponse = {
     suggestions: out.suggestions,
     isDiscovery: out.isDiscovery,
     matchedEntity: out.matchedEntity,
     usedNlu: out.usedNlu,
+    stockSuggestions: out.stockSuggestions,
+    situation: out.situation,
   };
   return NextResponse.json(res);
 }

@@ -18,6 +18,9 @@ import {
 } from "../config";
 import { requoteSideForLock, sourceHasClobBook } from "../depth";
 import { resolveDerivedSuggestion } from "./s2";
+import { loadStockAssets } from "./stock";
+import { openStockPosition } from "../stocks-db";
+import type { DerivedSuggestion } from "./suggest";
 
 // The final accept-time price-sanity gate (F1). True when the side we're about to LOCK is priced
 // inside the sane band — a decided/collapsed price (≤1% or ≥99%) fails, so a stale-cache snipe can't
@@ -55,9 +58,10 @@ export class HedgeBookUnavailableError extends Error {
 }
 
 export interface AcceptResult {
-  betId: string;
+  betId: string | null; // null on a stock accept (see positionId)
   stakeCents: number;
   alreadyAccepted: boolean;
+  positionId?: string; // the StockPosition a stock accept created
 }
 
 export async function acceptSuggestion(userId: string, sid: string): Promise<AcceptResult> {
@@ -68,10 +72,18 @@ export async function acceptSuggestion(userId: string, sid: string): Promise<Acc
   });
   if (prior) return { betId: prior.id, stakeCents: prior.stakeCents, alreadyAccepted: true };
 
+  // 1b) Idempotency fast path for a STOCK accept: this suggestion was already accepted into a lot.
+  const priorLot = await prisma.stockPosition.findUnique({
+    where: { userId_hedgeSuggestionId: { userId, hedgeSuggestionId: sid } },
+    select: { id: true, costCents: true },
+  });
+  if (priorLot) return { betId: null, stakeCents: priorLot.costCents, alreadyAccepted: true, positionId: priorLot.id };
+
   // 2) Re-derive (cache-only for S1; open S2/fallback markets otherwise) and locate the suggestion.
   const item = await resolveDerivedSuggestion(userId, sid);
   if (!item) throw new SuggestionNotFoundError();
   const s = item.suggestion;
+  if (s.stock) return acceptStock(userId, sid, item);
   const marketId = s.id;
 
   // 3) Validate the market is still tradable and lock the CURRENT price of the hedge side (D10:
@@ -186,6 +198,62 @@ export async function acceptSuggestion(userId: string, sid: string): Promise<Acc
         return { betId: other.id, stakeCents: other.stakeCents, alreadyAccepted: true };
       }
       throw new HedgeMarketUnavailableError("already bet this market");
+    }
+    throw e;
+  }
+}
+
+// A stock card accept: a PAPER lot at the STORED asset price (no book to walk — the poller refreshed
+// it within HEDGE_STOCK_PRICE_MAX_AGE_MS or loadStockAssets drops it), its stake clamped to Cash like
+// a market accept, booked TOGETHER with its ACCEPT telemetry in one transaction so a failure between
+// the two can never lose the event. Plain $transaction: the conditional hold and the
+// [userId, hedgeSuggestionId] unique are the guards.
+async function acceptStock(userId: string, sid: string, item: DerivedSuggestion): Promise<AcceptResult> {
+  const s = item.suggestion;
+  const stock = s.stock!;
+  const asset = (await loadStockAssets([stock.symbol], Date.now())).get(stock.symbol);
+  if (!asset) throw new HedgeMarketUnavailableError("stock_unavailable");
+  const vb = await prisma.virtualBalance.findUnique({ where: { userId } });
+  const cash = vb ? vb.balanceCents - vb.lockedCents : 0;
+  const stake = Math.min(s.proposedStakeCents, cash);
+  if (stake < HEDGE_MIN_STAKE_CENTS) throw new InsufficientFundsError();
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const lot = await openStockPosition(tx, {
+        userId,
+        assetId: asset.id,
+        source: "HEDGE",
+        stakeCents: stake,
+        priceCents: asset.priceCents,
+        decimals: asset.decimals,
+        hedgeSuggestionId: sid,
+      });
+      await tx.hedgeSuggestionEvent.upsert({
+        where: { userId_suggestionId_event: { userId, suggestionId: sid, event: "ACCEPT" } },
+        create: {
+          suggestionId: sid,
+          userId,
+          address: item.address,
+          marketId: null,
+          stockSymbol: stock.symbol,
+          kind: item.enumKind,
+          side: "YES",
+          proposedStakeCents: s.proposedStakeCents,
+          actualStakeCents: stake,
+          event: "ACCEPT",
+          positionId: lot.id,
+        },
+        update: { positionId: lot.id, actualStakeCents: stake },
+      });
+      return { betId: null, stakeCents: stake, alreadyAccepted: false, positionId: lot.id };
+    });
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
+      const lot = await prisma.stockPosition.findUnique({
+        where: { userId_hedgeSuggestionId: { userId, hedgeSuggestionId: sid } },
+        select: { id: true, costCents: true },
+      });
+      if (lot) return { betId: null, stakeCents: lot.costCents, alreadyAccepted: true, positionId: lot.id };
     }
     throw e;
   }

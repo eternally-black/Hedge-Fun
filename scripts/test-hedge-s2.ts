@@ -127,7 +127,7 @@ async function main() {
   const acc = await acceptSuggestion(userA.id, sug!.suggestionId);
   assert.strictEqual(acc.alreadyAccepted, false, "first accept is fresh");
   assert.strictEqual(acc.stakeCents, HEDGE_S2_STAKE_CENTS, "accepted at the fixed S2 stake");
-  const bet = await prisma.bet.findUniqueOrThrow({ where: { id: acc.betId } });
+  const bet = await prisma.bet.findUniqueOrThrow({ where: { id: acc.betId! } });
   assert.strictEqual(bet.source, "HEDGE", "bet source = HEDGE");
   assert.strictEqual(bet.side, "NO", "bet side = NO (the against side)");
   assert.strictEqual(bet.marketId, nba.id, "bet on the NBA market");
@@ -166,13 +166,13 @@ async function main() {
   assert.strictEqual(fb.kind, "fallback", "fallback card kind = fallback");
   assert.strictEqual(fb.isDiscovery, true, "fallback card flagged discovery");
   const accFb = await acceptSuggestion(userB.id, fb.suggestionId);
-  const betFb = await prisma.bet.findUniqueOrThrow({ where: { id: accFb.betId } });
+  const betFb = await prisma.bet.findUniqueOrThrow({ where: { id: accFb.betId! } });
   assert.strictEqual(betFb.source, "HEDGE", "fallback accept -> HEDGE bet");
   assert.strictEqual(betFb.marketId, fb.id, "fallback bet on the discovery market");
 
   // ── Settlement: the S2 hedge rides the EXISTING poller. Resolve NO -> the NO (against) bet WINS. ──
   await settleMarket(prisma, nba.id, { kind: "resolved", resolvedYes: false });
-  const settled = await prisma.bet.findUniqueOrThrow({ where: { id: acc.betId } });
+  const settled = await prisma.bet.findUniqueOrThrow({ where: { id: acc.betId! } });
   assert.strictEqual(settled.settlementStatus, "SETTLED", "S2 hedge settled by the standard path");
   assert.strictEqual(settled.result, "WIN", "NO (against Lakers) bet wins when the market resolves NO");
   vbA = await prisma.virtualBalance.findUniqueOrThrow({ where: { userId: userA.id } });

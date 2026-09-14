@@ -3,13 +3,15 @@
 import { memo, useEffect, useState } from "react";
 import { type Screen } from "../ui";
 
-// The second slot is the PREDICTIONS HISTORY, not a screen: it opens the sheet that lists open and
-// settled calls. It took the place of Hedge, whose path is hidden while that feature goes untested —
-// the screen and its routes are untouched, there is simply no way in from the UI for now.
+// "history" is not a screen: it opens the sheet that lists open and settled prediction calls. Hedge
+// is back in the bar (it is the Stocklana centrepiece: life situations → tokenized-stock legs), and
+// "portfolio" is the tokenized-stock holdings screen.
 export type NavKey = Screen | "history";
 
 const ITEMS: { key: NavKey; glyph: string; label: string }[] = [
   { key: "deck", glyph: "⚡", label: "Deck" },
+  { key: "hedge", glyph: "🛡", label: "Hedge" },
+  { key: "portfolio", glyph: "▲", label: "Stocks" },
   { key: "history", glyph: "≡", label: "History" },
   { key: "feed", glyph: "≋", label: "Feed" }, // DEV-ONLY (testing). Real users reach the feed via the post-cap Deck tab.
   { key: "vault", glyph: "◆", label: "Vault" },

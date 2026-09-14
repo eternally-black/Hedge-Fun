@@ -18,11 +18,15 @@ import type {
   HedgePickerLeague,
   HedgePickersResponse,
   HedgeSearchResponse,
+  HedgeSpottedResponse,
   HedgeSuggestion,
   HedgeSuggestionsResponse,
   HedgeWalletResponse,
   HedgeWalletStateResponse,
 } from "@/lib/api-types";
+import { STOCK_RULES } from "@/lib/hedge/stock-rules";
+import { useBuyReal } from "../useBuyReal";
+import { StockConsentSheet } from "./StockConsentSheet";
 
 // Whatever useApi resolves to — a thrown error carries `.status` (mirrors page.tsx's catch blocks).
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
@@ -56,6 +60,7 @@ const LINK_ERROR_COPY: Record<LinkError, string> = {
 // ============================================================================
 export function HedgeScreen({
   api,
+  me,
   onRefreshMe,
   onToast,
   onTopup,
@@ -68,6 +73,9 @@ export function HedgeScreen({
   onTopup: () => void; // open the BalanceSheet top-up when Cash can't cover a hedge stake
 }) {
   const [suggestions, setSuggestions] = useState<HedgeSuggestion[] | null>(null); // null = loading
+  const [stockSuggestions, setStockSuggestions] = useState<HedgeSuggestion[]>([]); // S1-stock legs (rendered first)
+  const [spotted, setSpotted] = useState<HedgeSuggestion[]>([]); // "Spotted today" — live 24h moves, best-effort
+  const [infoOpen, setInfoOpen] = useState(false); // the "how this works" sheet (same sheet as consent)
   const [walletLinked, setWalletLinked] = useState<boolean | null>(null); // null = first load hasn't answered
   const [loadError, setLoadError] = useState<LoadError | null>(null);
   const [exposure, setExposure] = useState<HedgeWalletResponse | null>(null); // set by a wallet POST this session
@@ -102,6 +110,7 @@ export function HedgeScreen({
       // The server re-derives suggestions deterministically and does NOT filter dismissed ones, so a
       // reload would resurrect a card the user just dismissed — hide this session's dismissals.
       setSuggestions(res.suggestions.filter((s) => !dismissed.current.has(s.suggestionId)));
+      setStockSuggestions((res.stockSuggestions ?? []).filter((s) => !dismissed.current.has(s.suggestionId)));
       setLoadError(null);
     } catch (e) {
       const status = (e as { status?: number }).status;
@@ -125,8 +134,19 @@ export function HedgeScreen({
     }
   }, [api]);
 
+  // "Spotted today" — proactive cards from live 24h moves, no wallet needed. Best-effort: a failure
+  // (or an older server without the route) just leaves the strip empty; it never blocks the screen.
+  const loadSpotted = useCallback(async () => {
+    try {
+      const res = (await api("/api/hedge/spotted")) as HedgeSpottedResponse;
+      setSpotted((res.suggestions ?? []).filter((s) => !dismissed.current.has(s.suggestionId)));
+    } catch {
+      /* best-effort: no strip when the route is unavailable */
+    }
+  }, [api]);
+
   // First load on mount.
-  useEffect(() => { void loadWalletState(); void loadSuggestions(); }, [loadWalletState, loadSuggestions]);
+  useEffect(() => { void loadWalletState(); void loadSuggestions(); void loadSpotted(); }, [loadWalletState, loadSuggestions, loadSpotted]);
 
   // POST the wallet link (the Refresh button reuses it with the already-linked address). The server
   // validates, links (idempotent), builds/refreshes the cached snapshot, and returns the exposure
@@ -273,12 +293,54 @@ export function HedgeScreen({
   // Opening the form wipes any stale link error left by a previous attempt/refresh.
   const toggleWalletForm = useCallback(() => { setLinkError(null); setWalletFormOpen((v) => !v); }, []);
 
+  // REAL stock buys (the "◎ Buy on Solana" ghost button on a stock hedge card). The hook owns the
+  // consent sheet + the Jupiter swap flow; we only hand it the target and the stake. No ctx passed:
+  // the hook reads the verified wallets + consent from /api/stocks/portfolio itself.
+  const real = useBuyReal({ api, me, onToast, onDone: () => { void onRefreshMe(); } });
+  const buyReal = real.buyReal;
+  const onBuyReal = useCallback(
+    (s: HedgeSuggestion) => {
+      if (!s.stock) return;
+      void buyReal({ assetId: "", symbol: s.stock.symbol }, s.proposedStakeCents, undefined, { hedgeSuggestionId: s.suggestionId });
+    },
+    [buyReal],
+  );
+
   return (
     <div className="hf-scroll" style={{ position: "absolute", inset: 0, overflowY: "auto", padding: "6px 16px 20px" }}>
       <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginTop: 4 }}>
         <div style={{ fontFamily: "var(--df)", fontSize: 26 }}>🛡 Hedge</div>
         <div style={{ fontSize: 11, color: "var(--muted)" }}>Paper hedges for your Solana bag</div>
+        <div style={{ marginLeft: "auto" }}>
+          <GhostButton onClick={() => setInfoOpen(true)}>ⓘ how this works</GhostButton>
+        </div>
       </div>
+
+      {/* "Spotted today" — proactive cards from live 24h moves. Rendered above the wallet intro so a
+          wallet-less visitor still sees something actionable. */}
+      {spotted.length > 0 && (
+        <div style={{ marginTop: 14 }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 8 }}>
+            <div style={{ fontFamily: "var(--df)", fontSize: 18 }}>Spotted today</div>
+            <div style={{ fontSize: 10, letterSpacing: ".12em", color: "var(--muted)", textTransform: "uppercase" }}>live moves</div>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {spotted.map((s) => (
+              <HedgeCard
+                key={s.suggestionId}
+                s={s}
+                acceptedInfo={accepted.get(s.suggestionId)}
+                busy={pending.has(s.suggestionId)}
+                nowMs={nowMs}
+                onAccept={accept}
+                onDismiss={dismiss}
+                onImpression={fireImpression}
+                onBuyReal={onBuyReal}
+              />
+            ))}
+          </div>
+        </div>
+      )}
 
       {loadError ? (
         // Hoisted above the walletLinked branches: a FAILED first load leaves walletLinked null, and
@@ -316,7 +378,7 @@ export function HedgeScreen({
 
           {suggestions === null ? (
             <CenterNote>Reading your hedges…</CenterNote>
-          ) : suggestions.length === 0 ? (
+          ) : suggestions.length === 0 && stockSuggestions.length === 0 ? (
             <div style={{ textAlign: "center", marginTop: 60, padding: "0 24px" }}>
               <div style={{ fontFamily: "var(--df)", fontSize: 22 }}>No matching markets right now.</div>
               <p style={{ color: "var(--muted)", fontSize: 13, marginTop: 8, lineHeight: 1.5 }}>
@@ -325,7 +387,7 @@ export function HedgeScreen({
             </div>
           ) : (
             <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
-              {suggestions.map((s) => (
+              {[...stockSuggestions, ...suggestions].map((s) => (
                 <HedgeCard
                   key={s.suggestionId}
                   s={s}
@@ -335,6 +397,7 @@ export function HedgeScreen({
                   onAccept={accept}
                   onDismiss={dismiss}
                   onImpression={fireImpression}
+                  onBuyReal={onBuyReal}
                 />
               ))}
             </div>
@@ -353,7 +416,12 @@ export function HedgeScreen({
         onDismiss={dismiss}
         onImpression={fireImpression}
         isDismissed={isDismissed}
+        onBuyReal={onBuyReal}
       />
+
+      {/* The consent sheet doubles as the "how this works" text (the limitations live here only). */}
+      <StockConsentSheet open={real.consentOpen} busy={real.busy} onAccept={real.acceptConsent} onClose={real.closeConsent} />
+      <StockConsentSheet open={infoOpen} busy={false} onAccept={() => setInfoOpen(false)} onClose={() => setInfoOpen(false)} />
     </div>
   );
 }
@@ -376,6 +444,7 @@ function LifeHedgeSection({
   onDismiss,
   onImpression,
   isDismissed,
+  onBuyReal,
 }: {
   api: Api;
   accepted: Map<string, AcceptedInfo>;
@@ -385,14 +454,18 @@ function LifeHedgeSection({
   onDismiss: (s: HedgeSuggestion, removeFromList?: (id: string) => void) => void;
   onImpression: (suggestionId: string) => void;
   isDismissed: (id: string) => boolean;
+  onBuyReal: (s: HedgeSuggestion) => void;
 }) {
   const [pickers, setPickers] = useState<HedgePickerLeague[] | null>(null); // null = loading
   const [pickersError, setPickersError] = useState(false);
   const [openLeague, setOpenLeague] = useState<string | null>(null); // expanded league slug
 
   const [text, setText] = useState("");
+  const [amount, setAmount] = useState(""); // optional $ / month, sent as amountCents
   const [lastQuery, setLastQuery] = useState("");
   const [results, setResults] = useState<HedgeSuggestion[] | null>(null); // null = no search this session
+  const [stockResults, setStockResults] = useState<HedgeSuggestion[]>([]); // S3-stock legs (rendered first)
+  const [situation, setSituation] = useState<HedgeSearchResponse["situation"]>(null);
   const [searchState, setSearchState] = useState<SearchState>("idle");
   const [isDiscovery, setIsDiscovery] = useState(false);
   const [matchedEntity, setMatchedEntity] = useState<string | null>(null);
@@ -423,9 +496,12 @@ function LifeHedgeSection({
       setLastQuery(q);
       setSearchState("loading");
       try {
-        const res = (await api("/api/hedge/search", { method: "POST", body: JSON.stringify({ text: q }) })) as HedgeSearchResponse;
+        const amountCents = Math.round(Number(amount) * 100) || undefined;
+        const res = (await api("/api/hedge/search", { method: "POST", body: JSON.stringify({ text: q, amountCents }) })) as HedgeSearchResponse;
         if (seq !== searchSeq.current) return; // a newer search superseded us — drop this stale response
         setResults(res.suggestions.filter((s) => !isDismissed(s.suggestionId)));
+        setStockResults((res.stockSuggestions ?? []).filter((s) => !isDismissed(s.suggestionId)));
+        setSituation(res.situation ?? null);
         setIsDiscovery(res.isDiscovery);
         setMatchedEntity(res.matchedEntity);
         setSearchState("done");
@@ -434,7 +510,7 @@ function LifeHedgeSection({
         setSearchState("error");
       }
     },
-    [api, isDismissed],
+    [api, isDismissed, amount],
   );
 
   const submitText = useCallback(() => { void runSearch(text); }, [runSearch, text]);
@@ -444,6 +520,7 @@ function LifeHedgeSection({
   // for both a dismiss and an accept that came back stale (404/409).
   const removeResult = useCallback((id: string) => {
     setResults((prev) => (prev ? prev.filter((s) => s.suggestionId !== id) : prev));
+    setStockResults((prev) => prev.filter((s) => s.suggestionId !== id));
   }, []);
   const handleAccept = useCallback((s: HedgeSuggestion) => onAccept(s, removeResult), [onAccept, removeResult]);
   const handleDismiss = useCallback((s: HedgeSuggestion) => onDismiss(s, removeResult), [onDismiss, removeResult]);
@@ -464,6 +541,16 @@ function LifeHedgeSection({
       <p style={{ color: "var(--muted)", fontSize: 12, lineHeight: 1.5, marginTop: 5 }}>
         Rooting for a team? Put a little on them losing — soften the sting either way. No wallet needed.
       </p>
+
+      {/* life-situation chips — the stock-hedge entry point (STOCK_RULES is the product's opinion) */}
+      <div style={{ marginTop: 12 }}>
+        <div style={{ fontSize: 10, letterSpacing: ".12em", color: "var(--muted)", textTransform: "uppercase", marginBottom: 8 }}>Life costs</div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+          {STOCK_RULES.map((r) => (
+            <Chip key={r.category} accent onClick={() => void runSearch(r.chipQuery)}>{r.emoji} {r.label}</Chip>
+          ))}
+        </div>
+      </div>
 
       {/* pickers — the PRIMARY path */}
       <div style={{ background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 18, padding: "14px 16px", marginTop: 12 }}>
@@ -511,9 +598,20 @@ function LifeHedgeSection({
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") submitText(); }}
             maxLength={200}
-            placeholder="e.g. I'm rooting for the Lakers"
-            aria-label="Describe who or what you're rooting for"
+            placeholder={'e.g. $800 on flights this month · or "rooting for the Lakers"'}
+            aria-label="Describe a life cost or who you're rooting for"
             style={{ flex: 1, minWidth: 0, background: "var(--panel2)", border: "1px solid var(--line)", borderRadius: 14, padding: "12px 14px", color: "var(--text)", fontFamily: "var(--nf)", fontSize: 12, outline: "none" }}
+          />
+          <input
+            type="number"
+            inputMode="decimal"
+            min={0}
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") submitText(); }}
+            placeholder="$ / month"
+            aria-label="Optional monthly amount in dollars"
+            style={{ width: 96, background: "var(--panel2)", border: "1px solid var(--line)", borderRadius: 14, padding: "12px 12px", color: "var(--text)", fontFamily: "var(--nf)", fontSize: 12, outline: "none" }}
           />
           <button
             type="button"
@@ -535,7 +633,7 @@ function LifeHedgeSection({
           <div style={{ marginTop: 10 }}><GhostButton onClick={() => void runSearch(lastQuery)}>↻ Try again</GhostButton></div>
         </div>
       ) : searchState === "done" && results ? (
-        results.length === 0 ? (
+        results.length === 0 && stockResults.length === 0 ? (
           // Defensive: the API returns a discovery fallback instead of nothing, so an empty result set
           // is unreachable in practice — handled so a contract change never renders a blank surface.
           <div style={{ textAlign: "center", marginTop: 18, color: "var(--muted)", fontSize: 12, lineHeight: 1.5 }}>
@@ -552,13 +650,18 @@ function LifeHedgeSection({
                 </div>
                 <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 3 }}>Discovery picks, not hedges.</div>
               </div>
+            ) : stockResults.length > 0 && results.length === 0 ? (
+              // A stock leg answered the situation and no market did — name the situation, not a foe.
+              <div style={{ marginBottom: 10, fontSize: 12, color: "var(--muted)" }}>
+                Stock leg for <span style={{ color: "var(--text)", fontWeight: 700 }}>{STOCK_RULES.find((r) => r.category === situation?.category)?.label ?? situation?.category ?? lastQuery}</span>
+              </div>
             ) : (
               <div style={{ marginBottom: 10, fontSize: 12, color: "var(--muted)" }}>
                 Betting against <span style={{ color: "var(--text)", fontWeight: 700 }}>{matchedEntity ?? lastQuery}</span>
               </div>
             )}
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {results.map((s) => (
+              {[...stockResults, ...results].map((s) => (
                 <HedgeCard
                   key={s.suggestionId}
                   s={s}
@@ -568,6 +671,7 @@ function LifeHedgeSection({
                   onAccept={handleAccept}
                   onDismiss={handleDismiss}
                   onImpression={onImpression}
+                  onBuyReal={onBuyReal}
                 />
               ))}
             </div>
@@ -605,37 +709,21 @@ function Chip({ active, accent, onClick, children }: { active?: boolean; accent?
 // (rendered ONLY when the server sends one — D4 degradation, no placeholder), and accept/dismiss
 // in place of the two-sided bet buttons. Memoized on primitive-ish props like the feed cards.
 // ============================================================================
-const HedgeCard = memo(function HedgeCard({
-  s,
-  acceptedInfo,
-  busy,
-  nowMs,
-  onAccept,
-  onDismiss,
-  onImpression,
-}: {
-  s: HedgeSuggestion;
-  acceptedInfo: AcceptedInfo | undefined;
-  busy: boolean;
-  nowMs: number; // shared screen clock — keeps Date.now() out of render
-  onAccept: (s: HedgeSuggestion) => void;
-  onDismiss: (s: HedgeSuggestion) => void;
-  onImpression: (suggestionId: string) => void;
-}) {
-  // F9: fire the impression on first VIEWPORT visibility, not mount — a below-the-fold card must not
-  // log an impression until the user actually scrolls it into view (spec §5 honesty). One IO per card;
-  // it disconnects after the first intersection, and the screen-level Set still dedupes across remounts.
-  const cardRef = useRef<HTMLDivElement>(null);
+// useImpression — F9: fire the impression on first VIEWPORT visibility, not mount — a below-the-fold
+// card must not log an impression until the user actually scrolls it into view (spec §5 honesty). One
+// IO per card; it disconnects after the first intersection, and the screen-level Set still dedupes
+// across remounts. Shared by the market and stock cards.
+function useImpression(ref: React.RefObject<HTMLDivElement | null>, suggestionId: string, onImpression: (sid: string) => void) {
   useEffect(() => {
-    const el = cardRef.current;
+    const el = ref.current;
     if (!el) return;
     // Guard for SSR / very old browsers with no IntersectionObserver — fall back to a mount fire.
-    if (typeof IntersectionObserver === "undefined") { onImpression(s.suggestionId); return; }
+    if (typeof IntersectionObserver === "undefined") { onImpression(suggestionId); return; }
     const io = new IntersectionObserver(
       (entries) => {
         for (const e of entries) {
           if (e.isIntersecting) {
-            onImpression(s.suggestionId);
+            onImpression(suggestionId);
             io.disconnect();
             break;
           }
@@ -645,7 +733,37 @@ const HedgeCard = memo(function HedgeCard({
     );
     io.observe(el);
     return () => io.disconnect();
-  }, [onImpression, s.suggestionId]);
+  }, [onImpression, suggestionId, ref]);
+}
+
+type HedgeCardProps = {
+  s: HedgeSuggestion;
+  acceptedInfo: AcceptedInfo | undefined;
+  busy: boolean;
+  nowMs: number; // shared screen clock — keeps Date.now() out of render
+  onAccept: (s: HedgeSuggestion) => void;
+  onDismiss: (s: HedgeSuggestion) => void;
+  onImpression: (suggestionId: string) => void;
+  onBuyReal?: (s: HedgeSuggestion) => void; // stock cards only: the "◎ Buy on Solana" ghost button
+};
+
+// HedgeCard — the hook-FREE dispatcher: a stock card renders StockHedgeCard, everything else the
+// market card. A component must not early-return before hooks, so the split lives here.
+const HedgeCard = memo(function HedgeCard(props: HedgeCardProps) {
+  return props.s.stock ? <StockHedgeCard {...props} /> : <MarketHedgeCard {...props} />;
+});
+
+const MarketHedgeCard = memo(function MarketHedgeCard({
+  s,
+  acceptedInfo,
+  busy,
+  nowMs,
+  onAccept,
+  onDismiss,
+  onImpression,
+}: HedgeCardProps) {
+  const cardRef = useRef<HTMLDivElement>(null);
+  useImpression(cardRef, s.suggestionId, onImpression);
 
   const cat = catOf(s);
   const labels = sideLabels(s);
@@ -788,6 +906,107 @@ const HedgeCard = memo(function HedgeCard({
   );
 });
 
+// ============================================================================
+// StockHedgeCard — a tokenized-stock hedge leg. MINIMAL copy by design: the owner's headline
+// (`rationale`) and nothing else; the only footnote is the shared sizing one-liner. No countdown, no
+// odds bar, no payout box — a stock has no resolution and no two-sided book.
+// ============================================================================
+const StockHedgeCard = memo(function StockHedgeCard({
+  s,
+  acceptedInfo,
+  busy,
+  onAccept,
+  onDismiss,
+  onImpression,
+  onBuyReal,
+}: HedgeCardProps) {
+  const cardRef = useRef<HTMLDivElement>(null);
+  useImpression(cardRef, s.suggestionId, onImpression);
+
+  const stock = s.stock;
+  if (!stock) return null; // unreachable: the dispatcher only routes stock cards here
+
+  const change = stock.change24hBp;
+  const changeColor = change == null ? "var(--muted)" : change >= 0 ? "var(--yes)" : "var(--no)";
+  const changeText = change == null ? "—" : `${change >= 0 ? "+" : "−"}${(Math.abs(change) / 100).toFixed(1)}%`;
+  const initials = stock.symbol.replace(/x$/, "").slice(0, 2).toUpperCase();
+
+  return (
+    <div ref={cardRef} style={{ position: "relative", borderRadius: 22, overflow: "hidden", background: "var(--panel2)", border: "1px solid var(--line)", boxShadow: "0 18px 40px -20px rgba(0,0,0,.7)" }}>
+      <div style={{ position: "absolute", inset: 0, background: "linear-gradient(170deg, var(--panel2), var(--panel))" }} />
+      <div style={{ position: "relative", display: "flex", flexDirection: "column", padding: "14px 15px" }}>
+        {/* row 1: logo + symbol · name … price + 24h change */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {stock.logoUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={stock.logoUrl} alt="" width={28} height={28} style={{ width: 28, height: 28, borderRadius: "50%", objectFit: "cover", background: "var(--panel)" }} />
+          ) : (
+            <div style={{ width: 28, height: 28, borderRadius: "50%", background: "var(--panel)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 800, color: "var(--muted)" }}>{initials}</div>
+          )}
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 13, color: "var(--text)" }}>{stock.symbol}</div>
+            <div style={{ fontSize: 10.5, color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{stock.name}</div>
+          </div>
+          <div style={{ marginLeft: "auto", textAlign: "right" }}>
+            <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 13, color: "var(--text)" }}>{usd(stock.priceCents)}</div>
+            <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 11, color: changeColor }}>{changeText}</div>
+          </div>
+        </div>
+
+        {/* row 2: the owner's headline — nothing else */}
+        <div style={{ padding: "10px 0 8px", fontFamily: "var(--df)", fontSize: 18, lineHeight: 1.15, color: "var(--text)" }}>
+          {s.rationale ?? s.question}
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+          <KindBadge s={s} />
+        </div>
+
+        {/* actions — or the confirmation banner once accepted */}
+        {acceptedInfo ? (
+          <AcceptedBanner s={s} info={acceptedInfo} />
+        ) : (
+          <div style={{ display: "flex", alignItems: "stretch", gap: 8 }}>
+            <button
+              type="button"
+              onClick={busy ? undefined : () => onDismiss(s)}
+              disabled={busy}
+              style={{ padding: "9px 14px", borderRadius: 14, font: "inherit", cursor: busy ? "default" : "pointer", background: "rgba(0,0,0,.35)", border: "1.5px solid var(--line)", color: "var(--muted)", fontSize: 12, fontWeight: 700, opacity: busy ? 0.5 : 1 }}
+            >
+              Dismiss
+            </button>
+            <button
+              type="button"
+              onClick={busy ? undefined : () => onAccept(s)}
+              disabled={busy}
+              style={{
+                flex: 1, minWidth: 0, padding: "9px 8px", borderRadius: 14, font: "inherit", cursor: busy ? "default" : "pointer",
+                background: "color-mix(in srgb,var(--yes) 16%,transparent)", border: "1.5px solid color-mix(in srgb,var(--yes) 50%,transparent)",
+                color: "var(--yes)", display: "flex", alignItems: "center", justifyContent: "center", opacity: busy ? 0.5 : 1,
+              }}
+            >
+              <span style={{ fontFamily: "var(--df)", fontSize: 16, lineHeight: 1, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {busy ? "Placing…" : `Hedge ${usd(s.proposedStakeCents)} with ${stock.symbol}`}
+              </span>
+            </button>
+          </div>
+        )}
+
+        {!acceptedInfo && stock.tradable && onBuyReal && (
+          <div style={{ marginTop: 8 }}>
+            <GhostButton onClick={() => { if (!busy) onBuyReal(s); }} disabled={busy}>◎ Buy on Solana</GhostButton>
+          </div>
+        )}
+
+        {/* honesty footnote — the shared sizing one-liner only */}
+        <div style={{ textAlign: "center", marginTop: 8, fontSize: 10, color: "rgba(255,255,255,.5)", letterSpacing: ".02em" }}>
+          Paper buy · sizing is a product rule, not hedge math.
+        </div>
+      </div>
+    </div>
+  );
+});
+
 // The kind badge the spec insists on: an S1-proxy is labeled a proxy (basis risk), an S2 card is
 // labeled a life-event bet AGAINST the supported side, and a discovery fallback is loudly flagged
 // "not a hedge" (muted + dashed to read as a different species from the hedges above it).
@@ -797,9 +1016,15 @@ function KindBadge({ s }: { s: HedgeSuggestion }) {
     ? { color: "var(--muted)", label: "Discovery — not a hedge", dashed: true }
     : s.kind === "S2"
       ? { color: "var(--energy)", label: "Life hedge · against", dashed: false }
-      : s.isProxy
-        ? { color: "#ff8a3d", label: "Proxy · basis risk", dashed: false }
-        : { color: "var(--yes)", label: "Direct hedge", dashed: false };
+      : s.kind === "S1-stock"
+        ? { color: "var(--yes)", label: "Stock leg", dashed: false }
+        : s.kind === "S3-stock"
+          ? { color: "var(--energy)", label: "Life hedge · stock", dashed: false }
+          : s.kind === "spotted"
+            ? { color: "#ff8a3d", label: "Spotted · live move", dashed: false }
+            : s.isProxy
+              ? { color: "#ff8a3d", label: "Proxy · basis risk", dashed: false }
+              : { color: "var(--yes)", label: "Direct hedge", dashed: false };
   return (
     <div style={{ display: "flex", alignItems: "center", padding: "4px 9px", borderRadius: 18, background: `color-mix(in srgb,${meta.color} 18%,transparent)`, border: `1px ${meta.dashed ? "dashed" : "solid"} color-mix(in srgb,${meta.color} 55%,transparent)` }}>
       <span style={{ fontSize: 9, letterSpacing: ".12em", textTransform: "uppercase", fontWeight: 800, color: meta.color }}>

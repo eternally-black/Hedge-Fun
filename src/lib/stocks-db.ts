@@ -273,7 +273,8 @@ export function positionRow(
 
 // The portfolio: open lots + the last 30 closed, both modes, plus totals over OPEN lots only (value
 // falls back to cost when unpriced, so a total never reads as a loss just because a price is missing).
-export async function portfolioFor(userId: string): Promise<StockPortfolioResponse> {
+export async function portfolioFor(user: { id: string; stockConsentVersion: number | null }): Promise<StockPortfolioResponse> {
+  const userId = user.id;
   const nowMs = Date.now();
   const [openLots, closedLots, wallets, attempts] = await Promise.all([
     prisma.stockPosition.findMany({
@@ -327,6 +328,7 @@ export async function portfolioFor(userId: string): Promise<StockPortfolioRespon
     closed,
     totals: { paper: totalsFor("PAPER"), real: totalsFor("REAL") },
     wallets,
+    stockConsent: hasStockConsent(user),
     pendingAttempts,
   };
 }

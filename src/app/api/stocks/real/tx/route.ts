@@ -17,9 +17,12 @@ export async function POST(req: Request) {
   }
 
   const body = (await req.json().catch(() => null)) as Partial<StockRealTxRequest> | null;
+  const namesAsset = (typeof body?.assetId === "string" && body.assetId.length > 0) || (typeof body?.symbol === "string" && body.symbol.length > 0);
   if (
     !body ||
-    typeof body.assetId !== "string" ||
+    !namesAsset ||
+    (body.assetId !== undefined && typeof body.assetId !== "string") ||
+    (body.symbol !== undefined && typeof body.symbol !== "string") ||
     typeof body.stakeCents !== "number" ||
     !Number.isInteger(body.stakeCents) ||
     body.stakeCents < STOCK_MIN_STAKE_CENTS ||
@@ -34,7 +37,8 @@ export async function POST(req: Request) {
     const result = await buildAttempt(
       { id: user.id, stockConsentVersion: user.stockConsentVersion },
       {
-        assetId: body.assetId,
+        assetId: body.assetId || undefined,
+        symbol: body.symbol || undefined,
         stakeCents: body.stakeCents,
         payer: body.payer,
         hedgeSuggestionId: body.hedgeSuggestionId,

@@ -38,7 +38,7 @@ type FaceProps = {
 // number just differs between frames, which reads exactly like a number that never moves. Returns
 // the animation to play — cheaper is a bright pulse (the same stake buys more), dearer is a dim one
 // — and nothing else, so a re-render mid-swipe can never shift the layout under a thumb.
-function useTick(value: number): string | undefined {
+export function useTick(value: number): string | undefined {
   const prev = useRef(value);
   const [anim, setAnim] = useState<string | undefined>(undefined);
   useEffect(() => {
@@ -202,22 +202,17 @@ export const CardPreview = memo(function CardPreview({ card, skinId, stakeCents 
 // DeckCard — the interactive top card. Owns the gesture AND its own 1s countdown tick, so the
 // clock no longer re-renders the whole App (it was the main jank source during swipes).
 // ============================================================================
-export function DeckCard({
-  card,
-  skinId,
-  busy,
-  onAction,
-  onTap,
-  stakeCents,
-  onEditStake,
-}: {
-  card: Card;
-  skinId: string;
+// ============================================================================
+// SwipeShell — the gesture shell, extracted so a second card type (the stock deck) reuses the exact
+// physics: the rise-out-of-stack animation, the drag-follow, the fling-off, the tap detection. It
+// owns ONLY the gesture and the outer element; the face is a render prop, so each card type draws
+// its own content while moving identically.
+// ============================================================================
+export function SwipeShell({ busy, onAction, onTap, children }: {
   busy?: boolean;
   onAction: (a: SwipeAction) => void;
   onTap: () => void;
-  stakeCents: number;
-  onEditStake?: () => void;
+  children: (p: { yesP: number; noP: number; skipP: number }) => React.ReactNode;
 }) {
   // `entering` plays the rise-out-of-stack animation once on mount (this card just became top).
   // While entering we let the CSS keyframe own `transform`; after it ends we switch to the
@@ -228,8 +223,6 @@ export function DeckCard({
     enterTimer.current = window.setTimeout(() => setEntering(false), RISE_MS); // matches keyframe
     return () => window.clearTimeout(enterTimer.current);
   }, []);
-
-  const cd = useCountdown(card.resolutionDeadline);
 
   // Shared deck/reveal physics. Commit fires the bet (onAction); tap opens detail.
   const swipe = useCardSwipe({ onCommit: onAction, onTap, enabled: !busy });
@@ -259,8 +252,35 @@ export function DeckCard({
           : swipe.style),
       }}
     >
-      <CardFace card={card} skinId={skinId} countdownText={cd.text} urgent={cd.urgent} windowText={cd.relText} yesP={swipe.progressOf("YES")} noP={swipe.progressOf("NO")} skipP={swipe.progressOf("SKIP")} stakeCents={stakeCents} onEditStake={onEditStake} />
+      {children({ yesP: swipe.progressOf("YES"), noP: swipe.progressOf("NO"), skipP: swipe.progressOf("SKIP") })}
     </div>
+  );
+}
+
+export function DeckCard({
+  card,
+  skinId,
+  busy,
+  onAction,
+  onTap,
+  stakeCents,
+  onEditStake,
+}: {
+  card: Card;
+  skinId: string;
+  busy?: boolean;
+  onAction: (a: SwipeAction) => void;
+  onTap: () => void;
+  stakeCents: number;
+  onEditStake?: () => void;
+}) {
+  const cd = useCountdown(card.resolutionDeadline);
+  return (
+    <SwipeShell busy={busy} onAction={onAction} onTap={onTap}>
+      {({ yesP, noP, skipP }) => (
+        <CardFace card={card} skinId={skinId} countdownText={cd.text} urgent={cd.urgent} windowText={cd.relText} yesP={yesP} noP={noP} skipP={skipP} stakeCents={stakeCents} onEditStake={onEditStake} />
+      )}
+    </SwipeShell>
   );
 }
 

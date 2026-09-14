@@ -5,6 +5,7 @@ import dynamic from "next/dynamic";
 import { usePrivy } from "@privy-io/react-auth";
 import { useApi } from "./useApi";
 import { DeckCard, CardPreview, type SwipeAction } from "./DeckCard";
+import { StockDeck, DeckModePill, type DeckMode } from "./screens/StockDeck";
 import { Hud } from "./screens/Hud";
 import { BottomNav, type NavKey } from "./screens/BottomNav";
 import { Onboarding } from "./screens/Onboarding";
@@ -17,6 +18,7 @@ import { StakeSheet } from "./screens/StakeSheet";
 import { BalanceSheet } from "./screens/BalanceSheet";
 import { NotificationsScreen } from "./screens/NotificationsScreen";
 import { HedgeScreen } from "./screens/HedgeScreen";
+import { PortfolioScreen } from "./screens/PortfolioScreen";
 import { RevealOverlay } from "./screens/RevealOverlay";
 import { type Card, type Me, type Screen } from "./ui";
 import { useRealCtx } from "./useRealCtx";
@@ -92,6 +94,12 @@ function App() {
   const [me, setMe] = useState<Me | null>(null);
   const [deck, setDeck] = useState<Card[]>([]);
   const [screen, setScreen] = useState<Screen>("deck");
+  // Which deck: tokenized stocks (default — the Stocklana build) or the prediction markets. Persisted
+  // per browser; the two decks share the slot and nothing else (separate routes, separate cards).
+  const [deckMode, setDeckModeState] = useState<DeckMode>(() => {
+    try { return localStorage.getItem("hf_deck_mode") === "predictions" ? "predictions" : "stocks"; } catch { return "stocks"; }
+  });
+  const setDeckMode = useCallback((m: DeckMode) => { setDeckModeState(m); try { localStorage.setItem("hf_deck_mode", m); } catch { /* storage blocked */ } }, []);
   // One-shot: true only for the moment the user JUST spent their last swipe this session. Gates the
   // "Deck's done → Feed" hand-off panel so it shows exactly once; every other time the deck is locked
   // (relogin, post-reveal, tapping a disabled Deck tab) we route straight to the feed, no panel.
@@ -326,7 +334,7 @@ function App() {
   const topId = deck[0]?.id;
   const nextId = deck[1]?.id;
   useEffect(() => {
-    if (!topId || screen !== "deck") return;
+    if (!topId || screen !== "deck" || deckMode !== "predictions") return;
     const ids = nextId ? `${topId},${nextId}` : topId;
     let alive = true;
     const poll = async () => {
@@ -375,7 +383,7 @@ function App() {
       window.clearInterval(id);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [topId, nextId, screen, api, effectiveStakeCents]);
+  }, [topId, nextId, screen, deckMode, api, effectiveStakeCents]);
 
   const flashPop = useCallback((amt: number, color: string) => {
     setPop({ amt, color });
@@ -597,7 +605,7 @@ function App() {
   // Opening the inbox clears the unread badge optimistically; the NotificationsScreen POSTs
   // /api/results/seen, and the next /api/me confirms unreadResults=0.
   const markResultsSeen = useCallback(() => {
-    setMe((m) => (m && m.unreadResults ? { ...m, unreadResults: 0 } : m));
+    setMe((m) => (m && (m.unreadResults || m.unreadStockAlerts) ? { ...m, unreadResults: 0, unreadStockAlerts: 0 } : m));
   }, []);
 
   // Where a closed reveal leads. A daily-ritual reveal chains forward to GM, but ONLY if the user
@@ -648,7 +656,7 @@ function App() {
   // post-reveal landing / a tap on a stale Deck route all show the feed), EXCEPT the one-shot
   // just-exhausted moment, which shows the hand-off panel. Pure render derivation — no redirect
   // effect, so there's no one-frame flash of the deck before bouncing to the feed.
-  const effectiveScreen: Screen = screen === "deck" && deckLocked && !justExhausted ? "feed" : screen;
+  const effectiveScreen: Screen = screen === "deck" && deckMode === "predictions" && deckLocked && !justExhausted ? "feed" : screen;
 
   return (
     <Frame>
@@ -673,8 +681,13 @@ function App() {
       <Hud me={me} pop={pop} realPusdMicro={realPusdMicro} onShards={goVault} onGM={goGmScreen} onBalance={openBalance} onBell={goNotifs} />
 
       <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
-        {effectiveScreen === "deck" && (
+        {effectiveScreen === "deck" && deckMode === "stocks" && (
+          <StockDeck api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} mode={deckMode} onMode={setDeckMode} />
+        )}
+
+        {effectiveScreen === "deck" && deckMode === "predictions" && (
           <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column" }}>
+            <DeckModePill mode={deckMode} onMode={setDeckMode} />
             <div style={{ position: "relative", flex: 1, margin: "6px 14px 0" }}>
               {capReached ? (
                 <div style={{ position: "absolute", inset: 0, borderRadius: 26, background: "var(--panel)", border: "1px solid var(--line)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 28, textAlign: "center", gap: 10 }}>
@@ -737,10 +750,11 @@ function App() {
         {effectiveScreen === "vault" && <VaultScreen me={me} api={api} onRefresh={refresh} previewCard={top ?? next} />}
         {effectiveScreen === "invite" && <InviteScreen me={me} />}
         {effectiveScreen === "you" && <ProfileScreen me={me} api={api} onRefresh={refresh} onLogout={doLogout} onToast={flashToast} pusdMicro={realPusdMicro} />}
-        {effectiveScreen === "notifications" && <NotificationsScreen api={api} onSeen={markResultsSeen} onReplay={replayReveal} />}
+        {effectiveScreen === "notifications" && <NotificationsScreen api={api} onSeen={markResultsSeen} onReplay={replayReveal} onOpenStock={() => setScreen("portfolio")} />}
+        {effectiveScreen === "portfolio" && <PortfolioScreen api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} />}
       </div>
 
-      <BottomNav screen={effectiveScreen} onNav={navTo} deckLocked={deckLocked} devFeed={!!me?.dev} />
+      <BottomNav screen={effectiveScreen} onNav={navTo} deckLocked={deckLocked && deckMode === "predictions"} devFeed={!!me?.dev} />
 
       {/* Results reveal sits above the whole shell (HUD + nav). */}
       {reveal && (
