@@ -292,9 +292,13 @@ async function tick() {
     if ((tickCount - 1) % STOCK_CATALOG_EVERY_N_TICKS === 1) {
       const c = await withDeadline(STOCK_CATALOG_BUDGET_MS, () => refreshStockCatalog());
       console.log(`[stocks] catalog ${c.assets} assets, ${c.priced} priced, ${c.eligible} deck-eligible`);
+      // Zero priced with a non-empty catalog = Jupiter served nothing. Not thrown upstream (a
+      // partial read is a success by design), but three ticks of it empties the deck silently.
+      if (c.assets > 0 && c.priced === 0) throw new Error(`0 of ${c.assets} assets priced`);
     } else {
       const p = await withDeadline(STOCK_PRICES_BUDGET_MS, () => refreshStockPrices());
       console.log(`[stocks] repriced ${p.priced}/${p.requested}`);
+      if (p.requested > 0 && p.priced === 0) throw new Error(`0 of ${p.requested} mints repriced`);
     }
     subsystemOk("stocks");
     beat();
@@ -313,6 +317,9 @@ async function tick() {
     if (sw.scanned > 0) {
       console.log(`[stock-attempts] scanned ${sw.scanned}: confirmed ${sw.confirmed}, expired ${sw.expired}, failed ${sw.failed}`);
     }
+    // A FAILED attempt is a signed on-chain tx that landed with an error: a user's real USDC path.
+    // Page immediately (not on a streak) — one line per tick that saw one, which is rare.
+    if (sw.failed > 0) void sendOpsTelegram(`⚠️ stocks: ${sw.failed} on-chain buy attempt(s) FAILED this tick — see GlitchTip (attempt ids)`);
     subsystemOk("stock-attempts");
   } catch (e) {
     console.warn("[stock-attempts] sweep error:", (e as Error).message);

@@ -239,6 +239,8 @@ export const STOCK_SWAP_SLIPPAGE_BPS = 50; // Jupiter quote slippage 0.5%
 export const STOCK_MAX_PRICE_IMPACT_BP = 200; // refuse to build a swap whose quoted impact exceeds 2%
 export const STOCK_CONFIRM_POLLS = 4; // getTransaction attempts (×1.5 s) before 404 tx_not_found
 export const STOCK_ATTEMPT_SWEEP_AFTER_MS = 3 * 60_000; // a PENDING real buy older than this is swept by the poller
+export const STOCK_HEALTH_MIN_DECK = 20; // /api/stocks/health is 503 below this many FRESH deck-eligible assets
+export const STOCK_HEALTH_STUCK_ATTEMPT_MS = 30 * 60_000; // a PENDING attempt older than this counts as stuck
 export const STOCK_WALLET_RECONCILE_MAX_AGE_MS = 6 * 3_600_000; // REAL lots are re-checked against the wallet balance at most this often
 export const STOCK_TERMS_VERSION = 1; // bump when the xStocks consent text changes
 

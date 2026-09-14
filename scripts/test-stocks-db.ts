@@ -199,6 +199,14 @@ async function main() {
     assert.strictEqual(await prisma.stockPosition.count({ where: { userId: user.id } }), before, "no lot on outage");
     jupiterDown = false;
 
+    // 10. Public stocks health probe: no auth, no secrets, counts only. 200/503 by fresh deck count.
+    const health = await import("../src/app/api/stocks/health/route");
+    const hres = await health.GET();
+    const hbody = (await hres.json()) as Record<string, unknown>;
+    assert.deepStrictEqual(Object.keys(hbody).sort(), ["assets", "deckFresh", "ok", "oldestFreshAgeSec", "stuckAttempts"], "/stocks/health keys");
+    assert.strictEqual(hres.status, hbody.ok ? 200 : 503, "/stocks/health status follows ok");
+    assert.strictEqual(typeof hbody.deckFresh, "number", "deckFresh is a count");
+
     console.log("test-stocks-db: OK");
   } finally {
     if (userId) {

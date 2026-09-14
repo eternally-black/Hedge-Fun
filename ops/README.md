@@ -32,6 +32,12 @@ client-owned, cannot-be-automated setup. Two hosts: **VPS1** (the app,
    `BACKUP_HC_URL`, `WATCHDOG_HC_URL`) and VPS2 `/opt/ops/.env` (`GUARD_HC_URL`,
    `BACKUP_PULL_HC_URL`); GH secret `CANARY_HC_URL` for the canary dead-man
    (healthchecks.io works identically if preferred for any of these).
+5b. **Stocks probe (Stocklana)** — Kuma HTTP(s)-Keyword monitor on
+   `https://app.hedgeyour.fun/api/stocks/health`, keyword `"ok":true`, 60 s, same Telegram
+   notification. It goes 503 when fewer than `STOCK_HEALTH_MIN_DECK` deck assets carry a fresh
+   Jupiter price (dead poller, Jupiter outage, empty catalog) — the user-facing "empty stocks deck".
+   The poller's own `[stocks]` / `[stock-attempts]` / `[stock-alerts]` blocks page through the
+   existing 3-strike GlitchTip + Telegram path; a FAILED on-chain buy pages at once.
 6. **Watcher-of-the-watcher** — one free UptimeRobot monitor on
    `https://ingest.hedgeyour.fun` (VPS2's only public 200 — `push.hedgeyour.fun` serves
    push pings only and 403s everything else) with Telegram **and email** notifications.

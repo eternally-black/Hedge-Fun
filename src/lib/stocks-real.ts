@@ -12,6 +12,7 @@
 import { createHash } from "node:crypto";
 import { isAddress } from "@solana/kit";
 import { prisma } from "./prisma";
+import { captureToGlitchTip } from "./glitchtip";
 import {
   USDC_MINT,
   parseSwapDelta,
@@ -206,6 +207,7 @@ export async function confirmAttempt(
       where: { id: attemptId },
       data: { status: "FAILED", sig, resolvedAt: new Date() },
     });
+    void captureToGlitchTip(new Error("stock buy attempt FAILED on chain"), { subsystem: "stocks", attemptId, userId, sig });
     throw new TxRejectedError("tx_failed");
   }
 
@@ -213,6 +215,9 @@ export async function confirmAttempt(
   // the real tx may still be in flight.
   const delta = parseSwapDelta(tx, { payer: attempt.payer, mint: attempt.asset.mint });
   if (!delta || !attemptMatches(delta, { inAmountMicro: attempt.inAmountMicro, minOutBase: attempt.minOutBase })) {
+    // A landed tx that is not the swap we built. Booked nothing; worth a human look (a wallet
+    // that signed something else, or a quote/route drift we do not expect).
+    void captureToGlitchTip(new Error("stock buy: landed tx does not match the attempt"), { subsystem: "stocks", attemptId, userId, sig });
     throw new TxRejectedError("not_this_buy");
   }
 
