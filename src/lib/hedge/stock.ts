@@ -274,7 +274,9 @@ export interface LifeSearchOutcome extends S2SearchOutcome {
 export async function searchLife(userId: string, text: string, amountCents: number | null): Promise<LifeSearchOutcome> {
   const parsed = parseSituation(text);
   let amount = parsed.amountCents ?? amountCents ?? null;
-  let period: string | null = parsed.period;
+  // The amount box on the hedge screen is labelled "$ / month": an amount that arrives through it
+  // (nothing parsed from the text) is monthly by construction.
+  let period: string | null = parsed.period ?? (parsed.amountCents == null && amountCents != null ? "month" : null);
   const distanceKm = parsed.distanceKm;
 
   let hits = matchStockRules(text, { amountCents: amount, distanceKm });
