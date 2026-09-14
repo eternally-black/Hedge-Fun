@@ -24,7 +24,9 @@ export class JupiterUnavailableError extends Error {
 
 const BASE = process.env.JUPITER_PRICE_BASE ?? "https://lite-api.jup.ag/price/v3";
 const TIMEOUT_MS = 10_000;
-const CHUNK = 100; // ids per request (stay well under the URL/endpoint cap)
+// ids per request. Jupiter SILENTLY caps a request at 50 ids — a 100-id call answers 200 with the
+// first 50 keys and drops the rest (measured 2026-09-14: n=100 -> 50 keys, n=50 -> 50 keys).
+const CHUNK = 50;
 
 export interface JupPriceEntry {
   usdPrice?: number;
@@ -32,6 +34,10 @@ export interface JupPriceEntry {
   priceChange24h?: number;
   liquidity?: number;
   scaledUiConfig?: { multiplier?: number } | null;
+  // xStocks-specific: the issuer's reference price for the underlying stock. Present even for an
+  // xStock with NO Solana pool yet (then usdPrice/liquidity are absent) — verified live 2026-09-14
+  // on DALx. A price, not a route: a swap may still be impossible.
+  stockData?: { price?: number; mcap?: number; updatedAt?: string } | null;
 }
 
 async function fetchChunk(ids: string[]): Promise<Record<string, JupPriceEntry>> {

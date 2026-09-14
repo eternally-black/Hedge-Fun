@@ -232,7 +232,7 @@ export const STOCK_STAKE_PRESETS_CENTS = [1_000, 2_500, 5_000] as const;
 export const STOCK_MIN_STAKE_CENTS = 100; // $1 — a hedge sizing may go this small
 export const STOCK_MAX_STAKE_CENTS = 50_000; // $500 fat-finger bound (= HEDGE_MAX_STAKE_CENTS)
 export const STOCK_DECK_POOL = 150; // the deck draws from the top-N assets by Jupiter liquidity
-export const STOCK_MIN_LIQUIDITY_CENTS = 2_500_000; // $25k — ponytail: calibration knob, re-measure after the first catalog refresh
+export const STOCK_MIN_LIQUIDITY_CENTS = 100_000; // $1k of Jupiter liquidity before a card offers a REAL buy (the quote's impact cap is the final gate) — ponytail: calibration knob; measured 2026-09-14: ~58 of 832 xStocks have any pool, the 20th deepest is ~$3k
 export const STOCK_DECK_SIZE = 50;
 export const STOCK_PRICE_MAX_STALE_MS = 15 * 60_000; // a dead poller must not serve day-old prices
 export const STOCK_SWAP_SLIPPAGE_BPS = 50; // Jupiter quote slippage 0.5%

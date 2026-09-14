@@ -1,4 +1,4 @@
-import type { BetSide, BetSource } from "@prisma/client";
+import type { BetSide, BetSource, Prisma } from "@prisma/client";
 import { prisma } from "./prisma";
 import { utcDay } from "./time";
 import { writePoints } from "./points";
@@ -20,6 +20,19 @@ export class InsufficientFundsError extends Error {
     super("insufficient cash for stake");
     this.name = "InsufficientFundsError";
   }
+}
+
+// Atomic conditional HOLD of `cents` against Cash (balance − locked), bank-style: the WHERE makes the
+// check + the increment one indivisible write, so two concurrent holds can't both pass. Shared by
+// swipes (STAKE_CENTS) and tokenized-stock buys (a variable stake). 0 rows ⇒ not enough Cash ⇒ throw
+// (the caller's transaction rolls back). Raw SQL because the guard compares two columns.
+export async function holdCash(tx: Prisma.TransactionClient, userId: string, cents: number): Promise<void> {
+  const held = await tx.$executeRaw`
+    UPDATE virtual_balances
+       SET "lockedCents" = "lockedCents" + ${cents}
+     WHERE "userId" = ${userId}
+       AND "balanceCents" - "lockedCents" >= ${cents}`;
+  if (held === 0) throw new InsufficientFundsError();
 }
 
 // Cheap, NON-atomic read of whether this user's NEXT swipe today would be over the daily cap.
@@ -108,19 +121,9 @@ export async function recordSwipe(input: {
     }
 
     // Cash gate as an atomic conditional HOLD (bank-style): place STAKE_CENTS onto "lockedCents"
-    // only if free Cash ("balanceCents" − "lockedCents") still covers it. The WHERE makes the check
-    // + the increment one indivisible DB write, so two concurrent swipes can't both pass — the
-    // second's WHERE sees the first's incremented "lockedCents" and updates 0 rows. "balanceCents"
-    // is never decremented; the hold is released by settle. Raw SQL because the guard compares two
-    // columns (balance − locked), which Prisma's typed `where` can't express. Column names are
-    // camelCase (no @map on the fields, only @@map on the table) so they must be double-quoted.
-    // Returns the affected row count; 0 ⇒ not enough Cash ⇒ throw (rolls back bet + counter + points).
-    const held = await tx.$executeRaw`
-      UPDATE virtual_balances
-         SET "lockedCents" = "lockedCents" + ${STAKE_CENTS}
-       WHERE "userId" = ${input.userId}
-         AND "balanceCents" - "lockedCents" >= ${STAKE_CENTS}`;
-    if (held === 0) throw new InsufficientFundsError();
+    // only if free Cash ("balanceCents" − "lockedCents") still covers it — see holdCash above. The
+    // hold is released by settle; 0 rows ⇒ not enough Cash ⇒ throw (rolls back bet + counter + points).
+    await holdCash(tx, input.userId, STAKE_CENTS);
 
     return {
       betId: bet.id,

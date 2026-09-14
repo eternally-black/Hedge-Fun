@@ -939,9 +939,10 @@ model StockAsset {
   openNow           Boolean   @default(false)
   priceCents        Int? // Jupiter usdPrice per RAW token, integer cents; null = unpriced -> never served
   change24hBp       Int? // Jupiter priceChange24h (%) × 100
-  liquidityCents    Int? // Jupiter liquidity, cents, saturated at INT4
+  liquidityCents    Int? // Jupiter liquidity, cents, saturated at INT4; null = no Solana pool (only ~60 of ~830 xStocks have one)
+  mcapMillions      Int? // issuer's market cap (Jupiter stockData.mcap) in USD millions — ranks the deck's long tail
   uiMultiplierMicro Int? // scaledUiConfig.multiplier × 1e6 — DISPLAY only, never used in accounting
-  deckEligible      Boolean   @default(false) // derived at refresh: !halted && priced && liquidity >= floor && within the top pool
+  deckEligible      Boolean   @default(false) // derived at refresh: !halted && priced && within the top pool (liquidity desc, then mcap desc)
   pricedAt          DateTime? // written ONLY on a successful Jupiter read (staleness gates depend on it)
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt

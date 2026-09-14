@@ -73,6 +73,7 @@ export interface StockPriceFields {
   priceCents: number;
   change24hBp: number | null;
   liquidityCents: number | null;
+  mcapMillions: number | null;
   decimals: number;
   uiMultiplierMicro: number | null;
 }
@@ -81,11 +82,18 @@ export interface StockPriceFields {
 // rather than blow up at insert time.
 const INT4_MAX = 2_147_483_647;
 
-// Jupiter entry -> the fields we persist. null when the entry is absent or unpriced (a mint Jupiter
-// can't price is simply not deck-eligible — never a $0 card).
+const positive = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
+
+// Jupiter entry -> the fields we persist. The price is Jupiter's DEX usdPrice when the mint has a
+// pool; otherwise the issuer's reference price (stockData.price — what xStocks says the share is
+// worth), which is honest for a paper buy or a hedge card but comes with NO liquidity, so such an
+// asset never reaches the deck (isDeckEligible) and a real swap for it fails at the quote. null when
+// neither exists (a mint nobody prices is never a $0 card).
 export function priceFieldsFrom(e: JupPriceEntry | undefined): StockPriceFields | null {
-  if (!e || typeof e.usdPrice !== "number" || !Number.isFinite(e.usdPrice) || e.usdPrice <= 0) return null;
-  const priceCents = Math.round(e.usdPrice * 100);
+  if (!e) return null;
+  const usd = positive(e.usdPrice) ? e.usdPrice : positive(e.stockData?.price) ? e.stockData.price : null;
+  if (usd === null) return null;
+  const priceCents = Math.round(usd * 100);
   if (priceCents <= 0 || priceCents >= INT4_MAX) return null;
   const decimals = typeof e.decimals === "number" && Number.isInteger(e.decimals) && e.decimals >= 0 ? e.decimals : 8;
   const change24hBp =
@@ -99,12 +107,34 @@ export function priceFieldsFrom(e: JupPriceEntry | undefined): StockPriceFields 
   const mult = e.scaledUiConfig?.multiplier;
   const uiMultiplierMicro =
     typeof mult === "number" && Number.isFinite(mult) && mult > 0 ? Math.round(mult * 1e6) : null;
-  return { priceCents, change24hBp, liquidityCents, decimals, uiMultiplierMicro };
+  const mcap = e.stockData?.mcap;
+  const mcapMillions = positive(mcap) ? Math.min(INT4_MAX, Math.round(mcap / 1e6)) : null;
+  return { priceCents, change24hBp, liquidityCents, mcapMillions, decimals, uiMultiplierMicro };
 }
 
-// Deck eligibility: tradable, priced, and liquid enough that a $10 order is not the whole book.
-export function isDeckEligible(a: { halted: boolean; priceCents: number | null; liquidityCents: number | null }): boolean {
-  return !a.halted && a.priceCents !== null && a.priceCents > 0 && a.liquidityCents !== null && a.liquidityCents >= STOCK_MIN_LIQUIDITY_CENTS;
+// Deck eligibility: not halted and priced. Liquidity is a RANK, not a gate: only ~60 of ~830 xStocks
+// have a Solana pool, and a deck of 11 cards is not a deck. The pool is ordered liquidity-first then
+// market-cap (see deckRank), so the liquid names lead and the household-name long tail follows.
+export function isDeckEligible(a: { halted: boolean; priceCents: number | null }): boolean {
+  return !a.halted && a.priceCents !== null && a.priceCents > 0;
+}
+
+// Can a REAL buy be attempted? Only with a Solana pool deep enough that a small order is not the
+// whole book. The Jupiter quote (price-impact cap) is the final gate; this is what the card shows.
+export function isTradable(a: { halted: boolean; liquidityCents: number | null }): boolean {
+  return !a.halted && a.liquidityCents !== null && a.liquidityCents >= STOCK_MIN_LIQUIDITY_CENTS;
+}
+
+// Deck ordering: liquidity desc (nulls last), then market cap desc (nulls last). Pure so the refresh
+// ranking and any in-memory sort agree byte-for-byte.
+export function deckRank(
+  a: { liquidityCents: number | null; mcapMillions: number | null },
+  b: { liquidityCents: number | null; mcapMillions: number | null },
+): number {
+  const la = a.liquidityCents ?? -1;
+  const lb = b.liquidityCents ?? -1;
+  if (la !== lb) return lb - la;
+  return (b.mcapMillions ?? -1) - (a.mcapMillions ?? -1);
 }
 
 export function pow10(decimals: number): bigint {

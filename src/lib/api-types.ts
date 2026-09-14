@@ -522,7 +522,9 @@ export interface HedgeEventResponse {
 // ─── GET /api/stocks/deck ────  Auth: Bearer. Deck-eligible assets with a fresh price, minus the
 // caller's open positions and passes, shuffled. `wallets` = the caller's VERIFIED Solana addresses
 // (gates "Buy on Solana"); `stockConsent` = the caller accepted the current xStocks terms.
-export interface StockDeckCard { id: string; symbol: string; name: string; underlying: string; logoUrl: string | null; mint: string; priceCents: number; change24hBp: number | null; uiMultiplierMicro: number | null; tradingHours: string | null; openNow: boolean; pricedAt: string }
+// `tradable` = the mint has a Solana pool deep enough for a small REAL buy; false = paper only (the
+// price is the issuer's reference price) and the client must not offer "Buy on Solana".
+export interface StockDeckCard { id: string; symbol: string; name: string; underlying: string; logoUrl: string | null; mint: string; priceCents: number; change24hBp: number | null; uiMultiplierMicro: number | null; tradingHours: string | null; openNow: boolean; tradable: boolean; pricedAt: string }
 export interface StockDeckResponse { cards: StockDeckCard[]; wallets: string[]; stockConsent: boolean }
 // ─── POST /api/stocks/buy ────  Auth: Bearer. Body: StockBuyRequest. PAPER buy: locks the live price
 // server-side, holds stakeCents against Cash (atomic, like a swipe). requestId (client uuid) makes a

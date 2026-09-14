@@ -6,6 +6,8 @@ import {
   xstockToAsset,
   priceFieldsFrom,
   isDeckEligible,
+  isTradable,
+  deckRank,
   qtyBaseFor,
   valueCents,
   entryPriceCents,
@@ -84,13 +86,24 @@ import {
   });
   assert.deepStrictEqual(
     real,
-    { priceCents: 33416, change24hBp: 94, liquidityCents: 85168162, decimals: 8, uiMultiplierMicro: 1002664 },
+    { priceCents: 33416, change24hBp: 94, liquidityCents: 85168162, mcapMillions: null, decimals: 8, uiMultiplierMicro: 1002664 },
     "real Jupiter entry maps to the persisted fields",
   );
 
   assert.strictEqual(priceFieldsFrom({ usdPrice: 0 }), null, "usdPrice 0 -> null");
   assert.strictEqual(priceFieldsFrom(undefined), null, "undefined entry -> null");
   assert.strictEqual(priceFieldsFrom({}), null, "no usdPrice -> null");
+
+  // DALx today: no Solana pool yet, so Jupiter carries only the issuer's reference price.
+  const refOnly = priceFieldsFrom({ decimals: 8, stockData: { price: 79.58, mcap: 5.2e10, updatedAt: "2026-09-14T17:20:46.79Z" } });
+  assert.deepStrictEqual(
+    refOnly,
+    { priceCents: 7958, change24hBp: null, liquidityCents: null, mcapMillions: 52000, decimals: 8, uiMultiplierMicro: null },
+    "reference price only -> priced, no liquidity, market cap in millions",
+  );
+  assert.strictEqual(isTradable({ halted: false, liquidityCents: null }), false, "reference-only asset is paper-only");
+  assert.strictEqual(priceFieldsFrom({ usdPrice: 80.1, stockData: { price: 79.58 } })!.priceCents, 8010, "DEX price wins over the reference price");
+  assert.strictEqual(priceFieldsFrom({ usdPrice: 1, stockData: { mcap: 1e16 } })!.mcapMillions, 2_147_483_647, "mcap saturates at INT4 max");
 
   const huge = priceFieldsFrom({ usdPrice: 1, liquidity: 1e12 });
   assert.strictEqual(huge!.liquidityCents, 2_147_483_647, "liquidity saturates at INT4 max");
@@ -101,12 +114,21 @@ import {
   assert.strictEqual(noMult!.change24hBp, null, "no priceChange24h -> null");
 }
 
-// ─── isDeckEligible ─────────────────────────────────────────────────────────────────────────────────
+// ─── isDeckEligible / isTradable / deckRank ─────────────────────────────────────────────────────────
 {
-  assert.strictEqual(isDeckEligible({ halted: false, priceCents: 100, liquidityCents: 2_500_000 }), true, "at the floor is eligible");
-  assert.strictEqual(isDeckEligible({ halted: true, priceCents: 100, liquidityCents: 9_999_999 }), false, "halted -> not eligible");
-  assert.strictEqual(isDeckEligible({ halted: false, priceCents: null, liquidityCents: 9_999_999 }), false, "unpriced -> not eligible");
-  assert.strictEqual(isDeckEligible({ halted: false, priceCents: 100, liquidityCents: 2_499_999 }), false, "below the liquidity floor -> not eligible");
+  assert.strictEqual(isDeckEligible({ halted: false, priceCents: 100 }), true, "priced + not halted is eligible");
+  assert.strictEqual(isDeckEligible({ halted: true, priceCents: 100 }), false, "halted -> not eligible");
+  assert.strictEqual(isDeckEligible({ halted: false, priceCents: null }), false, "unpriced -> not eligible");
+  assert.strictEqual(isTradable({ halted: false, liquidityCents: 100_000 }), true, "at the liquidity floor is tradable");
+  assert.strictEqual(isTradable({ halted: false, liquidityCents: 99_999 }), false, "below the floor is paper-only");
+  assert.strictEqual(isTradable({ halted: true, liquidityCents: 9_999_999 }), false, "halted is never tradable");
+  const ranked = [
+    { s: "ref-big", liquidityCents: null, mcapMillions: 5_000_000 },
+    { s: "liq-small", liquidityCents: 1_000, mcapMillions: 10 },
+    { s: "ref-small", liquidityCents: null, mcapMillions: 100 },
+    { s: "liq-big", liquidityCents: 900_000, mcapMillions: null },
+  ].sort(deckRank).map((x) => x.s);
+  assert.deepStrictEqual(ranked, ["liq-big", "liq-small", "ref-big", "ref-small"], "liquidity first (nulls last), then market cap");
 }
 
 // ─── qtyBaseFor / valueCents / entryPriceCents / usdcMicroToCents / livePnlCents ────────────────────

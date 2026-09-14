@@ -22,6 +22,8 @@ import { evaluateStreak } from "../src/lib/streak";
 import { refreshDeck } from "./refresh-deck";
 import { pruneMarkets } from "./prune-markets";
 import { refreshHedgeIndex } from "./refresh-hedge-index";
+import { refreshStockCatalog, refreshStockPrices } from "./refresh-stocks";
+import { sweepAttempts } from "../src/lib/stocks-real";
 import { pruneReferralClicks } from "../src/lib/refclick";
 import { acquirePollerLease, releasePollerLease } from "../src/lib/poller-lease";
 
@@ -59,8 +61,9 @@ const HEDGE_INDEX_EVERY_N_TICKS = 5;
 // so a restart needs 240 s without a beat. Beats land after the lease, after each successful upstream
 // subsystem, before the settle sweep and at the end of a clean tick, so the longest no-beat spans are
 // deck 45 + index 120 = 165 s (plus the index's DB upserts, which a budget cannot cut) and settle 60 +
-// funding 30 + real-settle 45 + the 20 s reconcile call = 155 s (plus DB). A request under a budget is
-// clamped to what is left of it, so an in-flight request never extends the span. A budget hit is an
+// funding 30 + real-settle 45 + the 20 s reconcile call = 155 s (plus DB). The stocks pass adds at most
+// 10 s per tick (30 s on its catalog minute, which never coincides with the index). A request under a
+// budget is clamped to what is left of it, so an in-flight request never extends the span. A budget hit is an
 // ordinary subsystem failure — the previous deck / index rows stay, nothing partial is written,
 // unsettled markets and unread balances wait a tick.
 const DECK_GAMMA_BUDGET_MS = 45_000;
@@ -73,6 +76,13 @@ const REAL_SETTLE_BUDGET_MS = 45_000;
 // cost in the steady state, where it finds nothing. Deliberately OFFSET from the hedge index above
 // (see the tick body) so the two heavy passes don't land on the same tick.
 const PRUNE_EVERY_N_TICKS = 5;
+// Tokenized stocks (Stocklana). Prices for the SERVED subset every tick (≤ 3 Jupiter requests); the
+// full xStocks catalog + all ~800 prices every 5th tick on phase 1 — deliberately not the hedge
+// index's minute (phase 0) or the prune's (phase 2), so the heavy passes never stack on one tick.
+const STOCK_PRICES_BUDGET_MS = 10_000;
+const STOCK_CATALOG_BUDGET_MS = 30_000;
+const STOCK_CATALOG_EVERY_N_TICKS = 5;
+const STOCK_SWEEP_BUDGET_MS = 15_000; // pending real-buy attempts: a few Helius reads, or nothing at all
 // Order reconciliation ping. The poller is deliberately SDK-free, so it cannot reconcile orders
 // itself — it pings the route that can. Offset to tick phase 4 so it never lands on the same
 // minute as the hedge index (phase 0) or the prune (phase 2).
@@ -271,6 +281,42 @@ async function tick() {
     }
     mark("index", t);
   }
+
+  // Stock prices/catalog. Same shape as the deck refresh: budgeted upstream reads, one summary line,
+  // a beat on success. The catalog tick (phase 1) also re-ranks deck eligibility; the price tick keeps
+  // the served subset, open positions and the hedge tickers fresh (STOCK_PRICE_MAX_STALE_MS gates).
+  t = Date.now();
+  try {
+    if ((tickCount - 1) % STOCK_CATALOG_EVERY_N_TICKS === 1) {
+      const c = await withDeadline(STOCK_CATALOG_BUDGET_MS, () => refreshStockCatalog());
+      console.log(`[stocks] catalog ${c.assets} assets, ${c.priced} priced, ${c.eligible} deck-eligible`);
+    } else {
+      const p = await withDeadline(STOCK_PRICES_BUDGET_MS, () => refreshStockPrices());
+      console.log(`[stocks] repriced ${p.priced}/${p.requested}`);
+    }
+    subsystemOk("stocks");
+    beat();
+  } catch (e) {
+    console.warn("[stocks] refresh error:", (e as Error).message);
+    subsystemFailed("stocks", e);
+  }
+  mark("stocks", t);
+
+  // Real stock buys whose tab died between "sent" and "confirm": re-confirm the ones that carry a
+  // signature, adopt the ones we can find on chain, expire the rest once their blockhash is gone.
+  // Returns immediately (no RPC) when nothing is pending, which is the steady state.
+  t = Date.now();
+  try {
+    const sw = await withDeadline(STOCK_SWEEP_BUDGET_MS, () => sweepAttempts());
+    if (sw.scanned > 0) {
+      console.log(`[stock-attempts] scanned ${sw.scanned}: confirmed ${sw.confirmed}, expired ${sw.expired}, failed ${sw.failed}`);
+    }
+    subsystemOk("stock-attempts");
+  } catch (e) {
+    console.warn("[stock-attempts] sweep error:", (e as Error).message);
+    subsystemFailed("stock-attempts", e);
+  }
+  mark("stock-attempts", t);
 
   // Market cache GC. The cache is append-only otherwise: settlement only touches markets that have
   // bets, so everything nobody bet on accumulates forever. Bounded per run, so a backlog drains over
