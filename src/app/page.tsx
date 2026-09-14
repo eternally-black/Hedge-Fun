@@ -13,7 +13,6 @@ import { GmScreen } from "./screens/GmScreen";
 import { VaultScreen } from "./screens/VaultScreen";
 import { InviteScreen } from "./screens/InviteScreen";
 import { ProfileScreen } from "./screens/ProfileScreen";
-import { HistorySheet } from "./screens/HistorySheet";
 import { StakeSheet } from "./screens/StakeSheet";
 import { BalanceSheet } from "./screens/BalanceSheet";
 import { NotificationsScreen } from "./screens/NotificationsScreen";
@@ -110,7 +109,6 @@ function App() {
   // Opened from the STAKE chip on the top card. Real mode only — in paper the stake is a game rule
   // (STAKE_CENTS) that a player does not get to set, so the chip there stays inert text.
   const [stakeOpen, setStakeOpen] = useState(false);
-  const [historyOpen, setHistoryOpen] = useState(false);
   const [balanceOpen, setBalanceOpen] = useState(false);
   // Results reveal: the rows to play, or null when closed. Opened by the daily-open ritual (unseen
   // results on auth) and by "Replay" from the inbox. `revealMode` controls where closing it leads:
@@ -564,7 +562,6 @@ function App() {
   // Stable nav callbacks so memo'd Hud/BottomNav don't re-render on unrelated state changes.
   const goVault = useCallback(() => setScreen("vault"), []);
   const goGmScreen = useCallback(() => setScreen("gm"), []);
-  const closeHistory = useCallback(() => setHistoryOpen(false), []);
   const openBalance = useCallback(() => setBalanceOpen(true), []);
   const closeBalance = useCallback(() => setBalanceOpen(false), []);
   const goDeck = useCallback(() => setScreen("deck"), []);
@@ -576,7 +573,7 @@ function App() {
   // wherever you already are.
   const navTo = useCallback((s: NavKey) => {
     setJustExhausted(false);
-    if (s === "history") return setHistoryOpen(true);
+    if (s === "history") return setBalanceOpen(true); // one sheet: money + calls + stocks + hedges
     setScreen(s);
   }, []);
   // The hand-off panel's CTA: into the feed, one-shot consumed.
@@ -676,7 +673,6 @@ function App() {
           onToast={flashToast}
         />
       )}
-      {historyOpen && <HistorySheet me={me} api={api} onClose={closeHistory} onToast={flashToast} />}
       {balanceOpen && <BalanceSheet me={me} api={api} realPusdMicro={realPusdMicro} onClose={closeBalance} onTopupDone={refreshMe} onToast={flashToast} />}
       <Hud me={me} pop={pop} realPusdMicro={realPusdMicro} onShards={goVault} onGM={goGmScreen} onBalance={openBalance} onBell={goNotifs} />
 

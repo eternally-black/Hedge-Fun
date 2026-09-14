@@ -1,17 +1,47 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import type { StockPortfolioResponse, StockPositionRow } from "@/lib/api-types";
 import { type Me, usd } from "../ui";
 import { usePredictionHistory, useClosePosition, useExitQuotes, toPredictionRow } from "./usePredictionHistory";
 import { PredictionRow } from "./PredictionRow";
+import { StockHistoryRow } from "./PortfolioScreen";
 import { RealDepositPanel } from "./RealDepositPanel";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
-// Balance bottom-sheet (opened by tapping the Cash tile). Shows the Cash / Locked / Total split, a
-// Top-Up button (free once, then 1 artifact), and the prediction history (same /api/history rows via
-// usePredictionHistory — shared with HistorySheet). All money is derived from `me` during render —
+// The ONE history sheet. Opens from the balance chip in the HUD (every screen) and from the History
+// row on the You screen. Top: the Cash / Locked / Total split and the Top-Up button. Below: three
+// tabs — Calls (prediction bets, /api/history), Stocks (tokenized-stock lots, /api/stocks/portfolio),
+// Hedges (the accepted hedge legs of both kinds). All money is derived from `me` during render —
 // no mirrored server state.
+type Tab = "calls" | "stocks" | "hedges";
+const TABS: { key: Tab; label: string }[] = [
+  { key: "calls", label: "Calls" },
+  { key: "stocks", label: "Stocks" },
+  { key: "hedges", label: "Hedges" },
+];
+
+// Stock lots, fetched once the first time a tab that shows them opens (Stocks or Hedges). Open lots
+// first, then closed — newest first within each, as the portfolio route already orders them.
+function useStockHistory(api: Api, wanted: boolean) {
+  const [rows, setRows] = useState<StockPositionRow[] | null>(null);
+  useEffect(() => {
+    if (!wanted || rows) return;
+    let alive = true;
+    void (async () => {
+      try {
+        const r = (await api("/api/stocks/portfolio")) as StockPortfolioResponse;
+        if (alive) setRows([...r.open, ...r.closed]);
+      } catch {
+        if (alive) setRows([]);
+      }
+    })();
+    return () => { alive = false; };
+  }, [api, wanted, rows]);
+  return rows;
+}
+
 export function BalanceSheet({ me, api, realPusdMicro, onClose, onTopupDone, onToast }: {
   me: Me | null;
   api: Api;
@@ -20,9 +50,11 @@ export function BalanceSheet({ me, api, realPusdMicro, onClose, onTopupDone, onT
   onToast: (msg: string) => void;
   realPusdMicro?: string | null;
 }) {
+  const [tab, setTab] = useState<Tab>("calls");
   const { rows, pending, nowMs, refresh, hasMore, loadMore } = usePredictionHistory(api);
   const { close, closing } = useClosePosition(api, me, onToast, refresh);
   const exitQuotes = useExitQuotes(api, rows); // live value + P&L for the closable rows, 1s
+  const stocks = useStockHistory(api, tab !== "calls");
   const [busy, setBusy] = useState(false);
 
   const doTopup = useCallback(async (kind: "free" | "artifact") => {
@@ -40,6 +72,18 @@ export function BalanceSheet({ me, api, realPusdMicro, onClose, onTopupDone, onT
       setBusy(false);
     }
   }, [api, busy, onClose, onTopupDone, onToast]);
+
+  // What each tab lists. Hedges = the HEDGE-sourced rows of both kinds. ponytail: the calls side
+  // filters the pages loaded so far (50 per page) — a hedge older than the loaded window shows up
+  // after "Load more"; a server-side ?source= filter if that ever bites.
+  const callRows = tab === "hedges" ? rows?.filter((r) => r.source === "HEDGE") ?? null : tab === "calls" ? rows : null;
+  const stockRows = tab === "hedges" ? stocks?.filter((r) => r.source === "HEDGE") ?? null : tab === "stocks" ? stocks : null;
+  const loading = (tab !== "stocks" && !rows) || (tab !== "calls" && !stocks);
+  const empty = !loading && (callRows?.length ?? 0) + (stockRows?.length ?? 0) === 0;
+  const emptyCopy =
+    tab === "calls" ? "No predictions yet. Swipe a card to make your first call."
+    : tab === "stocks" ? "No stocks yet. Swipe right on the Stocks deck to buy one."
+    : "No hedges yet. The Hedge tab turns a life cost or a wallet into one.";
 
   return (
     // Backdrop is a real button: click/Enter/Escape closes (matches the overlay-click-to-close).
@@ -92,8 +136,8 @@ export function BalanceSheet({ me, api, realPusdMicro, onClose, onTopupDone, onT
         )}
 
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
-          <div style={{ fontFamily: "var(--df)", fontSize: 26 }}>Your predictions</div>
-          {pending > 0 && <div style={{ fontSize: 11, color: "var(--skip)", fontWeight: 700 }}>{pending} open</div>}
+          <div style={{ fontFamily: "var(--df)", fontSize: 26 }}>History</div>
+          {tab === "calls" && pending > 0 && <div style={{ fontSize: 11, color: "var(--skip)", fontWeight: 700 }}>{pending} open</div>}
           <button
             type="button"
             aria-label="Close"
@@ -104,16 +148,35 @@ export function BalanceSheet({ me, api, realPusdMicro, onClose, onTopupDone, onT
           </button>
         </div>
 
-        {!rows ? (
+        <div role="tablist" style={{ display: "flex", gap: 6, marginBottom: 12, background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 999, padding: 3 }}>
+          {TABS.map((t) => {
+            const on = t.key === tab;
+            return (
+              <button
+                key={t.key}
+                type="button"
+                role="tab"
+                aria-selected={on}
+                onClick={() => setTab(t.key)}
+                style={{ flex: 1, margin: 0, font: "inherit", padding: "7px 0", borderRadius: 999, border: "none", cursor: "pointer", fontSize: 12, fontWeight: 700, letterSpacing: ".04em", background: on ? "var(--energy)" : "transparent", color: on ? "#fff" : "var(--muted)" }}
+              >
+                {t.label}
+              </button>
+            );
+          })}
+        </div>
+
+        {loading ? (
           <div style={{ textAlign: "center", color: "var(--muted)", padding: 24 }}>Loading…</div>
-        ) : rows.length === 0 ? (
-          <div style={{ textAlign: "center", color: "var(--muted)", padding: 24, fontSize: 13 }}>No predictions yet. Swipe a card to make your first call.</div>
+        ) : empty ? (
+          <div style={{ textAlign: "center", color: "var(--muted)", padding: 24, fontSize: 13 }}>{emptyCopy}</div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {rows.map((r) => (
+            {stockRows?.map((r) => <StockHistoryRow key={r.id} row={r} />)}
+            {callRows?.map((r) => (
               <PredictionRow key={r.id} row={toPredictionRow(r)} nowMs={nowMs} onClosePosition={() => close(r)} closing={closing === r.id} exitQuote={exitQuotes[r.id]} />
             ))}
-            {hasMore && (
+            {tab !== "stocks" && hasMore && (
               <button
                 type="button"
                 onClick={() => void loadMore()}

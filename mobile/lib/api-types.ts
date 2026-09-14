@@ -19,7 +19,7 @@
 
 // String enums mirrored from Prisma so this file stays @prisma/client-free (RN has no Prisma).
 export type BetSide = "YES" | "NO";
-export type BetSource = "DECK" | "FEED"; // DECK = swipe deck (points + capped shards); FEED = post-cap feed (no points, uncapped shards)
+export type BetSource = "DECK" | "FEED" | "HEDGE"; // DECK = swipe deck (points + capped shards); FEED = post-cap feed (no points, uncapped shards); HEDGE = an accepted hedge leg (no points, no cap)
 export type StreakState = "ACTIVE" | "BURNED_RECOVERABLE" | "LOST";
 export type PointsType = "SWIPE" | "LOGIN" | "REFERRAL" | "STREAK_X2";
 export type BetStatus = "PENDING" | "WIN" | "LOSS" | "PUSH";
@@ -204,6 +204,7 @@ export interface HistoryRow {
   league?: string | null; // server-derived, see DeckCard.league — the sport a row names in its subtitle
   sideLabel: string; // the label of the side the user bet (team / Over / Up / Yes)
   side: BetSide; // drives badge color
+  source: BetSource; // HEDGE rows are the accepted hedge legs — the history sheet groups them
   stakeCents: number;
   lockedPriceBp: number;
   status: BetStatus;

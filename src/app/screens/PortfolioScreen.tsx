@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { type CSSProperties, useCallback, useEffect, useRef, useState } from "react";
 import { type Me, usd } from "../ui";
 import { REAL_BALANCE_POLL_MS } from "@/lib/config";
 import type { StockPortfolioResponse, StockPositionRow } from "@/lib/api-types";
@@ -338,6 +338,32 @@ function ClosedRow({ row }: { row: StockPositionRow }) {
           {signed(pnl)}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+// Read-only row for the unified history sheet (BalanceSheet): open or closed, paper or on-chain,
+// deck or hedge. No actions here — selling and buying stay on the Portfolio screen.
+const PILL: CSSProperties = { fontSize: 10, fontWeight: 700, color: "var(--muted)", background: "var(--panel2)", border: "1px solid var(--line)", padding: "2px 7px", borderRadius: 20 };
+export function StockHistoryRow({ row }: { row: StockPositionRow }) {
+  const pnl = row.pnlCents;
+  const pnlColor = pnl == null ? "var(--muted)" : pnl >= 0 ? "var(--yes)" : "var(--no)";
+  const closed = row.closedAt != null;
+  const sub = closed
+    ? `${row.closeReason === "wallet" ? "moved in wallet" : "sold"}${row.proceedsCents != null ? ` · ${usd(row.proceedsCents)}` : ""}`
+    : `${fmtQty(row)} · ${usd(row.entryPriceCents)}${row.priceCents != null ? ` → ${usd(row.priceCents)}` : ""}`;
+  return (
+    <div style={{ background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 14, padding: "10px 13px", display: "flex", alignItems: "center", gap: 11, opacity: closed ? 0.8 : 1 }}>
+      <Logo url={row.logoUrl} symbol={row.symbol} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700, fontSize: 13 }}>
+          <span>{row.symbol}</span>
+          <span style={row.mode === "REAL" ? { ...PILL, color: "var(--gold)" } : PILL}>{row.mode === "REAL" ? "◎ on-chain" : "PAPER"}</span>
+          {row.source === "HEDGE" && <span style={PILL}>🛡 hedge</span>}
+        </div>
+        <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sub}</div>
+      </div>
+      {pnl != null && <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 13, color: pnlColor, whiteSpace: "nowrap" }}>{signed(pnl)}</div>}
     </div>
   );
 }

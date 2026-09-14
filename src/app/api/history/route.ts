@@ -43,6 +43,7 @@ export async function GET(req: Request) {
       id: true,
       marketId: true, // the EXIT intent is placed against the market, not the bet
       side: true,
+      source: true, // DECK | FEED | HEDGE — the history sheet groups hedge legs
       stakeCents: true,
       lockedPriceBp: true,
       settlementStatus: true,
@@ -122,6 +123,7 @@ export async function GET(req: Request) {
     // The label of the side the user actually bet (YES = side A label, NO = side B label).
     sideLabel: b.side === "YES" ? b.market.outcomeYesLabel : b.market.outcomeNoLabel,
     side: b.side, // "YES" | "NO" — drives the badge color
+    source: b.source,
     stakeCents: b.stakeCents,
     lockedPriceBp: b.lockedPriceBp,
     status: mode === "REAL" ? realStatus : b.settlementStatus === "PENDING" ? "PENDING" : b.result,

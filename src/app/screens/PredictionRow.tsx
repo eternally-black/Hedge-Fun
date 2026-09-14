@@ -21,6 +21,7 @@ export type PredictionRowData = {
   status: "PENDING" | "WIN" | "LOSS" | "PUSH";
   league?: string | null; // "Soccer", "CS2" — leads the subtitle when known
   category?: string | null; // fallback when the market names no discipline ("crypto", "politics")
+  hedge?: boolean; // an accepted hedge leg — the subtitle says so
   stakeCents: number;
   lockedPriceBp: number; // entry price
   pnlCents: number | null; // null while open
@@ -91,7 +92,8 @@ export function PredictionRow({
 
   // Subtitle: the discipline first (a card must say WHICH sport, and so must its row), then either
   // what the position costs and is worth NOW, or what the call was and how it landed.
-  const lead = row.league ?? (row.category && row.category !== "other" ? cap(row.category) : null);
+  const discipline = row.league ?? (row.category && row.category !== "other" ? cap(row.category) : null);
+  const lead = row.hedge ? (discipline ? `🛡 Hedge · ${discipline}` : "🛡 Hedge") : discipline;
   const detail = settled
     ? `Your call ${row.sideLabel}${row.outcome ? ` · ${row.outcome}` : ""}`
     : `${cents(row.lockedPriceBp)} · ${usd(row.stakeCents)} stake${live ? ` · now ${cents(live.priceBp)}` : ""}${

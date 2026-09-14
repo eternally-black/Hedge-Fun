@@ -20,6 +20,7 @@ export type HistoryRowData = {
   league?: string | null;
   sideLabel: string;
   side: "YES" | "NO";
+  source?: "DECK" | "FEED" | "HEDGE";
   stakeCents: number;
   lockedPriceBp: number;
   status: "PENDING" | "WIN" | "LOSS" | "PUSH";
@@ -145,6 +146,7 @@ export function toPredictionRow(r: HistoryRowData): PredictionRowData {
     side: r.side,
     sideLabel: r.sideLabel,
     status: r.status,
+    hedge: r.source === "HEDGE",
     league: r.league,
     category: r.category,
     stakeCents: r.stakeCents,
