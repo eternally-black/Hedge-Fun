@@ -1,0 +1,296 @@
+// Tokenized stocks (xStocks on Solana — "Stocklana"). A stock card is NOT a binary market: it never
+// resolves, its price is spot, and a right swipe is a BUY. This module is the PURE core — no prisma,
+// no env, no fetch — so the deck/portfolio/swap paths and the unit tests share one arithmetic.
+//
+// UNITS (the whole file is written in these, and mixing them is the bug this comment exists to stop):
+//  • priceCents  — integer USD cents per ONE RAW token (Jupiter's usdPrice is USD per raw token).
+//  • qtyBase     — raw base units (BigInt). A Token-2022 ScaledUiAmount mint carries a multiplier in
+//                  scaledUiConfig; raw balances are NOT scaled by it, only the wallet's DISPLAY is.
+//                  So qtyBase is the number the chain moves and the number we store.
+//  • costCents   — integer USD cents actually spent (USDC micro-units / 10_000, rounded UP).
+//  • uiMultiplierMicro — multiplier × 1e6, for DISPLAY ONLY (uiQty), never for money.
+
+import type { JupPriceEntry } from "./prices";
+import { STOCK_MIN_LIQUIDITY_CENTS } from "./config";
+
+// USDC on Solana — the quote side of every xStock swap (Jupiter routes USDC -> xStock).
+export const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+export const USDC_DECIMALS = 6;
+
+// One node of GET https://api.xstocks.fi/api/v2/public/assets. Every field is optional/nullable
+// because the upstream is a public API we do not control — a shape change must degrade to "skip this
+// asset", never to a crash mid-deck.
+export interface XStockNode {
+  symbol?: string | null;
+  name?: string | null;
+  logo?: string | null;
+  underlyingSymbol?: string | null;
+  isTradingHalted?: boolean | null;
+  trading?: { tradingHoursMode?: string | null; openNow?: boolean | null } | null;
+  deployments?: { network?: string | null; address?: string | null }[] | null;
+}
+
+export interface StockAssetInput {
+  mint: string;
+  symbol: string;
+  name: string;
+  underlying: string;
+  logoUrl: string | null;
+  halted: boolean;
+  tradingHours: string | null;
+  openNow: boolean;
+}
+
+// Normalise one upstream node. null unless we have a symbol AND a Solana deployment with a real
+// address — an Ethereum-only asset is not tradable here and must not reach the deck.
+export function xstockToAsset(n: XStockNode): StockAssetInput | null {
+  const symbol = typeof n.symbol === "string" ? n.symbol.trim() : "";
+  if (!symbol) return null;
+  const sol = (n.deployments ?? []).find(
+    (d) => d && d.network === "Solana" && typeof d.address === "string" && d.address.length > 0,
+  );
+  if (!sol || !sol.address) return null;
+  const name = typeof n.name === "string" && n.name.trim() ? n.name.trim() : symbol;
+  const underlying =
+    typeof n.underlyingSymbol === "string" && n.underlyingSymbol.trim()
+      ? n.underlyingSymbol.trim()
+      : symbol.endsWith("x")
+        ? symbol.slice(0, -1)
+        : symbol;
+  return {
+    mint: sol.address,
+    symbol,
+    name,
+    underlying,
+    logoUrl: typeof n.logo === "string" && n.logo ? n.logo : null,
+    halted: n.isTradingHalted === true,
+    tradingHours: n.trading?.tradingHoursMode ?? null,
+    openNow: n.trading?.openNow === true,
+  };
+}
+
+export interface StockPriceFields {
+  priceCents: number;
+  change24hBp: number | null;
+  liquidityCents: number | null;
+  decimals: number;
+  uiMultiplierMicro: number | null;
+}
+
+// INT4 ceiling — every one of these columns is a Prisma Int, so a value past it must be clamped here
+// rather than blow up at insert time.
+const INT4_MAX = 2_147_483_647;
+
+// Jupiter entry -> the fields we persist. null when the entry is absent or unpriced (a mint Jupiter
+// can't price is simply not deck-eligible — never a $0 card).
+export function priceFieldsFrom(e: JupPriceEntry | undefined): StockPriceFields | null {
+  if (!e || typeof e.usdPrice !== "number" || !Number.isFinite(e.usdPrice) || e.usdPrice <= 0) return null;
+  const priceCents = Math.round(e.usdPrice * 100);
+  if (priceCents <= 0 || priceCents >= INT4_MAX) return null;
+  const decimals = typeof e.decimals === "number" && Number.isInteger(e.decimals) && e.decimals >= 0 ? e.decimals : 8;
+  const change24hBp =
+    typeof e.priceChange24h === "number" && Number.isFinite(e.priceChange24h)
+      ? Math.round(e.priceChange24h * 100)
+      : null;
+  const liquidityCents =
+    typeof e.liquidity === "number" && Number.isFinite(e.liquidity) && e.liquidity > 0
+      ? Math.min(INT4_MAX, Math.round(e.liquidity * 100))
+      : null;
+  const mult = e.scaledUiConfig?.multiplier;
+  const uiMultiplierMicro =
+    typeof mult === "number" && Number.isFinite(mult) && mult > 0 ? Math.round(mult * 1e6) : null;
+  return { priceCents, change24hBp, liquidityCents, decimals, uiMultiplierMicro };
+}
+
+// Deck eligibility: tradable, priced, and liquid enough that a $10 order is not the whole book.
+export function isDeckEligible(a: { halted: boolean; priceCents: number | null; liquidityCents: number | null }): boolean {
+  return !a.halted && a.priceCents !== null && a.priceCents > 0 && a.liquidityCents !== null && a.liquidityCents >= STOCK_MIN_LIQUIDITY_CENTS;
+}
+
+export function pow10(decimals: number): bigint {
+  return 10n ** BigInt(Math.max(0, Math.trunc(decimals)));
+}
+
+// How many raw base units a stake buys at the quoted price. FLOOR — the user never gets more than
+// they paid for, and the remainder stays in their USDC.
+export function qtyBaseFor(stakeCents: number, priceCents: number, decimals: number): bigint {
+  if (stakeCents <= 0 || priceCents <= 0) return 0n;
+  return (BigInt(Math.trunc(stakeCents)) * pow10(decimals)) / BigInt(Math.trunc(priceCents));
+}
+
+// What a holding is worth at a price. FLOOR — a gain never reads high (the mirror of usdcMicroToCents).
+export function valueCents(qtyBase: bigint, priceCents: number, decimals: number): number {
+  if (qtyBase <= 0n || priceCents <= 0) return 0;
+  return Number((qtyBase * BigInt(Math.trunc(priceCents))) / pow10(decimals));
+}
+
+// The price a lot was actually bought at, derived from what it cost. ROUND — this is a display/entry
+// figure, not a payout, so neither direction is systematically unfair. Integer rounding is done in
+// BigInt (add half the divisor before dividing) — Math.round cannot take a BigInt.
+export function entryPriceCents(costCents: number, qtyBase: bigint, decimals: number): number {
+  if (qtyBase <= 0n || costCents <= 0) return 0;
+  const num = BigInt(Math.trunc(costCents)) * pow10(decimals);
+  return Number((num + qtyBase / 2n) / qtyBase);
+}
+
+// USDC micro-units -> cents, CEIL: a cost basis must never read low (understating cost overstates P&L).
+export function usdcMicroToCents(micro: bigint): number {
+  if (micro <= 0n) return 0;
+  return Number((micro + 9_999n) / 10_000n);
+}
+
+// THE P&L. Portfolio totals and alerts both read this one function so they can never disagree.
+export function livePnlCents(p: { qtyBase: bigint; costCents: number }, a: { priceCents: number; decimals: number }): number {
+  return valueCents(p.qtyBase, a.priceCents, a.decimals) - p.costCents;
+}
+
+// Display-only quantity: raw units scaled by the Token-2022 multiplier so the number matches what the
+// user's wallet shows. NEVER feed this back into money math.
+export function uiQty(qtyBase: bigint, decimals: number, uiMultiplierMicro: number | null): number {
+  const base = Number(qtyBase) / 10 ** Math.max(0, Math.trunc(decimals));
+  return uiMultiplierMicro === null ? base : base * (uiMultiplierMicro / 1e6);
+}
+
+// ─── Helius getTransaction (jsonParsed) parsing ────────────────────────────────────────────────────
+
+export interface RpcTokenBalance {
+  accountIndex?: number;
+  mint: string;
+  owner?: string | null;
+  uiTokenAmount: { amount: string; decimals: number };
+}
+
+export interface RpcParsedTx {
+  meta: {
+    err: unknown;
+    preTokenBalances?: RpcTokenBalance[] | null;
+    postTokenBalances?: RpcTokenBalance[] | null;
+  } | null;
+  transaction: { message: { accountKeys: { pubkey: string; signer?: boolean; writable?: boolean }[] } };
+}
+
+export interface SwapDelta {
+  qtyBase: bigint;
+  usdcOutMicro: bigint;
+}
+
+function sumFor(balances: RpcTokenBalance[] | null | undefined, owner: string, mint: string): bigint {
+  let total = 0n;
+  for (const b of balances ?? []) {
+    if (!b || b.owner !== owner || b.mint !== mint) continue;
+    try {
+      total += BigInt(b.uiTokenAmount.amount);
+    } catch {
+      // A malformed amount string means we cannot trust this tx — treat the whole parse as failed.
+      throw new Error("bad token amount");
+    }
+  }
+  return total;
+}
+
+// Read what a landed swap actually moved. null on ANY doubt: a failed tx, a tx built for a different
+// payer, or a tx that did not both receive the stock and spend USDC. Booking a lot off a tx we only
+// half-understand is how a user ends up with a position they never bought.
+export function parseSwapDelta(tx: RpcParsedTx, expect: { payer: string; mint: string }): SwapDelta | null {
+  const meta = tx.meta;
+  if (!meta || meta.err != null) return null; // a successful tx carries err: null
+  const payer = tx.transaction?.message?.accountKeys?.[0]?.pubkey;
+  if (payer !== expect.payer) return null;
+  let qtyBase: bigint;
+  let usdcOutMicro: bigint;
+  try {
+    qtyBase = sumFor(meta.postTokenBalances, payer, expect.mint) - sumFor(meta.preTokenBalances, payer, expect.mint);
+    usdcOutMicro = sumFor(meta.preTokenBalances, payer, USDC_MINT) - sumFor(meta.postTokenBalances, payer, USDC_MINT);
+  } catch {
+    return null;
+  }
+  if (qtyBase <= 0n || usdcOutMicro <= 0n) return null;
+  return { qtyBase, usdcOutMicro };
+}
+
+export interface AttemptLike {
+  inAmountMicro: bigint;
+  minOutBase: bigint;
+}
+
+// Does the landed swap match the quote we built the attempt from? The user can never be charged MORE
+// than the ExactIn amount they signed, and must receive at least the minimum output they signed.
+export function attemptMatches(d: SwapDelta, a: AttemptLike): boolean {
+  return d.usdcOutMicro <= a.inAmountMicro && d.qtyBase >= a.minOutBase;
+}
+
+// ─── Jupiter Lite Swap v1 quote parsing ─────────────────────────────────────────────────────────────
+
+export interface JupQuoteParsed {
+  inAmount: bigint;
+  outAmount: bigint;
+  minOutBase: bigint;
+  priceImpactBp: number;
+}
+
+function bigFromString(v: unknown): bigint | null {
+  if (typeof v !== "string" || !/^\d+$/.test(v)) return null;
+  try {
+    return BigInt(v);
+  } catch {
+    return null;
+  }
+}
+
+// Parse a Jupiter quote. null when any amount is missing/malformed/non-positive — a quote we cannot
+// fully read is a quote we must not sign. priceImpactPct is a PERCENT (string or number); a missing
+// one reads as 0 bp, which is the permissive direction and is why the caller also caps it.
+export function parseJupQuote(json: unknown): JupQuoteParsed | null {
+  if (!json || typeof json !== "object") return null;
+  const o = json as Record<string, unknown>;
+  const inAmount = bigFromString(o.inAmount);
+  const outAmount = bigFromString(o.outAmount);
+  const minOutBase = bigFromString(o.otherAmountThreshold);
+  if (inAmount === null || inAmount <= 0n) return null;
+  if (outAmount === null || outAmount <= 0n) return null;
+  if (minOutBase === null || minOutBase <= 0n) return null;
+  const raw = o.priceImpactPct;
+  const pct = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : 0;
+  const priceImpactBp = Number.isFinite(pct) ? Math.round(pct * 100) : 0;
+  return { inAmount, outAmount, minOutBase, priceImpactBp };
+}
+
+// ─── base58 (inline — no dependency for one decoder) ────────────────────────────────────────────────
+
+const B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const B58_MAP: Record<string, number> = (() => {
+  const m: Record<string, number> = {};
+  for (let i = 0; i < B58_ALPHABET.length; i++) m[B58_ALPHABET[i]] = i;
+  return m;
+})();
+
+// Decode base58 to bytes. null on any character outside the alphabet (0, O, I, l are the classic
+// typos) — a signature we cannot decode is a signature we must not trust. The accumulator starts
+// EMPTY: a seeded [0] would leave an extra zero byte behind for an all-'1' input.
+export function decodeBase58(s: string): Uint8Array | null {
+  if (typeof s !== "string" || s.length === 0) return null;
+  const bytes: number[] = [];
+  for (const ch of s) {
+    const val = B58_MAP[ch];
+    if (val === undefined) return null;
+    let carry = val;
+    for (let i = 0; i < bytes.length; i++) {
+      carry += bytes[i] * 58;
+      bytes[i] = carry & 0xff;
+      carry >>= 8;
+    }
+    while (carry > 0) {
+      bytes.push(carry & 0xff);
+      carry >>= 8;
+    }
+  }
+  // Leading '1's are leading zero bytes.
+  for (let i = 0; i < s.length && s[i] === "1"; i++) bytes.push(0);
+  return Uint8Array.from(bytes.reverse());
+}
+
+// A Solana signature is exactly 64 bytes of base58 — anything else is not a signature.
+export function sigBytesValid(sig: string): boolean {
+  const bytes = decodeBase58(sig);
+  return bytes !== null && bytes.length === 64;
+}

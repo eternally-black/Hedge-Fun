@@ -75,6 +75,19 @@ enum HedgeSuggestionKind {
   S1_PROXY // long-tail SPL aggregate -> SOL-short proxy (basis risk)
   S2 // reserved: life-event hedge
   FALLBACK // reserved: discovery fallback (never presented as a hedge)
+  S1_STOCK // wallet exposure -> a tokenized-stock leg (xStocks; Stocklana)
+  S3_STOCK // life situation (flights/fuel/rent...) -> a tokenized-stock card
+  SPOTTED // a live 24h move fired a rule's trigger (no user input needed)
+}
+
+// Lifecycle of a real (on-chain) stock buy. PENDING from the moment the swap tx is built; the client
+// stamps `sig` right after Phantom sends; CONFIRMED only after the server READ the landed tx and
+// matched it against this row; EXPIRED when lastValidBlockHeight passed with no matching tx on chain.
+enum StockAttemptStatus {
+  PENDING
+  CONFIRMED
+  EXPIRED
+  FAILED
 }
 
 // The parsed direction of a strike market = which side (YES / outcome index 0) benefits from an
@@ -212,6 +225,12 @@ model User {
   // to spend from the client. Default and floor are both $1 (REAL_DEFAULT_STAKE_CENTS), which is
   // what Polymarket's own ticket accepts as a market buy at any price.
   realStakeCents        Int          @default(100)
+  // Tokenized-stock eligibility (Stocklana): the moment the user accepted the xStocks terms and
+  // self-declared as not a US person / not in a restricted jurisdiction, and WHICH version of that
+  // text. /api/stocks/real/tx refuses to build a swap without the current version — the same
+  // "consent is a versioned record, not a click" reasoning as realConsentVersion above.
+  stockConsentAt        DateTime?
+  stockConsentVersion   Int?
 
   bets                  Bet[]
   pointsLedger          PointsLedger[]
@@ -231,6 +250,10 @@ model User {
   fundingAttempts       FundingAttempt[]
   relayerTxs            RelayerTx[]
   clobCredential        ClobCredential?
+  stockPositions        StockPosition[]
+  stockPasses           StockPass[]
+  stockAttempts         StockBuyAttempt[]
+  lifeSituations        LifeSituation[]
 
   @@index([createdAt])
   @@map("users")
@@ -689,8 +712,12 @@ model HedgeSuggestionEvent {
   userId             String
   user               User                @relation(fields: [userId], references: [id])
   address            String // the hedged wallet address
-  marketId           String
-  market             Market              @relation(fields: [marketId], references: [id])
+  // Nullable since the stock kinds (S1_STOCK / S3_STOCK / SPOTTED): a tokenized-stock card has no
+  // Market behind it — stockSymbol carries the instrument instead, and positionId the lot on ACCEPT.
+  marketId           String?
+  market             Market?             @relation(fields: [marketId], references: [id])
+  stockSymbol        String? // "DALx" — set on stock-kind events, null on market kinds
+  positionId         String? // set on a stock ACCEPT (the StockPosition created)
   kind               HedgeSuggestionKind
   side               BetSide // the side that hedges the holding (down-benefit)
   proposedStakeCents Int // the SIZED stake we OFFERED (before the per-user Cash clamp)
@@ -892,4 +919,135 @@ model ClobCredential {
   updatedAt  DateTime  @updatedAt
 
   @@map("clob_credentials")
+}
+
+// ============================================================ STOCKS (xStocks on Solana — Stocklana)
+// A tokenized stock is NOT a Market: it never resolves, it has no YES/NO, and its price is a spot
+// price, so it gets its own tables instead of a synthetic Market row. Prices are integer cents per
+// RAW token (Jupiter's usdPrice); quantities are raw base units (10^-decimals). The Token-2022
+// ScaledUiAmount multiplier is DISPLAY only (uiMultiplierMicro) — raw × price is the accounting.
+model StockAsset {
+  id                String    @id @default(cuid())
+  mint              String    @unique // Solana Token-2022 mint (the xStocks deployment address) — the upsert key
+  symbol            String    @unique // "AAPLx"
+  name              String // "Apple xStock"
+  underlying        String // "AAPL"
+  logoUrl           String?
+  decimals          Int       @default(8) // base-unit exponent, from Jupiter price v3
+  halted            Boolean   @default(false) // xStocks isTradingHalted
+  tradingHours      String? // "TwentyFourFive" | "Regular" | "MarketHours" | null (2 assets carry no trading block)
+  openNow           Boolean   @default(false)
+  priceCents        Int? // Jupiter usdPrice per RAW token, integer cents; null = unpriced -> never served
+  change24hBp       Int? // Jupiter priceChange24h (%) × 100
+  liquidityCents    Int? // Jupiter liquidity, cents, saturated at INT4
+  uiMultiplierMicro Int? // scaledUiConfig.multiplier × 1e6 — DISPLAY only, never used in accounting
+  deckEligible      Boolean   @default(false) // derived at refresh: !halted && priced && liquidity >= floor && within the top pool
+  pricedAt          DateTime? // written ONLY on a successful Jupiter read (staleness gates depend on it)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  positions StockPosition[]
+  passes    StockPass[]
+  attempts  StockBuyAttempt[]
+
+  @@index([deckEligible, liquidityCents])
+  @@map("stock_assets")
+}
+
+// One row per BUY (a lot). PAPER: the stake is HELD on VirtualBalance.lockedCents exactly like a bet
+// and released on sell. REAL: quantity/cost come from the confirmed on-chain transaction (txSig,
+// attemptId), never from the client; a REAL lot is closed with closeReason "wallet" when the payer's
+// live balance no longer backs it (sold/moved in Phantom).
+model StockPosition {
+  id                String     @id @default(cuid())
+  userId            String
+  user              User       @relation(fields: [userId], references: [id])
+  assetId           String
+  asset             StockAsset @relation(fields: [assetId], references: [id])
+  mode              BetMode    @default(PAPER)
+  source            BetSource  @default(DECK) // DECK | HEDGE (FEED unused)
+  requestId         String?    @unique // PAPER: client idempotency key (uuid) — a retried buy returns the same lot
+  hedgeSuggestionId String? // set when a hedge suggestion was accepted into this lot
+  qtyBase           BigInt // raw base units (10^-decimals)
+  costCents         Int // PAPER: the held stake. REAL: USDC actually spent, rounded UP to the cent
+  entryPriceCents   Int // cost / qty at entry (display: "bought at")
+  txSig             String?    @unique // REAL: the confirmed Solana signature — the idempotency key
+  payer             String? // REAL: the verified wallet that paid
+  attemptId         String?    @unique // REAL: the StockBuyAttempt this lot settled
+  walletCheckedAt   DateTime? // REAL: last reconciliation against the payer's live token balance
+  closedAt          DateTime?
+  closeReason       String? // "sold" | "wallet" | "reset"
+  proceedsCents     Int?
+  pnlCents          Int?
+  // Profit alerts: alertTierBp = the highest STOCK_ALERT_TIERS_BP tier this lot has crossed (0 =
+  // none), raised only by one conditional updateMany — a tier fires once, a poller restart cannot
+  // re-fire it. alertSeenAt resets to null on each new tier: the inbox's unread flag (= Bet.seenAt).
+  alertTierBp       Int        @default(0)
+  alertedAt         DateTime?
+  alertSeenAt       DateTime?
+  createdAt         DateTime   @default(now())
+
+  @@unique([userId, hedgeSuggestionId]) // a hedge suggestion is accepted into at most one lot (NULLs are distinct)
+  @@index([userId, closedAt])
+  @@index([assetId])
+  @@index([userId, alertSeenAt])
+  @@map("stock_positions")
+}
+
+// Swipe-left: never deal this asset to this user again.
+model StockPass {
+  userId    String
+  user      User       @relation(fields: [userId], references: [id])
+  assetId   String
+  asset     StockAsset @relation(fields: [assetId], references: [id])
+  createdAt DateTime   @default(now())
+
+  @@id([userId, assetId])
+  @@map("stock_passes")
+}
+
+// A real buy the server BUILT (Jupiter swap tx for a verified wallet). The chain is the receipt, but
+// this row is what the receipt is checked AGAINST: payer, mint, ExactIn amount, minimum output and the
+// tx message hash all have to match the landed transaction, so an unrelated transfer can never be
+// booked as a purchase. The poller sweeps PENDING rows: with a sig -> re-confirm; without one and past
+// lastValidBlockHeight -> search the payer's recent signatures for a match, else EXPIRED.
+model StockBuyAttempt {
+  id                   String             @id @default(cuid())
+  userId               String
+  user                 User               @relation(fields: [userId], references: [id])
+  assetId              String
+  asset                StockAsset         @relation(fields: [assetId], references: [id])
+  payer                String // the verified wallet the tx was built for
+  stakeCents           Int
+  inAmountMicro        BigInt // ExactIn USDC (micro-units)
+  minOutBase           BigInt // quote.otherAmountThreshold (raw base units)
+  msgHash              String // sha256 of the serialized swapTransaction bytes
+  lastValidBlockHeight BigInt
+  hedgeSuggestionId    String?
+  status               StockAttemptStatus @default(PENDING)
+  sig                  String? // stamped by /real/sent as soon as the client has it
+  createdAt            DateTime           @default(now())
+  resolvedAt           DateTime?
+
+  @@index([status, createdAt])
+  @@index([userId, createdAt])
+  @@map("stock_buy_attempts")
+}
+
+// What the user told us about a life cost (category + amount + period + distance) — no raw text
+// (nothing reads it, and it is PII). Persisted so a stock hedge card can be RE-DERIVED on accept
+// without the query, and so spotted cards can be sized to the user. Last write per category wins.
+model LifeSituation {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  category    String // StockCategory (src/lib/hedge/stock-rules.ts)
+  amountCents Int?
+  period      String? // "month" | "week" | "year" | "once"
+  distanceKm  Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([userId, category])
+  @@map("life_situations")
 }

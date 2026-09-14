@@ -511,3 +511,56 @@ export interface HedgeEventRequest {
 export interface HedgeEventResponse {
   ok: true;
 }
+
+// ─── STOCKS (xStocks on Solana — Stocklana) ────────────────────────────────────────────────────
+// A tokenized stock card is NOT a DeckCard: it has no YES/NO, never resolves, and its price is spot.
+// Right swipe = BUY (paper from the virtual balance, or REAL via the user's own Phantom + Jupiter),
+// left = PASS (never dealt again), up = skip (session only). qtyBase is a decimal STRING on the wire
+// (raw base units, BigInt server-side). Prices are integer cents per RAW token; uiMultiplierMicro
+// (Token-2022 ScaledUiAmount × 1e6) is for DISPLAY only so shown quantities match the wallet.
+
+// ─── GET /api/stocks/deck ────  Auth: Bearer. Deck-eligible assets with a fresh price, minus the
+// caller's open positions and passes, shuffled. `wallets` = the caller's VERIFIED Solana addresses
+// (gates "Buy on Solana"); `stockConsent` = the caller accepted the current xStocks terms.
+export interface StockDeckCard { id: string; symbol: string; name: string; underlying: string; logoUrl: string | null; mint: string; priceCents: number; change24hBp: number | null; uiMultiplierMicro: number | null; tradingHours: string | null; openNow: boolean; pricedAt: string }
+export interface StockDeckResponse { cards: StockDeckCard[]; wallets: string[]; stockConsent: boolean }
+// ─── POST /api/stocks/buy ────  Auth: Bearer. Body: StockBuyRequest. PAPER buy: locks the live price
+// server-side, holds stakeCents against Cash (atomic, like a swipe). requestId (client uuid) makes a
+// retry return the same lot (alreadyBought:true). Errors: 400 (bounds/uuid), 404 asset_not_found,
+// 409 asset_halted | stake_too_small, 402 insufficient_funds, 502 price_unavailable.
+export interface StockBuyRequest { assetId: string; stakeCents: number; requestId: string }
+export interface StockBuyResponse { positionId: string; qtyBase: string; priceCents: number; costCents: number; alreadyBought: boolean }
+// ─── POST /api/stocks/sell ────  Auth: Bearer. PAPER only: closes the lot at the live price, credits
+// P&L, releases the hold. Errors: 404 position_not_found, 409 already_closed, 502 price_unavailable.
+export interface StockSellRequest { positionId: string }
+export interface StockSellResponse { positionId: string; proceedsCents: number; pnlCents: number; priceCents: number }
+// ─── POST /api/stocks/pass ────  Auth: Bearer. Idempotent. Errors: 404 asset_not_found.
+export interface StockPassRequest { assetId: string }
+export type StockPassResponse = { ok: true };
+// ─── GET /api/stocks/portfolio ────  Auth: Bearer. Open + recent closed lots, both modes, priced from
+// the STORED asset price (refreshed every poller tick; `fresh` false when older than the staleness
+// bound). REAL lots are reconciled against the payer's live wallet balance at most every few hours.
+export interface StockPositionRow { id: string; assetId: string; symbol: string; name: string; logoUrl: string | null; mode: "PAPER" | "REAL"; source: "DECK" | "HEDGE"; qtyBase: string; decimals: number; uiMultiplierMicro: number | null; costCents: number; entryPriceCents: number; priceCents: number | null; valueCents: number | null; pnlCents: number | null; fresh: boolean; txSig: string | null; payer: string | null; createdAt: string; closedAt: string | null; closeReason: string | null; proceedsCents: number | null }
+export interface StockTotals { costCents: number; valueCents: number; pnlCents: number }
+export interface StockPendingAttempt { id: string; symbol: string; stakeCents: number; status: "PENDING" | "CONFIRMED" | "EXPIRED" | "FAILED"; sig: string | null; createdAt: string }
+export interface StockPortfolioResponse { open: StockPositionRow[]; closed: StockPositionRow[]; totals: { paper: StockTotals; real: StockTotals }; wallets: string[]; pendingAttempts: StockPendingAttempt[] }
+// ─── POST /api/stocks/consent ────  Auth: Bearer. Records acceptance of the xStocks terms +
+// self-declaration (not a US person / not in a restricted jurisdiction) at `version`.
+export interface StockConsentRequest { version: number }
+export type StockConsentResponse = { ok: true; version: number };
+// ─── POST /api/stocks/real/tx ────  Auth: Bearer. Builds a Jupiter USDC→xStock swap for the caller's
+// VERIFIED wallet `payer` and records a StockBuyAttempt. Nothing is spent here. Errors: 400, 403
+// stock_consent_required | wallet_not_verified, 404 asset_not_found, 409 asset_halted | price_impact,
+// 502 swap_unavailable.
+export interface StockRealTxRequest { assetId: string; stakeCents: number; payer: string; hedgeSuggestionId?: string }
+export interface StockRealTxResponse { attemptId: string; swapTransaction: string; lastValidBlockHeight: number; payer: string; quote: { inAmountMicro: string; outAmountBase: string; minOutBase: string; priceImpactBp: number } }
+// ─── POST /api/stocks/real/sent ────  Auth: Bearer. Stamps the signature on the attempt as soon as
+// the wallet has sent it, so the poller can recover a buy whose tab died before /confirm.
+export interface StockRealSentRequest { attemptId: string; sig: string }
+export type StockRealSentResponse = { ok: true };
+// ─── POST /api/stocks/real/confirm ────  Auth: Bearer. Reads the landed tx from the chain and books
+// the lot ONLY if it matches the attempt (payer, mint, ExactIn amount, minimum output). Idempotent by
+// signature. Errors: 400, 403 (not the caller's attempt/tx), 404 tx_not_found (retry), 409 tx_failed |
+// not_this_buy | attempt_expired, 502 rpc_unavailable.
+export interface StockRealConfirmRequest { attemptId: string; sig: string }
+export interface StockRealConfirmResponse { positionId: string; qtyBase: string; costCents: number; alreadyConfirmed: boolean }

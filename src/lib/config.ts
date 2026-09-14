@@ -174,6 +174,13 @@ export const S2_SIDE_CEIL_BP = 9800; // 98%
 export const HEDGE_FALLBACK_COUNT = 3;
 export const HEDGE_FALLBACK_POOL_MAX = 300; // cap the contested pool scanned for the fallback
 
+// ---- Life-situation → tokenized-stock hedges (Stocklana) ----
+export const HEDGE_STOCK_WALLET_PCT_BP = 1000; // 10% of a major / SPL notional → a tokenized-stock leg (S1-stock)
+export const HEDGE_STOCK_FIXED_CENTS = HEDGE_S2_STAKE_CENTS; // no amount stated → the fixed life-hedge stake ($10)
+export const HEDGE_STOCK_PRICE_MAX_AGE_MS = 15 * 60_000; // a StockAsset priced older than this is not offered
+export const HEDGE_STOCK_MAX_CATEGORIES = 2; // stock cards per free-text search
+export const HEDGE_SPOTTED_MAX = 3; // proactive "spotted" cards per request
+
 // ---- Depth-aware pricing (phase 2 — D10 Slice A) ----
 // Two DELIBERATELY different thresholds. QUOTE_TOLERANCE is a fairness guarantee on ONE bet: how far
 // the executed price may drift from the quote the user saw before the bet is rejected (seen-vs-
@@ -218,3 +225,19 @@ export const EXIT_QUOTES_MAX_IDS = 8;
 // arrived. One RPC read per interval per VISIBLE tab and none at all for a hidden one; a bridged
 // deposit lands in a minute or two, so anything tighter would just re-read the same number.
 export const REAL_BALANCE_POLL_MS = 15_000;
+
+// ---- Tokenized stocks (xStocks on Solana — Stocklana) ----
+// Amount chips on a stock card; the first is the default. Paper money, so these are game sizes.
+export const STOCK_STAKE_PRESETS_CENTS = [1_000, 2_500, 5_000] as const;
+export const STOCK_MIN_STAKE_CENTS = 100; // $1 — a hedge sizing may go this small
+export const STOCK_MAX_STAKE_CENTS = 50_000; // $500 fat-finger bound (= HEDGE_MAX_STAKE_CENTS)
+export const STOCK_DECK_POOL = 150; // the deck draws from the top-N assets by Jupiter liquidity
+export const STOCK_MIN_LIQUIDITY_CENTS = 2_500_000; // $25k — ponytail: calibration knob, re-measure after the first catalog refresh
+export const STOCK_DECK_SIZE = 50;
+export const STOCK_PRICE_MAX_STALE_MS = 15 * 60_000; // a dead poller must not serve day-old prices
+export const STOCK_SWAP_SLIPPAGE_BPS = 50; // Jupiter quote slippage 0.5%
+export const STOCK_MAX_PRICE_IMPACT_BP = 200; // refuse to build a swap whose quoted impact exceeds 2%
+export const STOCK_CONFIRM_POLLS = 4; // getTransaction attempts (×1.5 s) before 404 tx_not_found
+export const STOCK_ATTEMPT_SWEEP_AFTER_MS = 3 * 60_000; // a PENDING real buy older than this is swept by the poller
+export const STOCK_WALLET_RECONCILE_MAX_AGE_MS = 6 * 3_600_000; // REAL lots are re-checked against the wallet balance at most this often
+export const STOCK_TERMS_VERSION = 1; // bump when the xStocks consent text changes

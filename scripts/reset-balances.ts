@@ -27,6 +27,14 @@ import { START_BALANCE_CENTS } from "../src/lib/config";
     },
   });
 
+  // 1b. Open PAPER stock lots hold Cash too (lockedCents) — close them as a reset (no P&L) so the
+  // zeroed hold below does not orphan a lot that still claims part of it. REAL lots are untouched.
+  const lots = await prisma.stockPosition.updateMany({
+    where: { mode: "PAPER", closedAt: null },
+    data: { closedAt: now, closeReason: "reset", proceedsCents: 0, pnlCents: 0 },
+  });
+  console.log(`closed ${lots.count} open paper stock lot(s) as reset`);
+
   // 2. Hard-reset every balance to $200, zero the hold (all pending now voided), clear top-up state.
   const reset = await prisma.virtualBalance.updateMany({
     data: { balanceCents: START_BALANCE_CENTS, lockedCents: 0, freeTopupUsed: false, topupCount: 0 },

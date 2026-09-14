@@ -10,11 +10,16 @@
 // NLU_API_BASE/NLU_API_KEY/NLU_MODEL wherever you want; nothing else in the engine knows or cares.
 
 import { createHash } from "node:crypto";
+import type { SituationPeriod } from "./situation";
 
 export interface NluResult {
-  category: string | null; // "sports" | "esports" | "entertainment" | "crypto" | "other" | null
+  category: string | null; // "sports" | "esports" | "entertainment" | "crypto" | a life-cost category (see stock-rules) | "other" | null
   entities: string[]; // proper nouns: teams, clubs, people, titles
   keywords: string[]; // other salient terms
+  // B-P2: optional life-situation fields. OMITTED (not undefined) when the model didn't supply a
+  // valid value — existing callers deepStrictEqual against the old 3-key shape.
+  amountCents?: number;
+  period?: SituationPeriod;
 }
 
 const NLU_TIMEOUT_MS = 5_000;
@@ -24,13 +29,19 @@ const NLU_BASE = process.env.NLU_API_BASE ?? "https://openrouter.ai/api/v1";
 const NLU_MODEL = process.env.NLU_MODEL ?? "deepseek/deepseek-v4";
 
 const SYSTEM_PROMPT =
-  "You are a strict NLU extractor for a prediction-market hedge app. Given a short user message " +
-  "about something they care about (a sports team they support, a movie they will see, an event), " +
-  "extract structured fields. Respond with ONLY a single minified JSON object, no prose, no code " +
-  'fences, exactly this schema: {"category": string|null, "entities": string[], "keywords": string[]}. ' +
-  '"category" is one of "sports","esports","entertainment","crypto","other" or null. "entities" are ' +
-  "proper nouns (teams, clubs, people, titles) in their canonical English form when obvious. " +
-  '"keywords" are other salient terms. Do NOT choose bets, sides, odds, or markets — extraction only.';
+  "You are a strict NLU extractor for a hedging app. The user describes something they care about " +
+  "or spend on: a sports team they support, an event, or a life cost (flights, fuel/driving, taxis, " +
+  "rent, groceries, electricity, healthcare, subscriptions, online shopping, coffee/dining, their " +
+  "tech job, a crypto bag). Respond with ONLY one minified JSON object, no prose, no code fences, " +
+  'exactly this schema: {"category": string|null, "entities": string[], "keywords": string[], ' +
+  '"amountCents": integer|null, "period": string|null}. "category" is one of "sports","esports",' +
+  '"entertainment","crypto","travel","driving","rides","housing","groceries","energy","healthcare",' +
+  '"tech_job","streaming","shopping","dining","market","other" or null. "entities" are proper nouns ' +
+  '(teams, clubs, people, titles, brands) in canonical English. "keywords" are other salient terms. ' +
+  '"amountCents" is a money amount the user states, converted to USD integer cents (assume USD when ' +
+  'unclear), else null. "period" is "month","week","year" or "once" when stated, else null. The ' +
+  "message may be in English, Russian or Ukrainian. Do NOT choose stocks, bets, sides, sizes or " +
+  "markets — extraction only.";
 
 function buildUserPrompt(text: string): string {
   return `User message: ${JSON.stringify(text)}\nReturn the JSON object now.`;
@@ -59,7 +70,16 @@ export function parseNluResponse(raw: string): NluResult | null {
   const keywords = toStrArray(o.keywords);
   // A result with neither entities nor keywords carries no signal for a re-run.
   if (entities.length === 0 && keywords.length === 0 && category === null) return null;
-  return { category, entities, keywords };
+  const out: NluResult = { category, entities, keywords };
+  // B-P2: only attach the optional fields when the model supplied a VALID value. Invalid/absent
+  // values must leave the KEY OFF entirely — existing tests deepStrictEqual against the old shape.
+  if (typeof o.amountCents === "number" && Number.isFinite(o.amountCents) && o.amountCents >= 0) {
+    out.amountCents = Math.round(o.amountCents);
+  }
+  if (o.period === "month" || o.period === "week" || o.period === "year" || o.period === "once") {
+    out.period = o.period;
+  }
+  return out;
 }
 
 // Extract the assistant text from an OpenAI-compatible /chat/completions body.
