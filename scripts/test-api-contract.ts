@@ -92,7 +92,7 @@ async function main() {
   // ---- (b) authed 200 + EXACT top-level key contract (Android binds to these) ----
   const meBody = await (await me.GET(authed("http://x/api/me"))).json();
   assert.deepStrictEqual(keysOf(meBody),
-    ["artifacts","balanceCents","cashCents","dev","isNewUser","lockedCents","loginMarkedToday","points","real","referrals","shards","shardsPerArtifact","skins","skips","stakeCents","streak","swipes","topup","unreadResults","user"],
+    ["artifacts","balanceCents","cashCents","dev","isNewUser","lockedCents","loginMarkedToday","points","real","referrals","shards","shardsPerArtifact","skins","skips","stakeCents","streak","swipes","topup","unreadResults","unreadStockAlerts","user"],
     "/me top-level keys");
   // The Paper/Real switch binds to these, and the Android client reads the same payload — a rename
   // here is a broken toggle there, so the shape is pinned like every other block on this endpoint.
@@ -202,7 +202,7 @@ async function main() {
 
   // results: empty top-level contract first (no settled bets yet).
   const resEmpty = await (await results.GET(authed("http://x/api/results"))).json();
-  assert.deepStrictEqual(keysOf(resEmpty), ["nextCursor","rows","unreadCount"], "/results top-level keys");
+  assert.deepStrictEqual(keysOf(resEmpty), ["nextCursor","rows","stockAlerts","unreadCount"], "/results top-level keys");
   assert.strictEqual(resEmpty.nextCursor, null, "/results empty -> nextCursor null");
   assert.strictEqual(resEmpty.rows.length, 0, "/results no settled bets yet -> empty");
 
@@ -227,7 +227,7 @@ async function main() {
 
   // results/seen: marks all unseen, idempotent.
   const seen1 = await (await resultsSeen.POST(authed("http://x/api/results/seen", { method: "POST" }))).json();
-  assert.deepStrictEqual(keysOf(seen1), ["markedSeen"], "/results/seen top-level keys");
+  assert.deepStrictEqual(keysOf(seen1), ["markedSeen","markedStockAlertsSeen"], "/results/seen top-level keys");
   assert.strictEqual(seen1.markedSeen, 1, "/results/seen marks the 1 unseen row");
   const seen2 = await (await resultsSeen.POST(authed("http://x/api/results/seen", { method: "POST" }))).json();
   assert.strictEqual(seen2.markedSeen, 0, "/results/seen idempotent -> 0 on second call");

@@ -48,6 +48,23 @@ export function s2SuggestionId(parts: {
 // digest. A caller can reject a malformed id — truncated client state, telemetry spam — before doing
 // ANY DB re-derivation (F14). It only proves the SHAPE; a well-formed id that no longer derives is
 // still resolved to null downstream (stale → 404).
+// Stock-card ids: content hashes like the others, namespaced "S3v1". Stake is NOT hashed (same
+// reasoning as suggestionId); a spotted id does not hash the move either — re-derivation re-evaluates
+// the trigger, and a faded move resolves to "stale" (404), which is the honest outcome.
+export function stockSuggestionId(p: { kind: "S1_STOCK" | "S3_STOCK" | "SPOTTED"; symbol: string; address?: string; hedgedAsset?: string; hedgedNotionalCents?: number; category?: string; amountCents?: number }): string {
+  const canonical = [
+    "S3v1",
+    p.kind,
+    p.symbol,
+    p.address ?? "",
+    p.hedgedAsset ?? "",
+    String(p.hedgedNotionalCents ?? 0),
+    p.category ?? "",
+    String(p.amountCents ?? 0),
+  ].join("|");
+  return createHash("sha256").update(canonical).digest("hex").slice(0, 32);
+}
+
 export function isHexSuggestionId(sid: string): boolean {
   return /^[0-9a-f]{32}$/.test(sid);
 }

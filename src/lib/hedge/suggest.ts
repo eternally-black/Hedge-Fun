@@ -10,12 +10,13 @@ import { suggestionId } from "./id";
 import { WSOL_MINT } from "./exposure";
 import type { HedgeAsset, ParsedDirection } from "./parse";
 import { getSnapshot, getCachedSnapshot, type SnapshotData } from "./snapshot";
+import { deriveWalletStock } from "./stock";
 import { quoteSideForDisplay, sourceHasClobBook } from "../depth";
 import type { HedgeSuggestion, HedgeSuggestionKind } from "../api-types";
 
 // The Prisma HedgeSuggestionKind values (mirrored so this module stays @prisma/client-free at the
 // type level). S1_* are wallet hedges; S2 / FALLBACK are the life-event + discovery kinds (A2).
-export type PrismaHedgeKind = "S1_MAJOR" | "S1_PROXY" | "S2" | "FALLBACK";
+export type PrismaHedgeKind = "S1_MAJOR" | "S1_PROXY" | "S2" | "FALLBACK" | "S1_STOCK" | "S3_STOCK" | "SPOTTED";
 
 // Internal derived item: the wire suggestion + the fields /accept and telemetry need (address, the
 // Prisma enum kind) that don't belong in the public card shape. `address` is the hedged wallet for
@@ -36,6 +37,9 @@ export function enumKind(wire: HedgeSuggestionKind): PrismaHedgeKind {
     case "S1-proxy": return "S1_PROXY";
     case "S2": return "S2";
     case "fallback": return "FALLBACK";
+    case "S1-stock": return "S1_STOCK";
+    case "S3-stock": return "S3_STOCK";
+    case "spotted": return "SPOTTED";
   }
 }
 
@@ -210,6 +214,7 @@ export async function deriveForUser(
     const snap = opts.cacheOnly ? await getCachedSnapshot(w.address) : await getSnapshot(w.address);
     if (!snap) continue;
     items.push(...(await deriveSuggestions(snap, indexed, nowMs, { quoteDisplay: opts.quoteDisplay })));
+    items.push(...(await deriveWalletStock(snap, nowMs)));
   }
   return { items, walletLinked: true };
 }

@@ -241,3 +241,10 @@ export const STOCK_CONFIRM_POLLS = 4; // getTransaction attempts (×1.5 s) befor
 export const STOCK_ATTEMPT_SWEEP_AFTER_MS = 3 * 60_000; // a PENDING real buy older than this is swept by the poller
 export const STOCK_WALLET_RECONCILE_MAX_AGE_MS = 6 * 3_600_000; // REAL lots are re-checked against the wallet balance at most this often
 export const STOCK_TERMS_VERSION = 1; // bump when the xStocks consent text changes
+
+// ---- Stock profit alerts ----
+export const STOCK_ALERT_TIERS_BP = [200, 500, 1000] as const; // +2/+5/+10% of cost; each fires once per lot, monotonic (ascending)
+export const STOCK_ALERT_MIN_PNL_CENTS = 50; // $0.50 — a $1 lot at +2% is two cents, not news
+export const STOCK_ALERT_PRICE_MAX_STALE_MS = 5 * 60_000; // prices refresh every 60 s tick; 5 missed ticks is an outage, not a rally
+export const STOCK_ALERT_SCAN_MAX = 2_000; // open lots scanned per tick — ponytail: no cursor rotation at hackathon scale
+export const STOCK_ALERT_FIRE_MAX_PER_TICK = 200; // the rest wait one tick

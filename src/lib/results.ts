@@ -1,6 +1,31 @@
 import type { Prisma } from "@prisma/client";
-import type { ResultRow } from "./api-types";
+import type { ResultRow, StockAlertRow } from "./api-types";
 import { categoryOf, gameOf } from "./deck-mix";
+import type { PnlFn } from "./stock-alerts";
+
+// A stock profit alert as the inbox shows it. P&L is LIVE (the stored asset price at read time) —
+// the honest number for a "take profit?" nudge — while tierBp is what fired. `pnl` is injected
+// (livePnlCents in production) so the unit math has exactly one owner.
+export function toStockAlertRow(
+  p: Prisma.StockPositionGetPayload<{ include: { asset: true } }>,
+  pnl: PnlFn,
+): StockAlertRow {
+  const a = p.asset;
+  const pnlCents = a.priceCents != null ? pnl(p, { priceCents: a.priceCents, decimals: a.decimals }) : 0;
+  return {
+    positionId: p.id,
+    symbol: a.symbol,
+    name: a.name,
+    logoUrl: a.logoUrl,
+    mode: p.mode,
+    tierBp: p.alertTierBp,
+    pnlCents,
+    pnlBp: p.costCents > 0 ? Math.floor((pnlCents * 10_000) / p.costCents) : 0,
+    costCents: p.costCents,
+    alertedAt: (p.alertedAt ?? p.createdAt).toISOString(),
+    seen: p.alertSeenAt != null,
+  };
+}
 
 // Shared select + mapper for a settled bet -> ResultRow. Used by /api/results. (/api/history has
 // its OWN inline select — the two are not shared, despite what this comment used to claim.)

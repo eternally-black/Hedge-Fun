@@ -259,13 +259,26 @@ export interface ResultsResponse {
   rows: ResultRow[];
   unreadCount: number;
   nextCursor: string | null; // opaque; pass back as ?cursor= for the next page; null = no more
+  stockAlerts?: StockAlertRow[]; // stock profit alerts (optional: older servers omit, older clients ignore)
 }
+
+// ─── Stock profit alerts — ride the results inbox (Stocklana) ─────────────────────────────────────
+// One row per OPEN tokenized-stock lot that crossed a profit tier (+2/+5/+10% of cost). Not a settled
+// result: nothing is booked and the reveal never plays it — it is a nudge. pnl* are LIVE at read time
+// (stored asset price); tierBp is what fired. Both modes are returned (stock alerts do not follow the
+// Polymarket real-mode switch); `mode` labels each row.
+export interface StockAlertRow { positionId: string; symbol: string; name: string; logoUrl: string | null; mode: "PAPER" | "REAL"; tierBp: number; pnlCents: number; pnlBp: number; costCents: number; alertedAt: string; seen: boolean }
+// POST /api/results/seen body (optional). NO body = bets only (what the shipped mobile client sends).
+// `stockAlerts` acknowledges exactly the (positionId, tierBp) pairs the client displayed — a tier that
+// fired after the client loaded is left unread.
+export interface SeenRequest { scope?: "bets" | "stocks" | "both"; stockAlerts?: { positionId: string; tierBp: number }[] }
 
 // ─── POST /api/results/seen ──────────────────────────────────────────────────────────────────────
 // Auth: Bearer. No body. Marks ALL of the user's unseen settled results as seen (idempotent —
 // only seenAt IS NULL rows are touched). Called when the reveal is dismissed or the inbox is opened.
 export interface SeenResponse {
-  markedSeen: number;
+  markedSeen: number; // bets marked seen (unchanged meaning)
+  markedStockAlertsSeen: number; // stock alert pairs acknowledged (0 unless the body listed them)
 }
 
 // ─── GET /api/me ───────────────────────────────────────────────────────────────────────────────
@@ -328,6 +341,9 @@ export interface MeResponse {
   // client skips the GM/reveal open ritual for new users — straight to the deck so they feel the
   // core loop first. Derived (streak.level===0 && !loginMarkedToday), no extra query.
   isNewUser: boolean;
+  // Open tokenized-stock lots with an unseen profit tier, BOTH modes — the bell adds it to
+  // unreadResults. Optional so a stale client never sees a phantom badge.
+  unreadStockAlerts?: number;
 }
 
 // ─── POST /api/skins ─────────────────────────────────────────────────────────────────────────────
@@ -380,7 +396,10 @@ export interface AdminLeaderboardResponse {
 // ETH). "S1-proxy" = the long-tail SPL aggregate hedged via a SOL short (BASIS RISK — the client MUST
 // label it a proxy, never a hedge). "S2" = a life-event hedge (bet AGAINST a team you support).
 // "fallback" = a discovery card (NOT a hedge — client MUST label it discovery; see isDiscovery).
-export type HedgeSuggestionKind = "S1-major" | "S1-proxy" | "S2" | "fallback";
+// "S1-stock" = a tokenized-stock leg sized off wallet exposure; "S3-stock" = a life-situation
+// (flights/fuel/rent…) → tokenized stock; "spotted" = a live 24h move fired a rule's trigger (no
+// user input needed).
+export type HedgeSuggestionKind = "S1-major" | "S1-proxy" | "S2" | "fallback" | "S1-stock" | "S3-stock" | "spotted";
 
 // ─── POST /api/hedge/wallet ──────────────────────────────────────────────────────────────────────
 // Auth: Bearer. Body: HedgeWalletRequest. Validates the base58 Solana address, links it (read-only —
@@ -431,6 +450,12 @@ export interface HedgeWalletStateResponse {
 // Price semantics (D10 follow-up): yesPriceBp/noPriceBp are the live CLOB VWAP at the card's OWN
 // proposedStakeCents — the exact quote /accept honours — never the Gamma mid; a market that won't
 // quote both sides at that stake is dropped rather than shown at an approximated price.
+// A tokenized stock behind a hedge card (Stocklana). When `stock` is set on a HedgeSuggestion the
+// DeckCard fields are SENTINELS (id "stock:<SYMBOL>", prices 0, deadline "") — render off `stock`,
+// never off the market fields.
+export interface HedgeStockRef { symbol: string; name: string; mint: string; logoUrl: string | null; priceCents: number; change24hBp: number | null; tradable: boolean }
+// The parsed life situation a stock card answers (persisted per user+category, no raw text).
+export interface HedgeSituation { category: string; amountCents: number | null; period: "month" | "week" | "year" | "once" | null; distanceKm: number | null }
 export interface HedgeSuggestion extends DeckCard {
   suggestionId: string; // deterministic; pass to /accept and /event
   kind: HedgeSuggestionKind; // "S1-major" | "S1-proxy" | "S2" | "fallback"
@@ -446,10 +471,17 @@ export interface HedgeSuggestion extends DeckCard {
   matchedEntity?: string | null; // the team/entity the user supports (we bet AGAINST it); null on fallback
   league?: string | null; // league/competition label for an S2 card (e.g. "NBA"); null if unknown/non-S2
   matchConfidence?: number; // 0..1 free-text match confidence (S2 search only; omitted on accept re-derivation)
+  // ── Stock-card extras (present only when `stock` is set) ──
+  stock?: HedgeStockRef; // the tokenized stock behind this card; when set, render off THIS, not the market fields
+  rationale?: string; // server-rendered one-liner (also mirrored into `question` for legacy clients)
+  hedgePctBp?: number; // the product rule applied, 0 ⇒ fixed life-hedge stake
+  situation?: HedgeSituation; // the parsed life situation this card answers
+  triggerChangeBp?: number; // spotted only — the 24h move that fired the rule
 }
 export interface HedgeSuggestionsResponse {
   suggestions: HedgeSuggestion[];
   walletLinked: boolean; // false => prompt the user to link a wallet first
+  stockSuggestions?: HedgeSuggestion[]; // S1-stock legs (additive; old clients ignore)
 }
 
 // ─── GET /api/hedge/pickers ────────────────────────────────────────────────────────────────────────
@@ -474,12 +506,15 @@ export interface HedgePickersResponse {
 // contested markets, honestly flagged as discovery, never a hedge). Errors: 400 (empty / too-long text).
 export interface HedgeSearchRequest {
   text: string; // free text; trimmed, max 200 chars
+  amountCents?: number; // optional stated amount (a chip's amount field); an amount inside the text wins
 }
 export interface HedgeSearchResponse {
   suggestions: HedgeSuggestion[]; // S2 against-hedges (isDiscovery=false) OR fallback cards (isDiscovery=true)
   isDiscovery: boolean; // true => the fallback discovery path; the client MUST label the cards discovery
   matchedEntity: string | null; // the entity we matched the text to (null on fallback)
   usedNlu: boolean; // true => the NLU edge was invoked (below-threshold + key present)
+  stockSuggestions?: HedgeSuggestion[]; // S3-stock cards (additive; old clients ignore)
+  situation?: HedgeSituation | null; // the parsed life situation, echoed back for the client
 }
 
 // ─── POST /api/hedge/accept ──────────────────────────────────────────────────────────────────────
@@ -495,9 +530,10 @@ export interface HedgeAcceptRequest {
   suggestionId: string;
 }
 export interface HedgeAcceptResponse {
-  betId: string;
+  betId: string | null; // null on a stock accept (see positionId)
   stakeCents: number; // the ACTUAL locked stake (may be clamped down to available Cash)
   alreadyAccepted: boolean; // true => idempotent replay, returns the pre-existing bet
+  positionId?: string; // the StockPosition created by a stock accept
 }
 
 // ─── POST /api/hedge/event ───────────────────────────────────────────────────────────────────────
@@ -511,6 +547,12 @@ export interface HedgeEventRequest {
 export interface HedgeEventResponse {
   ok: true;
 }
+
+// ─── GET /api/hedge/spotted ──────────────────────────────────────────────────────────────────────
+// Auth: Bearer. Proactive cards from live 24h moves — no wallet needed. One card per firing rule,
+// capped at HEDGE_SPOTTED_MAX, sized off the user's persisted LifeSituation row for that category
+// when present (else the fixed life-hedge stake). `generatedAt` is ISO-8601.
+export interface HedgeSpottedResponse { suggestions: HedgeSuggestion[]; generatedAt: string }
 
 // ─── STOCKS (xStocks on Solana — Stocklana) ────────────────────────────────────────────────────
 // A tokenized stock card is NOT a DeckCard: it has no YES/NO, never resolves, and its price is spot.

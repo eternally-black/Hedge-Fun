@@ -23,7 +23,7 @@ async function main() {
   // Top-level key set must include the Cash/Locked/topup fields, cosmetics (skins) and the
   // Paper/Real block the profile switch binds to.
   assert.deepStrictEqual(Object.keys(body).sort(),
-    ["artifacts","balanceCents","cashCents","dev","isNewUser","lockedCents","loginMarkedToday","points","real","referrals","shards","shardsPerArtifact","skins","skips","stakeCents","streak","swipes","topup","unreadResults","user"],
+    ["artifacts","balanceCents","cashCents","dev","isNewUser","lockedCents","loginMarkedToday","points","real","referrals","shards","shardsPerArtifact","skins","skips","stakeCents","streak","swipes","topup","unreadResults","unreadStockAlerts","user"],
     "/me top-level keys include cashCents/lockedCents/stakeCents/topup/skins/real");
   assert.deepStrictEqual(Object.keys(body.real).sort(),
     ["consentAt","consentVersion","depositWallet","maxStakeCents","minStakeCents","mode","stakeCents","termsVersion"],

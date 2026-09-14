@@ -142,6 +142,11 @@ export async function GET(req: Request) {
     },
     loginMarkedToday: !!loginMark,
     unreadResults,
+    // Stock profit alerts, BOTH modes: a Phantom buyer never flips the Polymarket real-mode switch,
+    // so following effectiveRealMode here would hide every REAL stock alert from them.
+    unreadStockAlerts: await prisma.stockPosition.count({
+      where: { userId: user.id, closedAt: null, alertTierBp: { gt: 0 }, alertSeenAt: null },
+    }),
     referrals,
     // Brand-new account: streak never started AND no GM today → skip the open ritual (deck first).
     isNewUser: (streak?.currentLevel ?? 0) === 0 && !loginMark,

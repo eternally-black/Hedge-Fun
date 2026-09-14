@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
-import { resultBetSelect, toResultRow } from "@/lib/results";
+import { resultBetSelect, toResultRow, toStockAlertRow } from "@/lib/results";
+import { livePnlCents } from "@/lib/stocks";
 import { effectiveRealMode } from "@/lib/real";
 import { rateLimit } from "@/lib/ratelimit";
 import { encodeKeysetCursor, decodeKeysetCursor } from "@/lib/cursor";
@@ -30,7 +31,7 @@ export async function GET(req: Request) {
   const after = cursor ? decodeKeysetCursor(cursor) : null;
   // Keyset on (settledAt desc, id desc) — a stable total order across pages. Over-fetch by one so
   // we can tell whether another page exists (51 rows = yes, drop the last and emit a cursor).
-  const [bets, unreadCount] = await Promise.all([
+  const [bets, unreadCount, alertLots] = await Promise.all([
     prisma.bet.findMany({
       where: {
         userId: user.id,
@@ -52,6 +53,14 @@ export async function GET(req: Request) {
         seenAt: null,
       },
     }),
+    // Stock profit alerts: open lots that crossed a tier, BOTH modes (deliberately not `mode` —
+    // a Phantom buyer never flips the Polymarket real-mode switch). Newest tier first.
+    prisma.stockPosition.findMany({
+      where: { userId: user.id, closedAt: null, alertTierBp: { gt: 0 }, alertedAt: { not: null } },
+      include: { asset: true },
+      orderBy: { alertedAt: "desc" },
+      take: 50,
+    }),
   ]);
   // 51 rows = there is at least one more page. Drop the over-fetched row and remember where the
   // next page starts (the last row we actually keep).
@@ -61,6 +70,7 @@ export async function GET(req: Request) {
   const nextCursor = hasMore && last?.settledAt ? encodeKeysetCursor(last.settledAt, last.id) : null;
 
   const rows = bets.map(toResultRow);
-  const body: ResultsResponse = { rows, unreadCount, nextCursor };
+  const stockAlerts = alertLots.map((p) => toStockAlertRow(p, livePnlCents));
+  const body: ResultsResponse = { rows, unreadCount, nextCursor, stockAlerts };
   return NextResponse.json(body);
 }

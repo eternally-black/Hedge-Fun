@@ -14,6 +14,7 @@
 import { prisma } from "../prisma";
 import { s2SuggestionId, isHexSuggestionId } from "./id";
 import { deriveForUser, type DerivedSuggestion } from "./suggest";
+import { deriveLifeStockForAccept } from "./stock";
 import {
   scoreMatch,
   opposingSide,
@@ -22,7 +23,7 @@ import {
   type S2Candidate,
   type S2Match,
 } from "./s2match";
-import { extractEntities } from "./nlu";
+import { extractEntities, type NluResult } from "./nlu";
 import { priceIsContested, isCompositeSideLabel } from "../polymarket";
 import { authoritativePrices } from "../depth";
 import type { BetSide, HedgeSuggestion, HedgePickersResponse } from "../api-types";
@@ -273,6 +274,7 @@ export interface S2SearchOutcome {
   isDiscovery: boolean;
   matchedEntity: string | null;
   usedNlu: boolean;
+  nluResult: NluResult | null; // what the NLU edge extracted (null when it did not run / gave nothing)
 }
 
 // Keep the best distinct-entity matches at/above threshold, most-confident first.
@@ -280,18 +282,21 @@ function passingEntityMatches(matches: S2Match[]): S2Match[] {
   return matches.filter((m) => m.kind === "entity" && m.score >= S2_CONFIDENCE_THRESHOLD);
 }
 
-export async function searchS2(query: string): Promise<S2SearchOutcome> {
+export async function searchS2(query: string, opts: { allowNlu?: boolean } = {}): Promise<S2SearchOutcome> {
   const nowMs = Date.now();
   const rows = await loadS2Candidates(nowMs);
   const candidates = buildMatchCandidates(rows);
 
   let matches = passingEntityMatches(scoreMatch(query, candidates));
   let usedNlu = false;
+  let nluResult: NluResult | null = null;
 
-  // NLU edge (D2): only when the deterministic pass fell below threshold AND a key is configured.
-  if (matches.length === 0) {
+  // NLU edge (D2): only when the deterministic pass fell below threshold AND a key is configured
+  // AND the caller did not already resolve the text elsewhere (the stock rules run first).
+  if (matches.length === 0 && opts.allowNlu !== false) {
     const nlu = await extractEntities(query);
     usedNlu = nlu.usedNlu;
+    nluResult = nlu.result;
     if (nlu.result && (nlu.result.entities.length > 0 || nlu.result.keywords.length > 0)) {
       const requery = [...nlu.result.entities, ...nlu.result.keywords].join(" ");
       matches = passingEntityMatches(scoreMatch(requery, candidates));
@@ -315,9 +320,9 @@ export async function searchS2(query: string): Promise<S2SearchOutcome> {
   if (suggestions.length === 0) {
     // Discovery fallback: 3 random open contested markets, honestly flagged (never a hedge).
     const fb = await searchFallback(nowMs);
-    return { suggestions: fb, isDiscovery: true, matchedEntity: null, usedNlu };
+    return { suggestions: fb, isDiscovery: true, matchedEntity: null, usedNlu, nluResult };
   }
-  return { suggestions, isDiscovery: false, matchedEntity: suggestions[0].matchedEntity ?? null, usedNlu };
+  return { suggestions, isDiscovery: false, matchedEntity: suggestions[0].matchedEntity ?? null, usedNlu, nluResult };
 }
 
 // ── discovery fallback pool ──────────────────────────────────────────────────────────────────────
@@ -427,7 +432,10 @@ async function deriveFallbackForAccept(): Promise<DerivedSuggestion[]> {
 // wallet snapshot), then the open S2 markets, then the fallback pool. Null => stale (the route 404s).
 export async function resolveDerivedSuggestion(userId: string, sid: string): Promise<DerivedSuggestion | null> {
   const { items } = await deriveForUser(userId, { cacheOnly: true });
-  const s1 = items.find((i) => i.suggestion.suggestionId === sid);
+  // Life-situation stock cards (S3/spotted) re-derive from LifeSituation rows + triggers — they need
+  // no wallet, so they sit OUTSIDE deriveForUser's wallet gate.
+  const life = await deriveLifeStockForAccept(userId, Date.now());
+  const s1 = [...items, ...life].find((i) => i.suggestion.suggestionId === sid);
   if (s1) return s1;
 
   const s2 = await deriveS2ForAccept();
@@ -474,6 +482,7 @@ async function cachedS1Map(userId: string): Promise<Map<string, DerivedSuggestio
   const hit = s1MapCache.get(userId);
   if (hit && Date.now() - hit.at < DERIVE_CACHE_TTL_MS) return hit.map;
   const { items } = await deriveForUser(userId, { cacheOnly: true });
+  items.push(...(await deriveLifeStockForAccept(userId, Date.now()))); // stock cards, outside the wallet gate
   if (s1MapCache.size >= S1_CACHE_MAX_USERS) {
     // Sweep expired entries (and, if still full, this is a cheap bounded reset) before inserting.
     const cutoff = Date.now() - DERIVE_CACHE_TTL_MS;

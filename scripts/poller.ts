@@ -24,6 +24,8 @@ import { pruneMarkets } from "./prune-markets";
 import { refreshHedgeIndex } from "./refresh-hedge-index";
 import { refreshStockCatalog, refreshStockPrices } from "./refresh-stocks";
 import { sweepAttempts } from "../src/lib/stocks-real";
+import { evalStockAlerts } from "../src/lib/stock-alerts";
+import { livePnlCents } from "../src/lib/stocks";
 import { pruneReferralClicks } from "../src/lib/refclick";
 import { acquirePollerLease, releasePollerLease } from "../src/lib/poller-lease";
 
@@ -317,6 +319,21 @@ async function tick() {
     subsystemFailed("stock-attempts", e);
   }
   mark("stock-attempts", t);
+
+  // Stock profit alerts: DB-only, reads the prices the stocks block just wrote. No withDeadline —
+  // nothing upstream is read; the pass is bounded by STOCK_ALERT_SCAN_MAX / FIRE_MAX. A tier fires
+  // once per lot (conditional update), so a restart never re-fires.
+  t = Date.now();
+  try {
+    const sa = await evalStockAlerts(prisma, livePnlCents);
+    if (sa.fired + sa.errors > 0) console.log(`[stock-alerts] scanned ${sa.scanned}, fired ${sa.fired}, skipped ${sa.skipped}, errors ${sa.errors}`);
+    if (sa.errors > 0) subsystemFailed("stock-alerts", new Error(`${sa.errors} lot(s) failed`));
+    else subsystemOk("stock-alerts");
+  } catch (e) {
+    console.warn("[stock-alerts] error:", (e as Error).message);
+    subsystemFailed("stock-alerts", e);
+  }
+  mark("stock-alerts", t);
 
   // Market cache GC. The cache is append-only otherwise: settlement only touches markets that have
   // bets, so everything nobody bet on accumulates forever. Bounded per run, so a backlog drains over
