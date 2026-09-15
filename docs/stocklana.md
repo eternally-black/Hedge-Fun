@@ -16,6 +16,22 @@ baskets / robo portfolios**, on top of an app people already use for paper predi
 | Why Solana | The instruments ARE Solana tokens (xStocks by Backed, Token-2022 mints), and Solana is the only chain where the onboarding disappears: an email login mints a Privy **embedded** Solana wallet (no Phantom, no extension, no seed phrase), and the app **sponsors the network fee** — the user's wallet signs, our fee-payer co-signs and sends, so all a user ever needs is USDC. The buy is still a real Jupiter swap USDC→xStock; the user's key never leaves their wallet and the lot is booked only from the landed transaction. | `src/app/providers.tsx` (embedded Solana wallet), `src/lib/sponsor.ts` + `src/app/api/stocks/real/submit/route.ts` (co-sign only a message we built), `src/lib/jupiter-swap.ts`, `src/lib/stocks-real.ts`, `src/app/useBuyReal.ts` |
 | Quality of execution | Money paths are typed, idempotent and tested: paper buys hold cash atomically (same hold as every bet), real buys are matched against the server-built attempt (payer, mint, ExactIn amount, min out), the sponsor co-signs only a transaction whose message is byte-identical to the one it built (hash stored on the attempt), and at most `STOCK_SPONSOR_MAX_PER_USER_PER_DAY` sponsored transactions per user per day, lots the wallet no longer backs are closed, alerts fire once per tier. It is monitored like the rest of the product: one public probe that turns 503 on a stale deck OR a drained fee-payer, and a poller block that pages Telegram once an hour while the sponsor is low. 6 new unit suites + 4 DB suites in CI. | `scripts/test-stocks*.ts`, `scripts/test-stock-rules.ts`, `scripts/test-hedge-stock.ts`, `scripts/test-stock-alerts*.ts`; `src/app/api/stocks/health/route.ts`, `scripts/poller.ts` (`[stock-sponsor]`); `.github/workflows/deploy.yml` |
 
+## On-chain proof (mainnet, 2026-09-15, fee-sponsored, Privy embedded wallet)
+
+A real buy and a real sell of MUx (Micron xStock) from a freshly created Privy embedded Solana wallet
+holding **only $2 USDC and no SOL** — the server fee-payer covered both transactions and fronted the
+token-account rent, which came back on the sell:
+
+| Step | Signature |
+|---|---|
+| Buy $2 USDC → 0.00213222 MUx | [4pNH9FKM…W2BvQX](https://solscan.io/tx/4pNH9FKM8Rsyive8NArkFKhPEbCBKTEQNo69ewVXpP7ZuJPAwWexzpKdsFGL5eqGh4buMNpgCQehMEP7Z3W2BvQX) |
+| Sell 0.00213222 MUx → $1.998 USDC, token account closed | [3fUrmEb9…B4NpJ](https://solscan.io/tx/3fUrmEb9SWUBRDHHq6FFjhmAtSbb6yHFdk7PdwUb9KR5WEAh9uCLgEYLqYFxtaWGzUy2jH6Qb5zspzktZs7B4NpJ) |
+
+Sponsor wallet before → after the round trip: 0.050000 → 0.049980 SOL (≈20,000 lamports for two
+transactions; the ≈0.00157 SOL rent was fronted on the buy and refunded on the sell). The $10 chip was
+sized down to the wallet's $2 USDC by the server, and the lot was booked only after the landed
+transaction matched the attempt the server had built.
+
 ## What was built (4 days)
 
 - **Catalog + prices.** xStocks public API (≈830 Solana assets) upserted every 5 min; Jupiter Price v3 every
