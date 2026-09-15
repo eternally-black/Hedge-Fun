@@ -13,8 +13,8 @@ baskets / robo portfolios**, on top of an app people already use for paper predi
 |---|---|---|
 | Real user + problem | Your life creates financial exposure you never hedge: flights, fuel, rent, a crypto bag. HedgeFun turns each one into a one-tap tokenized-stock position, with a swipe deck for discovery and live data spotting the risk. | `src/lib/hedge/stock-rules.ts` (13 life situations, EN/RU/UK), `src/lib/hedge/stock.ts` (rules → cards, spotted triggers) |
 | Working end-to-end demo | Web app live at https://app.hedgeyour.fun — Stocks deck (swipe right = buy), Portfolio with live P&L, Hedge tab with life-cost chips and "Spotted today", profit alerts in the inbox. Paper (virtual $200) AND real. | `src/app/screens/StockDeck.tsx`, `PortfolioScreen.tsx`, `HedgeScreen.tsx`, `NotificationsScreen.tsx` |
-| Why Solana | The instruments ARE Solana tokens (xStocks by Backed, Token-2022 mints). A real buy is a Jupiter swap USDC→xStock signed by the user's own Phantom; the server never holds keys and books the lot only from the landed transaction. | `src/lib/jupiter-swap.ts`, `src/lib/stocks-real.ts` (attempt → confirm by reading the tx via Helius → poller sweep), `src/app/useBuyReal.ts` |
-| Quality of execution | Money paths are typed, idempotent and tested: paper buys hold cash atomically (same hold as every bet), real buys are matched against the server-built attempt (payer, mint, ExactIn amount, min out), lots the wallet no longer backs are closed, alerts fire once per tier. 6 new unit suites + 4 DB suites in CI. | `scripts/test-stocks*.ts`, `scripts/test-stock-rules.ts`, `scripts/test-hedge-stock.ts`, `scripts/test-stock-alerts*.ts`; `.github/workflows/deploy.yml` |
+| Why Solana | The instruments ARE Solana tokens (xStocks by Backed, Token-2022 mints), and Solana is the only chain where the onboarding disappears: an email login mints a Privy **embedded** Solana wallet (no Phantom, no extension, no seed phrase), and the app **sponsors the network fee** — the user's wallet signs, our fee-payer co-signs and sends, so all a user ever needs is USDC. The buy is still a real Jupiter swap USDC→xStock; the user's key never leaves their wallet and the lot is booked only from the landed transaction. | `src/app/providers.tsx` (embedded Solana wallet), `src/lib/sponsor.ts` + `src/app/api/stocks/real/submit/route.ts` (co-sign only a message we built), `src/lib/jupiter-swap.ts`, `src/lib/stocks-real.ts`, `src/app/useBuyReal.ts` |
+| Quality of execution | Money paths are typed, idempotent and tested: paper buys hold cash atomically (same hold as every bet), real buys are matched against the server-built attempt (payer, mint, ExactIn amount, min out), the sponsor co-signs only a transaction whose message is byte-identical to the one it built (hash stored on the attempt), and at most `STOCK_SPONSOR_MAX_PER_USER_PER_DAY` sponsored transactions per user per day, lots the wallet no longer backs are closed, alerts fire once per tier. It is monitored like the rest of the product: one public probe that turns 503 on a stale deck OR a drained fee-payer, and a poller block that pages Telegram once an hour while the sponsor is low. 6 new unit suites + 4 DB suites in CI. | `scripts/test-stocks*.ts`, `scripts/test-stock-rules.ts`, `scripts/test-hedge-stock.ts`, `scripts/test-stock-alerts*.ts`; `src/app/api/stocks/health/route.ts`, `scripts/poller.ts` (`[stock-sponsor]`); `.github/workflows/deploy.yml` |
 
 ## What was built (4 days)
 
@@ -23,14 +23,25 @@ baskets / robo portfolios**, on top of an app people already use for paper predi
   a Solana pool are `tradable` (real buy), the rest are paper-only at the issuer's reference price.
 - **Stocks deck.** Right = buy (paper: $10/$25/$50 chips; real: "Buy on Solana"), left = pass, up = skip.
   Toggle back to the prediction-market deck any time.
-- **Portfolio.** Paper and on-chain lots, live mark, two-tap sell (paper), Solscan link (real), pending
-  real buys, lots "moved in wallet" when Phantom sold them behind our back.
+- **Wallet + fees.** Email login mints a Privy embedded Solana wallet — no extension, no seed phrase;
+  an external Phantom still works for anyone who has one. Real buys and sells are **fee-sponsored**:
+  the server builds the swap, the user's wallet signs it, our fee-payer co-signs and sends it. The
+  server re-derives the message before co-signing (it never signs bytes it did not build) and caps
+  sponsored transactions per user per day. Funding a position needs USDC and nothing else.
+- **Portfolio.** Paper and on-chain lots, live mark, two-tap sell — paper against the stored price,
+  REAL as a sponsored xStock→USDC swap that closes the emptied token account in the same transaction,
+  so its ≈0.0016 SOL rent returns to the sponsor. Solscan link, pending real buys, lots "moved in
+  wallet" when the user sold them elsewhere behind our back.
 - **Hedge.** "$800 on flights this month" → *Hedge your travel costs with DALx* (10% sizing). Wallet
   holds BTC → *hedge 10% with GLDx*. Energy stocks +5% → *Spotted today* card for drivers. Deterministic
   rules first; the LLM only extracts entities/amounts when the rules miss.
 - **Profit alerts.** +2/+5/+10% tiers, once per lot, delivered through the existing results inbox and bell.
 - **Eligibility.** One consent sheet (self-declaration + xStocks terms) gates the first real buy; the
   limitations text (thematic exposure ≠ hedge, XLEx is a basket, sizing is a product rule) lives there.
+- **Monitoring.** A public probe, `/api/stocks/health`, answers the two questions that kill the
+  surface silently: is the deck still priced, and can we still pay for trades. It is 503 below 20
+  fresh deck assets or below 0.05 SOL in the fee-payer. The poller's `[stock-sponsor]` block reads
+  the same balance every 5 minutes and pages Telegram once an hour while it is low.
 
 ## Verify it yourself
 
@@ -38,6 +49,13 @@ baskets / robo portfolios**, on top of an app people already use for paper predi
 npm test                      # pure suites incl. test-stocks / test-stock-rules / test-stock-alerts
 npm run test:db               # DB suites incl. paper buy/sell, real attempt→confirm→sweep, hedge stock cards, alerts
 npm run refresh-stocks        # live: xStocks catalog + Jupiter prices → "8xx assets, 7xx priced, 150 deck-eligible"
+curl -s https://app.hedgeyour.fun/api/stocks/health   # live monitoring probe, no auth
+```
+
+A healthy probe is HTTP 200 and says so in the body (503 with the same shape when it is not):
+
+```json
+{"ok":true,"assets":832,"deckFresh":50,"oldestFreshAgeSec":41,"stuckAttempts":0,"sponsorLamports":"1043210000","sponsorOk":true}
 ```
 
 ## Facts that shaped the design

@@ -12,7 +12,7 @@ import { fetchResolution } from "../src/lib/polymarket";
 import { withDeadline } from "../src/lib/deadline";
 import { conditionResolution, type ChainOutcome } from "../src/lib/polygon";
 import { DECK_FETCH_HORIZON_HOURS } from "../src/lib/deck-mix";
-import { DECK_MIN_SERVABLE } from "../src/lib/config";
+import { DECK_MIN_SERVABLE, STOCK_SPONSOR_MIN_LAMPORTS, STOCK_SPONSOR_LOW_ALERT_EVERY_MS } from "../src/lib/config";
 import { captureToGlitchTip, sendOpsTelegram } from "../src/lib/glitchtip";
 import { settleMarket, type Resolution } from "./settle";
 import { watchFunding, rpcChain } from "../src/lib/funding";
@@ -25,6 +25,8 @@ import { refreshHedgeIndex } from "./refresh-hedge-index";
 import { refreshStockCatalog, refreshStockPrices } from "./refresh-stocks";
 import { sweepAttempts } from "../src/lib/stocks-real";
 import { evalStockAlerts } from "../src/lib/stock-alerts";
+import { sponsorConfigured, sponsorAddress } from "../src/lib/sponsor";
+import { getBalanceLamports } from "../src/lib/helius";
 import { livePnlCents } from "../src/lib/stocks";
 import { pruneReferralClicks } from "../src/lib/refclick";
 import { acquirePollerLease, releasePollerLease } from "../src/lib/poller-lease";
@@ -64,7 +66,8 @@ const HEDGE_INDEX_EVERY_N_TICKS = 5;
 // subsystem, before the settle sweep and at the end of a clean tick, so the longest no-beat spans are
 // deck 45 + index 120 = 165 s (plus the index's DB upserts, which a budget cannot cut) and settle 60 +
 // funding 30 + real-settle 45 + the 20 s reconcile call = 155 s (plus DB). The stocks pass adds at most
-// 10 s per tick (30 s on its catalog minute, which never coincides with the index). A request under a
+// 10 s per tick (30 s on its catalog minute, which never coincides with the index; plus the 5 s
+// sponsor-balance read, which rides that same minute). A request under a
 // budget is clamped to what is left of it, so an in-flight request never extends the span. A budget hit is an
 // ordinary subsystem failure — the previous deck / index rows stay, nothing partial is written,
 // unsettled markets and unread balances wait a tick.
@@ -85,6 +88,7 @@ const STOCK_PRICES_BUDGET_MS = 10_000;
 const STOCK_CATALOG_BUDGET_MS = 30_000;
 const STOCK_CATALOG_EVERY_N_TICKS = 5;
 const STOCK_SWEEP_BUDGET_MS = 15_000; // pending real-buy attempts: a few Helius reads, or nothing at all
+const STOCK_SPONSOR_BUDGET_MS = 5_000; // fee-payer balance: one getBalance call, on the catalog tick only
 // Order reconciliation ping. The poller is deliberately SDK-free, so it cannot reconcile orders
 // itself — it pings the route that can. Offset to tick phase 4 so it never lands on the same
 // minute as the hedge index (phase 0) or the prune (phase 2).
@@ -117,6 +121,9 @@ function subsystemOk(name: string): void {
 }
 // Settlement-backlog alert throttle: one Telegram send per hour max while overdue persists.
 let backlogLastAlertAt = 0;
+// Sponsor-wallet alert throttle, same shape: one page per STOCK_SPONSOR_LOW_ALERT_EVERY_MS while the
+// fee-payer stays below the floor, one "refilled" when it comes back.
+let lastSponsorAlertAt = 0;
 
 // Liveness signal: touched as a tick makes progress — after the lease is written, after each
 // upstream-bound subsystem SUCCEEDS (deck, hedge index), before the settle sweep and at the end of
@@ -341,6 +348,39 @@ async function tick() {
     subsystemFailed("stock-alerts", e);
   }
   mark("stock-alerts", t);
+
+  // Fee-payer wallet. Every sponsored buy/sell is signed and paid by it, so an empty sponsor breaks
+  // the whole real path with no other symptom a probe outside can name — the swap simply never gets
+  // sent. One getBalance call on the catalog's minute: a wallet that drains inside five minutes is
+  // not a case a poller can save, and the health probe reads the same balance per request anyway.
+  if (sponsorConfigured() && (tickCount - 1) % STOCK_CATALOG_EVERY_N_TICKS === 1) {
+    t = Date.now();
+    try {
+      const addr = sponsorAddress();
+      if (!addr) throw new Error("sponsor configured but its address could not be derived");
+      const lamports = await withDeadline(STOCK_SPONSOR_BUDGET_MS, () => getBalanceLamports(addr));
+      const sol = Number(lamports) / 1e9;
+      console.log(`[stock-sponsor] balance ${sol.toFixed(4)} SOL`);
+      if (lamports < BigInt(STOCK_SPONSOR_MIN_LAMPORTS)) {
+        // Throttled, not per-tick: a low balance persists for as long as nobody funds it, and the
+        // fix (send SOL) is not faster for being asked twelve times an hour.
+        if (Date.now() - lastSponsorAlertAt > STOCK_SPONSOR_LOW_ALERT_EVERY_MS) {
+          lastSponsorAlertAt = Date.now();
+          void sendOpsTelegram(
+            `⚠️ stocks: sponsor wallet low — ${sol.toFixed(4)} SOL (min ${(STOCK_SPONSOR_MIN_LAMPORTS / 1e9).toFixed(2)}). Real buys/sells will start failing.`,
+          );
+        }
+      } else if (lastSponsorAlertAt !== 0) {
+        lastSponsorAlertAt = 0;
+        void sendOpsTelegram("✅ stocks: sponsor wallet refilled");
+      }
+      subsystemOk("stock-sponsor");
+    } catch (e) {
+      console.warn("[stock-sponsor] balance read error:", (e as Error).message);
+      subsystemFailed("stock-sponsor", e);
+    }
+    mark("stock-sponsor", t);
+  }
 
   // Market cache GC. The cache is append-only otherwise: settlement only touches markets that have
   // bets, so everything nobody bet on accumulates forever. Bounded per run, so a backlog drains over

@@ -203,7 +203,11 @@ async function main() {
     const health = await import("../src/app/api/stocks/health/route");
     const hres = await health.GET();
     const hbody = (await hres.json()) as Record<string, unknown>;
-    assert.deepStrictEqual(Object.keys(hbody).sort(), ["assets", "deckFresh", "ok", "oldestFreshAgeSec", "stuckAttempts"], "/stocks/health keys");
+    assert.deepStrictEqual(
+      Object.keys(hbody).sort(),
+      ["assets", "deckFresh", "ok", "oldestFreshAgeSec", "sponsorLamports", "sponsorOk", "stuckAttempts"],
+      "/stocks/health keys",
+    );
     assert.strictEqual(hres.status, hbody.ok ? 200 : 503, "/stocks/health status follows ok");
     assert.strictEqual(typeof hbody.deckFresh, "number", "deckFresh is a count");
 

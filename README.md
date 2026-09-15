@@ -34,7 +34,10 @@ npm run smoke             # full daily loop end-to-end on live DB + live API
 
 The deck also deals **xStocks** (tokenized US equities on Solana): swipe right = buy, left = pass.
 Paper buys hold virtual cash like a bet; **Buy on Solana** builds a Jupiter USDC→xStock swap that the
-user's own Phantom signs — the server books the lot only from the landed transaction. The Hedge tab
+user's wallet signs — the server books the lot only from the landed transaction. That wallet is the
+Privy **embedded** Solana wallet an email login already creates (Phantom optional), and the swap is
+**fee-sponsored**: our own fee-payer (`STOCK_SPONSOR_SECRET`) co-signs and sends it, so a user needs
+USDC and no SOL. The Hedge tab
 turns a life cost ("$800 on flights this month") into a stock card, and profit alerts land in the inbox.
 Design, evidence and the verify-it-yourself commands: [docs/stocklana.md](docs/stocklana.md).
 
