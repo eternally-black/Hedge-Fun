@@ -11,6 +11,24 @@
 //      dynamicComputeUnitLimit: true, prioritizationFeeLamports: "auto" }
 //      -> { swapTransaction: <base64 VersionedTransaction>, lastValidBlockHeight: <number> }
 //  - No API key at our volumes (lite-api). A non-2xx / timeout is an outage, not a bad quote.
+//
+// Verified facts (Jupiter Lite Swap v1 /swap-instructions, verified live 2026-09-15, USDC -> AAPLx
+// 1.0 USDC, slippage 50 bp — the FEE-SPONSORED path, where we assemble the tx ourselves):
+//  - POST ${BASE}/swap-instructions, same body as /swap, with
+//      prioritizationFeeLamports: { priorityLevelWithMaxLamports: { maxLamports, priorityLevel: "medium" } }
+//      ACCEPTED (the response echoed prioritizationFeeLamports: 99999 for maxLamports 100000).
+//  - -> { computeBudgetInstructions: Ix[2], setupInstructions: Ix[0..2], swapInstruction: Ix,
+//         cleanupInstruction: Ix | null, otherInstructions: Ix[] (empty in practice),
+//         addressLookupTableAddresses: string[2], tokenLedgerInstruction: null,
+//         computeUnitLimit, prioritizationType, simulationError, blockhashWithMetadata, ... }
+//      Ix = { programId: base58, accounts: [{ pubkey, isSigner, isWritable }], data: base64 }.
+//  - setupInstructions are ATA creations (programId ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL)
+//      whose accounts[0] is the FUNDING PAYER (isSigner true, isWritable true) — the one account the
+//      sponsor takes over so the ~0.00157 SOL of rent comes from us, not from the user.
+//  - cleanupInstruction on this route is an SPL-Token CloseAccount (data = [9], accounts =
+//      [account(w), destination(w), owner(signer)]) — the same 3-account/1-byte shape our own
+//      close-the-emptied-xStock-account instruction uses on the SELL path.
+//  - addressesByLookupTableAddress came back null, so the tables are resolved via the RPC.
 
 import { JupiterUnavailableError } from "./prices";
 import { parseJupQuote, type JupQuoteParsed } from "./stocks";
@@ -90,4 +108,103 @@ export async function buildSwapTx(
     throw new JupiterUnavailableError("swap_unparseable");
   }
   return { swapTransaction, lastValidBlockHeight };
+}
+
+// ─── /swap-instructions (the FEE-SPONSORED path) ────────────────────────────────────────────────────
+
+// One instruction exactly as Jupiter puts it on the wire. This is also the shape the sponsor builder
+// consumes, so a hand-built instruction (the SELL close-account) needs no second representation.
+export interface JupIxAccount {
+  pubkey: string;
+  isSigner: boolean;
+  isWritable: boolean;
+}
+export interface JupIx {
+  programId: string;
+  accounts: JupIxAccount[];
+  data: string; // base64
+}
+export interface JupSwapInstructions {
+  computeBudgetInstructions: JupIx[];
+  setupInstructions: JupIx[];
+  swapInstruction: JupIx;
+  cleanupInstruction: JupIx | null;
+  otherInstructions: JupIx[];
+  addressLookupTableAddresses: string[];
+}
+
+// An instruction we cannot fully read is an instruction we must not sign — so validate every field
+// rather than trusting the shape (same rule as parseJupQuote).
+function parseIx(v: unknown): JupIx | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as { programId?: unknown; accounts?: unknown; data?: unknown };
+  if (typeof o.programId !== "string" || !o.programId) return null;
+  if (typeof o.data !== "string") return null;
+  if (!Array.isArray(o.accounts)) return null;
+  const accounts: JupIxAccount[] = [];
+  for (const a of o.accounts) {
+    const acc = a as { pubkey?: unknown; isSigner?: unknown; isWritable?: unknown };
+    if (!acc || typeof acc.pubkey !== "string" || !acc.pubkey) return null;
+    accounts.push({ pubkey: acc.pubkey, isSigner: acc.isSigner === true, isWritable: acc.isWritable === true });
+  }
+  return { programId: o.programId, accounts, data: o.data };
+}
+
+function parseIxList(v: unknown): JupIx[] | null {
+  if (v == null) return [];
+  if (!Array.isArray(v)) return null;
+  const out: JupIx[] = [];
+  for (const raw of v) {
+    const ix = parseIx(raw);
+    if (!ix) return null;
+    out.push(ix);
+  }
+  return out;
+}
+
+// The same swap as /swap, but as instructions we compose into OUR transaction (fee payer = the
+// sponsor). maxPriorityLamports caps what the sponsor pays for priority on this one tx.
+export async function swapInstructions(p: {
+  quoteResponse: unknown;
+  userPublicKey: string;
+  maxPriorityLamports: number;
+}): Promise<JupSwapInstructions> {
+  const json = (await jupFetch(`${BASE}/swap-instructions`, {
+    method: "POST",
+    headers: { accept: "application/json", "content-type": "application/json" },
+    body: JSON.stringify({
+      quoteResponse: p.quoteResponse,
+      userPublicKey: p.userPublicKey,
+      wrapAndUnwrapSol: true,
+      dynamicComputeUnitLimit: true,
+      prioritizationFeeLamports: {
+        priorityLevelWithMaxLamports: { maxLamports: p.maxPriorityLamports, priorityLevel: "medium" },
+      },
+    }),
+  })) as Record<string, unknown> | null;
+
+  const computeBudgetInstructions = parseIxList(json?.computeBudgetInstructions);
+  const setupInstructions = parseIxList(json?.setupInstructions);
+  const otherInstructions = parseIxList(json?.otherInstructions);
+  const swapInstruction = parseIx(json?.swapInstruction);
+  const cleanupInstruction = json?.cleanupInstruction == null ? null : parseIx(json.cleanupInstruction);
+  const luts = json?.addressLookupTableAddresses;
+  if (
+    !computeBudgetInstructions ||
+    !setupInstructions ||
+    !otherInstructions ||
+    !swapInstruction ||
+    (json?.cleanupInstruction != null && !cleanupInstruction) ||
+    (luts != null && !Array.isArray(luts))
+  ) {
+    throw new JupiterUnavailableError("swap_instructions_unparseable");
+  }
+  return {
+    computeBudgetInstructions,
+    setupInstructions,
+    swapInstruction,
+    cleanupInstruction,
+    otherInstructions,
+    addressLookupTableAddresses: ((luts as unknown[]) ?? []).filter((a): a is string => typeof a === "string" && a.length > 0),
+  };
 }

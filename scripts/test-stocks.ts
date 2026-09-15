@@ -15,7 +15,10 @@ import {
   livePnlCents,
   uiQty,
   parseSwapDelta,
+  parseSellDelta,
   attemptMatches,
+  sellMatches,
+  usdcMicroToCentsFloor,
   parseJupQuote,
   decodeBase58,
   sigBytesValid,
@@ -247,4 +250,198 @@ import {
   assert.strictEqual(sigBytesValid("0OIl"), false, "invalid characters -> false");
 }
 
-console.log("test-stocks: OK");
+// ─── parseSwapDelta / parseSellDelta under FEE SPONSORSHIP ──────────────────────────────────────────
+// The fee payer is the sponsor now, so the buyer is no longer accountKeys[0] — but must still SIGN.
+{
+  const PAYER = "PayerPubkey111";
+  const SPONSOR = "SponsorPubkey111";
+  const MINT = "XsbEhLAtcf6HdfpFZ5xEMdqW8nfAvcsP5bdudRLJzJp";
+  const buy = (keys: { pubkey: string; signer?: boolean }[]): RpcParsedTx => ({
+    meta: {
+      err: null,
+      preTokenBalances: [{ accountIndex: 1, mint: USDC_MINT, owner: PAYER, uiTokenAmount: { amount: "5000000", decimals: 6 } }],
+      postTokenBalances: [
+        { accountIndex: 1, mint: USDC_MINT, owner: PAYER, uiTokenAmount: { amount: "4000000", decimals: 6 } },
+        { accountIndex: 2, mint: MINT, owner: PAYER, uiTokenAmount: { amount: "299330", decimals: 8 } },
+      ],
+    },
+    transaction: { message: { accountKeys: keys } },
+  });
+
+  const sponsored = parseSwapDelta(buy([{ pubkey: SPONSOR, signer: true }, { pubkey: PAYER, signer: true }]), {
+    payer: PAYER,
+    mint: MINT,
+  });
+  assert.deepStrictEqual(sponsored, { qtyBase: 299_330n, usdcOutMicro: 1_000_000n }, "payer is a signer but not key 0 -> still our buy");
+
+  const notSigner = parseSwapDelta(buy([{ pubkey: SPONSOR, signer: true }, { pubkey: PAYER, signer: false }]), {
+    payer: PAYER,
+    mint: MINT,
+  });
+  assert.strictEqual(notSigner, null, "payer present but NOT a signer -> not our buy");
+
+  // The same tx read from the other end: the stock leaves, USDC arrives.
+  const sell = (over: Partial<NonNullable<RpcParsedTx["meta"]>> = {}): RpcParsedTx => ({
+    meta: {
+      err: null,
+      preTokenBalances: [
+        { accountIndex: 1, mint: USDC_MINT, owner: PAYER, uiTokenAmount: { amount: "4000000", decimals: 6 } },
+        { accountIndex: 2, mint: MINT, owner: PAYER, uiTokenAmount: { amount: "299330", decimals: 8 } },
+      ],
+      // The emptied token account is CLOSED in the same tx, so it is absent from postTokenBalances.
+      postTokenBalances: [
+        { accountIndex: 1, mint: USDC_MINT, owner: PAYER, uiTokenAmount: { amount: "5010000", decimals: 6 } },
+      ],
+      ...over,
+    },
+    transaction: { message: { accountKeys: [{ pubkey: SPONSOR, signer: true }, { pubkey: PAYER, signer: true }] } },
+  });
+
+  assert.deepStrictEqual(
+    parseSellDelta(sell(), { payer: PAYER, mint: MINT }),
+    { qtyBase: 299_330n, usdcInMicro: 1_010_000n },
+    "reads the stock sold and the USDC received (closed account = zero post balance)",
+  );
+  assert.strictEqual(parseSellDelta(buy([{ pubkey: PAYER, signer: true }]), { payer: PAYER, mint: MINT }), null, "a BUY is not a sell");
+  assert.strictEqual(parseSwapDelta(sell(), { payer: PAYER, mint: MINT }), null, "a SELL is not a buy");
+  assert.strictEqual(
+    parseSellDelta(sell({ err: { InstructionError: [0, "Custom"] } }), { payer: PAYER, mint: MINT }),
+    null,
+    "a failed sell closes nothing",
+  );
+}
+
+// ─── sellMatches ────────────────────────────────────────────────────────────────────────────────────
+{
+  const d = { qtyBase: 299_330n, usdcInMicro: 1_010_000n };
+  assert.strictEqual(sellMatches(d, { inAmountBase: 299_330n, minOutMicro: 1_000_000n }), true, "exact lot, above the minimum -> match");
+  assert.strictEqual(sellMatches(d, { inAmountBase: 299_329n, minOutMicro: 1_000_000n }), false, "sold MORE stock than signed -> reject");
+  assert.strictEqual(sellMatches(d, { inAmountBase: 299_330n, minOutMicro: 1_010_001n }), false, "received less USDC than the minimum -> reject");
+}
+
+// ─── usdcMicroToCentsFloor: proceeds floor vs cost ceil ─────────────────────────────────────────────
+{
+  assert.strictEqual(usdcMicroToCentsFloor(1_009_999n), 100, "proceeds FLOOR (cost would ceil to 101)");
+  assert.strictEqual(usdcMicroToCents(1_009_999n), 101, "a cost basis still ceils");
+  assert.strictEqual(usdcMicroToCentsFloor(0n), 0);
+  assert.strictEqual(usdcMicroToCentsFloor(-5n), 0, "a negative reads as nothing, never as a debt");
+}
+
+// ─── sponsor.ts: the pure pieces of the fee-sponsored builder ───────────────────────────────────────
+// Everything here is arithmetic on bytes — no network, no key material beyond a throwaway keypair.
+async function sponsorChecks() {
+  const { patchAtaPayer, decodeLookupTable, messageHashOf, closeAccountIx, ATA_PROGRAM } = await import("../src/lib/sponsor");
+  const kit = await import("@solana/kit");
+  const { generateKeyPairSync } = await import("node:crypto");
+
+  // patchAtaPayer: ONLY the Associated-Token program's funding account (index 0) moves.
+  {
+    const USER = "6dNVeTv6yzcYiRhRPfCnJfRQmUMKFJqPmPJcaNBRCGFT";
+    const SPONSOR = "GavgGKU9N3V1WjKLwQr3tapuXCCLFeJEeQpV6Bgq9rGf";
+    const ata = {
+      programId: ATA_PROGRAM,
+      accounts: [
+        { pubkey: USER, isSigner: true, isWritable: true },
+        { pubkey: "Ch4K4D2cTVNY7H7nJ2Y6byCiEeQzkE3AmGvJb1knYbTc", isSigner: false, isWritable: true },
+        { pubkey: USER, isSigner: false, isWritable: false },
+      ],
+      data: "AA==",
+    };
+    const swap = {
+      programId: "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+      accounts: [{ pubkey: USER, isSigner: true, isWritable: true }],
+      data: "AQ==",
+    };
+    const [patchedAta, patchedSwap] = patchAtaPayer([ata, swap], SPONSOR);
+    assert.strictEqual(patchedAta.accounts[0].pubkey, SPONSOR, "the ATA funding payer becomes the sponsor");
+    assert.strictEqual(patchedAta.accounts[0].isSigner, true, "its roles are untouched");
+    assert.strictEqual(patchedAta.accounts[0].isWritable, true);
+    assert.strictEqual(patchedAta.accounts[2].pubkey, USER, "the OWNER account is not touched");
+    assert.deepStrictEqual(patchedSwap, swap, "a non-ATA instruction is left alone");
+    assert.strictEqual(ata.accounts[0].pubkey, USER, "the input instruction is not mutated");
+  }
+
+  // decodeLookupTable: 56-byte header, then packed 32-byte addresses.
+  {
+    const b58 = kit.getBase58Decoder();
+    const a1 = new Uint8Array(32).fill(1);
+    const a2 = new Uint8Array(32).fill(2);
+    const buf = new Uint8Array(56 + 64);
+    buf.set(a1, 56);
+    buf.set(a2, 88);
+    assert.deepStrictEqual(decodeLookupTable(buf), [b58.decode(a1), b58.decode(a2)], "two addresses past the header");
+    assert.deepStrictEqual(decodeLookupTable(new Uint8Array(56)), [], "a header-only table has no addresses");
+    const ragged = new Uint8Array(56 + 40);
+    ragged.set(a1, 56);
+    assert.deepStrictEqual(decodeLookupTable(ragged), [b58.decode(a1)], "a truncated tail is ignored, not guessed");
+  }
+
+  // closeAccountIx: the SPL-Token CloseAccount shape verified live in Jupiter's own cleanup ix.
+  {
+    const ix = closeAccountIx({ tokenProgram: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", account: "A", destination: "B", owner: "C" });
+    assert.deepStrictEqual(Array.from(Buffer.from(ix.data, "base64")), [9], "opcode 9 = CloseAccount");
+    assert.deepStrictEqual(
+      ix.accounts.map((a) => [a.pubkey, a.isSigner, a.isWritable]),
+      [["A", false, true], ["B", false, true], ["C", true, false]],
+      "account(w), destination(w), owner(signer)",
+    );
+  }
+
+  // messageHashOf: the hash is over the MESSAGE, so signing must not move it.
+  {
+    const keypair64 = () => {
+      const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+      const sk = privateKey.export({ format: "der", type: "pkcs8" }) as Buffer;
+      const pk = publicKey.export({ format: "der", type: "spki" }) as Buffer;
+      return Uint8Array.from(Buffer.concat([sk.subarray(sk.length - 32), pk.subarray(pk.length - 32)]));
+    };
+    const sponsor = await kit.createKeyPairSignerFromBytes(keypair64());
+    const user = await kit.createKeyPairSignerFromBytes(keypair64());
+    // SetComputeUnitLimit(1_400_000) — hand-built, so the test needs no program client.
+    const cuLimit = {
+      programAddress: kit.address("ComputeBudget111111111111111111111111111111"),
+      accounts: [],
+      data: new Uint8Array([2, 0xc0, 0x5c, 0x15, 0x00]),
+    };
+    // One instruction the USER must sign, so the tx has both signature slots a real swap has.
+    const userIx = {
+      programAddress: kit.address("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"),
+      accounts: [{ address: user.address, role: kit.AccountRole.READONLY_SIGNER }],
+      data: new Uint8Array([1]),
+    };
+    const message = kit.pipe(
+      kit.createTransactionMessage({ version: 0 }),
+      (m) => kit.setTransactionMessageFeePayer(sponsor.address, m),
+      (m) =>
+        kit.setTransactionMessageLifetimeUsingBlockhash(
+          { blockhash: kit.getBase58Decoder().decode(new Uint8Array(32).fill(7)) as never, lastValidBlockHeight: 1_000n },
+          m,
+        ),
+      (m) => kit.appendTransactionMessageInstructions([cuLimit, userIx], m),
+    );
+    const compiled = kit.compileTransaction(message);
+    const wire = new Uint8Array(kit.getTransactionEncoder().encode(compiled));
+    const unsignedHash = messageHashOf(wire);
+    assert.strictEqual(unsignedHash.length, 64, "sha256 hex");
+    assert.deepStrictEqual(
+      Object.values(kit.getTransactionDecoder().decode(wire).signatures),
+      [null, null],
+      "an unsigned tx has empty signature slots",
+    );
+
+    const signed = await kit.partiallySignTransaction([user.keyPair], kit.getTransactionDecoder().decode(wire));
+    const signedWire = new Uint8Array(kit.getTransactionEncoder().encode(signed));
+    assert.strictEqual(messageHashOf(signedWire), unsignedHash, "the user's signature does not move the message hash");
+    const slots = kit.getTransactionDecoder().decode(signedWire).signatures as Record<string, Uint8Array | null>;
+    assert.strictEqual(slots[sponsor.address], null, "the sponsor slot is still open");
+    assert.strictEqual(slots[user.address]?.length, 64, "the user slot is filled with 64 bytes");
+  }
+}
+
+sponsorChecks()
+  .then(() => console.log("test-stocks: OK"))
+  .catch((e) => {
+    console.error("FAIL:", e);
+    process.exitCode = 1;
+  });
+

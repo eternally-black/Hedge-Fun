@@ -67,8 +67,16 @@ export async function getWalletBalances(address: string): Promise<TokenBalance[]
 // ─── JSON-RPC (the real tokenized-stock buy path) ───────────────────────────────────────────────────
 // Same key, a different host: Helius' RPC endpoint speaks standard Solana JSON-RPC. Used to READ a
 // landed swap (getTransaction), to recover a swap whose tab died (getSignaturesForAddress +
-// getBlockHeight) and to reconcile REAL lots against the wallet's live balance. Deadline-aware like
-// the balances read. The URL carries the api key — it is never part of an error message or a log line.
+// getBlockHeight), to reconcile REAL lots against the wallet's live balance, and — for the
+// fee-sponsored path — to build (getLatestBlockhash, getAccountInfo for the lookup tables) and SEND
+// (sendTransaction) the co-signed swap. Deadline-aware like the balances read. The URL carries the
+// api key — it is never part of an error message or a log line.
+//
+// Verified facts (Solana JSON-RPC via Helius, verified live 2026-09-15):
+//  - getLatestBlockhash [{commitment}] -> { context, value: { blockhash: base58, lastValidBlockHeight: number } }
+//  - getAccountInfo [addr, {encoding:"base64", commitment}] -> { value: { data: [b64, "base64"], owner, ... } | null }
+//  - sendTransaction [b64, {encoding:"base64", ...}] -> base58 signature (an RPC error = not sent)
+//  - getBalance [addr, {commitment}] -> { value: <lamports:number> }
 
 async function rpc(method: string, params: unknown[]): Promise<unknown> {
   const key = (process.env.HELIUS_API_KEY ?? "").trim();
@@ -123,18 +131,79 @@ export async function getBlockHeight(): Promise<number> {
   return r;
 }
 
-// Σ RAW token amount across the owner's accounts for one mint (a wallet can hold several ATAs). 0n
-// when it holds none. RAW on purpose: the Token-2022 ScaledUiAmount multiplier scales only uiAmount.
-export async function getTokenBalanceRaw(owner: string, mint: string): Promise<bigint> {
+// The owner's token accounts for one mint, with their RAW amounts (a wallet can hold several ATAs).
+// The pubkey matters to the SELL path: closing the emptied account returns its rent, and closing the
+// account the chain actually shows beats re-deriving an ATA that may not be the one holding the lot.
+export async function getTokenAccounts(owner: string, mint: string): Promise<{ pubkey: string; amount: bigint }[]> {
   const r = (await rpc("getTokenAccountsByOwner", [
     owner,
     { mint },
     { encoding: "jsonParsed", commitment: "confirmed" },
-  ])) as { value?: { account?: { data?: { parsed?: { info?: { tokenAmount?: { amount?: string } } } } } }[] } | null;
-  let total = 0n;
+  ])) as
+    | { value?: { pubkey?: string; account?: { data?: { parsed?: { info?: { tokenAmount?: { amount?: string } } } } } }[] }
+    | null;
+  const out: { pubkey: string; amount: bigint }[] = [];
   for (const v of r?.value ?? []) {
     const amount = v?.account?.data?.parsed?.info?.tokenAmount?.amount;
-    if (typeof amount === "string" && /^\d+$/.test(amount)) total += BigInt(amount);
+    if (typeof amount !== "string" || !/^\d+$/.test(amount)) continue;
+    out.push({ pubkey: typeof v?.pubkey === "string" ? v.pubkey : "", amount: BigInt(amount) });
   }
+  return out;
+}
+
+// Σ RAW token amount across the owner's accounts for one mint. 0n when it holds none. RAW on
+// purpose: the Token-2022 ScaledUiAmount multiplier scales only uiAmount.
+export async function getTokenBalanceRaw(owner: string, mint: string): Promise<bigint> {
+  let total = 0n;
+  for (const a of await getTokenAccounts(owner, mint)) total += a.amount;
   return total;
+}
+
+// The blockhash a sponsored transaction is built against, plus the height past which it can never
+// land (persisted on the attempt so the sweep knows when to stop waiting).
+export async function getLatestBlockhash(): Promise<{ blockhash: string; lastValidBlockHeight: number }> {
+  const r = (await rpc("getLatestBlockhash", [{ commitment: "confirmed" }])) as {
+    value?: { blockhash?: unknown; lastValidBlockHeight?: unknown };
+  } | null;
+  const blockhash = r?.value?.blockhash;
+  const lastValidBlockHeight = r?.value?.lastValidBlockHeight;
+  if (typeof blockhash !== "string" || !blockhash) throw new HeliusUnavailableError("rpc getLatestBlockhash: bad result");
+  if (typeof lastValidBlockHeight !== "number" || !Number.isFinite(lastValidBlockHeight)) {
+    throw new HeliusUnavailableError("rpc getLatestBlockhash: bad result");
+  }
+  return { blockhash, lastValidBlockHeight };
+}
+
+// Raw account bytes + owning program. null when the account does not exist — a MISSING account is an
+// answer (an unopened token account), not an outage, so it must not read as one.
+export async function getAccountInfoBase64(address: string): Promise<{ data: Uint8Array; owner: string } | null> {
+  const r = (await rpc("getAccountInfo", [address, { encoding: "base64", commitment: "confirmed" }])) as {
+    value?: { data?: unknown; owner?: unknown } | null;
+  } | null;
+  const v = r?.value;
+  if (!v) return null;
+  const data = Array.isArray(v.data) ? v.data[0] : null;
+  if (typeof data !== "string" || typeof v.owner !== "string") {
+    throw new HeliusUnavailableError("rpc getAccountInfo: bad result");
+  }
+  return { data: new Uint8Array(Buffer.from(data, "base64")), owner: v.owner };
+}
+
+// Send a fully-signed wire transaction. preflight ON: a swap that would fail on chain costs the
+// sponsor a fee for nothing, and the RPC error tells us why. An RPC error means NOT SENT.
+export async function sendRawTransaction(base64: string): Promise<string> {
+  const r = await rpc("sendTransaction", [
+    base64,
+    { encoding: "base64", skipPreflight: false, preflightCommitment: "confirmed", maxRetries: 3 },
+  ]);
+  if (typeof r !== "string" || !r) throw new HeliusUnavailableError("rpc sendTransaction: bad result");
+  return r;
+}
+
+// Native SOL of one address, in lamports. The ops probe watches the sponsor's balance with this.
+export async function getBalanceLamports(address: string): Promise<bigint> {
+  const r = (await rpc("getBalance", [address, { commitment: "confirmed" }])) as { value?: unknown } | null;
+  const v = r?.value;
+  if (typeof v !== "number" || !Number.isFinite(v)) throw new HeliusUnavailableError("rpc getBalance: bad result");
+  return BigInt(Math.trunc(v));
 }

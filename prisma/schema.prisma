@@ -90,6 +90,14 @@ enum StockAttemptStatus {
   FAILED
 }
 
+// A real on-chain attempt is a BUY (USDC -> xStock) or a SELL (xStock -> USDC) — one row type, one
+// sweep, one confirm, because the receipt semantics are identical: the chain is checked against what
+// the server itself built.
+enum StockAttemptKind {
+  BUY
+  SELL
+}
+
 // The parsed direction of a strike market = which side (YES / outcome index 0) benefits from an
 // UP move. "Bitcoin above 62,600" / "reach"/"hit" => UP (YES wins on a rise); "dip to"/"below" =>
 // DOWN (YES wins on a fall). Hedging a LONG holding picks the opposite side of an UP market.
@@ -973,6 +981,7 @@ model StockPosition {
   costCents         Int // PAPER: the held stake. REAL: USDC actually spent, rounded UP to the cent
   entryPriceCents   Int // cost / qty at entry (display: "bought at")
   txSig             String?    @unique // REAL: the confirmed Solana signature — the idempotency key
+  sellTxSig         String?    @unique // REAL: the signature of the swap that SOLD this lot (unique = one sell per lot)
   payer             String? // REAL: the verified wallet that paid
   attemptId         String?    @unique // REAL: the StockBuyAttempt this lot settled
   walletCheckedAt   DateTime? // REAL: last reconciliation against the payer's live token balance
@@ -1019,9 +1028,15 @@ model StockBuyAttempt {
   assetId              String
   asset                StockAsset         @relation(fields: [assetId], references: [id])
   payer                String // the verified wallet the tx was built for
+  kind                 StockAttemptKind   @default(BUY)
+  positionId           String? // SELL: the open REAL lot this attempt sells in full
+  sponsored            Boolean            @default(false) // the fee payer is OUR key (counts against the per-user daily cap)
   stakeCents           Int
-  inAmountMicro        BigInt // ExactIn USDC (micro-units)
-  minOutBase           BigInt // quote.otherAmountThreshold (raw base units)
+  // BUY: ExactIn USDC (micro) in, minimum xStock (raw base units) out.
+  // SELL: the column names are kept to avoid churn but the units flip — inAmountMicro holds the RAW
+  // xStock amount sold (ExactIn) and minOutBase holds the MINIMUM USDC micro-amount out.
+  inAmountMicro        BigInt
+  minOutBase           BigInt
   msgHash              String // sha256 of the serialized swapTransaction bytes
   lastValidBlockHeight BigInt
   hedgeSuggestionId    String?

@@ -169,6 +169,13 @@ export function usdcMicroToCents(micro: bigint): number {
   return Number((micro + 9_999n) / 10_000n);
 }
 
+// USDC micro-units -> cents, FLOOR: the mirror of the above for PROCEEDS. A cost ceils and a payout
+// floors, so a rounding artefact can never invent profit that the wallet does not actually hold.
+export function usdcMicroToCentsFloor(micro: bigint): number {
+  if (micro <= 0n) return 0;
+  return Number(micro / 10_000n);
+}
+
 // THE P&L. Portfolio totals and alerts both read this one function so they can never disagree.
 export function livePnlCents(p: { qtyBase: bigint; costCents: number }, a: { priceCents: number; decimals: number }): number {
   return valueCents(p.qtyBase, a.priceCents, a.decimals) - p.costCents;
@@ -218,24 +225,63 @@ function sumFor(balances: RpcTokenBalance[] | null | undefined, owner: string, m
   return total;
 }
 
-// Read what a landed swap actually moved. null on ANY doubt: a failed tx, a tx built for a different
-// payer, or a tx that did not both receive the stock and spend USDC. Booking a lot off a tx we only
+// Did our wallet SIGN this transaction? Under fee sponsorship the fee payer is the server's key, so
+// the payer is no longer accountKeys[0] — but it must still be a signer of the tx that moved its
+// tokens. A key merely PRESENT in the tx (someone else's swap touching a shared account) is not a
+// receipt for our wallet, so `signer: true` is required, not just presence.
+function signedBy(tx: RpcParsedTx, payer: string): boolean {
+  for (const k of tx.transaction?.message?.accountKeys ?? []) {
+    if (k?.pubkey === payer && k.signer === true) return true;
+  }
+  return false;
+}
+
+// The signed token movement of ONE owner in a landed swap: +stock/-USDC for a buy, the mirror for a
+// sell. Throws (via sumFor) on an unreadable amount — the caller turns that into "no delta".
+function ownerDeltas(tx: RpcParsedTx, payer: string, mint: string): { stock: bigint; usdc: bigint } {
+  const meta = tx.meta!;
+  return {
+    stock: sumFor(meta.postTokenBalances, payer, mint) - sumFor(meta.preTokenBalances, payer, mint),
+    usdc: sumFor(meta.postTokenBalances, payer, USDC_MINT) - sumFor(meta.preTokenBalances, payer, USDC_MINT),
+  };
+}
+
+// Read what a landed BUY actually moved. null on ANY doubt: a failed tx, a tx our wallet did not
+// sign, or a tx that did not both receive the stock and spend USDC. Booking a lot off a tx we only
 // half-understand is how a user ends up with a position they never bought.
 export function parseSwapDelta(tx: RpcParsedTx, expect: { payer: string; mint: string }): SwapDelta | null {
   const meta = tx.meta;
   if (!meta || meta.err != null) return null; // a successful tx carries err: null
-  const payer = tx.transaction?.message?.accountKeys?.[0]?.pubkey;
-  if (payer !== expect.payer) return null;
-  let qtyBase: bigint;
-  let usdcOutMicro: bigint;
+  if (!signedBy(tx, expect.payer)) return null;
+  let d: { stock: bigint; usdc: bigint };
   try {
-    qtyBase = sumFor(meta.postTokenBalances, payer, expect.mint) - sumFor(meta.preTokenBalances, payer, expect.mint);
-    usdcOutMicro = sumFor(meta.preTokenBalances, payer, USDC_MINT) - sumFor(meta.postTokenBalances, payer, USDC_MINT);
+    d = ownerDeltas(tx, expect.payer, expect.mint);
   } catch {
     return null;
   }
-  if (qtyBase <= 0n || usdcOutMicro <= 0n) return null;
-  return { qtyBase, usdcOutMicro };
+  if (d.stock <= 0n || d.usdc >= 0n) return null;
+  return { qtyBase: d.stock, usdcOutMicro: -d.usdc };
+}
+
+export interface SellDelta {
+  qtyBase: bigint; // raw stock units that LEFT the wallet
+  usdcInMicro: bigint; // USDC micro-units that arrived
+}
+
+// The same reading for a landed SELL: the stock went out and USDC came in. Same null-on-doubt rule —
+// a lot is only ever closed as "sold" against a tx we can fully account for.
+export function parseSellDelta(tx: RpcParsedTx, expect: { payer: string; mint: string }): SellDelta | null {
+  const meta = tx.meta;
+  if (!meta || meta.err != null) return null;
+  if (!signedBy(tx, expect.payer)) return null;
+  let d: { stock: bigint; usdc: bigint };
+  try {
+    d = ownerDeltas(tx, expect.payer, expect.mint);
+  } catch {
+    return null;
+  }
+  if (d.stock >= 0n || d.usdc <= 0n) return null;
+  return { qtyBase: -d.stock, usdcInMicro: d.usdc };
 }
 
 export interface AttemptLike {
@@ -247,6 +293,12 @@ export interface AttemptLike {
 // than the ExactIn amount they signed, and must receive at least the minimum output they signed.
 export function attemptMatches(d: SwapDelta, a: AttemptLike): boolean {
   return d.usdcOutMicro <= a.inAmountMicro && d.qtyBase >= a.minOutBase;
+}
+
+// The same question for a SELL, with the units flipped: the wallet can never give up MORE stock than
+// the lot it signed away, and must receive at least the minimum USDC it signed for.
+export function sellMatches(d: SellDelta, a: { inAmountBase: bigint; minOutMicro: bigint }): boolean {
+  return d.qtyBase <= a.inAmountBase && d.usdcInMicro >= a.minOutMicro;
 }
 
 // ─── Jupiter Lite Swap v1 quote parsing ─────────────────────────────────────────────────────────────

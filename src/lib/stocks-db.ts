@@ -14,6 +14,7 @@ import { prisma } from "./prisma";
 import { getPriceEntries, JupiterUnavailableError, type JupPriceEntry } from "./prices";
 import { priceFieldsFrom, qtyBaseFor, valueCents } from "./stocks";
 import { holdCash } from "./swipe";
+import { sponsorConfigured } from "./sponsor";
 import { STOCK_PRICE_MAX_STALE_MS, STOCK_TERMS_VERSION } from "./config";
 import type {
   StockBuyResponse,
@@ -263,6 +264,7 @@ export function positionRow(
     pnlCents: open ? pnlCentsOpen : (p.pnlCents ?? null),
     fresh,
     txSig: p.txSig,
+    sellTxSig: p.sellTxSig,
     payer: p.payer,
     createdAt: p.createdAt.toISOString(),
     closedAt: p.closedAt?.toISOString() ?? null,
@@ -329,6 +331,8 @@ export async function portfolioFor(user: { id: string; stockConsentVersion: numb
     totals: { paper: totalsFor("PAPER"), real: totalsFor("REAL") },
     wallets,
     stockConsent: hasStockConsent(user),
+    // The server holds a fee-payer key: the client may offer a real sell (and a real buy with no SOL).
+    sponsored: sponsorConfigured(),
     pendingAttempts,
   };
 }

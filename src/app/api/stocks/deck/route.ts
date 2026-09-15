@@ -6,6 +6,7 @@ import { shuffleNoRun } from "@/lib/deck-mix";
 import { STOCK_DECK_POOL, STOCK_DECK_SIZE, STOCK_PRICE_MAX_STALE_MS } from "@/lib/config";
 import { verifiedWallets, hasStockConsent } from "@/lib/stocks-db";
 import { isTradable } from "@/lib/stocks";
+import { sponsorConfigured } from "@/lib/sponsor";
 import type { StockDeckResponse, StockDeckCard } from "@/lib/api-types";
 
 // The tokenized-stock deck: deck-eligible assets with a FRESH price, minus the caller's open lots and
@@ -46,6 +47,8 @@ export async function GET(req: Request) {
   }));
 
   const body: StockDeckResponse = {
+    // A sponsored server needs no SOL from the buyer — the card can say "buy with USDC only".
+    sponsored: sponsorConfigured(),
     cards,
     wallets: await verifiedWallets(user.id),
     stockConsent: hasStockConsent(user),
