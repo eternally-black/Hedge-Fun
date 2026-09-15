@@ -24,11 +24,13 @@ type FaceProps = {
   stakeCents: number;
   onPickStake: (c: number) => void;
   onBuyReal?: () => void;
+  // A real buy is in flight (signature + chain confirmation): the CTA must not fire a second one.
+  buyRealBusy?: boolean;
   walletLinked: boolean;
   consented: boolean;
 };
 
-export const StockCardFace = memo(function StockCardFace({ card, yesP, noP, skipP, stakeCents, onPickStake, onBuyReal, walletLinked, consented }: FaceProps) {
+export const StockCardFace = memo(function StockCardFace({ card, yesP, noP, skipP, stakeCents, onPickStake, onBuyReal, buyRealBusy, walletLinked, consented }: FaceProps) {
   // The price pulses exactly like the odds do on a prediction card: a number that changes between
   // frames reads as a number that never moves. Same hook, same animation names.
   const priceTick = useTick(card.priceCents);
@@ -37,11 +39,13 @@ export const StockCardFace = memo(function StockCardFace({ card, yesP, noP, skip
   const change = card.change24hBp;
   const changeText = change == null ? "—" : `${change >= 0 ? "+" : "−"}${(Math.abs(change) / 100).toFixed(2)}%`;
   const changeColor = change == null ? "var(--muted)" : change >= 0 ? "var(--yes)" : "var(--no)";
-  const buyLabel = !walletLinked
-    ? "Connect Phantom to buy on Solana"
-    : !consented
-      ? "Accept xStocks terms to buy"
-      : "◎ Buy on Solana";
+  const buyLabel = buyRealBusy
+    ? "Buying…"
+    : !walletLinked
+      ? "Connect Phantom to buy on Solana"
+      : !consented
+        ? "Accept xStocks terms to buy"
+        : "◎ Buy on Solana";
 
   return (
     <>
@@ -124,6 +128,7 @@ export const StockCardFace = memo(function StockCardFace({ card, yesP, noP, skip
             type="button"
             onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => { e.stopPropagation(); onBuyReal(); }}
+            disabled={buyRealBusy}
             style={{
               margin: 0,
               font: "inherit",
@@ -135,7 +140,8 @@ export const StockCardFace = memo(function StockCardFace({ card, yesP, noP, skip
               color: STOCK_ACCENT,
               fontWeight: 700,
               fontSize: 13,
-              cursor: "pointer",
+              cursor: buyRealBusy ? "default" : "pointer",
+              opacity: buyRealBusy ? 0.5 : 1,
             }}
           >
             {buyLabel}
@@ -186,6 +192,7 @@ export function StockDeckCard({
   stakeCents,
   onPickStake,
   onBuyReal,
+  buyRealBusy,
   walletLinked,
   consented,
 }: {
@@ -195,13 +202,14 @@ export function StockDeckCard({
   stakeCents: number;
   onPickStake: (c: number) => void;
   onBuyReal?: () => void;
+  buyRealBusy?: boolean;
   walletLinked: boolean;
   consented: boolean;
 }) {
   return (
     <SwipeShell busy={busy} onAction={onAction} onTap={() => {}}>
       {({ yesP, noP, skipP }) => (
-        <StockCardFace card={card} yesP={yesP} noP={noP} skipP={skipP} stakeCents={stakeCents} onPickStake={onPickStake} onBuyReal={onBuyReal} walletLinked={walletLinked} consented={consented} />
+        <StockCardFace card={card} yesP={yesP} noP={noP} skipP={skipP} stakeCents={stakeCents} onPickStake={onPickStake} onBuyReal={onBuyReal} buyRealBusy={buyRealBusy} walletLinked={walletLinked} consented={consented} />
       )}
     </SwipeShell>
   );

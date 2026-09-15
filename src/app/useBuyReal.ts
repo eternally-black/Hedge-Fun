@@ -11,6 +11,7 @@ import {
 import { STOCK_TERMS_VERSION } from "@/lib/config";
 import { usd, type Me } from "./ui";
 import type {
+  HedgeWalletResponse,
   StockPortfolioResponse,
   StockRealTxResponse,
   StockRealSellTxResponse,
@@ -118,6 +119,12 @@ function errCode(e: unknown): string | undefined {
   return (e as { body?: { error?: string } }).body?.error;
 }
 
+// ensureVerified's one refusal: the POST succeeded but the server could not confirm ownership, so
+// the address must NOT be treated as usable. Exported because the fund panel awaits it too.
+export function isWalletUnverified(e: unknown): boolean {
+  return e instanceof Error && e.message === "wallet_unverified";
+}
+
 // A deliberate cancel is the user's own decision — silent, no toast.
 function isUserReject(e: unknown): boolean {
   return /reject|denied|cancel/i.test(e instanceof Error ? e.message : String(e));
@@ -157,6 +164,9 @@ export function useBuyReal(p: {
 } {
   const { api, me, onToast, onDone, onRefreshMe, ctx: screenCtx } = p;
   const [busy, setBusy] = useState(false);
+  // ONE real trade at a time, whichever screen asked for it. `busy` cannot be the guard: it is state,
+  // so two taps in the same tick both read it as false and both spend the user's USDC.
+  const inFlight = useRef(false);
   const [consentOpen, setConsentOpen] = useState(false);
   // The trade that was interrupted by the consent sheet. Held in a ref, not state: resuming it must
   // not re-render, and it must survive the sheet's own open/close churn.
@@ -202,7 +212,11 @@ export function useBuyReal(p: {
       if (verifiedOnce.current.has(address)) return;
       verifiedOnce.current.add(address);
       try {
-        await api("/api/hedge/wallet", { method: "POST", body: JSON.stringify({ address }) });
+        // 200 is NOT "verified": the route never refuses on a Privy outage, it answers 200 with
+        // verified:false. Caching that would leave the wallet unusable for the rest of the session —
+        // every balance read 403s and a buy sends an embedded-wallet user into the link flow.
+        const r = (await api("/api/hedge/wallet", { method: "POST", body: JSON.stringify({ address }) })) as HedgeWalletResponse;
+        if (!r.verified) throw new Error("wallet_unverified");
         await onRefreshMe?.();
       } catch (e) {
         verifiedOnce.current.delete(address); // a failed verify must stay retryable, not stick
@@ -259,8 +273,11 @@ export function useBuyReal(p: {
           const code = errCode(e);
           if (status === 409 && code === "tx_mismatch") onToast("Something changed — try again");
           else if (status === 409 && code === "attempt_expired") onToast("That quote expired — try again");
+          else if (status === 409 && code === "lot_closed") onToast("This lot was already sold");
           else if (status === 429) onToast("Daily limit of sponsored trades reached — try again tomorrow");
-          else if (status === 502) onToast("Solana is busy — try again");
+          // 502 = the send was attempted with the signature already stamped on the attempt, so a lost
+          // acknowledgement is recovered by the sweep. Inviting a retry here would double-spend.
+          else if (status === 502) onToast("Solana is busy — if it went through, your lot appears within a few minutes");
           else onToast("Couldn't send the transaction");
           return null;
         }
@@ -355,8 +372,8 @@ export function useBuyReal(p: {
       if (!ctx.wallets.includes(w.address)) {
         try {
           await ensureVerified(w.address);
-        } catch {
-          onToast("Couldn't set up your wallet — try again");
+        } catch (e) {
+          onToast(isWalletUnverified(e) ? "Couldn't verify your wallet — try again in a moment" : "Couldn't set up your wallet — try again");
           return;
         }
       }
@@ -382,6 +399,10 @@ export function useBuyReal(p: {
           onToast("Not enough USDC — send at least $1 to your wallet");
         } else if (status === 409 && code === "asset_halted") {
           onToast("Trading is halted for this stock");
+        } else if (status === 409 && code === "buy_in_flight") {
+          onToast("Your previous buy of this stock is still confirming — give it a minute");
+        } else if (status === 409 && code === "hedge_already_accepted") {
+          onToast("You already hold this hedge");
         } else if (status === 502 && code === "swap_unavailable") {
           onToast("Jupiter is busy — try again");
         } else if (status === 502 && code === "rpc_unavailable") {
@@ -475,6 +496,8 @@ export function useBuyReal(p: {
 
   const buyReal = useCallback(
     async (target: BuyRealTarget, stakeCents: number, ctx?: BuyRealCtx, opts?: { hedgeSuggestionId?: string }) => {
+      if (inFlight.current) return;
+      inFlight.current = true;
       setBusy(true);
       try {
         const resolved = await resolveCtx(ctx);
@@ -486,6 +509,7 @@ export function useBuyReal(p: {
         }
         await runBuy(target, stakeCents, resolved, opts);
       } finally {
+        inFlight.current = false;
         setBusy(false);
       }
     },
@@ -494,6 +518,8 @@ export function useBuyReal(p: {
 
   const sellReal = useCallback(
     async (positionId: string, opts?: { symbol?: string; ctx?: BuyRealCtx }) => {
+      if (inFlight.current) return;
+      inFlight.current = true;
       setBusy(true);
       try {
         const resolved = await resolveCtx(opts?.ctx);
@@ -505,6 +531,7 @@ export function useBuyReal(p: {
         }
         await runSell(positionId, resolved, opts);
       } finally {
+        inFlight.current = false;
         setBusy(false);
       }
     },
@@ -514,6 +541,9 @@ export function useBuyReal(p: {
   // The consent sheet's accept. POSTs the CURRENT terms version, so a stale tab cannot accept a
   // text it never rendered, then resumes whichever trade opened the sheet.
   const acceptConsent = useCallback(async () => {
+    // The resumed trade runs here, not through buyReal — so the same one-at-a-time guard applies.
+    if (inFlight.current) return;
+    inFlight.current = true;
     setBusy(true);
     try {
       await api("/api/stocks/consent", { method: "POST", body: JSON.stringify({ version: STOCK_TERMS_VERSION }) });
@@ -525,6 +555,7 @@ export function useBuyReal(p: {
     } catch {
       onToast("Couldn't record your acceptance — try again");
     } finally {
+      inFlight.current = false;
       setBusy(false);
     }
   }, [api, onToast, runBuy, runSell]);

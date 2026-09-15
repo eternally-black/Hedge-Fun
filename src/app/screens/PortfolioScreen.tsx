@@ -4,7 +4,7 @@ import { type CSSProperties, useCallback, useEffect, useRef, useState } from "re
 import { type Me, usd } from "../ui";
 import { REAL_BALANCE_POLL_MS } from "@/lib/config";
 import type { StockPortfolioResponse, StockPositionRow, StockWalletResponse } from "@/lib/api-types";
-import { useBuyReal } from "../useBuyReal";
+import { isWalletUnverified, useBuyReal } from "../useBuyReal";
 import { StockConsentSheet } from "./StockConsentSheet";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
@@ -259,6 +259,9 @@ function FundPanel({ api, address, sponsored, verified, ensureVerified, onToast 
   onToast: (m: string) => void;
 }) {
   const [usdcCents, setUsdcCents] = useState<number | null>(null);
+  // Said once, not every 15s: this load is on a poll, and a Privy outage would otherwise repeat the
+  // same toast until it clears.
+  const warnedUnverified = useRef(false);
 
   const load = useCallback(async () => {
     try {
@@ -268,9 +271,16 @@ function FundPanel({ api, address, sponsored, verified, ensureVerified, onToast 
       const r = (await api(`/api/stocks/wallet?address=${address}`)) as StockWalletResponse;
       setUsdcCents(r.usdcCents);
     } catch (e) {
+      if (isWalletUnverified(e)) {
+        if (!warnedUnverified.current) {
+          warnedUnverified.current = true;
+          onToast("Couldn't verify your wallet — try again in a moment");
+        }
+        return;
+      }
       console.error(e);
     }
-  }, [address, api, ensureVerified, verified]);
+  }, [address, api, ensureVerified, onToast, verified]);
 
   // Same visibility-gated poll as the portfolio list. What is being watched here is USDC arriving
   // from somewhere else entirely, so returning to the tab must re-read immediately.

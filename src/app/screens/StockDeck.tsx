@@ -118,10 +118,12 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode }: {
   const top = cards[0];
   const next = cards[1];
 
-  // Advance the top card off the deck. Shared by every action and by the real-buy completion.
-  const advanceTop = useCallback(() => {
+  // Remove ONE card, by id. Deliberately not "drop the top one": a real buy finishes minutes after
+  // the tap, by which time the user may have skipped past it — advancing the top then would throw
+  // away a card they never acted on. A card already gone (skipped, passed) is a no-op.
+  const removeCard = useCallback((id: string) => {
     setCards((d) => {
-      const nextDeck = d.slice(1);
+      const nextDeck = d.filter((c) => c.id !== id);
       void topUpIfLow(nextDeck.length);
       return nextDeck;
     });
@@ -132,11 +134,11 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode }: {
       if (dir === "SKIP") {
         // Session-local: a skip is "not now", not "never again". Never posted — the server has no
         // skip route for stocks, and a reload may legitimately re-serve it.
-        advanceTop();
+        removeCard(card.id);
         return;
       }
       if (dir === "NO") {
-        advanceTop();
+        removeCard(card.id);
         void api("/api/stocks/pass", { method: "POST", body: JSON.stringify({ assetId: card.id }) }).catch(() => { /* best-effort */ });
         return;
       }
@@ -146,7 +148,7 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode }: {
         onToast("No free cash left");
         return;
       }
-      advanceTop();
+      removeCard(card.id);
       setBusy(true); // one buy in flight at a time — the next card waits for this one's answer
       void api("/api/stocks/buy", {
         method: "POST",
@@ -171,8 +173,12 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode }: {
         })
         .finally(() => setBusy(false));
     },
-    [advanceTop, api, me, onRefreshMe, onToast, stakeCents],
+    [api, me, onRefreshMe, onToast, removeCard, stakeCents],
   );
+
+  // The card a real buy was started on. A REAL buy is a wallet signature plus a chain confirmation —
+  // seconds to minutes — so which card it belongs to has to be remembered, not re-derived on done.
+  const buyingId = useRef<string | null>(null);
 
   const real = useBuyReal({
     api,
@@ -180,7 +186,12 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode }: {
     onToast,
     onRefreshMe,
     ctx: { wallets, stockConsent, sponsored },
-    onDone: () => { advanceTop(); void onRefreshMe(); },
+    onDone: () => {
+      const id = buyingId.current;
+      buyingId.current = null;
+      if (id) removeCard(id);
+      void onRefreshMe();
+    },
   });
 
   // A consent accepted through the sheet flips the local flag immediately, so the card's buy button
@@ -189,6 +200,10 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode }: {
     await real.acceptConsent();
     setStockConsent(true);
   }, [real]);
+
+  // A real buy locks the deck the same way a paper one does — harder, in fact: real money is moving,
+  // and every action here (pass, skip, paper buy, swipe) changes which card is on top.
+  const locked = busy || real.busy;
 
   return (
     <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column" }}>
@@ -200,11 +215,15 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode }: {
           <StockDeckCard
             key={top.id}
             card={top}
-            busy={busy}
+            busy={locked}
             onAction={(a) => act(top, a)}
             stakeCents={stakeCents}
             onPickStake={setStakeCents}
-            onBuyReal={() => void real.buyReal({ assetId: top.id, symbol: top.symbol }, stakeCents, { wallets, stockConsent, sponsored })}
+            onBuyReal={() => {
+              buyingId.current = top.id;
+              void real.buyReal({ assetId: top.id, symbol: top.symbol }, stakeCents, { wallets, stockConsent, sponsored });
+            }}
+            buyRealBusy={real.busy}
             // A usable wallet is a verified external one OR the embedded wallet Privy issues on
             // login — only a user with neither is told to go get Phantom.
             walletLinked={wallets.length > 0 || real.walletAddress !== null}
@@ -218,9 +237,9 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode }: {
       </div>
 
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 18, padding: "14px 0 2px" }}>
-        <CircleBtn glyph="✕" label="Pass" color="var(--no)" size={56} disabled={busy || !top} onClick={() => top && act(top, "NO")} />
-        <CircleBtn glyph="↑" label="Skip" color="var(--skip)" size={46} disabled={busy || !top} onClick={() => top && act(top, "SKIP")} />
-        <CircleBtn glyph="✓" label="Buy" color="var(--yes)" size={56} disabled={busy || !top} onClick={() => top && act(top, "YES")} />
+        <CircleBtn glyph="✕" label="Pass" color="var(--no)" size={56} disabled={locked || !top} onClick={() => top && act(top, "NO")} />
+        <CircleBtn glyph="↑" label="Skip" color="var(--skip)" size={46} disabled={locked || !top} onClick={() => top && act(top, "SKIP")} />
+        <CircleBtn glyph="✓" label="Buy" color="var(--yes)" size={56} disabled={locked || !top} onClick={() => top && act(top, "YES")} />
       </div>
       <div style={{ textAlign: "center", fontSize: 10, color: "var(--muted)", paddingBottom: 8 }}>
         Paper buys use play money · Buy on Solana uses your own wallet{sponsored ? " · fees on us" : ""}
