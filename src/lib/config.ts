@@ -239,6 +239,11 @@ export const STOCK_SWAP_SLIPPAGE_BPS = 50; // Jupiter quote slippage 0.5%
 export const STOCK_MAX_PRICE_IMPACT_BP = 200; // refuse to build a swap whose quoted impact exceeds 2%
 export const STOCK_CONFIRM_POLLS = 4; // getTransaction attempts (×1.5 s) before 404 tx_not_found
 export const STOCK_ATTEMPT_SWEEP_AFTER_MS = 3 * 60_000; // a PENDING real buy older than this is swept by the poller
+// ─── Fee sponsorship (our own fee-payer; STOCK_SPONSOR_SECRET in env, base58 64-byte secret key) ──
+export const STOCK_SPONSOR_MAX_PER_USER_PER_DAY = 20; // sponsored attempts (buy + sell) per user per rolling 24 h
+export const STOCK_SPONSOR_MAX_PRIORITY_LAMPORTS = 100_000; // cap on the priority fee the sponsor pays per tx
+export const STOCK_SPONSOR_MIN_LAMPORTS = 50_000_000; // 0.05 SOL: below this the health probe is 503 and the poller pages
+export const STOCK_SPONSOR_LOW_ALERT_EVERY_MS = 3_600_000; // one "sponsor low" page per hour while it persists
 export const STOCK_HEALTH_MIN_DECK = 20; // /api/stocks/health is 503 below this many FRESH deck-eligible assets
 export const STOCK_HEALTH_STUCK_ATTEMPT_MS = 30 * 60_000; // a PENDING attempt older than this counts as stuck
 export const STOCK_WALLET_RECONCILE_MAX_AGE_MS = 6 * 3_600_000; // REAL lots are re-checked against the wallet balance at most this often

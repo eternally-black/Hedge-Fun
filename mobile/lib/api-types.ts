@@ -569,7 +569,9 @@ export interface HedgeSpottedResponse { suggestions: HedgeSuggestion[]; generate
 // `tradable` = the mint has a Solana pool deep enough for a small REAL buy; false = paper only (the
 // price is the issuer's reference price) and the client must not offer "Buy on Solana".
 export interface StockDeckCard { id: string; symbol: string; name: string; underlying: string; logoUrl: string | null; mint: string; priceCents: number; change24hBp: number | null; uiMultiplierMicro: number | null; tradingHours: string | null; openNow: boolean; tradable: boolean; pricedAt: string }
-export interface StockDeckResponse { cards: StockDeckCard[]; wallets: string[]; stockConsent: boolean }
+// sponsored: the server holds a fee-payer key — real buys/sells are fee-sponsored (the user needs USDC only).
+export interface StockDeckResponse {
+  sponsored: boolean; cards: StockDeckCard[]; wallets: string[]; stockConsent: boolean }
 // ─── POST /api/stocks/buy ────  Auth: Bearer. Body: StockBuyRequest. PAPER buy: locks the live price
 // server-side, holds stakeCents against Cash (atomic, like a swipe). requestId (client uuid) makes a
 // retry return the same lot (alreadyBought:true). Errors: 400 (bounds/uuid), 404 asset_not_found,
@@ -586,10 +588,14 @@ export type StockPassResponse = { ok: true };
 // ─── GET /api/stocks/portfolio ────  Auth: Bearer. Open + recent closed lots, both modes, priced from
 // the STORED asset price (refreshed every poller tick; `fresh` false when older than the staleness
 // bound). REAL lots are reconciled against the payer's live wallet balance at most every few hours.
-export interface StockPositionRow { id: string; assetId: string; symbol: string; name: string; logoUrl: string | null; mode: "PAPER" | "REAL"; source: "DECK" | "HEDGE"; qtyBase: string; decimals: number; uiMultiplierMicro: number | null; costCents: number; entryPriceCents: number; priceCents: number | null; valueCents: number | null; pnlCents: number | null; fresh: boolean; txSig: string | null; payer: string | null; createdAt: string; closedAt: string | null; closeReason: string | null; proceedsCents: number | null }
+export interface StockPositionRow { id: string; assetId: string; symbol: string; name: string; logoUrl: string | null; mode: "PAPER" | "REAL"; source: "DECK" | "HEDGE"; qtyBase: string; decimals: number; uiMultiplierMicro: number | null; costCents: number; entryPriceCents: number; priceCents: number | null; valueCents: number | null; pnlCents: number | null; fresh: boolean; txSig: string | null; sellTxSig: string | null; payer: string | null; createdAt: string; closedAt: string | null; closeReason: string | null; proceedsCents: number | null }
 export interface StockTotals { costCents: number; valueCents: number; pnlCents: number }
 export interface StockPendingAttempt { id: string; symbol: string; stakeCents: number; status: "PENDING" | "CONFIRMED" | "EXPIRED" | "FAILED"; sig: string | null; createdAt: string }
-export interface StockPortfolioResponse { open: StockPositionRow[]; closed: StockPositionRow[]; totals: { paper: StockTotals; real: StockTotals }; wallets: string[]; stockConsent: boolean; pendingAttempts: StockPendingAttempt[] }
+export interface StockPortfolioResponse { open: StockPositionRow[]; closed: StockPositionRow[]; totals: { paper: StockTotals; real: StockTotals }; wallets: string[]; stockConsent: boolean; sponsored: boolean; pendingAttempts: StockPendingAttempt[] }
+// ─── GET /api/stocks/wallet?address= ────  Auth: Bearer. Live balances of ONE of the caller's
+// VERIFIED wallets (403 otherwise) — the "fund your wallet" panel. usdcCents floors micro-USDC.
+// Errors: 400, 403 wallet_not_verified, 502 rpc_unavailable.
+export interface StockWalletResponse { address: string; usdcCents: number; solLamports: string; sponsored: boolean }
 // ─── POST /api/stocks/consent ────  Auth: Bearer. Records acceptance of the xStocks terms +
 // self-declaration (not a US person / not in a restricted jurisdiction) at `version`.
 export interface StockConsentRequest { version: number }
@@ -600,7 +606,25 @@ export type StockConsentResponse = { ok: true; version: number };
 // 502 swap_unavailable.
 // `assetId` OR `symbol` names the asset (a hedge card knows only the symbol).
 export interface StockRealTxRequest { assetId?: string; symbol?: string; stakeCents: number; payer: string; hedgeSuggestionId?: string }
-export interface StockRealTxResponse { attemptId: string; swapTransaction: string; lastValidBlockHeight: number; payer: string; quote: { inAmountMicro: string; outAmountBase: string; minOutBase: string; priceImpactBp: number } }
+// feePayer: the sponsor address when the tx is FEE-SPONSORED — the wallet must SIGN ONLY (signTransaction)
+// and hand the signed bytes to /real/submit, which co-signs and sends. null = self-paid: the wallet
+// signs AND sends (signAndSendTransaction) as before, then /real/sent.
+export interface StockRealTxResponse { attemptId: string; swapTransaction: string; lastValidBlockHeight: number; payer: string; feePayer: string | null; quote: { inAmountMicro: string; outAmountBase: string; minOutBase: string; priceImpactBp: number } }
+// ─── POST /api/stocks/real/submit ────  Auth: Bearer. The user-signed, fee-sponsored transaction.
+// The server recomputes the message hash (only a message it built itself is ever co-signed), adds
+// the sponsor signature, sends it, stamps the signature on the attempt. Errors: 400, 403 (not the
+// caller's attempt), 404 attempt_not_found, 409 attempt_not_pending | tx_mismatch | attempt_expired,
+// 429 sponsor_limit, 502 rpc_unavailable.
+export interface StockRealSubmitRequest { attemptId: string; signedTransaction: string } // base64 wire tx, user-signed
+export interface StockRealSubmitResponse { sig: string }
+// ─── POST /api/stocks/real/sell-tx ────  Auth: Bearer. Builds a fee-sponsored xStock -> USDC swap
+// that sells ONE open REAL lot in full (ExactIn = the lot's qtyBase). When the wallet holds exactly
+// the lot, the empty token account is closed in the same tx (rent back to the sponsor). Same sign +
+// /real/submit + /real/confirm loop as a buy. Errors: 400, 403 stock_consent_required |
+// wallet_not_verified, 404 position_not_found, 409 lot_closed | lot_moved | price_impact |
+// sponsor_unavailable, 502 swap_unavailable | rpc_unavailable.
+export interface StockRealSellTxRequest { positionId: string }
+export interface StockRealSellTxResponse { attemptId: string; swapTransaction: string; lastValidBlockHeight: number; payer: string; feePayer: string; quote: { inAmountBase: string; outAmountMicro: string; minOutMicro: string; priceImpactBp: number } }
 // ─── POST /api/stocks/real/sent ────  Auth: Bearer. Stamps the signature on the attempt as soon as
 // the wallet has sent it, so the poller can recover a buy whose tab died before /confirm.
 export interface StockRealSentRequest { attemptId: string; sig: string }
@@ -610,4 +634,5 @@ export type StockRealSentResponse = { ok: true };
 // signature. Errors: 400, 403 (not the caller's attempt/tx), 404 tx_not_found (retry), 409 tx_failed |
 // not_this_buy | attempt_expired, 502 rpc_unavailable.
 export interface StockRealConfirmRequest { attemptId: string; sig: string }
-export interface StockRealConfirmResponse { positionId: string; qtyBase: string; costCents: number; alreadyConfirmed: boolean }
+// kind SELL: positionId = the lot that was closed; proceedsCents/pnlCents are set; qtyBase = raw sold.
+export interface StockRealConfirmResponse { positionId: string; qtyBase: string; costCents: number; alreadyConfirmed: boolean; kind: "BUY" | "SELL"; proceedsCents?: number; pnlCents?: number }
