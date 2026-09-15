@@ -68,6 +68,8 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode }: {
   const [stakeCents, setStakeCents] = useState<number>(STOCK_STAKE_PRESETS_CENTS[0]);
   const [wallets, setWallets] = useState<string[]>([]);
   const [stockConsent, setStockConsent] = useState(false);
+  // The server holds a fee-payer: real buys are gasless, so the footer can promise it.
+  const [sponsored, setSponsored] = useState(false);
   const [busy, setBusy] = useState(false);
 
   // Every card id this session has already put in front of the user. Same rationale as the
@@ -83,6 +85,7 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode }: {
       for (const c of r.cards) served.current.add(c.id);
       setWallets(r.wallets);
       setStockConsent(r.stockConsent);
+      setSponsored(r.sponsored);
     } catch (e) {
       console.error(e);
     }
@@ -102,6 +105,7 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode }: {
         for (const c of r.cards) served.current.add(c.id);
         setWallets(r.wallets);
         setStockConsent(r.stockConsent);
+        setSponsored(r.sponsored);
       } catch (e) {
         console.error(e);
       } finally {
@@ -174,6 +178,8 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode }: {
     api,
     me,
     onToast,
+    onRefreshMe,
+    ctx: { wallets, stockConsent, sponsored },
     onDone: () => { advanceTop(); void onRefreshMe(); },
   });
 
@@ -198,8 +204,10 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode }: {
             onAction={(a) => act(top, a)}
             stakeCents={stakeCents}
             onPickStake={setStakeCents}
-            onBuyReal={() => void real.buyReal({ assetId: top.id, symbol: top.symbol }, stakeCents, { wallets, stockConsent })}
-            walletLinked={wallets.length > 0}
+            onBuyReal={() => void real.buyReal({ assetId: top.id, symbol: top.symbol }, stakeCents, { wallets, stockConsent, sponsored })}
+            // A usable wallet is a verified external one OR the embedded wallet Privy issues on
+            // login — only a user with neither is told to go get Phantom.
+            walletLinked={wallets.length > 0 || real.walletAddress !== null}
             consented={stockConsent}
           />
         ) : (
@@ -215,10 +223,10 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode }: {
         <CircleBtn glyph="✓" label="Buy" color="var(--yes)" size={56} disabled={busy || !top} onClick={() => top && act(top, "YES")} />
       </div>
       <div style={{ textAlign: "center", fontSize: 10, color: "var(--muted)", paddingBottom: 8 }}>
-        Paper buys use play money · Buy on Solana uses your own wallet
+        Paper buys use play money · Buy on Solana uses your own wallet{sponsored ? " · fees on us" : ""}
       </div>
 
-      <StockConsentSheet open={real.consentOpen} busy={real.busy} onAccept={acceptConsent} onClose={real.closeConsent} />
+      <StockConsentSheet open={real.consentOpen} busy={real.busy} sponsored={sponsored} onAccept={acceptConsent} onClose={real.closeConsent} />
     </div>
   );
 }

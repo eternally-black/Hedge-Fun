@@ -10,9 +10,11 @@ import { APP_SURFACE_ID } from "../appSurface";
 //
 // The checkbox is the point. This is a self-declaration that the user is not a US person and not in
 // a restricted jurisdiction — a claim only they can make, and one the button must not make for them.
-export function StockConsentSheet({ open, busy, onAccept, onClose }: {
+export function StockConsentSheet({ open, busy, sponsored, onAccept, onClose }: {
   open: boolean;
   busy: boolean;
+  /** The server pays the Solana network fee for these swaps — say so before the user agrees. */
+  sponsored?: boolean;
   onAccept: () => void;
   onClose: () => void;
 }) {
@@ -21,10 +23,10 @@ export function StockConsentSheet({ open, busy, onAccept, onClose }: {
   if (!open || !host) return null;
   // The body (and its checkbox state) mounts fresh on every open: re-opening the sheet must not
   // remember a previous tick — the declaration is per-acceptance.
-  return createPortal(<SheetBody busy={busy} onAccept={onAccept} onClose={onClose} />, host);
+  return createPortal(<SheetBody busy={busy} sponsored={sponsored} onAccept={onAccept} onClose={onClose} />, host);
 }
 
-function SheetBody({ busy, onAccept, onClose }: { busy: boolean; onAccept: () => void; onClose: () => void }) {
+function SheetBody({ busy, sponsored, onAccept, onClose }: { busy: boolean; sponsored?: boolean; onAccept: () => void; onClose: () => void }) {
   const [checked, setChecked] = useState(false);
 
   return (
@@ -64,6 +66,11 @@ function SheetBody({ busy, onAccept, onClose }: { busy: boolean; onAccept: () =>
           can rise while the stock falls. &apos;Energy stocks&apos; cards track an energy-equity basket
           (XLEx), not crude oil. Sizing is a product rule, not hedge math.
         </div>
+        {sponsored ? (
+          <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8, lineHeight: 1.55 }}>
+            Network fees for these swaps are paid by HedgeFun.
+          </div>
+        ) : null}
         <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8, lineHeight: 1.55 }}>
           xStocks are not available to US persons or in restricted jurisdictions.
         </div>

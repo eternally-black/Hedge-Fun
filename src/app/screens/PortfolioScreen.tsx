@@ -3,7 +3,7 @@
 import { type CSSProperties, useCallback, useEffect, useRef, useState } from "react";
 import { type Me, usd } from "../ui";
 import { REAL_BALANCE_POLL_MS } from "@/lib/config";
-import type { StockPortfolioResponse, StockPositionRow } from "@/lib/api-types";
+import type { StockPortfolioResponse, StockPositionRow, StockWalletResponse } from "@/lib/api-types";
 import { useBuyReal } from "../useBuyReal";
 import { StockConsentSheet } from "./StockConsentSheet";
 
@@ -40,8 +40,30 @@ export function PortfolioScreen({
     }
   }, [api]);
 
-  const real = useBuyReal({ api, me, onToast, onDone: () => { void load(); void onRefreshMe(); } });
+  const real = useBuyReal({
+    api,
+    me,
+    onToast,
+    onRefreshMe,
+    ctx: { wallets: data?.wallets ?? [], stockConsent: data?.stockConsent ?? false, sponsored: data?.sponsored },
+    onDone: () => { void load(); void onRefreshMe(); },
+  });
   const replayPending = real.replayPending;
+  const sellReal = real.sellReal;
+
+  // Selling a REAL lot is the same two-tap as a paper sell, but the work happens in the hook (build,
+  // sign, submit, confirm). `selling` is shared: a row is either paper or on-chain, never both.
+  const sellOnChain = useCallback(
+    async (row: StockPositionRow) => {
+      setSelling(row.id);
+      try {
+        await sellReal(row.id, { symbol: row.symbol, ctx: { wallets: data?.wallets ?? [], stockConsent: data?.stockConsent ?? false, sponsored: data?.sponsored } });
+      } finally {
+        setSelling(null);
+      }
+    },
+    [data?.sponsored, data?.stockConsent, data?.wallets, sellReal],
+  );
 
   // Initial load + one replay of any pending real buy (a tab that died before /confirm). If the
   // replay confirmed anything, refetch so the new lot appears and say so.
@@ -125,6 +147,17 @@ export function PortfolioScreen({
         <div style={{ fontFamily: "var(--df)", fontSize: 26, marginTop: 4 }}>Portfolio</div>
         <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>Tokenized stocks you own — paper and on-chain.</div>
 
+        {real.embedded && real.walletAddress ? (
+          <FundPanel
+            api={api}
+            address={real.walletAddress}
+            sponsored={data?.sponsored ?? false}
+            verified={(data?.wallets ?? []).includes(real.walletAddress)}
+            ensureVerified={real.ensureVerified}
+            onToast={onToast}
+          />
+        ) : null}
+
         <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
           <TotalTile label="Paper" totals={paper} />
           {hasReal ? <TotalTile label="On-chain" totals={realTotals} /> : null}
@@ -165,7 +198,7 @@ export function PortfolioScreen({
                     onSell={() => {
                       window.clearTimeout(armTimer.current);
                       setArmed(null);
-                      void sell(row);
+                      void (row.mode === "REAL" ? sellOnChain(row) : sell(row));
                     }}
                     onBuyReal={() =>
                       void real.buyReal(
@@ -205,10 +238,105 @@ export function PortfolioScreen({
       <StockConsentSheet
         open={real.consentOpen}
         busy={real.busy}
+        sponsored={data?.sponsored ?? false}
         onAccept={real.acceptConsent}
         onClose={real.closeConsent}
       />
     </>
+  );
+}
+
+// FundPanel — "send USDC here". An embedded wallet has no wallet app of its own to show a balance
+// or an address, so the app has to be that surface, or the user has nothing to fund and no way to
+// know it arrived. No QR: no QR library is installed and one dependency for one square is a bad
+// trade — the address is one tap away from the clipboard.
+function FundPanel({ api, address, sponsored, verified, ensureVerified, onToast }: {
+  api: Api;
+  address: string;
+  sponsored: boolean;
+  verified: boolean;
+  ensureVerified: (address: string) => Promise<void>;
+  onToast: (m: string) => void;
+}) {
+  const [usdcCents, setUsdcCents] = useState<number | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      // /stocks/wallet answers only for a VERIFIED address, and a freshly created embedded wallet is
+      // not one until we tell the server about it — this panel is usually the first place that needs it.
+      if (!verified) await ensureVerified(address);
+      const r = (await api(`/api/stocks/wallet?address=${address}`)) as StockWalletResponse;
+      setUsdcCents(r.usdcCents);
+    } catch (e) {
+      console.error(e);
+    }
+  }, [address, api, ensureVerified, verified]);
+
+  // Same visibility-gated poll as the portfolio list. What is being watched here is USDC arriving
+  // from somewhere else entirely, so returning to the tab must re-read immediately.
+  useEffect(() => {
+    let timer: number | undefined;
+    const stop = () => window.clearInterval(timer);
+    const start = () => {
+      stop();
+      timer = window.setInterval(() => void load(), REAL_BALANCE_POLL_MS);
+    };
+    const onVis = () => {
+      if (document.hidden) return stop();
+      void load();
+      start();
+    };
+    // "We are visible now" is exactly the mount case too — read once, then start the clock. Going
+    // through onVis rather than calling load() here keeps the first setState off the effect body.
+    onVis();
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("focus", onVis);
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("focus", onVis);
+    };
+  }, [load]);
+
+  const copy = () => {
+    void navigator.clipboard
+      .writeText(address)
+      .then(() => onToast("Address copied"))
+      .catch(() => onToast("Couldn't copy — select the address instead"));
+  };
+
+  return (
+    <div style={{ marginTop: 14, background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 14, padding: "12px 13px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ flex: 1, fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700 }}>Your Solana wallet</div>
+        <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 15 }}>{usdcCents == null ? "—" : usd(usdcCents)}</div>
+        <button
+          type="button"
+          onClick={() => void load()}
+          aria-label="Refresh balance"
+          style={{ margin: 0, font: "inherit", padding: "3px 8px", borderRadius: 8, background: "transparent", color: "var(--muted)", border: "1px solid var(--line)", fontWeight: 700, fontSize: 11, cursor: "pointer" }}
+        >
+          ↻
+        </button>
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 9 }}>
+        <div style={{ flex: 1, minWidth: 0, fontFamily: "ui-monospace,SFMono-Regular,Menlo,monospace", fontSize: 11, color: "var(--text)", overflowWrap: "anywhere", lineHeight: 1.4 }}>{address}</div>
+        <button
+          type="button"
+          onClick={copy}
+          style={{ margin: 0, font: "inherit", flexShrink: 0, padding: "6px 11px", borderRadius: 10, background: "transparent", color: "var(--muted)", border: "1px solid var(--line)", fontWeight: 700, fontSize: 11, cursor: "pointer" }}
+        >
+          Copy
+        </button>
+      </div>
+
+      <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 9, lineHeight: 1.5 }}>
+        {sponsored
+          ? "Send USDC (Solana) here. No SOL needed — network fees are on us."
+          : "Send USDC (Solana) here, plus ~0.01 SOL for network fees."}
+      </div>
+    </div>
   );
 }
 
@@ -296,26 +424,26 @@ function OpenRow({
         >
           ◎ Buy on Solana
         </button>
-        {row.mode === "PAPER" ? (
-          <button
-            type="button"
-            disabled={selling}
-            onClick={armed ? onSell : onArm}
-            style={{
-              margin: 0, font: "inherit",
-              padding: "7px 12px", borderRadius: 10,
-              background: armed ? "var(--gold)" : "transparent",
-              color: armed ? "#1a1205" : "var(--muted)",
-              border: "1px solid " + (armed ? "var(--gold)" : "var(--line)"),
-              fontWeight: 700, fontSize: 11,
-              cursor: selling ? "default" : "pointer",
-              opacity: selling ? 0.5 : 1,
-              whiteSpace: "nowrap",
-            }}
-          >
-            {selling ? "Selling…" : armed ? "Sell?" : "Sell"}
-          </button>
-        ) : null}
+        {/* Same two-tap for both modes — a REAL sell is a swap back to USDC, which is no more
+            undoable than a paper one, so it gets the same "are you sure" gesture and the same look. */}
+        <button
+          type="button"
+          disabled={selling}
+          onClick={armed ? onSell : onArm}
+          style={{
+            margin: 0, font: "inherit",
+            padding: "7px 12px", borderRadius: 10,
+            background: armed ? "var(--gold)" : "transparent",
+            color: armed ? "#1a1205" : "var(--muted)",
+            border: "1px solid " + (armed ? "var(--gold)" : "var(--line)"),
+            fontWeight: 700, fontSize: 11,
+            cursor: selling ? "default" : "pointer",
+            opacity: selling ? 0.5 : 1,
+            whiteSpace: "nowrap",
+          }}
+        >
+          {selling ? "Selling…" : armed ? "Sell?" : row.mode === "REAL" ? "◎ Sell on Solana" : "Sell"}
+        </button>
       </div>
     </div>
   );
@@ -331,6 +459,15 @@ function ClosedRow({ row }: { row: StockPositionRow }) {
         <div style={{ fontWeight: 700, fontSize: 13 }}>{row.symbol}</div>
         <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
           {row.closeReason === "wallet" ? "moved in wallet" : "sold"}
+          {/* The sale has its own signature — the buy link on the open row is gone once it closes. */}
+          {row.sellTxSig ? (
+            <>
+              {" · "}
+              <a href={`https://solscan.io/tx/${row.sellTxSig}`} target="_blank" rel="noreferrer" style={{ color: "var(--gold)" }}>
+                ◎ sale
+              </a>
+            </>
+          ) : null}
         </div>
       </div>
       {pnl != null ? (

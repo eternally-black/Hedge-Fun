@@ -31,7 +31,10 @@ export default function Providers({ children }: { children: React.ReactNode }) {
         // bounds the debit, the daily cap bounds the count, and the irreversible verbs (withdraw,
         // bridge-out) keep their explicit confirmation. Set client-side, which overrides the Privy
         // dashboard, so this decision lives here rather than in a console nobody reads.
-        embeddedWallets: { ethereum: { createOnLogin: "all-users" }, showWalletUIs: false },
+        // Solana: "users-without-wallets" — a user who already linked Phantom keeps buying from it;
+        // everyone else gets an embedded Solana wallet on login, which is what makes a fee-sponsored
+        // xStocks buy possible without the user ever installing a wallet (USDC in, no SOL needed).
+        embeddedWallets: { ethereum: { createOnLogin: "all-users" }, solana: { createOnLogin: "users-without-wallets" }, showWalletUIs: false },
         // Solana external wallets (Phantom etc.) enabled in the dashboard need
         // their connectors passed here, else Privy warns and connect is a no-op.
         externalWallets: { solana: { connectors: solanaConnectors } },

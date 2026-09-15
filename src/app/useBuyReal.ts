@@ -1,13 +1,20 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import { useLinkAccount, useConnectWallet } from "@privy-io/react-auth";
-import { useWallets as useSolanaWallets, useSignAndSendTransaction } from "@privy-io/react-auth/solana";
+import { useLinkAccount, useConnectWallet, usePrivy, type WalletWithMetadata } from "@privy-io/react-auth";
+import {
+  useWallets as useSolanaWallets,
+  useSignAndSendTransaction,
+  useSignTransaction,
+  type ConnectedStandardSolanaWallet,
+} from "@privy-io/react-auth/solana";
 import { STOCK_TERMS_VERSION } from "@/lib/config";
-import type { Me } from "./ui";
+import { usd, type Me } from "./ui";
 import type {
   StockPortfolioResponse,
   StockRealTxResponse,
+  StockRealSellTxResponse,
+  StockRealSubmitResponse,
   StockRealConfirmResponse,
 } from "@/lib/api-types";
 
@@ -18,11 +25,26 @@ import type {
 // The shape of the flow is deliberate: the server builds, the device signs, the server books. The
 // client never decides what a buy costs, never holds a key, and never marks a position as bought —
 // the card advances only when /confirm returns a positionId.
+//
+// Two signing shapes live here, and the server picks which one per transaction:
+//   feePayer null     → SELF-PAID: the wallet signs AND sends (signAndSendTransaction), then /sent.
+//   feePayer non-null → SPONSORED: the wallet SIGNS ONLY, /real/submit co-signs and sends. The user
+//                       needs USDC and no SOL at all, which is what makes the embedded wallet usable.
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
 export interface BuyRealTarget { assetId: string; symbol: string }
-export interface BuyRealCtx { wallets: string[]; stockConsent: boolean }
+export interface BuyRealCtx { wallets: string[]; stockConsent: boolean; sponsored?: boolean }
+
+// What the consent sheet interrupted. A buy and a sell both hit the same 403, and both must resume
+// on accept — so the held action carries its own kind rather than being assumed to be a buy.
+type Held =
+  | { kind: "buy"; target: BuyRealTarget; stakeCents: number; ctx: BuyRealCtx; opts?: { hedgeSuggestionId?: string } }
+  | { kind: "sell"; positionId: string; ctx: BuyRealCtx; opts?: { symbol?: string } };
+
+// The only three fields of a built swap the sign → land → book tail needs. /real/tx and
+// /real/sell-tx differ in their quote, never in how the signature is collected and confirmed.
+type BuiltSwap = { attemptId: string; swapTransaction: string; feePayer: string | null };
 
 // The mainnet chain literal, exactly as @privy-io/react-auth/solana declares it (SolanaChain).
 const SOLANA_MAINNET = "solana:mainnet" as const;
@@ -49,6 +71,15 @@ function encodeBase58(bytes: Uint8Array): string {
   let out = "1".repeat(zeros);
   for (let i = digits.length - 1; i >= 0; i--) out += B58_ALPHABET[digits[i]!];
   return out;
+}
+
+// Signed wire tx → base64, the shape /real/submit takes. A byte-at-a-time loop rather than
+// String.fromCharCode(...bytes): a swap is ~1.2 KB today, and a spread that big is a stack overflow
+// waiting for the day a route adds one more instruction.
+function encodeBase64(bytes: Uint8Array): string {
+  let s = "";
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s);
 }
 
 // A pending buy, parked in localStorage between "the wallet sent it" and "the server booked it".
@@ -87,28 +118,99 @@ function errCode(e: unknown): string | undefined {
   return (e as { body?: { error?: string } }).body?.error;
 }
 
+// A deliberate cancel is the user's own decision — silent, no toast.
+function isUserReject(e: unknown): boolean {
+  return /reject|denied|cancel/i.test(e instanceof Error ? e.message : String(e));
+}
+
+// "+$1.05" / "−$0.40" (U+2212) — usd() formats the magnitude, the sign is ours.
+function signed(cents: number): string {
+  return `${cents >= 0 ? "+" : "−"}${usd(Math.abs(cents))}`;
+}
+
 export function useBuyReal(p: {
   api: Api;
   me: Me | null;
   onToast: (m: string) => void;
   onDone?: (r: { symbol: string; qtyBase: string; costCents: number }) => void;
+  // Called after the embedded wallet is verified server-side, so the screen re-reads its wallet list.
+  onRefreshMe?: () => void | Promise<void>;
+  // What the screen already knows (wallets / consent / sponsored). Read during render only — never a
+  // callback dependency — so the exposed callbacks stay stable for the fund panel's poll effect.
+  ctx?: BuyRealCtx;
 }): {
   buyReal: (target: BuyRealTarget, stakeCents: number, ctx?: BuyRealCtx, opts?: { hedgeSuggestionId?: string }) => Promise<void>;
+  sellReal: (positionId: string, opts?: { symbol?: string; ctx?: BuyRealCtx }) => Promise<void>;
   busy: boolean;
   consentOpen: boolean;
   acceptConsent: () => Promise<void>;
   closeConsent: () => void;
   replayPending: () => Promise<number>;
+  /** The wallet the next real trade will use — external-verified first, else the embedded one. */
+  walletAddress: string | null;
+  /** True when that wallet is the Privy embedded one (no popup to sign, nothing to install). */
+  embedded: boolean;
+  /** The server holds a fee-payer: the user needs USDC only, no SOL. */
+  sponsored: boolean;
+  /** Tell the server about an embedded wallet it hasn't seen. Once per address per session. */
+  ensureVerified: (address: string) => Promise<void>;
 } {
-  const { api, me, onToast, onDone } = p;
+  const { api, me, onToast, onDone, onRefreshMe, ctx: screenCtx } = p;
   const [busy, setBusy] = useState(false);
   const [consentOpen, setConsentOpen] = useState(false);
-  // The buy that was interrupted by the consent sheet. Held in a ref, not state: resuming it must
+  // The trade that was interrupted by the consent sheet. Held in a ref, not state: resuming it must
   // not re-render, and it must survive the sheet's own open/close churn.
-  const pendingBuy = useRef<{ target: BuyRealTarget; stakeCents: number; ctx: BuyRealCtx; opts?: { hedgeSuggestionId?: string } } | null>(null);
+  const heldRef = useRef<Held | null>(null);
 
-  const { wallets: solWallets } = useSolanaWallets();
+  const { wallets: solWallets, ready: walletsReady } = useSolanaWallets();
   const { signAndSendTransaction } = useSignAndSendTransaction();
+  const { signTransaction } = useSignTransaction();
+  const { user } = usePrivy();
+
+  // The Privy EMBEDDED Solana wallet. A ConnectedStandardSolanaWallet carries only `address` and
+  // `standardWallet`, so "is this one ours" cannot be asked of the connected wallet — it is asked of
+  // the LINKED ACCOUNT that created it, where walletClientType === 'privy' is the SDK's own marker.
+  const embeddedAddress =
+    user?.linkedAccounts.find(
+      (a): a is WalletWithMetadata => a.type === "wallet" && a.chainType === "solana" && a.walletClientType === "privy",
+    )?.address ?? null;
+
+  // Which wallet a real trade uses: a CONNECTED external wallet the server already verified wins —
+  // the user deliberately linked that one — else the embedded wallet, which every login now has.
+  const pickWallet = useCallback(
+    (verified: readonly string[]): ConnectedStandardSolanaWallet | null => {
+      const set = new Set(verified);
+      return (
+        solWallets.find((w) => w.address !== embeddedAddress && set.has(w.address)) ??
+        solWallets.find((w) => w.address === embeddedAddress) ??
+        null
+      );
+    },
+    [embeddedAddress, solWallets],
+  );
+
+  const wallet = pickWallet(screenCtx?.wallets ?? []);
+  const walletAddress = wallet?.address ?? null;
+  const embedded = walletAddress !== null && walletAddress === embeddedAddress;
+
+  // Addresses this session already handed to the server. An embedded wallet is a Privy LINKED
+  // account, so /api/hedge/wallet can verify it through Privy without a signature prompt — but it is
+  // a write, and both the first trade and the fund panel want it done, so it runs at most once.
+  const verifiedOnce = useRef<Set<string>>(new Set());
+  const ensureVerified = useCallback(
+    async (address: string): Promise<void> => {
+      if (verifiedOnce.current.has(address)) return;
+      verifiedOnce.current.add(address);
+      try {
+        await api("/api/hedge/wallet", { method: "POST", body: JSON.stringify({ address }) });
+        await onRefreshMe?.();
+      } catch (e) {
+        verifiedOnce.current.delete(address); // a failed verify must stay retryable, not stick
+        throw e;
+      }
+    },
+    [api, onRefreshMe],
+  );
 
   // Linking a wallet is a VERIFYING action: Privy makes the wallet sign a challenge, and the server
   // records the address as verified. A pasted address is read-only and cannot pay for a swap.
@@ -126,22 +228,137 @@ export function useBuyReal(p: {
   });
   const { connectWallet } = useConnectWallet();
 
-  // The whole buy, from ctx resolution to a booked position. Defined as a stable inner function so
+  // sign → land → book: the one place a signature becomes a booked lot. A buy and a sell reach it
+  // with different quotes and leave it with different toasts; everything between is identical, and
+  // duplicating it is how one of the two paths ends up without the pending-replay stamp.
+  const signSubmitConfirm = useCallback(
+    async (built: BuiltSwap, w: ConnectedStandardSolanaWallet): Promise<StockRealConfirmResponse | null> => {
+      const bytes = Uint8Array.from(atob(built.swapTransaction), (c) => c.charCodeAt(0));
+      const isEmbedded = w.address === embeddedAddress;
+      let sig: string;
+
+      if (built.feePayer) {
+        // SPONSORED: sign only. An embedded wallet raises no popup, so "Confirm in your wallet…"
+        // would point the user at a window that never opens.
+        onToast(isEmbedded ? "Signing…" : "Confirm in your wallet…");
+        let signedTransaction: Uint8Array;
+        try {
+          ({ signedTransaction } = await signTransaction({ transaction: bytes, wallet: w, chain: SOLANA_MAINNET }));
+        } catch (e) {
+          if (!isUserReject(e)) onToast("Couldn't sign the transaction");
+          return null;
+        }
+        try {
+          const r = (await api("/api/stocks/real/submit", {
+            method: "POST",
+            body: JSON.stringify({ attemptId: built.attemptId, signedTransaction: encodeBase64(signedTransaction) }),
+          })) as StockRealSubmitResponse;
+          sig = r.sig;
+        } catch (e) {
+          const status = errStatus(e);
+          const code = errCode(e);
+          if (status === 409 && code === "tx_mismatch") onToast("Something changed — try again");
+          else if (status === 409 && code === "attempt_expired") onToast("That quote expired — try again");
+          else if (status === 429) onToast("Daily limit of sponsored trades reached — try again tomorrow");
+          else if (status === 502) onToast("Solana is busy — try again");
+          else onToast("Couldn't send the transaction");
+          return null;
+        }
+      } else {
+        // SELF-PAID: the wallet owns send as well as sign, and pays the network fee out of its SOL.
+        onToast("Confirm in your wallet…");
+        try {
+          const { signature } = await signAndSendTransaction({ transaction: bytes, wallet: w, chain: SOLANA_MAINNET });
+          sig = encodeBase58(signature);
+        } catch (e) {
+          if (isUserReject(e)) return null;
+          const msg = e instanceof Error ? e.message : String(e);
+          if (/insufficient|lamports|fee/i.test(msg)) onToast("Your wallet needs a little SOL for network fees");
+          else onToast("Couldn't send the transaction");
+          return null;
+        }
+      }
+
+      // Write the signature down BEFORE telling the server. If the tab dies between here and the
+      // confirm, the next visit replays it — the money is already gone at this point.
+      const key = me ? pendingKey(me.user.id, w.address) : null;
+      if (key) writePending(key, [...readPending(key), { attemptId: built.attemptId, sig }]);
+
+      // Self-paid only: a sponsored tx was sent BY /real/submit, which already stamped the signature
+      // on the attempt. A second stamp would be a write for nothing.
+      if (!built.feePayer) {
+        try {
+          await api("/api/stocks/real/sent", { method: "POST", body: JSON.stringify({ attemptId: built.attemptId, sig }) });
+        } catch { /* the poller sweep covers this */ }
+      }
+
+      onToast("Confirming on Solana…");
+
+      // Confirm, with retries. A 404 means the tx has not landed yet — the chain is a beat behind
+      // the wallet's own "sent" answer. Six attempts, 2s apart, is ~12s of patience.
+      let confirmed: StockRealConfirmResponse | null = null;
+      for (let i = 0; i < 6; i++) {
+        try {
+          confirmed = (await api("/api/stocks/real/confirm", {
+            method: "POST",
+            body: JSON.stringify({ attemptId: built.attemptId, sig }),
+          })) as StockRealConfirmResponse;
+          break;
+        } catch (e) {
+          if (errStatus(e) === 404) {
+            await new Promise((r) => setTimeout(r, 2000));
+            continue;
+          }
+          const code = errCode(e);
+          if (errStatus(e) === 409 && code === "tx_failed") onToast("The transaction failed on Solana");
+          else if (errStatus(e) === 409 && code === "not_this_buy") onToast("That transaction didn't match");
+          else if (errStatus(e) === 409 && code === "attempt_expired") onToast("That quote expired — try again");
+          else if (errStatus(e) === 502) onToast("Solana RPC is busy — it will be picked up automatically");
+          else onToast("Couldn't confirm — it will be picked up automatically");
+          return null;
+        }
+      }
+      if (!confirmed) {
+        onToast("Still confirming — it will be picked up automatically");
+        return null;
+      }
+
+      // Booked. Drop the pending entry; the caller says what happened.
+      if (key) writePending(key, readPending(key).filter((e) => e.sig !== sig));
+      return confirmed;
+    },
+    [api, embeddedAddress, me, onToast, signAndSendTransaction, signTransaction],
+  );
+
+  // The whole buy, from a resolved ctx to a booked position. Defined as a stable inner function so
   // acceptConsent can resume it without re-entering buyReal's own ctx fetch.
   const runBuy = useCallback(
     async (target: BuyRealTarget, stakeCents: number, ctx: BuyRealCtx, opts?: { hedgeSuggestionId?: string }) => {
-      // 1. Wallet. The verified set is the server's; the connected set is Privy's. A wallet that is
-      //    verified but not connected this session needs a connect, not a link.
-      const verified = new Set(ctx.wallets);
-      const w = solWallets.find((x) => verified.has(x.address));
+      // 1. Wallet. The verified set is the server's; the connected set is Privy's. With an embedded
+      //    wallet there is always one to use, so the link/connect prompts are the no-wallet case only.
+      const w = pickWallet(ctx.wallets);
       if (!w) {
-        if (ctx.wallets.length > 0) {
+        // Privy provisions the embedded wallet on login, but it appears a beat later. Opening the
+        // Phantom link modal in that beat would tell a user who already HAS a wallet to go get one.
+        if (!walletsReady) {
+          onToast("Setting up your wallet — try again in a moment");
+        } else if (ctx.wallets.length > 0) {
           connectWallet({ walletChainType: "solana-only" });
           onToast("Connect the wallet you linked, then tap again");
         } else {
           linkWallet({ walletChainType: "solana-only", description: "Connect the Phantom wallet you buy stocks with" });
         }
         return;
+      }
+      // The embedded wallet is brand new to the server on the first trade — /real/tx refuses a payer
+      // it has not verified, so tell it first rather than bouncing the user through a link flow.
+      if (!ctx.wallets.includes(w.address)) {
+        try {
+          await ensureVerified(w.address);
+        } catch {
+          onToast("Couldn't set up your wallet — try again");
+          return;
+        }
       }
 
       // 2. Build. The server derives the swap from the asset + stake; nothing is spent here.
@@ -155,7 +372,7 @@ export function useBuyReal(p: {
         const status = errStatus(e);
         const code = errCode(e);
         if (status === 403 && code === "stock_consent_required") {
-          pendingBuy.current = { target, stakeCents, ctx, opts };
+          heldRef.current = { kind: "buy", target, stakeCents, ctx, opts };
           setConsentOpen(true);
         } else if (status === 403 && code === "wallet_not_verified") {
           linkWallet({ walletChainType: "solana-only", description: "Connect the Phantom wallet you buy stocks with" });
@@ -173,113 +390,90 @@ export function useBuyReal(p: {
         return;
       }
 
-      // 3. Sign + send. The wallet owns this step; a rejection is the user's own decision and is
-      //    silent (no toast for a deliberate cancel).
-      const bytes = Uint8Array.from(atob(tx.swapTransaction), (c) => c.charCodeAt(0));
-      onToast("Confirm in your wallet…");
-      let sig: string;
-      try {
-        const { signature } = await signAndSendTransaction({ transaction: bytes, wallet: w, chain: SOLANA_MAINNET });
-        sig = encodeBase58(signature);
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        if (/reject|denied|cancel/i.test(msg)) return; // the user said no — nothing to report
-        if (/insufficient|lamports|fee/i.test(msg)) onToast("Your wallet needs a little SOL for network fees");
-        else onToast("Couldn't send the transaction");
-        return;
-      }
-
-      // 4. Write the signature down BEFORE telling the server. If the tab dies between here and the
-      //    confirm, the next visit replays it — the money is already gone at this point.
-      const key = me ? pendingKey(me.user.id, w.address) : null;
-      if (key) writePending(key, [...readPending(key), { attemptId: tx.attemptId, sig }]);
-
-      // 5. Best-effort "sent" stamp, so the server's poller can recover this buy even if the client
-      //    never confirms. A failure here is not fatal — the confirm below is the real path.
-      try {
-        await api("/api/stocks/real/sent", { method: "POST", body: JSON.stringify({ attemptId: tx.attemptId, sig }) });
-      } catch { /* the poller sweep covers this */ }
-
-      onToast("Confirming on Solana…");
-
-      // 6. Confirm, with retries. A 404 means the tx has not landed yet — the chain is a beat behind
-      //    the wallet's own "sent" answer. Six attempts, 2s apart, is ~12s of patience.
-      let confirmed: StockRealConfirmResponse | null = null;
-      for (let i = 0; i < 6; i++) {
-        try {
-          confirmed = (await api("/api/stocks/real/confirm", {
-            method: "POST",
-            body: JSON.stringify({ attemptId: tx.attemptId, sig }),
-          })) as StockRealConfirmResponse;
-          break;
-        } catch (e) {
-          if (errStatus(e) === 404) {
-            await new Promise((r) => setTimeout(r, 2000));
-            continue;
-          }
-          const code = errCode(e);
-          if (errStatus(e) === 409 && code === "tx_failed") onToast("The transaction failed on Solana");
-          else if (errStatus(e) === 409 && code === "not_this_buy") onToast("That transaction didn't match the buy");
-          else if (errStatus(e) === 409 && code === "attempt_expired") onToast("That buy expired — try again");
-          else if (errStatus(e) === 502) onToast("Solana RPC is busy — your buy will be picked up automatically");
-          else onToast("Couldn't confirm the buy — it will be picked up automatically");
-          return;
-        }
-      }
-      if (!confirmed) {
-        onToast("Still confirming — your buy will be picked up automatically");
-        return;
-      }
-
-      // 7. Booked. Drop the pending entry and hand the result up; the caller advances the card.
-      if (key) writePending(key, readPending(key).filter((e) => e.sig !== sig));
+      // 3. Sign, land, book — and only then advance the card.
+      const confirmed = await signSubmitConfirm(tx, w);
+      if (!confirmed) return;
       onToast(`Bought ${target.symbol} on Solana ✓`);
       onDone?.({ symbol: target.symbol, qtyBase: confirmed.qtyBase, costCents: confirmed.costCents });
     },
-    [api, connectWallet, linkWallet, me, onDone, onToast, signAndSendTransaction, solWallets],
+    [api, connectWallet, ensureVerified, linkWallet, onDone, onToast, pickWallet, signSubmitConfirm, walletsReady],
   );
 
-  // The consent sheet's accept. POSTs the CURRENT terms version, so a stale tab cannot accept a
-  // text it never rendered, then resumes the buy that opened the sheet.
-  const acceptConsent = useCallback(async () => {
-    setBusy(true);
-    try {
-      await api("/api/stocks/consent", { method: "POST", body: JSON.stringify({ version: STOCK_TERMS_VERSION }) });
-      setConsentOpen(false);
-      const held = pendingBuy.current;
-      pendingBuy.current = null;
-      if (held) await runBuy(held.target, held.stakeCents, { ...held.ctx, stockConsent: true }, held.opts);
-    } catch {
-      onToast("Couldn't record your acceptance — try again");
-    } finally {
-      setBusy(false);
-    }
-  }, [api, onToast, runBuy]);
+  // The mirror image: sell ONE open REAL lot in full. Same three beats as a buy — build, sign, book —
+  // through the same tail, so a sell can never drift out of sync with the pending-replay guarantee.
+  const runSell = useCallback(
+    async (positionId: string, ctx: BuyRealCtx, opts?: { symbol?: string }) => {
+      let tx: StockRealSellTxResponse;
+      try {
+        tx = (await api("/api/stocks/real/sell-tx", { method: "POST", body: JSON.stringify({ positionId }) })) as StockRealSellTxResponse;
+      } catch (e) {
+        const status = errStatus(e);
+        const code = errCode(e);
+        if (status === 403 && code === "stock_consent_required") {
+          heldRef.current = { kind: "sell", positionId, ctx, opts };
+          setConsentOpen(true);
+        } else if (status === 403) {
+          linkWallet({ walletChainType: "solana-only", description: "Connect the wallet that holds this stock" });
+        } else if (status === 409 && code === "lot_moved") {
+          onToast("This lot isn't in your wallet anymore");
+        } else if (status === 409 && code === "lot_closed") {
+          onToast("Already sold");
+        } else if (status === 409 && code === "sponsor_unavailable") {
+          onToast("Selling on Solana isn't available right now");
+        } else if (status === 409 && code === "price_impact") {
+          onToast("Too thin to sell right now");
+        } else if (status === 502 && code === "swap_unavailable") {
+          onToast("Jupiter is busy — try again");
+        } else if (status === 502) {
+          onToast("Solana is busy — try again");
+        } else {
+          onToast("Couldn't start that sale — try again");
+        }
+        return;
+      }
 
-  const closeConsent = useCallback(() => {
-    setConsentOpen(false);
-    pendingBuy.current = null;
-  }, []);
+      // The LOT's own wallet signs: a sell moves tokens that live in it, so the payer is the server's
+      // answer, not our pick. A lot bought from Phantom cannot be sold from the embedded wallet.
+      const w = solWallets.find((x) => x.address === tx.payer);
+      if (!w) {
+        connectWallet({ walletChainType: "solana-only" });
+        onToast("Connect the wallet that holds this lot, then tap again");
+        return;
+      }
 
+      const confirmed = await signSubmitConfirm(tx, w);
+      if (!confirmed) return;
+      const symbol = opts?.symbol ?? "";
+      onToast(`Sold ${symbol}${symbol ? " " : ""}· ${signed(confirmed.pnlCents ?? 0)}`);
+      onDone?.({ symbol, qtyBase: confirmed.qtyBase, costCents: confirmed.costCents });
+    },
+    [api, connectWallet, linkWallet, onDone, onToast, signSubmitConfirm, solWallets],
+  );
+
+  // ctx is optional so a caller that has not loaded the portfolio yet can still trade — the portfolio
+  // route is the authoritative source of both the verified wallets and consent.
+  const resolveCtx = useCallback(
+    async (ctx?: BuyRealCtx): Promise<BuyRealCtx | null> => {
+      if (ctx) return ctx;
+      try {
+        const pf = (await api("/api/stocks/portfolio")) as StockPortfolioResponse;
+        return { wallets: pf.wallets, stockConsent: pf.stockConsent, sponsored: pf.sponsored };
+      } catch {
+        onToast("Couldn't read your wallet — try again");
+        return null;
+      }
+    },
+    [api, onToast],
+  );
 
   const buyReal = useCallback(
     async (target: BuyRealTarget, stakeCents: number, ctx?: BuyRealCtx, opts?: { hedgeSuggestionId?: string }) => {
       setBusy(true);
       try {
-        // ctx is optional so a caller that has not loaded the portfolio yet can still buy — the
-        // portfolio route is the authoritative source of both the verified wallets and consent.
-        let resolved = ctx;
-        if (!resolved) {
-          try {
-            const pf = (await api("/api/stocks/portfolio")) as StockPortfolioResponse;
-            resolved = { wallets: pf.wallets, stockConsent: pf.stockConsent };
-          } catch {
-            onToast("Couldn't read your wallet — try again");
-            return;
-          }
-        }
+        const resolved = await resolveCtx(ctx);
+        if (!resolved) return;
         if (!resolved.stockConsent) {
-          pendingBuy.current = { target, stakeCents, ctx: resolved, opts };
+          heldRef.current = { kind: "buy", target, stakeCents, ctx: resolved, opts };
           setConsentOpen(true);
           return;
         }
@@ -288,10 +482,52 @@ export function useBuyReal(p: {
         setBusy(false);
       }
     },
-    [api, onToast, runBuy],
+    [resolveCtx, runBuy],
   );
 
-  // Replay: a buy whose tab died between send and confirm. One attempt each, no retry loop — the
+  const sellReal = useCallback(
+    async (positionId: string, opts?: { symbol?: string; ctx?: BuyRealCtx }) => {
+      setBusy(true);
+      try {
+        const resolved = await resolveCtx(opts?.ctx);
+        if (!resolved) return;
+        if (!resolved.stockConsent) {
+          heldRef.current = { kind: "sell", positionId, ctx: resolved, opts };
+          setConsentOpen(true);
+          return;
+        }
+        await runSell(positionId, resolved, opts);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [resolveCtx, runSell],
+  );
+
+  // The consent sheet's accept. POSTs the CURRENT terms version, so a stale tab cannot accept a
+  // text it never rendered, then resumes whichever trade opened the sheet.
+  const acceptConsent = useCallback(async () => {
+    setBusy(true);
+    try {
+      await api("/api/stocks/consent", { method: "POST", body: JSON.stringify({ version: STOCK_TERMS_VERSION }) });
+      setConsentOpen(false);
+      const held = heldRef.current;
+      heldRef.current = null;
+      if (held?.kind === "buy") await runBuy(held.target, held.stakeCents, { ...held.ctx, stockConsent: true }, held.opts);
+      else if (held?.kind === "sell") await runSell(held.positionId, { ...held.ctx, stockConsent: true }, held.opts);
+    } catch {
+      onToast("Couldn't record your acceptance — try again");
+    } finally {
+      setBusy(false);
+    }
+  }, [api, onToast, runBuy, runSell]);
+
+  const closeConsent = useCallback(() => {
+    setConsentOpen(false);
+    heldRef.current = null;
+  }, []);
+
+  // Replay: a trade whose tab died between send and confirm. One attempt each, no retry loop — the
   // server's own poller is the backstop, and a client that hammers confirm on every load is worse
   // than one that tries once and leaves the rest to the sweep.
   const replayPending = useCallback(async (): Promise<number> => {
@@ -326,5 +562,17 @@ export function useBuyReal(p: {
     return landed;
   }, [api, me]);
 
-  return { buyReal, busy, consentOpen, acceptConsent, closeConsent, replayPending };
+  return {
+    buyReal,
+    sellReal,
+    busy,
+    consentOpen,
+    acceptConsent,
+    closeConsent,
+    replayPending,
+    walletAddress,
+    embedded,
+    sponsored: screenCtx?.sponsored ?? false,
+    ensureVerified,
+  };
 }
