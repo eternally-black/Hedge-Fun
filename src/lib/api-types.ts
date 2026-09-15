@@ -601,8 +601,9 @@ export interface StockConsentRequest { version: number }
 export type StockConsentResponse = { ok: true; version: number };
 // ─── POST /api/stocks/real/tx ────  Auth: Bearer. Builds a Jupiter USDC→xStock swap for the caller's
 // VERIFIED wallet `payer` and records a StockBuyAttempt. Nothing is spent here. Errors: 400, 403
-// stock_consent_required | wallet_not_verified, 404 asset_not_found, 409 asset_halted | price_impact,
-// 502 swap_unavailable.
+// stock_consent_required | wallet_not_verified, 404 asset_not_found, 409 asset_halted | price_impact
+// | buy_in_flight (a sponsored buy of this asset is already sent and may still land — wait for it)
+// | hedge_already_accepted (that suggestion is already in a lot), 502 swap_unavailable.
 // `assetId` OR `symbol` names the asset (a hedge card knows only the symbol).
 export interface StockRealTxRequest { assetId?: string; symbol?: string; stakeCents: number; payer: string; hedgeSuggestionId?: string }
 // feePayer: the sponsor address when the tx is FEE-SPONSORED — the wallet must SIGN ONLY (signTransaction)
@@ -612,14 +613,18 @@ export interface StockRealTxResponse { attemptId: string; swapTransaction: strin
 // ─── POST /api/stocks/real/submit ────  Auth: Bearer. The user-signed, fee-sponsored transaction.
 // The server recomputes the message hash (only a message it built itself is ever co-signed), adds
 // the sponsor signature, sends it, stamps the signature on the attempt. Errors: 400, 403 (not the
-// caller's attempt), 404 attempt_not_found, 409 attempt_not_pending | tx_mismatch | attempt_expired,
-// 429 sponsor_limit, 502 rpc_unavailable.
+// caller's attempt), 404 attempt_not_found, 409 attempt_not_pending | tx_mismatch | attempt_expired
+// | lot_closed (a SELL whose lot another sale already closed — nothing is sent), 429 sponsor_limit,
+// 502 rpc_unavailable.
 export interface StockRealSubmitRequest { attemptId: string; signedTransaction: string } // base64 wire tx, user-signed
 export interface StockRealSubmitResponse { sig: string }
 // ─── POST /api/stocks/real/sell-tx ────  Auth: Bearer. Builds a fee-sponsored xStock -> USDC swap
 // that sells ONE open REAL lot in full (ExactIn = the lot's qtyBase). When the wallet holds exactly
-// the lot, the empty token account is closed in the same tx (rent back to the sponsor). Same sign +
-// /real/submit + /real/confirm loop as a buy. Errors: 400, 403 stock_consent_required |
+// the lot, the empty token account is closed in the same tx (rent back to whoever fronted it). Same
+// sign + /real/submit + /real/confirm loop as a buy. A retry while the first sell of this lot is
+// still in flight RETURNS THAT SAME attemptId and the same swapTransaction — re-signing and
+// re-submitting it is safe (same signature), and two sells of one lot are never built.
+// Errors: 400, 403 stock_consent_required |
 // wallet_not_verified, 404 position_not_found, 409 lot_closed | lot_moved | price_impact |
 // sponsor_unavailable, 502 swap_unavailable | rpc_unavailable.
 export interface StockRealSellTxRequest { positionId: string }

@@ -49,6 +49,14 @@ const SIG6 = "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF
 const SIG7 = "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUc";
 const SIG8 = "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUd";
 const SIG9 = "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUe";
+const SIG10 = "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUf";
+const SIG11 = "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUg";
+const SIG12 = "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUh";
+const SIG13 = "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUi";
+const SIG14 = "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUj";
+const SIG15 = "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUk";
+const SIG16 = "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUm";
+const SIG17 = "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUn";
 
 (PrivyClient.prototype as unknown as { verifyAuthToken: unknown }).verifyAuthToken = async (t: string) => {
   if (t === "good") return { userId: DID };
@@ -75,6 +83,12 @@ let usdcRaw = 100_000_000n; // the wallet's USDC (micro) — the buy path sizes 
 let blockhashSeed = 7;
 let sent: string[] = []; // every base64 tx handed to sendTransaction
 let sendSig = SIG;
+// A send that fails AFTER the server has decided the signature — the case that used to leave a swap
+// on chain with no row pointing at it.
+let sendFails = false;
+// Fired once on the sweep's getSignaturesForAddress read: the seam for "the row changed between the
+// sweep's snapshot and its write".
+let onSigs: (() => Promise<void>) | null = null;
 
 function makeTx(usdcSpendMicro: bigint, qtyBase: bigint, err: unknown = null): RpcParsedTx {
   return {
@@ -133,6 +147,15 @@ async function signAsUser(b64: string): Promise<string> {
 function hasCloseAccountIx(b64: string): boolean {
   const msg = getCompiledTransactionMessageDecoder().decode(getTransactionDecoder().decode(bytes(b64)).messageBytes);
   return msg.instructions.some((i) => i.data?.length === 1 && i.data[0] === 9);
+}
+
+// Where the reclaimed rent goes: CloseAccount's accounts are [account, destination, owner], and both
+// candidates (the sponsor = fee payer, and the user = a signer) are static accounts of the message.
+function closeDestination(b64: string): string {
+  const msg = getCompiledTransactionMessageDecoder().decode(getTransactionDecoder().decode(bytes(b64)).messageBytes);
+  const ix = msg.instructions.find((i) => i.data?.length === 1 && i.data[0] === 9);
+  assert.ok(ix?.accountIndices, "the close-account instruction carries its accounts");
+  return msg.staticAccounts[ix!.accountIndices![1]] as string;
 }
 
 const realFetch = globalThis.fetch;
@@ -215,16 +238,19 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     } else if (body.method === "getBalance") {
       result = { value: 7_000_000 };
     } else if (body.method === "getSignaturesForAddress") {
+      if (onSigs) await onSigs();
       result = SIGS;
     } else if (body.method === "getTokenAccountsByOwner") {
       // The buy path sizes the swap to the wallet's USDC (usdcRaw, $100 by default so every stake fits);
-      // the sell/reconcile paths read the xStock balance (walletRaw).
+      // the sell/reconcile paths read the xStock balance (walletRaw). A wallet with none of the mint
+      // has NO token account at all — which is exactly when the sponsor pays the rent to open one.
       const mint = (body.params?.[1] as { mint?: string } | undefined)?.mint;
       const amount = mint === USDC_MINT ? String(usdcRaw) : String(walletRaw);
       result = {
-        value: [
-          { pubkey: TOKEN_ACCOUNT, account: { data: { parsed: { info: { tokenAmount: { amount } } } } } },
-        ],
+        value:
+          amount === "0"
+            ? []
+            : [{ pubkey: TOKEN_ACCOUNT, account: { data: { parsed: { info: { tokenAmount: { amount } } } } } }],
       };
     } else if (body.method === "getLatestBlockhash") {
       result = {
@@ -246,6 +272,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
         result = { value: { data: ["", "base64"], owner: TOKEN_PROGRAM } };
       }
     } else if (body.method === "sendTransaction") {
+      if (sendFails) return json({ jsonrpc: "2.0", id: 1, error: { message: "node is behind" } });
       sent.push(body.params[0] as string);
       result = sendSig;
     } else {
@@ -271,7 +298,9 @@ async function main() {
   // The local .env may carry a real STOCK_SPONSOR_SECRET (the dev server uses one). This suite
   // drives BOTH modes explicitly, so it starts from a known state: sponsorship off.
   delete process.env.STOCK_SPONSOR_SECRET;
-  const { confirmAttempt, sweepAttempts, reconcileRealLots } = await import("../src/lib/stocks-real");
+  const { buildAttempt, buildSellAttempt, submitSigned, confirmAttempt, sweepAttempts, reconcileRealLots } = await import(
+    "../src/lib/stocks-real"
+  );
 
   let userId: string | null = null;
   let assetId: string | null = null;
@@ -510,18 +539,22 @@ async function main() {
     assert.strictEqual(sent.length, 0);
 
     // ── 13. The real thing: the user signs, we co-sign and send, the attempt carries the signature.
+    //       The signature is the FEE PAYER's own — computed from the co-signed bytes before the send,
+    //       not read back from the RPC (sendSig), so a send that never answers still leaves a row we
+    //       can follow.
     sendSig = SIG6;
     res = await post(submitRoute, "/api/stocks/real/submit", {
       attemptId: spon.attemptId,
       signedTransaction: await signAsUser(spon.swapTransaction),
     });
     assert.strictEqual(res.status, 200);
-    assert.strictEqual(((await res.json()) as { sig: string }).sig, SIG6);
+    const submittedSig = ((await res.json()) as { sig: string }).sig;
     assert.strictEqual(sent.length, 1, "exactly one send");
     const sentSlots = getTransactionDecoder().decode(bytes(sent[0])).signatures as Record<string, Uint8Array | null>;
     assert.strictEqual(sentSlots[PAYER]?.length, 64, "the user signature is on the wire");
     assert.strictEqual(sentSlots[SPONSOR]?.length, 64, "and so is the sponsor one");
-    assert.strictEqual((await prisma.stockBuyAttempt.findUniqueOrThrow({ where: { id: spon.attemptId } })).sig, SIG6);
+    assert.strictEqual(submittedSig, getBase58Decoder().decode(sentSlots[SPONSOR]!), "the returned sig IS the sent tx's signature");
+    assert.strictEqual((await prisma.stockBuyAttempt.findUniqueOrThrow({ where: { id: spon.attemptId } })).sig, submittedSig);
 
     // A second submit of a no-longer-PENDING attempt is refused before anything is sent.
     await prisma.stockBuyAttempt.update({ where: { id: spon.attemptId }, data: { status: "CONFIRMED" } });
@@ -556,17 +589,19 @@ async function main() {
     assert.strictEqual(sellAttempt.stakeCents, 100, "the lot cost basis travels with the attempt");
     assert.ok(hasCloseAccountIx(sellJson.swapTransaction), "selling the whole balance closes the token account");
 
-    // Holding MORE than the lot: the account stays open (something else lives in it).
+    // Holding MORE than the lot: the account stays open (something else lives in it). The attempt
+    // above is retired first — a sell already in flight is RE-SERVED, not rebuilt (case 26).
+    await prisma.stockBuyAttempt.updateMany({ where: { id: sellJson.attemptId }, data: { status: "EXPIRED" } });
     walletRaw = 299_330n * 2n;
     res = await post(sellRoute, "/api/stocks/real/sell-tx", { positionId: lot1.id });
     assert.strictEqual(res.status, 200);
-    const sellPartial = (await res.json()) as { swapTransaction: string };
+    const sellPartial = (await res.json()) as { attemptId: string; swapTransaction: string };
     assert.strictEqual(hasCloseAccountIx(sellPartial.swapTransaction), false, "a wallet holding more keeps its account");
 
     // ── 15. Confirm the sell from a landed tx whose PAYER IS A SIGNER BUT NOT KEY 0 (the sponsor
     //       pays): the lot closes with the proceeds the chain actually paid.
     TXS[SIG7] = makeSellTx(299_330n, 1_010_000n);
-    res = await post(confirmRoute, "/api/stocks/real/confirm", { attemptId: sellJson.attemptId, sig: SIG7 });
+    res = await post(confirmRoute, "/api/stocks/real/confirm", { attemptId: sellPartial.attemptId, sig: SIG7 });
     assert.strictEqual(res.status, 200);
     const sold = (await res.json()) as {
       kind: string;
@@ -590,12 +625,12 @@ async function main() {
     assert.strictEqual(closedLot1.sellTxSig, SIG7);
     assert.strictEqual(closedLot1.proceedsCents, 101);
     assert.strictEqual(closedLot1.pnlCents, 1);
-    assert.strictEqual((await prisma.stockBuyAttempt.findUniqueOrThrow({ where: { id: sellJson.attemptId } })).status, "CONFIRMED");
+    assert.strictEqual((await prisma.stockBuyAttempt.findUniqueOrThrow({ where: { id: sellPartial.attemptId } })).status, "CONFIRMED");
     const vb2 = await prisma.virtualBalance.findUnique({ where: { userId } });
     assert.strictEqual(vb2?.lockedCents ?? 0, 0, "a REAL sell touches no paper balance");
 
     // Replay -> the same answer, no second close.
-    res = await post(confirmRoute, "/api/stocks/real/confirm", { attemptId: sellJson.attemptId, sig: SIG7 });
+    res = await post(confirmRoute, "/api/stocks/real/confirm", { attemptId: sellPartial.attemptId, sig: SIG7 });
     assert.strictEqual(res.status, 200);
     const replay = (await res.json()) as { alreadyConfirmed: boolean; positionId: string; proceedsCents: number };
     assert.strictEqual(replay.alreadyConfirmed, true);
@@ -689,6 +724,316 @@ async function main() {
     );
     assert.strictEqual(res.status, 403);
     assert.strictEqual(await err(res), "wallet_not_verified");
+
+    // ── 19. The sponsor cap is ONE decision. At cap-1 two builds race: exactly one creates an
+    //       attempt, because the count and the insert share a per-user lock.
+    process.env.STOCK_SPONSOR_SECRET = SPONSOR_B58;
+    await prisma.stockBuyAttempt.deleteMany({ where: { userId, msgHash: { startsWith: "cap-" } } });
+    usdcRaw = 100_000_000n; // case 18 shrank the wallet — every stake must fit again
+    walletRaw = 0n; // and the wallet holds none of the mint: opening its account is on the sponsor
+    height = 900;
+    const me2 = { id: userId!, stockConsentVersion: STOCK_TERMS_VERSION };
+    const buy = () => buildAttempt(me2, { assetId: assetId!, stakeCents: 100, payer: PAYER });
+    // The serialisation itself, deterministically: hold this user's advisory lock in a parallel
+    // transaction and the build cannot get past its own count until the holder commits. (The race
+    // below is the outcome; this is the mechanism that makes the outcome reliable.)
+    let lockReleased = false;
+    const holder = prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${userId}))`;
+      await new Promise((r) => setTimeout(r, 300));
+      lockReleased = true;
+    });
+    const blocked = buy().then((r) => {
+      assert.ok(lockReleased, "a sponsored build waits for the user's own lock before it counts");
+      return r;
+    });
+    await Promise.all([holder, blocked]);
+
+    // Stage the wallet at EXACTLY cap-1, counting the sponsored attempts the cases above already made.
+    const usedSoFar = await prisma.stockBuyAttempt.count({
+      where: { userId, sponsored: true, createdAt: { gte: new Date(Date.now() - 24 * 3_600_000) } },
+    });
+    const toSeed = STOCK_SPONSOR_MAX_PER_USER_PER_DAY - 1 - usedSoFar;
+    assert.ok(toSeed >= 0, `the daily cap has room to stage the race (used ${usedSoFar})`);
+    await prisma.stockBuyAttempt.createMany({
+      data: Array.from({ length: toSeed }, (_, i) => ({
+        userId: userId!,
+        assetId: assetId!,
+        payer: PAYER,
+        sponsored: true,
+        stakeCents: 100,
+        inAmountMicro: 1_000_000n,
+        minOutBase: 297_834n,
+        msgHash: `race-${i}`,
+        lastValidBlockHeight: 1000n,
+      })),
+    });
+    const raced = await Promise.allSettled([buy(), buy()]);
+    const won = raced.filter((r) => r.status === "fulfilled");
+    const lost = raced.filter((r) => r.status === "rejected");
+    assert.strictEqual(won.length, 1, "exactly one of two concurrent builds at cap-1 gets the last sponsored slot");
+    assert.strictEqual((lost[0] as PromiseRejectedResult).reason.name, "SponsorLimitError", "the other is refused");
+    const wonId = (won[0] as PromiseFulfilledResult<{ attemptId: string }>).value.attemptId;
+    const wonRow = await prisma.stockBuyAttempt.findUniqueOrThrow({ where: { id: wonId } });
+    assert.strictEqual(wonRow.rentFromSponsor, true, "no token account for the mint -> the sponsor fronts its rent");
+    await prisma.stockBuyAttempt.deleteMany({ where: { userId, msgHash: { startsWith: "race-" } } });
+
+    // ── 20. A send that fails AFTER the signature is decided. The attempt keeps the signature (the
+    //       swap may well have landed), a second buy of the same asset is refused meanwhile, and the
+    //       sweep settles it.
+    walletRaw = 299_330n; // this time the wallet already holds the mint
+    const flight = await buy();
+    assert.strictEqual(
+      (await prisma.stockBuyAttempt.findUniqueOrThrow({ where: { id: flight.attemptId } })).rentFromSponsor,
+      false,
+      "a wallet that already holds the mint pays no new rent",
+    );
+    sendFails = true;
+    sent = [];
+    const flightSigned = await signAsUser(flight.swapTransaction);
+    await assert.rejects(
+      () => submitSigned(userId!, flight.attemptId, flightSigned),
+      (e: Error) => e.name === "HeliusUnavailableError",
+    );
+    sendFails = false;
+    const stamped = await prisma.stockBuyAttempt.findUniqueOrThrow({ where: { id: flight.attemptId } });
+    assert.strictEqual(stamped.status, "PENDING");
+    assert.ok(stamped.sig, "the signature is stamped BEFORE the send, so a lost send is still recoverable");
+    await assert.rejects(() => buy(), (e: Error) => e.message === "buy_in_flight");
+    TXS[stamped.sig!] = makeTx(1_000_000n, 299_330n); // it did land after all
+    await prisma.stockBuyAttempt.update({
+      where: { id: flight.attemptId },
+      data: { createdAt: new Date(Date.now() - 10 * 60_000) },
+    });
+    await sweepAttempts();
+    assert.strictEqual(
+      (await prisma.stockBuyAttempt.findUniqueOrThrow({ where: { id: flight.attemptId } })).status,
+      "CONFIRMED",
+      "the sweep confirms the stamped attempt",
+    );
+
+    // ── 21. A sponsored attempt is bound to the signature the SERVER stamped: another receipt,
+    //       however valid, belongs to another transaction.
+    blockhashSeed = 11; // a different message, or this build would be byte-identical to case 20's —
+    // same bytes, same signature, and the signature is the identity of the transaction.
+    const bound = await buy();
+    const boundSig = await submitSigned(userId!, bound.attemptId, await signAsUser(bound.swapTransaction));
+    TXS[SIG10] = makeTx(1_000_000n, 299_330n); // a perfectly good swap — just not this attempt's
+    await assert.rejects(
+      () => confirmAttempt(userId!, bound.attemptId, SIG10, { polls: 1, sleepMs: 0 }),
+      (e: Error) => e.message === "not_this_buy",
+    );
+    const untouched = await prisma.stockBuyAttempt.findUniqueOrThrow({ where: { id: bound.attemptId } });
+    assert.strictEqual(untouched.status, "PENDING", "a foreign receipt changes nothing");
+    assert.strictEqual(untouched.sig, boundSig, "...not even the stamped signature");
+    TXS[boundSig] = makeTx(1_000_000n, 299_330n);
+    assert.strictEqual(
+      (await confirmAttempt(userId!, bound.attemptId, boundSig, { polls: 1, sleepMs: 0 })).alreadyConfirmed,
+      false,
+      "its own receipt books the lot",
+    );
+
+    // ── 22. Self-paid: a FAILED transaction our payer never signed must not fail our attempt, and a
+    //       swap that spent LESS than we quoted is an older buy, not this one.
+    delete process.env.STOCK_SPONSOR_SECRET;
+    const selfAttempt = await buy();
+    TXS[SIG11] = {
+      meta: { err: { InstructionError: [0, "Custom"] }, preTokenBalances: [], postTokenBalances: [] },
+      transaction: { message: { accountKeys: [{ pubkey: SPONSOR, signer: true }] } },
+    };
+    await assert.rejects(
+      () => confirmAttempt(userId!, selfAttempt.attemptId, SIG11, { polls: 1, sleepMs: 0 }),
+      (e: Error) => e.message === "not_this_buy",
+    );
+    assert.strictEqual(
+      (await prisma.stockBuyAttempt.findUniqueOrThrow({ where: { id: selfAttempt.attemptId } })).status,
+      "PENDING",
+      "someone else's failed tx never marks our attempt FAILED",
+    );
+    TXS[SIG12] = makeTx(999_999n, 299_330n);
+    await assert.rejects(
+      () => confirmAttempt(userId!, selfAttempt.attemptId, SIG12, { polls: 1, sleepMs: 0 }),
+      (e: Error) => e.message === "not_this_buy",
+    );
+    assert.strictEqual(
+      (await prisma.stockBuyAttempt.findUniqueOrThrow({ where: { id: selfAttempt.attemptId } })).status,
+      "PENDING",
+      "a smaller swap is a different swap",
+    );
+
+    // ── 23. A hedge suggestion already accepted (on PAPER) blocks a REAL buy for it — and a swap
+    //       that landed anyway is still booked, minus the back-reference.
+    const sid = `sug-${RUN}`;
+    await prisma.stockPosition.create({
+      data: {
+        userId,
+        assetId: assetId!,
+        mode: "PAPER",
+        source: "HEDGE",
+        hedgeSuggestionId: sid,
+        qtyBase: 1n,
+        costCents: 100,
+        entryPriceCents: 100,
+      },
+    });
+    await assert.rejects(
+      () => buildAttempt(me2, { assetId: assetId!, stakeCents: 100, payer: PAYER, hedgeSuggestionId: sid }),
+      (e: Error) => e.message === "hedge_already_accepted",
+    );
+    const hedged = await prisma.stockBuyAttempt.create({
+      data: {
+        userId,
+        assetId: assetId!,
+        payer: PAYER,
+        stakeCents: 100,
+        inAmountMicro: 1_000_000n,
+        minOutBase: 297_834n,
+        msgHash: `hedge-${RUN}`,
+        lastValidBlockHeight: 1000n,
+        hedgeSuggestionId: sid,
+      },
+    });
+    TXS[SIG13] = makeTx(1_000_000n, 299_330n);
+    const hedgedLot = await confirmAttempt(userId!, hedged.id, SIG13, { polls: 1, sleepMs: 0 });
+    const hedgedRow = await prisma.stockPosition.findUniqueOrThrow({ where: { id: hedgedLot.positionId } });
+    assert.strictEqual(hedgedRow.mode, "REAL");
+    assert.strictEqual(hedgedRow.hedgeSuggestionId, null, "a landed swap is booked even when the suggestion is taken");
+
+    // ── 24. Reconcile while a sell is in flight: lots A (older) and B (newer) of one mint, A's
+    //       tokens already off the chain. Closing newest-first off that snapshot would close B — the
+    //       lot the wallet still backs — so the mint is skipped entirely until the sale resolves.
+    await prisma.stockPosition.updateMany({
+      where: { userId, mode: "REAL", closedAt: null },
+      data: { closedAt: new Date(), closeReason: "reset" },
+    });
+    const mkLot = (txSig: string, ageMs: number, rentFromSponsor = false) =>
+      prisma.stockPosition.create({
+        data: {
+          userId: userId!,
+          assetId: assetId!,
+          mode: "REAL",
+          source: "DECK",
+          qtyBase: 299_330n,
+          costCents: 100,
+          entryPriceCents: 33_408,
+          txSig,
+          payer: PAYER,
+          rentFromSponsor,
+          createdAt: new Date(Date.now() - ageMs),
+        },
+      });
+    const lotA = await mkLot(SIG14, 120_000);
+    const lotB = await mkLot(SIG15, 60_000, true);
+    const sellA = await prisma.stockBuyAttempt.create({
+      data: {
+        userId,
+        assetId: assetId!,
+        payer: PAYER,
+        kind: "SELL",
+        positionId: lotA.id,
+        sponsored: true,
+        stakeCents: 100,
+        inAmountMicro: 299_330n,
+        minOutBase: 1_000_000n,
+        msgHash: `sellA-${RUN}`,
+        lastValidBlockHeight: 1000n,
+      },
+    });
+    walletRaw = 299_330n; // A's tokens are gone; only B's remain
+    assert.strictEqual((await reconcileRealLots(userId!, PAYER)).closed, 0, "a mint with a sell in flight is left alone");
+    assert.strictEqual(
+      (await prisma.stockPosition.findUniqueOrThrow({ where: { id: lotB.id } })).closedAt,
+      null,
+      "the newer lot is not closed behind the sale's back",
+    );
+    assert.strictEqual(
+      (await prisma.stockPosition.findUniqueOrThrow({ where: { id: lotA.id } })).walletCheckedAt,
+      null,
+      "...and nothing of that mint is stamped either",
+    );
+    TXS[SIG16] = makeSellTx(299_330n, 1_010_000n);
+    const soldA = await confirmAttempt(userId!, sellA.id, SIG16, { polls: 1, sleepMs: 0 });
+    assert.strictEqual(soldA.positionId, lotA.id, "the sell closes the lot it was built for");
+    assert.strictEqual(
+      (await prisma.stockPosition.findUniqueOrThrow({ where: { id: lotB.id } })).closedAt,
+      null,
+      "and the lot the wallet still backs stays open",
+    );
+
+    // ── 25. The reclaimed token-account rent goes back to whoever fronted it.
+    process.env.STOCK_SPONSOR_SECRET = SPONSOR_B58;
+    const sellB = await buildSellAttempt(me2, lotB.id);
+    assert.ok(hasCloseAccountIx(sellB.swapTransaction), "the whole balance is sold -> the account is closed");
+    assert.strictEqual(closeDestination(sellB.swapTransaction), SPONSOR, "the sponsor opened it -> the rent returns to the sponsor");
+    // The same lot with the rent paid by the user. (Retire the attempt above first: a sell in flight
+    // is RE-SERVED, which is case 26.)
+    await prisma.stockBuyAttempt.updateMany({ where: { id: sellB.attemptId }, data: { status: "EXPIRED" } });
+    await prisma.stockPosition.update({ where: { id: lotB.id }, data: { rentFromSponsor: false } });
+    const sellB2 = await buildSellAttempt(me2, lotB.id);
+    assert.strictEqual(closeDestination(sellB2.swapTransaction), PAYER, "a wallet that funded its own account keeps the rent");
+
+    // ── 26. A retried sell RE-SERVES the attempt in flight (same bytes = same signature on chain),
+    //       and a second attempt for a lot that is already sold is refused before a byte is sent.
+    const retry = await buildSellAttempt(me2, lotB.id);
+    assert.strictEqual(retry.attemptId, sellB2.attemptId, "the retry is the same attempt");
+    assert.strictEqual(retry.swapTransaction, sellB2.swapTransaction, "...with the very same transaction");
+    const rowB2 = await prisma.stockBuyAttempt.findUniqueOrThrow({ where: { id: sellB2.attemptId } });
+    const stale = await prisma.stockBuyAttempt.create({
+      data: {
+        userId,
+        assetId: assetId!,
+        payer: PAYER,
+        kind: "SELL",
+        positionId: lotB.id,
+        sponsored: true,
+        stakeCents: 100,
+        inAmountMicro: rowB2.inAmountMicro,
+        minOutBase: rowB2.minOutBase,
+        msgHash: rowB2.msgHash, // built before the fix: a SECOND live sell of one lot
+        unsignedTx: rowB2.unsignedTx,
+        lastValidBlockHeight: rowB2.lastValidBlockHeight,
+      },
+    });
+    TXS[SIG17] = makeSellTx(299_330n, 1_010_000n);
+    await confirmAttempt(userId!, sellB2.attemptId, SIG17, { polls: 1, sleepMs: 0 });
+    sent = [];
+    const staleSigned = await signAsUser(sellB2.swapTransaction);
+    await assert.rejects(() => submitSigned(userId!, stale.id, staleSigned), (e: Error) => e.message === "lot_closed");
+    assert.strictEqual(sent.length, 0, "a sell whose lot another sale already closed is never sent");
+
+    // ── 27. A candidate receipt that ANOTHER attempt already booked must not wedge the sweep: the
+    //       attempt expires instead of staying PENDING for ever and holding a slot in every sweep.
+    height = 2000;
+    const orphan = await mkOld("orphan");
+    SIGS = [{ signature: SIG4, blockTime: Math.floor(Date.now() / 1000), err: null }]; // SIG4's lot is oldAttempt2's
+    await sweepAttempts();
+    assert.strictEqual(
+      (await prisma.stockBuyAttempt.findUniqueOrThrow({ where: { id: orphan.id } })).status,
+      "EXPIRED",
+      "an unbookable receipt expires the attempt instead of throwing out of the loop",
+    );
+
+    // ── 28. The sweep's snapshot is minutes old by the time it writes: a confirm that won the race
+    //       in between is never overwritten with EXPIRED.
+    await prisma.stockBuyAttempt.deleteMany({ where: { userId, status: "PENDING" } });
+    const expiredBefore = await prisma.stockBuyAttempt.count({ where: { userId, status: "EXPIRED" } });
+    const racer = await mkOld("racer");
+    SIGS = [];
+    onSigs = async () => {
+      onSigs = null;
+      await prisma.stockBuyAttempt.update({ where: { id: racer.id }, data: { status: "CONFIRMED", resolvedAt: new Date() } });
+    };
+    await sweepAttempts();
+    assert.strictEqual(
+      (await prisma.stockBuyAttempt.findUniqueOrThrow({ where: { id: racer.id } })).status,
+      "CONFIRMED",
+      "a CONFIRMED attempt survives a stale sweep",
+    );
+    assert.strictEqual(
+      await prisma.stockBuyAttempt.count({ where: { userId, status: "EXPIRED" } }),
+      expiredBefore,
+      "...and no expiry of ours was counted",
+    );
 
     console.log("test-stocks-real-db: OK");
   } finally {

@@ -39,6 +39,23 @@ async function main() {
   const spotted = await import("../src/app/api/hedge/spotted/route");
   const accept = await import("../src/app/api/hedge/accept/route");
 
+  // This suite DELETES every asset, position, pass and attempt for seven REAL tickers. On a
+  // disposable CI database that is housekeeping; pointed at a dev database it wipes the owner's real
+  // catalog and their positions on it (it did, twice, on 2026-09-15). A real catalog row carries the
+  // on-chain mint; this suite's fixtures carry "<SYMBOL>-mint-<run>". So: any real row present and
+  // no explicit "this DB is disposable" flag -> refuse to run at all.
+  const realRows = await prisma.stockAsset.count({
+    where: { symbol: { in: [...SYMBOLS] }, NOT: { mint: { contains: "-mint-" } } },
+  });
+  if (realRows > 0 && process.env.HF_TEST_DB !== "1") {
+    console.error(
+      `test-hedge-stock: REFUSING to run — this database holds ${realRows} REAL stock_assets row(s) for ${SYMBOLS.join(", ")} ` +
+        "and the suite would delete them (with every position on them). Point DATABASE_URL at a disposable test DB, " +
+        "or set HF_TEST_DB=1 if you really mean this one.",
+    );
+    process.exit(2);
+  }
+
   const headers = { authorization: "Bearer good", "content-type": "application/json" };
   const get = (url: string) => new Request(url, { headers });
   const post = (url: string, body: unknown) =>

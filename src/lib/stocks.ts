@@ -229,7 +229,7 @@ function sumFor(balances: RpcTokenBalance[] | null | undefined, owner: string, m
 // the payer is no longer accountKeys[0] — but it must still be a signer of the tx that moved its
 // tokens. A key merely PRESENT in the tx (someone else's swap touching a shared account) is not a
 // receipt for our wallet, so `signer: true` is required, not just presence.
-function signedBy(tx: RpcParsedTx, payer: string): boolean {
+export function signedBy(tx: RpcParsedTx, payer: string): boolean {
   for (const k of tx.transaction?.message?.accountKeys ?? []) {
     if (k?.pubkey === payer && k.signer === true) return true;
   }
@@ -289,16 +289,18 @@ export interface AttemptLike {
   minOutBase: bigint;
 }
 
-// Does the landed swap match the quote we built the attempt from? The user can never be charged MORE
-// than the ExactIn amount they signed, and must receive at least the minimum output they signed.
+// Does the landed swap match the quote we built the attempt from? ExactIn is EXACT on chain: the swap
+// spends the amount it was built for, to the micro-unit. "<=" would also accept an OLDER, SMALLER
+// swap of the same mint by the same wallet as the receipt for this attempt — which is how one buy
+// gets booked twice. The minimum output stays a bound (the route can pay out more than quoted).
 export function attemptMatches(d: SwapDelta, a: AttemptLike): boolean {
-  return d.usdcOutMicro <= a.inAmountMicro && d.qtyBase >= a.minOutBase;
+  return d.usdcOutMicro === a.inAmountMicro && d.qtyBase >= a.minOutBase;
 }
 
-// The same question for a SELL, with the units flipped: the wallet can never give up MORE stock than
-// the lot it signed away, and must receive at least the minimum USDC it signed for.
+// The same question for a SELL, with the units flipped: ExactIn is the lot's own quantity, exactly,
+// and the wallet must receive at least the minimum USDC it signed for.
 export function sellMatches(d: SellDelta, a: { inAmountBase: bigint; minOutMicro: bigint }): boolean {
-  return d.qtyBase <= a.inAmountBase && d.usdcInMicro >= a.minOutMicro;
+  return d.qtyBase === a.inAmountBase && d.usdcInMicro >= a.minOutMicro;
 }
 
 // ─── Jupiter Lite Swap v1 quote parsing ─────────────────────────────────────────────────────────────

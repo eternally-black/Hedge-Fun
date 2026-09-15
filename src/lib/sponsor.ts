@@ -3,7 +3,7 @@
 // new user to "go buy some SOL for gas" is where the funnel ends. So the server builds the swap
 // itself (Jupiter gives us the instructions, not a finished tx), puts the sponsor in the fee-payer
 // slot, takes over the ATA-creation rent, and co-signs ONLY a message whose sha256 equals the one it
-// built (coSignAndSend). That hash equality is the entire authorisation model: the sponsor signature
+// built (coSign). That hash equality is the entire authorisation model: the sponsor signature
 // can never land on bytes the server did not compose, whatever the client sends back.
 //
 // The secret lives in STOCK_SPONSOR_SECRET (base58 64-byte ed25519 secret key — Phantom's "export
@@ -37,6 +37,7 @@ import {
   createTransactionMessage,
   getBase58Decoder,
   getBase64EncodedWireTransaction,
+  getSignatureFromTransaction,
   getTransactionDecoder,
   getTransactionEncoder,
   partiallySignTransaction,
@@ -50,7 +51,7 @@ import {
 } from "@solana/kit";
 import { decodeBase58 } from "./stocks";
 import { swapInstructions, type JupIx } from "./jupiter-swap";
-import { getAccountInfoBase64, getLatestBlockhash, sendRawTransaction, HeliusUnavailableError } from "./helius";
+import { getAccountInfoBase64, getLatestBlockhash, HeliusUnavailableError } from "./helius";
 import { STOCK_SPONSOR_MAX_PRIORITY_LAMPORTS } from "./config";
 
 // The Associated Token program: its instructions fund a new token account out of accounts[0], which
@@ -226,15 +227,20 @@ export async function buildSponsoredSwapTx(p: {
   };
 }
 
-// ─── co-sign + send ─────────────────────────────────────────────────────────────────────────────────
+// ─── co-sign ────────────────────────────────────────────────────────────────────────────────────────
 
-// Add the sponsor's signature to a user-signed transaction and send it. The ONLY thing that
-// authorises the signature is expectedMessageHash: the server co-signs nothing it did not build.
-export async function coSignAndSend(p: {
+// Add the sponsor's signature to a user-signed transaction and hand back BOTH the wire bytes and the
+// signature the transaction will have once it is sent. The signature is known before the send (the
+// fee payer's signature IS the transaction signature), and the caller stamps it on the attempt
+// FIRST: a send that times out after the broadcast would otherwise leave an attempt with no
+// signature, a swap on chain, and a client free to retry it into a second purchase.
+// The ONLY thing that authorises the signature is expectedMessageHash: the server co-signs nothing
+// it did not build.
+export async function coSign(p: {
   signedTransactionB64: string;
   expectedMessageHash: string;
   userAddress: string;
-}): Promise<string> {
+}): Promise<{ wire: string; sig: string }> {
   const signer = await sponsorSigner();
 
   let tx: ReturnType<ReturnType<typeof getTransactionDecoder>["decode"]>;
@@ -252,7 +258,7 @@ export async function coSignAndSend(p: {
   if (!userSig || userSig.length !== 64) throw new TxMismatchError();
 
   const signed = await partiallySignTransaction([signer.keyPair], tx);
-  return sendRawTransaction(getBase64EncodedWireTransaction(signed));
+  return { wire: getBase64EncodedWireTransaction(signed), sig: getSignatureFromTransaction(signed) };
 }
 
 // ─── close-account instruction (SELL) ───────────────────────────────────────────────────────────────

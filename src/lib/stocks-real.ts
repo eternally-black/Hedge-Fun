@@ -29,6 +29,7 @@ import {
   usdcMicroToCentsFloor,
   entryPriceCents,
   sigBytesValid,
+  signedBy,
   type RpcParsedTx,
 } from "./stocks";
 import { quoteSwap, buildSwapTx, type JupIx } from "./jupiter-swap";
@@ -39,12 +40,13 @@ import {
   getTokenBalanceRaw,
   getTokenAccounts,
   getAccountInfoBase64,
+  sendRawTransaction,
 } from "./helius";
 import {
   sponsorConfigured,
   sponsorAddress,
   buildSponsoredSwapTx,
-  coSignAndSend,
+  coSign,
   closeAccountIx,
   SponsorUnavailableError,
 } from "./sponsor";
@@ -118,11 +120,22 @@ export async function recordStockConsent(userId: string, version: number): Promi
 // The sponsor pays real SOL for every tx it fronts, so one user cannot drain it: a rolling 24 h
 // count of their sponsored attempts (built, not landed — a signature we never see still cost us a
 // blockhash and a build) is the whole quota.
-async function assertSponsorQuota(userId: string): Promise<void> {
-  const used = await prisma.stockBuyAttempt.count({
-    where: { userId, sponsored: true, createdAt: { gte: new Date(Date.now() - 24 * 3_600_000) } },
+//
+// Counting and inserting must be ONE decision, or two builds that both read 19/20 both pass. The
+// per-user advisory lock serialises a single user's concurrent builds and is released when the
+// transaction ends; two DIFFERENT users never wait on each other. Every attempt row — BUY, SELL,
+// sponsored or not — is created here so the quota can never be bypassed by a new call site.
+async function createAttempt(data: Prisma.StockBuyAttemptUncheckedCreateInput) {
+  return prisma.$transaction(async (tx) => {
+    if (data.sponsored) {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${data.userId}))`;
+      const used = await tx.stockBuyAttempt.count({
+        where: { userId: data.userId, sponsored: true, createdAt: { gte: new Date(Date.now() - 24 * 3_600_000) } },
+      });
+      if (used >= STOCK_SPONSOR_MAX_PER_USER_PER_DAY) throw new SponsorLimitError();
+    }
+    return tx.stockBuyAttempt.create({ data });
   });
-  if (used >= STOCK_SPONSOR_MAX_PER_USER_PER_DAY) throw new SponsorLimitError();
 }
 
 export async function buildAttempt(
@@ -142,6 +155,28 @@ export async function buildAttempt(
       : null;
   if (!asset) throw new StockUnavailableError("asset_not_found");
   if (asset.halted) throw new StockUnavailableError("asset_halted");
+
+  // A hedge suggestion is accepted into AT MOST one lot (the unique spans PAPER and REAL). Finding
+  // that out at confirm time would mean a swap that landed on chain and a lot that cannot be
+  // created — so refuse before anything is built.
+  if (p.hedgeSuggestionId) {
+    const accepted = await prisma.stockPosition.findFirst({
+      where: { userId: user.id, hedgeSuggestionId: p.hedgeSuggestionId },
+      select: { id: true },
+    });
+    if (accepted) throw new StockUnavailableError("hedge_already_accepted");
+  }
+
+  // A sponsored buy we already SENT (the signature is stamped before the send) may be landing right
+  // now. Building a second one for the same asset is how a user buys twice off one tap — wait for
+  // the first to resolve (confirm, or the sweep past its block height).
+  const inFlight = await prisma.stockBuyAttempt.findFirst({
+    where: { userId: user.id, assetId: asset.id, kind: "BUY", status: "PENDING", sponsored: true, sig: { not: null } },
+    orderBy: { createdAt: "desc" },
+  });
+  if (inFlight && (await getBlockHeight()) <= Number(inFlight.lastValidBlockHeight)) {
+    throw new StockUnavailableError("buy_in_flight");
+  }
 
   // Size the buy to what the wallet actually holds: a chip larger than the USDC balance would become
   // a swap that fails at simulation (and, sponsored, a fee paid for nothing). Below the minimum stake
@@ -165,7 +200,10 @@ export async function buildAttempt(
   // Sponsored when we hold a key: the tx is OURS (fee payer + ATA rent) and the wallet only signs.
   // Without a key the old self-paid path is unchanged, so the app still works with no sponsor at all.
   const sponsored = sponsorConfigured();
-  if (sponsored) await assertSponsorQuota(user.id);
+  // WHO pays the token account's rent, recorded at the only moment we can know it: the setup
+  // instruction creates the account (on us) only when the wallet holds none for this mint. A wallet
+  // that already has one — or that pays for its own — keeps that rent when the lot is sold.
+  const rentFromSponsor = sponsored && (await getTokenAccounts(p.payer, asset.mint)).length === 0;
   // Self-paid: the client sends back the very bytes we handed it, so hashing the base64 is enough.
   // Sponsored: the hash is over the compiled MESSAGE, because signing changes the bytes (the
   // signature slots) but never the message.
@@ -176,20 +214,19 @@ export async function buildAttempt(
         messageHash: createHash("sha256").update(t.swapTransaction).digest("hex"),
       }));
 
-  const attempt = await prisma.stockBuyAttempt.create({
-    data: {
-      userId: user.id,
-      assetId: asset.id,
-      payer: p.payer,
-      kind: "BUY",
-      sponsored,
-      stakeCents,
-      inAmountMicro: quote.inAmount,
-      minOutBase: quote.minOutBase,
-      msgHash: tx.messageHash,
-      lastValidBlockHeight: BigInt(tx.lastValidBlockHeight),
-      hedgeSuggestionId: p.hedgeSuggestionId ?? null,
-    },
+  const attempt = await createAttempt({
+    userId: user.id,
+    assetId: asset.id,
+    payer: p.payer,
+    kind: "BUY",
+    sponsored,
+    rentFromSponsor,
+    stakeCents,
+    inAmountMicro: quote.inAmount,
+    minOutBase: quote.minOutBase,
+    msgHash: tx.messageHash,
+    lastValidBlockHeight: BigInt(tx.lastValidBlockHeight),
+    hedgeSuggestionId: p.hedgeSuggestionId ?? null,
   });
 
   return {
@@ -233,7 +270,40 @@ export async function buildSellAttempt(
   if (!wallets.includes(payer)) throw new WalletNotVerifiedError();
 
   if (!sponsorConfigured()) throw new SponsorUnavailableError();
-  await assertSponsorQuota(user.id);
+
+  // A sell already in flight for this lot is RE-SERVED, never rebuilt: two live sell transactions
+  // for one lot would both leave the wallet, but only the first can be booked against the lot — the
+  // second would quietly sell ANOTHER lot of the same mint and could never be settled. The same
+  // bytes carry the same signature, so a retry is idempotent on chain. Past its block height the
+  // attempt can never land: expire it and build a fresh one.
+  const pending = await prisma.stockBuyAttempt.findFirst({
+    where: { userId: user.id, positionId: lot.id, kind: "SELL", status: "PENDING", unsignedTx: { not: null } },
+    orderBy: { createdAt: "desc" },
+  });
+  if (pending) {
+    if ((await getBlockHeight()) <= Number(pending.lastValidBlockHeight)) {
+      return {
+        attemptId: pending.id,
+        swapTransaction: pending.unsignedTx!,
+        lastValidBlockHeight: Number(pending.lastValidBlockHeight),
+        payer,
+        feePayer: sponsorAddress()!,
+        // Re-served from the attempt row, which holds exactly what the user signed: the amount in
+        // and the MINIMUM out. The mid quote is not persisted, so the minimum stands in for it — a
+        // retry never advertises more than the first build already guaranteed.
+        quote: {
+          inAmountBase: String(pending.inAmountMicro),
+          outAmountMicro: String(pending.minOutBase),
+          minOutMicro: String(pending.minOutBase),
+          priceImpactBp: 0,
+        },
+      };
+    }
+    await prisma.stockBuyAttempt.updateMany({
+      where: { id: pending.id, status: "PENDING" },
+      data: { status: "EXPIRED", resolvedAt: new Date() },
+    });
+  }
 
   // The wallet must still hold the lot. If it does not, the user moved or sold it elsewhere: close
   // what the chain says (reconcile) and tell the client the lot is gone rather than quoting a sale
@@ -255,8 +325,9 @@ export async function buildSellAttempt(
   if (quote.priceImpactBp > STOCK_MAX_PRICE_IMPACT_BP) throw new StockUnavailableError("price_impact");
 
   // Selling the wallet's ENTIRE holding of this mint: close the emptied account in the same tx so
-  // the ~0.00157 SOL of rent the sponsor fronted at the buy comes back. Only when exactly one
-  // account holds exactly the lot — anything else and we do not know what else lives in there.
+  // the ~0.00157 SOL of rent comes back — to WHOEVER fronted it (the sponsor only when it opened the
+  // account; a user who funded their own keeps it). Only when exactly one account holds exactly the
+  // lot — anything else and we do not know what else lives in there.
   const extraInstructions: JupIx[] = [];
   if (held === lot.qtyBase && accounts.length === 1 && accounts[0].pubkey) {
     const mintAcc = await getAccountInfoBase64(lot.asset.mint);
@@ -265,7 +336,7 @@ export async function buildSellAttempt(
         closeAccountIx({
           tokenProgram: mintAcc.owner, // Token or Token-2022 — CloseAccount is the same opcode in both
           account: accounts[0].pubkey,
-          destination: sponsorAddress()!,
+          destination: lot.rentFromSponsor ? sponsorAddress()! : payer,
           owner: payer,
         }),
       );
@@ -274,20 +345,19 @@ export async function buildSellAttempt(
 
   const tx = await buildSponsoredSwapTx({ quoteResponse: quote.raw, userPublicKey: payer, extraInstructions });
 
-  const attempt = await prisma.stockBuyAttempt.create({
-    data: {
-      userId: user.id,
-      assetId: lot.assetId,
-      payer,
-      kind: "SELL",
-      positionId: lot.id,
-      sponsored: true,
-      stakeCents: lot.costCents, // what the lot cost — the basis the P&L is measured against
-      inAmountMicro: lot.qtyBase, // SELL: RAW xStock in (see the schema comment)
-      minOutBase: quote.minOutBase, // SELL: MINIMUM USDC micro out
-      msgHash: tx.messageHash,
-      lastValidBlockHeight: BigInt(tx.lastValidBlockHeight),
-    },
+  const attempt = await createAttempt({
+    userId: user.id,
+    assetId: lot.assetId,
+    payer,
+    kind: "SELL",
+    positionId: lot.id,
+    sponsored: true,
+    stakeCents: lot.costCents, // what the lot cost — the basis the P&L is measured against
+    inAmountMicro: lot.qtyBase, // SELL: RAW xStock in (see the schema comment)
+    minOutBase: quote.minOutBase, // SELL: MINIMUM USDC micro out
+    msgHash: tx.messageHash,
+    unsignedTx: tx.swapTransaction, // a retry re-serves THESE bytes (see the in-flight branch above)
+    lastValidBlockHeight: BigInt(tx.lastValidBlockHeight),
   });
 
   return {
@@ -320,12 +390,30 @@ export async function submitSigned(userId: string, attemptId: string, signedTran
   const height = await getBlockHeight();
   if (height > Number(attempt.lastValidBlockHeight)) throw new TxRejectedError("attempt_expired");
 
-  const sig = await coSignAndSend({
+  // SELL: the lot must still be ours to sell. An older attempt for a lot that a newer one already
+  // closed would sell the wallet's OTHER tokens of the same mint and could never be booked, so it
+  // is refused here — the last point before the sponsor signature makes it sendable by anyone.
+  if (attempt.kind === "SELL") {
+    await prisma.$transaction(async (db) => {
+      const lot = attempt.positionId ? await db.stockPosition.findUnique({ where: { id: attempt.positionId } }) : null;
+      if (!lot || lot.userId !== userId || lot.closedAt) throw new TxRejectedError("lot_closed");
+      const settled = await db.stockBuyAttempt.count({
+        where: { positionId: attempt.positionId, kind: "SELL", status: "CONFIRMED", id: { not: attempt.id } },
+      });
+      if (settled > 0) throw new TxRejectedError("lot_closed");
+    });
+  }
+
+  const { wire, sig } = await coSign({
     signedTransactionB64,
     expectedMessageHash: attempt.msgHash,
     userAddress: attempt.payer,
   });
+  // Stamp BEFORE the send. The signature is already decided (it is the fee payer's), and a send that
+  // times out after the broadcast would otherwise leave a swap on chain that no row points at: the
+  // client would retry and buy twice. A stamped PENDING attempt is exactly what the sweep recovers.
   await markSent(userId, attemptId, sig);
+  await sendRawTransaction(wire);
   return sig;
 }
 
@@ -395,10 +483,18 @@ export async function confirmAttempt(
     throw new TxRejectedError("not_this_buy");
   }
 
+  // A receipt only ever speaks for the attempt it belongs to. Sponsored: the server stamped the
+  // signature itself before sending (submitSigned), so ANY other signature is a different
+  // transaction — refuse it here, before a single row is touched.
+  if (attempt.sponsored && attempt.sig !== sig) throw new TxRejectedError("not_this_buy");
+
   const tx = await landedTx(sig, polls, sleepMs);
 
   // A failed tx books nothing and marks the attempt FAILED.
   if (tx.meta?.err != null) {
+    // Self-paid: nothing has bound this signature to the attempt yet. A failed transaction our payer
+    // did not even sign says nothing about this buy — and the real one may still be in flight.
+    if (!attempt.sponsored && !signedBy(tx, attempt.payer)) throw new TxRejectedError("not_this_buy");
     await prisma.stockBuyAttempt.update({
       where: { id: attemptId },
       data: { status: "FAILED", sig, resolvedAt: new Date() },
@@ -421,8 +517,8 @@ export async function confirmAttempt(
   const entry = entryPriceCents(costCents, delta.qtyBase, attempt.asset.decimals);
   const now = new Date();
 
-  try {
-    return await prisma.$transaction(async (db) => {
+  const book = (hedgeSuggestionId: string | null): Promise<StockRealConfirmResponse> =>
+    prisma.$transaction(async (db) => {
       const fresh = await db.stockBuyAttempt.findUnique({ where: { id: attemptId } });
       if (!fresh) throw new AttemptNotFoundError();
       if (fresh.status !== "PENDING") {
@@ -437,13 +533,14 @@ export async function confirmAttempt(
           userId,
           assetId: attempt.assetId,
           mode: "REAL",
-          source: attempt.hedgeSuggestionId ? "HEDGE" : "DECK",
-          hedgeSuggestionId: attempt.hedgeSuggestionId ?? null,
+          source: hedgeSuggestionId ? "HEDGE" : "DECK",
+          hedgeSuggestionId,
           qtyBase: delta.qtyBase,
           costCents,
           entryPriceCents: entry,
           txSig: sig,
           payer: attempt.payer,
+          rentFromSponsor: attempt.rentFromSponsor, // the sell returns the rent to whoever fronted it
           attemptId,
           walletCheckedAt: now,
         },
@@ -454,18 +551,35 @@ export async function confirmAttempt(
       });
       return { positionId: lot.id, qtyBase: String(lot.qtyBase), costCents: lot.costCents, alreadyConfirmed: false, kind: "BUY" };
     });
-  } catch (e) {
-    // P2002 = unique violation on txSig / attemptId / userId_hedgeSuggestionId — a concurrent confirm
-    // won the race. Re-read by txSig and return the existing lot iff it belongs to this user+attempt.
-    if (e && typeof e === "object" && "code" in e && (e as { code: string }).code === "P2002") {
-      const lot = await prisma.stockPosition.findUnique({ where: { txSig: sig } });
-      if (lot && lot.userId === userId && lot.attemptId === attemptId) {
-        return { positionId: lot.id, qtyBase: String(lot.qtyBase), costCents: lot.costCents, alreadyConfirmed: true, kind: "BUY" };
-      }
-      throw new TxRejectedError("not_this_buy");
+
+  // P2002 = unique violation on txSig / attemptId / userId_hedgeSuggestionId — a concurrent confirm
+  // won the race. Re-read by txSig and return the existing lot iff it belongs to this user+attempt.
+  const afterP2002 = async (e: unknown): Promise<StockRealConfirmResponse> => {
+    if (!isP2002(e)) throw e;
+    const lot = await prisma.stockPosition.findUnique({ where: { txSig: sig } });
+    if (lot && lot.userId === userId && lot.attemptId === attemptId) {
+      return { positionId: lot.id, qtyBase: String(lot.qtyBase), costCents: lot.costCents, alreadyConfirmed: true, kind: "BUY" };
     }
-    throw e;
+    throw new TxRejectedError("not_this_buy");
+  };
+
+  try {
+    return await book(attempt.hedgeSuggestionId);
+  } catch (e) {
+    // The [userId, hedgeSuggestionId] unique spans PAPER and REAL: the same suggestion accepted on
+    // paper first makes this create throw. The swap already LANDED — a landed swap is always booked,
+    // so the lot keeps the money and loses only the back-reference to the suggestion.
+    if (attempt.hedgeSuggestionId && isP2002(e, "hedgeSuggestionId")) {
+      return await book(null).catch(afterP2002);
+    }
+    return await afterP2002(e);
   }
+}
+
+// Prisma's unique-violation error, optionally narrowed to one of the offending columns.
+function isP2002(e: unknown, column?: string): boolean {
+  if (!e || typeof e !== "object" || !("code" in e) || (e as { code: string }).code !== "P2002") return false;
+  return column === undefined || String((e as { meta?: { target?: unknown } }).meta?.target ?? "").includes(column);
 }
 
 // ─── confirm (SELL) ─────────────────────────────────────────────────────────────────────────────────
@@ -512,6 +626,9 @@ async function confirmSell(
   const tx = await landedTx(sig, polls, sleepMs);
 
   if (tx.meta?.err != null) {
+    // A failed transaction our payer did not sign is not this sell failing — marking the attempt
+    // FAILED off it would strand a sale that is still in flight.
+    if (!signedBy(tx, attempt.payer)) throw new TxRejectedError("not_this_buy");
     await prisma.stockBuyAttempt.update({
       where: { id: attempt.id },
       data: { status: "FAILED", sig, resolvedAt: new Date() },
@@ -577,7 +694,7 @@ async function confirmSell(
     });
   } catch (e) {
     // P2002 = the unique sellTxSig — a concurrent confirm won the race.
-    if (e && typeof e === "object" && "code" in e && (e as { code: string }).code === "P2002") {
+    if (isP2002(e)) {
       const lot = await prisma.stockPosition.findUnique({ where: { sellTxSig: sig } });
       if (lot && lot.userId === userId && lot.id === positionId) return sellResponse(lot, delta.qtyBase, true);
       throw new TxRejectedError("not_this_buy");
@@ -622,6 +739,16 @@ export async function sweepAttempts(
   // One block-height read for the whole sweep. A Helius outage aborts the sweep (throw).
   const height = await getBlockHeight();
 
+  // EXPIRE only a row that is still PENDING: this sweep's snapshot is minutes old by now, and a
+  // confirm that landed in between must not be overwritten with EXPIRED.
+  const expire = async (id: string): Promise<void> => {
+    const res = await prisma.stockBuyAttempt.updateMany({
+      where: { id, status: "PENDING" },
+      data: { status: "EXPIRED", resolvedAt: now },
+    });
+    if (res.count === 1) expired++;
+  };
+
   for (const attempt of attempts) {
     try {
       if (attempt.sig) {
@@ -639,31 +766,26 @@ export async function sweepAttempts(
           if (s.blockTime != null && s.blockTime * 1000 < floor) continue;
           const tx = await getTransaction(s.signature);
           if (!tx) continue;
-          if (landedMatchesAttempt(attempt, tx)) {
+          if (!landedMatchesAttempt(attempt, tx)) continue;
+          try {
             await confirmAttempt(attempt.userId, attempt.id, s.signature, { polls: 1, sleepMs: 0 });
             confirmed++;
             matched = true;
             break;
+          } catch (e) {
+            // This receipt cannot be booked against this attempt (it already belongs to another
+            // one, say). Try the next signature — throwing here would leave the row PENDING for
+            // ever and hold a slot in every future sweep.
+            if (e instanceof TxRejectedError) continue;
+            throw e;
           }
         }
-        if (!matched) {
-          await prisma.stockBuyAttempt.update({
-            where: { id: attempt.id },
-            data: { status: "EXPIRED", resolvedAt: now },
-          });
-          expired++;
-        }
+        if (!matched) await expire(attempt.id);
       }
       // else: not yet past the block height, no sig — skip (a later sweep may still match).
     } catch (e) {
       if (e instanceof TxNotFoundError) {
-        if (height > Number(attempt.lastValidBlockHeight)) {
-          await prisma.stockBuyAttempt.update({
-            where: { id: attempt.id },
-            data: { status: "EXPIRED", resolvedAt: now },
-          });
-          expired++;
-        }
+        if (height > Number(attempt.lastValidBlockHeight)) await expire(attempt.id);
         continue;
       }
       if (e instanceof TxRejectedError) {
@@ -692,6 +814,21 @@ export async function reconcileRealLots(
   });
   if (lots.length === 0) return { closed: 0 };
 
+  // A sell in flight makes the balance a moving target: the tokens can already be gone while the lot
+  // they belong to is still open (its confirm is seconds away). Reconciling off that snapshot closes
+  // the WRONG lot — newest-first, i.e. one the wallet still backs — so every mint with a live sell
+  // is left entirely alone, walletCheckedAt included, until the sale resolves.
+  const selling = await prisma.stockBuyAttempt.findMany({
+    where: {
+      payer,
+      kind: "SELL",
+      status: "PENDING",
+      createdAt: { gte: new Date(now.getTime() - 2 * 3_600_000) },
+    },
+    select: { assetId: true },
+  });
+  const busy = new Set(selling.map((a) => a.assetId));
+
   // Group by mint.
   const byMint = new Map<string, typeof lots>();
   for (const lot of lots) {
@@ -702,6 +839,7 @@ export async function reconcileRealLots(
 
   let closed = 0;
   for (const [mint, group] of byMint) {
+    if (group.some((l) => busy.has(l.assetId))) continue;
     const bal = await getTokenBalanceRaw(payer, mint);
     let need = 0n;
     for (const lot of group) need += lot.qtyBase;

@@ -983,6 +983,9 @@ model StockPosition {
   txSig             String?    @unique // REAL: the confirmed Solana signature — the idempotency key
   sellTxSig         String?    @unique // REAL: the signature of the swap that SOLD this lot (unique = one sell per lot)
   payer             String? // REAL: the verified wallet that paid
+  // REAL: the sponsor fronted this lot's token-account rent (copied from the attempt at confirm).
+  // The sell that empties the account returns the rent to whoever paid it — sponsor or user.
+  rentFromSponsor   Boolean    @default(false)
   attemptId         String?    @unique // REAL: the StockBuyAttempt this lot settled
   walletCheckedAt   DateTime? // REAL: last reconciliation against the payer's live token balance
   closedAt          DateTime?
@@ -1038,6 +1041,14 @@ model StockBuyAttempt {
   inAmountMicro        BigInt
   minOutBase           BigInt
   msgHash              String // sha256 of the serialized swapTransaction bytes
+  // The unsigned wire tx (base64) of a sponsored SELL. A retried sell RE-SERVES these bytes instead
+  // of building a second transaction for the same lot: two live sells of one lot cannot both be
+  // booked, and the second would quietly sell the wallet's OTHER tokens. Null on every other kind.
+  unsignedTx           String?
+  // BUY: the sponsor paid the rent of the token account this swap created (the wallet held none for
+  // the mint). Only then does the SELL that empties it send the rent back to the sponsor — a user
+  // who funded their own account keeps it.
+  rentFromSponsor      Boolean            @default(false)
   lastValidBlockHeight BigInt
   hedgeSuggestionId    String?
   status               StockAttemptStatus @default(PENDING)

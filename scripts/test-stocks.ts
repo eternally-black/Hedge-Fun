@@ -219,6 +219,9 @@ import {
   assert.strictEqual(attemptMatches(d, { inAmountMicro: 1_000_000n, minOutBase: 297_834n }), true, "exact match passes");
   assert.strictEqual(attemptMatches(d, { inAmountMicro: 999_999n, minOutBase: 297_834n }), false, "spent more than signed -> reject");
   assert.strictEqual(attemptMatches(d, { inAmountMicro: 1_000_000n, minOutBase: 299_331n }), false, "received less than the minimum -> reject");
+  // ExactIn is exact: a SMALLER swap is an older, different transaction of the same mint by the same
+  // wallet — booking it against this attempt would credit one buy twice.
+  assert.strictEqual(attemptMatches(d, { inAmountMicro: 1_000_001n, minOutBase: 297_834n }), false, "spent LESS than signed -> reject");
 }
 
 // ─── parseJupQuote ──────────────────────────────────────────────────────────────────────────────────
@@ -317,6 +320,7 @@ import {
   assert.strictEqual(sellMatches(d, { inAmountBase: 299_330n, minOutMicro: 1_000_000n }), true, "exact lot, above the minimum -> match");
   assert.strictEqual(sellMatches(d, { inAmountBase: 299_329n, minOutMicro: 1_000_000n }), false, "sold MORE stock than signed -> reject");
   assert.strictEqual(sellMatches(d, { inAmountBase: 299_330n, minOutMicro: 1_010_001n }), false, "received less USDC than the minimum -> reject");
+  assert.strictEqual(sellMatches(d, { inAmountBase: 299_331n, minOutMicro: 1_000_000n }), false, "sold LESS stock than signed -> reject");
 }
 
 // ─── usdcMicroToCentsFloor: proceeds floor vs cost ceil ─────────────────────────────────────────────
