@@ -378,6 +378,8 @@ export function useBuyReal(p: {
           linkWallet({ walletChainType: "solana-only", description: "Connect the Phantom wallet you buy stocks with" });
         } else if (status === 409 && code === "price_impact") {
           onToast("Too thin to buy right now");
+        } else if (status === 409 && code === "insufficient_usdc") {
+          onToast("Not enough USDC — send at least $1 to your wallet");
         } else if (status === 409 && code === "asset_halted") {
           onToast("Trading is halted for this stock");
         } else if (status === 502 && code === "swap_unavailable") {
@@ -389,6 +391,11 @@ export function useBuyReal(p: {
         }
         return;
       }
+
+      // The server sizes the swap to the wallet's USDC when the chip is larger than the balance
+      // (the quote carries the amount really used) — say so before the signature, not after.
+      const usedCents = Math.floor(Number(tx.quote.inAmountMicro) / 10_000);
+      if (usedCents < stakeCents) onToast(`Buying with your full ${(usedCents / 100).toFixed(2)} USDC`);
 
       // 3. Sign, land, book — and only then advance the card.
       const confirmed = await signSubmitConfirm(tx, w);

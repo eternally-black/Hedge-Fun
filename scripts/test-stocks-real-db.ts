@@ -68,6 +68,8 @@ const TXS: Record<string, RpcParsedTx | null> = {};
 let SIGS: { signature: string; blockTime: number | null; err: unknown }[] = [];
 let height = 900;
 let walletRaw = 0n;
+
+let usdcRaw = 100_000_000n; // the wallet's USDC (micro) — the buy path sizes the swap to it
 // The blockhash the sponsored builder gets. Changing it makes the NEXT built tx a different message,
 // which is how the tx_mismatch case gets a decodable-but-wrong transaction.
 let blockhashSeed = 7;
@@ -215,9 +217,13 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     } else if (body.method === "getSignaturesForAddress") {
       result = SIGS;
     } else if (body.method === "getTokenAccountsByOwner") {
+      // The buy path sizes the swap to the wallet's USDC (usdcRaw, $100 by default so every stake fits);
+      // the sell/reconcile paths read the xStock balance (walletRaw).
+      const mint = (body.params?.[1] as { mint?: string } | undefined)?.mint;
+      const amount = mint === USDC_MINT ? String(usdcRaw) : String(walletRaw);
       result = {
         value: [
-          { pubkey: TOKEN_ACCOUNT, account: { data: { parsed: { info: { tokenAmount: { amount: String(walletRaw) } } } } } },
+          { pubkey: TOKEN_ACCOUNT, account: { data: { parsed: { info: { tokenAmount: { amount } } } } } },
         ],
       };
     } else if (body.method === "getLatestBlockhash") {
@@ -670,7 +676,7 @@ async function main() {
     assert.strictEqual(selfPaid.swapTransaction, Buffer.from("fake-tx").toString("base64"), "...via the plain /swap path");
 
     // ── 18. GET /api/stocks/wallet: only the caller's VERIFIED wallet, floored to cents.
-    walletRaw = 12_345_678n; // USDC micro
+    usdcRaw = 12_345_678n; // USDC micro
     res = await walletRoute.GET(new Request(`http://x/api/stocks/wallet?address=${PAYER}`, { headers }));
     assert.strictEqual(res.status, 200);
     const wal = (await res.json()) as { address: string; usdcCents: number; solLamports: string; sponsored: boolean };

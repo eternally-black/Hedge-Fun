@@ -56,6 +56,7 @@ import {
   STOCK_ATTEMPT_SWEEP_AFTER_MS,
   STOCK_TERMS_VERSION,
   STOCK_SPONSOR_MAX_PER_USER_PER_DAY,
+  STOCK_MIN_STAKE_CENTS,
 } from "./config";
 import type { StockRealTxResponse, StockRealSellTxResponse, StockRealConfirmResponse } from "./api-types";
 
@@ -142,10 +143,21 @@ export async function buildAttempt(
   if (!asset) throw new StockUnavailableError("asset_not_found");
   if (asset.halted) throw new StockUnavailableError("asset_halted");
 
+  // Size the buy to what the wallet actually holds: a chip larger than the USDC balance would become
+  // a swap that fails at simulation (and, sponsored, a fee paid for nothing). Below the minimum stake
+  // there is nothing sensible to buy. The response quote carries the amount really used.
+  const usdcMicro = await getTokenBalanceRaw(p.payer, USDC_MINT);
+  const affordableCents = Number(usdcMicro / 10_000n);
+  let stakeCents = p.stakeCents;
+  if (affordableCents < stakeCents) {
+    if (affordableCents < STOCK_MIN_STAKE_CENTS) throw new StockUnavailableError("insufficient_usdc");
+    stakeCents = affordableCents;
+  }
+
   const quote = await quoteSwap({
     inputMint: USDC_MINT,
     outputMint: asset.mint,
-    amount: BigInt(p.stakeCents) * 10_000n,
+    amount: BigInt(stakeCents) * 10_000n,
     slippageBps: STOCK_SWAP_SLIPPAGE_BPS,
   });
   if (quote.priceImpactBp > STOCK_MAX_PRICE_IMPACT_BP) throw new StockUnavailableError("price_impact");
@@ -171,7 +183,7 @@ export async function buildAttempt(
       payer: p.payer,
       kind: "BUY",
       sponsored,
-      stakeCents: p.stakeCents,
+      stakeCents,
       inAmountMicro: quote.inAmount,
       minOutBase: quote.minOutBase,
       msgHash: tx.messageHash,
