@@ -10,7 +10,8 @@ import { sponsorConfigured } from "@/lib/sponsor";
 import type { StockDeckResponse, StockDeckCard } from "@/lib/api-types";
 
 // The tokenized-stock deck: deck-eligible assets with a FRESH price, minus the caller's open lots and
-// passes, shuffled. `wallets` gates "Buy on Solana"; `stockConsent` gates the xStocks terms.
+// passes, shuffled. `wallets` is the verified payer list a real buy picks from; `stockConsent` gates
+// the xStocks terms.
 export async function GET(req: Request) {
   const user = await authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });

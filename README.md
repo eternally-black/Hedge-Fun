@@ -33,8 +33,10 @@ npm run smoke             # full daily loop end-to-end on live DB + live API
 ## Tokenized stocks (Stocklana)
 
 The deck also deals **xStocks** (tokenized US equities on Solana): swipe right = buy, left = pass.
-Paper buys hold virtual cash like a bet; **Buy on Solana** builds a Jupiter USDC→xStock swap that the
-user's wallet signs — the server books the lot only from the landed transaction. That wallet is the
+There is **one Paper/Real switch, the same as predictions** (You → Mode) — no separate buy button.
+In Paper a buy holds virtual cash like a bet; in **Real** the same swipe right buys on Solana from
+the user's own wallet (fees sponsored): a Jupiter USDC→xStock swap that the wallet signs — the server
+books the lot only from the landed transaction. That wallet is the
 Privy **embedded** Solana wallet an email login already creates (Phantom optional), and the swap is
 **fee-sponsored**: our own fee-payer (`STOCK_SPONSOR_SECRET`) co-signs and sends it, so a user needs
 USDC and no SOL. The Hedge tab

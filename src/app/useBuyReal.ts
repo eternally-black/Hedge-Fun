@@ -202,7 +202,7 @@ export function useBuyReal(p: {
     onSuccess: ({ linkedAccount }) => {
       if (linkedAccount?.type === "wallet" && linkedAccount.chainType === "solana") {
         void api("/api/hedge/wallet", { method: "POST", body: JSON.stringify({ address: linkedAccount.address }) })
-          .then(() => onToast("Wallet linked — tap Buy on Solana again"))
+          .then(() => onToast("Wallet linked — try that buy again"))
           .catch(() => onToast("Couldn't link that wallet — try again"));
       }
     },

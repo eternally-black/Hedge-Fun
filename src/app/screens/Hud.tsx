@@ -19,9 +19,11 @@ export type Pocket = "paper" | "stocks" | "predictions";
 
 export const Hud = memo(function Hud({ me, pop, pocket, realPusdMicro, stocksUsdCents, onShards, onGM, onBalance, onBell }: { me: Me | null; pop: { amt: number; color: string } | null; pocket: Pocket; realPusdMicro?: string | null; stocksUsdCents: number | null; onShards: () => void; onGM: () => void; onBalance: () => void; onBell: () => void }) {
   const isReal = me?.real.mode === "REAL";
-  // Which rendering wins. Stocks falls back to paper while the balance is unknown (no wallet yet,
-  // first load): a gold "—" where the user expects their cash reads as money that went missing.
-  const showStocks = pocket === "stocks" && stocksUsdCents !== null;
+  // Which rendering wins. BOTH real pockets are gated on the app's one Paper/Real switch: in paper
+  // mode a stock swipe spends play money, so the chip must state the play balance on stock screens
+  // too. Stocks also falls back to paper while the balance is unknown (no wallet yet, first load):
+  // a gold "—" where the user expects their cash reads as money that went missing.
+  const showStocks = pocket === "stocks" && isReal && stocksUsdCents !== null;
   const showPredictions = pocket === "predictions" && isReal;
   const real = showStocks || showPredictions;
   const amount = showStocks

@@ -51,8 +51,10 @@ fees — with every rent it fronted returned.
 - **Catalog + prices.** xStocks public API (≈830 Solana assets) upserted every 5 min; Jupiter Price v3 every
   minute for the served subset. Deck pool = top 150 by DEX liquidity, then market cap; only mints with
   a Solana pool are `tradable` (real buy), the rest are paper-only at the issuer's reference price.
-- **Stocks deck.** Right = buy (paper: $10/$25/$50 chips; real: "Buy on Solana"), left = pass, up = skip.
-  Toggle back to the prediction-market deck any time.
+- **Stocks deck.** Right = buy, left = pass, up = skip. Whose money a buy spends is the app's ONE
+  Paper/Real switch, the same one predictions use (You → Mode): in Real mode a swipe right buys on
+  Solana from the user's own wallet, fees sponsored; in Paper it holds virtual cash. An asset with no
+  Solana pool stays paper in either mode. Toggle back to the prediction-market deck any time.
 - **Wallet + fees.** Email login mints a Privy embedded Solana wallet — no extension, no seed phrase;
   an external Phantom still works for anyone who has one. Real buys and sells are **fee-sponsored**:
   the server builds the swap, the user's wallet signs it, our fee-payer co-signs and sends it. The

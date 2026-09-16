@@ -2,18 +2,18 @@
 
 import { type CSSProperties, useCallback, useEffect, useRef, useState } from "react";
 import { type Me, usd } from "../ui";
-import { REAL_BALANCE_POLL_MS, STOCK_MIN_STAKE_CENTS } from "@/lib/config";
+import { REAL_BALANCE_POLL_MS } from "@/lib/config";
 import type { StockPortfolioResponse, StockPositionRow } from "@/lib/api-types";
 import { useBuyReal } from "../useBuyReal";
-import { useStockStake } from "../useStockStake";
 import { StockConsentSheet } from "./StockConsentSheet";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
 // The Portfolio (Stocklana): every tokenized-stock lot the user owns, paper and on-chain, in one
-// list. Open lots carry their live mark and a two-tap Sell (paper) or a Buy-on-Solana ghost button
-// (real, via the user's own wallet). Closed lots collapse behind a toggle — they are history, not
-// the thing you came to look at. Pending real buys show as a strip while the poller confirms them.
+// list. Open lots carry their live mark and a two-tap Sell — paper rows sell paper, on-chain rows
+// swap back to the wallet. BUYING is the deck's job (one swipe, in the app's current mode), so no
+// row offers it. Closed lots collapse behind a toggle — they are history, not the thing you came to
+// look at. Pending real buys show as a strip while the poller confirms them.
 export function PortfolioScreen({
   api,
   me,
@@ -33,14 +33,10 @@ export function PortfolioScreen({
   onOpenWallet: () => void;
 }) {
   const [data, setData] = useState<StockPortfolioResponse | null>(null);
-  // The row has no chips of its own (it is a lot you already own, not a card you are sizing), so it
-  // spends whatever the user last set on the deck — read-only here, and stated on the button.
-  const { stakeCents } = useStockStake();
   const [closedOpen, setClosedOpen] = useState(false);
   const [selling, setSelling] = useState<string | null>(null);
-  // The armed key is `${row.id}:sell` or `${row.id}:buy` — ONE arm at a time across the screen, and
-  // the two buttons on a row can never be armed together. A real buy spends real money on the tap,
-  // so it gets the same are-you-sure gesture the sell beside it has always had.
+  // The armed row id — ONE arm at a time across the screen, so a stale arm on a row you scrolled
+  // past can never turn the next tap into a sale.
   const [armed, setArmed] = useState<string | null>(null);
   const armTimer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(armTimer.current), []);
@@ -172,14 +168,6 @@ export function PortfolioScreen({
     [api, load, onRefreshMe, onToast],
   );
 
-  // What the "◎ Buy" button on a row will actually spend: the chosen stake, capped by what the
-  // wallet holds so the label never promises more than it can pay. null = the wallet is under the
-  // tradable minimum, and the button funds instead of buying.
-  const buyCents =
-    stocksUsdCents !== null && stocksUsdCents < STOCK_MIN_STAKE_CENTS
-      ? null
-      : Math.min(stakeCents, stocksUsdCents ?? stakeCents);
-
   const open = data?.open ?? [];
   const closed = data?.closed ?? [];
   const pending = data?.pendingAttempts ?? [];
@@ -235,26 +223,13 @@ export function PortfolioScreen({
                   <OpenRow
                     key={row.id}
                     row={row}
-                    armedSell={armed === `${row.id}:sell`}
-                    armedBuy={armed === `${row.id}:buy`}
+                    armedSell={armed === row.id}
                     selling={selling === row.id}
-                    buyCents={buyCents}
-                    buyBusy={real.busy}
-                    onArmSell={() => arm(`${row.id}:sell`)}
-                    onArmBuy={() => arm(`${row.id}:buy`)}
+                    onArmSell={() => arm(row.id)}
                     onSell={() => {
                       disarm();
                       void (row.mode === "REAL" ? sellOnChain(row) : sell(row));
                     }}
-                    onBuyReal={() => {
-                      disarm();
-                      void real.buyReal(
-                        { assetId: row.assetId, symbol: row.symbol },
-                        buyCents ?? stakeCents,
-                        { wallets: data?.wallets ?? [], stockConsent: data?.stockConsent ?? false, sponsored: data?.sponsored },
-                      );
-                    }}
-                    onOpenWallet={onOpenWallet}
                   />
                 ))}
               </div>
@@ -326,28 +301,15 @@ function fmtQty(row: StockPositionRow): string {
 function OpenRow({
   row,
   armedSell,
-  armedBuy,
   selling,
-  buyCents,
-  buyBusy,
   onArmSell,
-  onArmBuy,
   onSell,
-  onBuyReal,
-  onOpenWallet,
 }: {
   row: StockPositionRow;
   armedSell: boolean;
-  armedBuy: boolean;
   selling: boolean;
-  // What a buy would spend, or null when the wallet is under the minimum (→ fund, don't buy).
-  buyCents: number | null;
-  buyBusy: boolean;
   onArmSell: () => void;
-  onArmBuy: () => void;
   onSell: () => void;
-  onBuyReal: () => void;
-  onOpenWallet: () => void;
 }) {
   const pnl = row.pnlCents;
   const pnlColor = pnl == null ? "var(--muted)" : pnl >= 0 ? "var(--yes)" : "var(--no)";
@@ -382,26 +344,6 @@ function OpenRow({
         </div>
       </div>
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 10 }}>
-        {/* Real money on a tap, so: the amount is IN the label, and the same two-tap arm as Sell
-            stands between the tap and the signature. Under the minimum it funds instead. */}
-        <button
-          type="button"
-          disabled={buyBusy}
-          onClick={buyCents === null ? onOpenWallet : armedBuy ? onBuyReal : onArmBuy}
-          style={{
-            margin: 0, font: "inherit",
-            padding: "7px 12px", borderRadius: 10,
-            background: armedBuy ? "var(--gold)" : "transparent",
-            color: armedBuy ? "#1a1205" : "var(--muted)",
-            border: "1px solid " + (armedBuy ? "var(--gold)" : "var(--line)"),
-            fontWeight: 700, fontSize: 11,
-            cursor: buyBusy ? "default" : "pointer",
-            opacity: buyBusy ? 0.5 : 1,
-            whiteSpace: "nowrap",
-          }}
-        >
-          {buyBusy ? "Buying…" : buyCents === null ? "◎ Fund your wallet" : armedBuy ? `Buy ${usd(buyCents)}?` : `◎ Buy ${usd(buyCents)} on Solana`}
-        </button>
         {/* Same two-tap for both modes — a REAL sell is a swap back to USDC, which is no more
             undoable than a paper one, so it gets the same "are you sure" gesture and the same look. */}
         <button

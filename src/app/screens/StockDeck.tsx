@@ -5,6 +5,7 @@ import { StockDeckCard, StockCardPreview } from "../StockCard";
 import { StockConsentSheet } from "./StockConsentSheet";
 import { useBuyReal } from "../useBuyReal";
 import { useStockStake } from "../useStockStake";
+import { STOCK_MIN_STAKE_CENTS } from "@/lib/config";
 import { type Me } from "../ui";
 import type { StockDeckCard as StockDeckCardType, StockDeckResponse } from "@/lib/api-types";
 import type { SwipeAction } from "../DeckCard";
@@ -53,8 +54,9 @@ export function DeckModePill({ mode, onMode }: { mode: DeckMode; onMode: (m: Dec
 
 // ============================================================================
 // StockDeck — the tokenized-stock deck. Same slot, same gesture, same physics as the prediction
-// deck; a different card and a different economy. Right = buy (paper from the virtual balance, or
-// real through the user's own Phantom), left = pass (never dealt again), up = skip (session only).
+// deck; a different card and a different economy. Right = buy, left = pass (never dealt again), up =
+// skip (session only). WHOSE money a buy spends is the app's one Paper/Real switch (me.real.mode),
+// exactly as it is for predictions — the card has no second button to choose it.
 // ============================================================================
 export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksUsdCents, onOpenWallet }: {
   api: Api;
@@ -140,6 +142,37 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksU
   // request on every removal in StrictMode.
   useEffect(() => { void topUpIfLow(cards.length); }, [cards.length, topUpIfLow]);
 
+  // The card a real buy was started on. A REAL buy is a wallet signature plus a chain confirmation —
+  // seconds to minutes — so which card it belongs to has to be remembered, not re-derived on done.
+  const buyingId = useRef<string | null>(null);
+
+  // Memoized rather than inlined into the call below: an arrow here is a new onDone every render,
+  // which rebuilds useBuyReal's callbacks, which rebuilds the card's props — and the balance poll
+  // re-renders this component every few seconds (rerender-memo).
+  const onDone = useCallback(() => {
+    const id = buyingId.current;
+    buyingId.current = null;
+    if (id) removeCard(id);
+    void onRefreshMe();
+  }, [onRefreshMe, removeCard]);
+
+  const real = useBuyReal({
+    api,
+    me,
+    onToast,
+    onRefreshMe,
+    ctx: { wallets, stockConsent, sponsored },
+    onDone,
+  });
+  const { buyReal, replayPending, acceptConsent: acceptConsentReal } = real;
+
+  // Which economy a swipe-right spends. ONE switch for the whole app (me.real.mode, flipped on the
+  // You screen) — the stock deck does not get a second one.
+  const realMode = me?.real.mode === "REAL";
+  // A non-tradable stock in real mode still buys paper; say so ONCE per session rather than on every
+  // such card, which would be nagging about something the user cannot change.
+  const paperFallbackToasted = useRef(false);
+
   const act = useCallback(
     (card: StockDeckCardType, dir: SwipeAction) => {
       if (dir === "SKIP") {
@@ -153,7 +186,26 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksU
         void api("/api/stocks/pass", { method: "POST", body: JSON.stringify({ assetId: card.id }) }).catch(() => { /* best-effort */ });
         return;
       }
-      // YES = a paper buy. The cash gate is checked BEFORE the optimistic advance so the card is not
+      // YES = buy, in whichever economy the app is in — the card has no second button to choose it.
+      if (realMode && card.tradable) {
+        // Below the tradable minimum the quote would refuse. The fix is funding, so the tap opens
+        // the wallet and the card STAYS: it is the one the user wanted to buy.
+        if (stocksUsdCents !== null && stocksUsdCents < STOCK_MIN_STAKE_CENTS) {
+          onOpenWallet();
+          onToast("Add money to your wallet to buy");
+          return;
+        }
+        // NOT removed here: only /confirm says a real buy happened, and onDone removes the card it
+        // was started on — minutes later, by which time the top card may be a different one.
+        buyingId.current = card.id;
+        void buyReal({ assetId: card.id, symbol: card.symbol }, stakeCents, { wallets, stockConsent, sponsored });
+        return;
+      }
+      if (realMode && !paperFallbackToasted.current) {
+        paperFallbackToasted.current = true;
+        onToast("This stock has no on-chain market yet — bought with paper");
+      }
+      // A paper buy. The cash gate is checked BEFORE the optimistic advance so the card is not
       // lost — it stays so the user can top up and retry.
       if (me && me.cashCents < stakeCents) {
         onToast("No free cash left");
@@ -184,32 +236,8 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksU
         })
         .finally(() => setBusy(false));
     },
-    [api, me, onRefreshMe, onToast, removeCard, stakeCents],
+    [api, buyReal, me, onOpenWallet, onRefreshMe, onToast, realMode, removeCard, sponsored, stakeCents, stockConsent, stocksUsdCents, wallets],
   );
-
-  // The card a real buy was started on. A REAL buy is a wallet signature plus a chain confirmation —
-  // seconds to minutes — so which card it belongs to has to be remembered, not re-derived on done.
-  const buyingId = useRef<string | null>(null);
-
-  // Memoized rather than inlined into the call below: an arrow here is a new onDone every render,
-  // which rebuilds useBuyReal's callbacks, which rebuilds the card's props — and the balance poll
-  // re-renders this component every few seconds (rerender-memo).
-  const onDone = useCallback(() => {
-    const id = buyingId.current;
-    buyingId.current = null;
-    if (id) removeCard(id);
-    void onRefreshMe();
-  }, [onRefreshMe, removeCard]);
-
-  const real = useBuyReal({
-    api,
-    me,
-    onToast,
-    onRefreshMe,
-    ctx: { wallets, stockConsent, sponsored },
-    onDone,
-  });
-  const { buyReal, replayPending, acceptConsent: acceptConsentReal } = real;
 
   // A real buy STARTS here, so the tab that died between "the wallet sent it" and "the server booked
   // it" died HERE — replaying only from the portfolio leaves that buy parked until the user happens
@@ -233,10 +261,9 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksU
     })();
   }, [load, onToast, replayPending, userId]);
 
-  // A consent accepted through the sheet flips the local flag immediately, so the card's buy button
-  // stops saying "Accept xStocks terms to buy" without waiting for the next deck fetch — but only if
-  // the SERVER recorded it. Flipping it on a failed POST puts a Buy on the card that /real/tx then
-  // 403s, which reopens this same sheet: a loop the user cannot get out of.
+  // A consent accepted through the sheet flips the local flag immediately, so the next swipe does
+  // not re-open it while the deck fetch catches up — but only if the SERVER recorded it. Flipping it
+  // on a failed POST lets /real/tx 403 again, which reopens this same sheet: a loop with no way out.
   const acceptConsent = useCallback(async () => {
     if (await acceptConsentReal()) setStockConsent(true);
   }, [acceptConsentReal]);
@@ -244,11 +271,6 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksU
   // Stable card callbacks: StockCardFace is memo()'d, and a fresh closure per render defeats it —
   // the card re-renders on every balance tick, restarting the price pulse mid-animation.
   const onAction = useCallback((a: SwipeAction) => { if (top) act(top, a); }, [act, top]);
-  const onBuyReal = useCallback(() => {
-    if (!top) return;
-    buyingId.current = top.id;
-    void buyReal({ assetId: top.id, symbol: top.symbol }, stakeCents, { wallets, stockConsent, sponsored });
-  }, [buyReal, sponsored, stakeCents, stockConsent, top, wallets]);
 
   // A real buy locks the deck the same way a paper one does — harder, in fact: real money is moving,
   // and every action here (pass, skip, paper buy, swipe) changes which card is on top.
@@ -259,7 +281,7 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksU
       <DeckModePill mode={mode} onMode={onMode} />
 
       <div style={{ position: "relative", flex: 1, margin: "6px 14px 0" }}>
-        {next && <StockCardPreview key={next.id} card={next} stakeCents={stakeCents} />}
+        {next && <StockCardPreview key={next.id} card={next} stakeCents={stakeCents} realMode={realMode} />}
         {top ? (
           <StockDeckCard
             key={top.id}
@@ -268,14 +290,7 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksU
             onAction={onAction}
             stakeCents={stakeCents}
             onPickStake={setStakeCents}
-            onBuyReal={onBuyReal}
-            buyRealBusy={real.busy}
-            // A usable wallet is a verified external one OR the embedded wallet Privy issues on
-            // login — only a user with neither is told to go get Phantom.
-            walletLinked={wallets.length > 0 || real.walletAddress !== null}
-            consented={stockConsent}
-            stocksUsdCents={stocksUsdCents}
-            onOpenWallet={onOpenWallet}
+            realMode={realMode}
           />
         ) : (
           <div style={{ position: "absolute", inset: 0, borderRadius: 26, background: "var(--panel)", border: "1px solid var(--line)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, textAlign: "center" }}>
@@ -290,7 +305,11 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksU
         <CircleBtn glyph="✓" label="Buy" color="var(--yes)" size={56} disabled={locked || !top} onClick={() => top && act(top, "YES")} />
       </div>
       <div style={{ textAlign: "center", fontSize: 10, color: "var(--muted)", paddingBottom: 8 }}>
-        Paper buys use play money · Buy on Solana uses your own wallet{sponsored ? " · fees on us" : ""}
+        {realMode
+          ? sponsored
+            ? "Real money · fees on us"
+            : "Real money · from your wallet"
+          : "Paper buys use play money · switch to real money in You"}
       </div>
 
       <StockConsentSheet open={real.consentOpen} busy={real.busy} sponsored={sponsored} onAccept={acceptConsent} onClose={real.closeConsent} />

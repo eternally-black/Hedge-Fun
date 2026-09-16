@@ -294,11 +294,15 @@ export function HedgeScreen({
   // Opening the form wipes any stale link error left by a previous attempt/refresh.
   const toggleWalletForm = useCallback(() => { setLinkError(null); setWalletFormOpen((v) => !v); }, []);
 
-  // REAL stock buys (the "◎ Buy on Solana" ghost button on a stock hedge card). The hook owns the
-  // consent sheet + the Jupiter swap flow; we only hand it the target and the stake.
+  // REAL stock buys — what a stock hedge card's ONE accept button does while the app is in real
+  // mode. The hook owns the consent sheet + the Jupiter swap flow; we hand it the target and stake.
   const real = useBuyReal({ api, me, onToast, onDone: () => { void onRefreshMe(); } });
   const buyReal = real.buyReal;
   const acceptConsent = real.acceptConsent;
+
+  // The app's ONE Paper/Real switch decides which economy a stock hedge spends — a hedge card has
+  // no money switch of its own, the same rule the stock deck follows.
+  const realMode = me?.real.mode === "REAL";
 
   // The stock ctx (verified wallets + consent + fee sponsorship), read ONCE with the suggestions.
   // Without it the hook re-fetches /api/stocks/portfolio on every single tap of a buy button.
@@ -364,6 +368,7 @@ export function HedgeScreen({
                 onImpression={fireImpression}
                 onBuyReal={onBuyReal}
                 buyRealBusy={real.busy}
+                realMode={realMode}
               />
             ))}
           </div>
@@ -427,6 +432,7 @@ export function HedgeScreen({
                   onImpression={fireImpression}
                   onBuyReal={onBuyReal}
                   buyRealBusy={real.busy}
+                  realMode={realMode}
                 />
               ))}
             </div>
@@ -447,6 +453,7 @@ export function HedgeScreen({
         isDismissed={isDismissed}
         onBuyReal={onBuyReal}
         buyRealBusy={real.busy}
+        realMode={realMode}
       />
 
       {/* The consent sheet doubles as the "how this works" text (the limitations live here only) —
@@ -491,6 +498,7 @@ function LifeHedgeSection({
   isDismissed,
   onBuyReal,
   buyRealBusy,
+  realMode,
 }: {
   api: Api;
   accepted: Map<string, AcceptedInfo>;
@@ -502,6 +510,7 @@ function LifeHedgeSection({
   isDismissed: (id: string) => boolean;
   onBuyReal: (s: HedgeSuggestion) => void;
   buyRealBusy: boolean;
+  realMode: boolean;
 }) {
   const [pickers, setPickers] = useState<HedgePickerLeague[] | null>(null); // null = loading
   const [pickersError, setPickersError] = useState(false);
@@ -720,6 +729,7 @@ function LifeHedgeSection({
                   onImpression={onImpression}
                   onBuyReal={onBuyReal}
                   buyRealBusy={buyRealBusy}
+                  realMode={realMode}
                 />
               ))}
             </div>
@@ -792,8 +802,9 @@ type HedgeCardProps = {
   onAccept: (s: HedgeSuggestion) => void;
   onDismiss: (s: HedgeSuggestion) => void;
   onImpression: (suggestionId: string) => void;
-  onBuyReal?: (s: HedgeSuggestion) => void; // stock cards only: the "◎ Buy on Solana" ghost button
+  onBuyReal?: (s: HedgeSuggestion) => void; // stock cards only: what the accept does in real mode
   buyRealBusy?: boolean; // a real buy is in flight — no second signature from any card
+  realMode?: boolean; // stock cards only: whose money the accept spends (me.real.mode)
 };
 
 // A stock card has no countdown, so it must not be handed the screen's 15s clock: `{...props}` was
@@ -814,6 +825,7 @@ const HedgeCard = memo(function HedgeCard(props: HedgeCardProps) {
       onImpression={props.onImpression}
       onBuyReal={props.onBuyReal}
       buyRealBusy={props.buyRealBusy}
+      realMode={props.realMode}
     />
   ) : (
     <MarketHedgeCard {...props} />
@@ -987,17 +999,45 @@ const StockHedgeCard = memo(function StockHedgeCard({
   onImpression,
   onBuyReal,
   buyRealBusy,
+  realMode,
 }: StockHedgeCardProps) {
   const cardRef = useRef<HTMLDivElement>(null);
   useImpression(cardRef, s.suggestionId, onImpression);
-  // The real-money buy is two taps: the first states the amount and waits 3s, the second signs.
-  // The paper accept sits directly above it, and one tap must not be the difference between them.
+  // A real-money accept is two taps: the first states the amount and waits 3s, the second signs.
   const [armed, setArmed] = useState(false);
   const armTimer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(armTimer.current), []);
 
   const stock = s.stock;
   if (!stock) return null; // unreachable: the dispatcher only routes stock cards here
+
+  // ONE accept button, and the app's Paper/Real switch decides what it spends. An asset with no
+  // Solana pool has no on-chain market to buy in, so it stays a paper hedge even in real mode — and
+  // the label says why, rather than offering a button that would refuse.
+  const spendsReal = realMode === true && stock.tradable && onBuyReal !== undefined;
+  const accent = spendsReal ? "var(--gold)" : "var(--yes)";
+  const ctaBusy = busy || buyRealBusy === true;
+  const ctaLabel = busy
+    ? "Placing…"
+    : buyRealBusy
+      ? "Buying…"
+      : armed
+        ? `Buy ${usd(s.proposedStakeCents)}?`
+        : `Hedge ${usd(s.proposedStakeCents)} with ${stock.symbol}${spendsReal ? " · real money" : realMode ? " · paper (no on-chain market yet)" : ""}`;
+  const longLabel = realMode === true && !ctaBusy && !armed;
+  const onCta = () => {
+    if (ctaBusy) return;
+    if (!spendsReal) return void onAccept(s);
+    if (!armed) {
+      setArmed(true);
+      window.clearTimeout(armTimer.current);
+      armTimer.current = window.setTimeout(() => setArmed(false), 3000);
+      return;
+    }
+    window.clearTimeout(armTimer.current);
+    setArmed(false);
+    onBuyReal(s);
+  };
 
   const change = stock.change24hBp;
   const changeColor = change == null ? "var(--muted)" : change >= 0 ? "var(--yes)" : "var(--no)";
@@ -1055,47 +1095,28 @@ const StockHedgeCard = memo(function StockHedgeCard({
             </button>
             <button
               type="button"
-              onClick={busy ? undefined : () => onAccept(s)}
-              disabled={busy}
+              onClick={ctaBusy ? undefined : onCta}
+              disabled={ctaBusy}
               style={{
-                flex: 1, minWidth: 0, padding: "9px 8px", borderRadius: 14, font: "inherit", cursor: busy ? "default" : "pointer",
-                background: "color-mix(in srgb,var(--yes) 16%,transparent)", border: "1.5px solid color-mix(in srgb,var(--yes) 50%,transparent)",
-                color: "var(--yes)", display: "flex", alignItems: "center", justifyContent: "center", opacity: busy ? 0.5 : 1,
+                flex: 1, minWidth: 0, padding: "9px 8px", borderRadius: 14, font: "inherit", cursor: ctaBusy ? "default" : "pointer",
+                background: armed ? accent : `color-mix(in srgb,${accent} 16%,transparent)`,
+                border: `1.5px solid ${armed ? accent : `color-mix(in srgb,${accent} 50%,transparent)`}`,
+                color: armed ? "#1a1205" : accent, display: "flex", alignItems: "center", justifyContent: "center", opacity: ctaBusy ? 0.5 : 1,
               }}
             >
-              <span style={{ fontFamily: "var(--df)", fontSize: 16, lineHeight: 1, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {busy ? "Placing…" : `Hedge ${usd(s.proposedStakeCents)} with ${stock.symbol}`}
+              {/* The real-mode labels carry a second clause ("· real money", "· paper (no on-chain
+                  market yet)") and that clause is the whole point — let it WRAP rather than ellipse
+                  the money word off the end of the button. */}
+              <span style={{ fontFamily: "var(--df)", fontSize: longLabel ? 14 : 16, lineHeight: 1.1, maxWidth: "100%", overflow: "hidden", textOverflow: longLabel ? "clip" : "ellipsis", whiteSpace: longLabel ? "normal" : "nowrap", textAlign: "center" }}>
+                {ctaLabel}
               </span>
             </button>
           </div>
         )}
 
-        {!acceptedInfo && stock.tradable && onBuyReal && (
-          <div style={{ marginTop: 8 }}>
-            <GhostButton
-              armed={armed}
-              disabled={busy || buyRealBusy}
-              onClick={() => {
-                if (busy || buyRealBusy) return;
-                if (!armed) {
-                  setArmed(true);
-                  window.clearTimeout(armTimer.current);
-                  armTimer.current = window.setTimeout(() => setArmed(false), 3000);
-                  return;
-                }
-                window.clearTimeout(armTimer.current);
-                setArmed(false);
-                onBuyReal(s);
-              }}
-            >
-              {buyRealBusy ? "Buying…" : armed ? `Buy ${usd(s.proposedStakeCents)}?` : `◎ Buy ${usd(s.proposedStakeCents)} on Solana · real money`}
-            </GhostButton>
-          </div>
-        )}
-
-        {/* honesty footnote — the shared sizing one-liner only */}
+        {/* honesty footnote — whose money, then the shared sizing one-liner */}
         <div style={{ textAlign: "center", marginTop: 8, fontSize: 10, color: "rgba(255,255,255,.5)", letterSpacing: ".02em" }}>
-          Paper buy · sizing is a product rule, not hedge math.
+          {spendsReal ? "Real money" : "Paper buy"} · sizing is a product rule, not hedge math.
         </div>
       </div>
     </div>
@@ -1333,9 +1354,7 @@ function CenterNote({ children }: { children: React.ReactNode }) {
   );
 }
 
-// `armed` is the second half of a two-tap: gold, exactly like the armed Sell on the Portfolio row,
-// so an armed control looks the same wherever the app asks "are you sure".
-function GhostButton({ onClick, disabled, armed, children }: { onClick: () => void; disabled?: boolean; armed?: boolean; children: React.ReactNode }) {
+function GhostButton({ onClick, disabled, children }: { onClick: () => void; disabled?: boolean; children: React.ReactNode }) {
   return (
     <button
       type="button"
@@ -1344,9 +1363,9 @@ function GhostButton({ onClick, disabled, armed, children }: { onClick: () => vo
       style={{
         padding: "7px 12px", borderRadius: 12, font: "inherit", fontSize: 11, fontWeight: 700,
         cursor: disabled ? "default" : "pointer",
-        background: armed ? "var(--gold)" : "var(--panel2)",
-        border: "1px solid " + (armed ? "var(--gold)" : "var(--line)"),
-        color: armed ? "#1a1205" : "var(--muted)",
+        background: "var(--panel2)",
+        border: "1px solid var(--line)",
+        color: "var(--muted)",
         opacity: disabled ? 0.6 : 1,
       }}
     >

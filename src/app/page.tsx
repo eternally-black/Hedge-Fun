@@ -196,9 +196,11 @@ function App() {
   // money. Derived from `screen`, not from effectiveScreen (computed below, past the boot gates):
   // the only difference is deck-predictions → feed, and both of those map to "predictions" anyway.
   //
-  // The hedge tab counts as a STOCK surface: its only real-money action is "◎ Buy on Solana" on the
-  // stock leg, which spends the Solana wallet. The market side of a hedge is a paper bet, so calling
-  // it "predictions" left the one pocket the screen can actually spend unpolled.
+  // The hedge tab counts as a STOCK surface: in real mode its stock leg spends the Solana wallet.
+  // The market side of a hedge is a paper bet, so calling it "predictions" left the one pocket the
+  // screen can actually spend unpolled. The HUD still shows the PAPER chip on these screens while
+  // the app is in paper mode — the balance is read here regardless, because the wallet sheet and the
+  // Portfolio's wallet row state it in both modes (that is how you fund before switching).
   const pocket: Pocket =
     (screen === "deck" && deckMode === "stocks") || screen === "portfolio" || screen === "hedge"
       ? "stocks"

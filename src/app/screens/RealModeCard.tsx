@@ -213,7 +213,9 @@ export function RealModeCard({ me, api, onRefresh, onToast, pusdMicro }: {
             </div>
             <div style={{ ...MUTED, marginTop: 2 }}>
               {isReal
-                ? "Swipes place real orders and spend real funds."
+                ? // ONE switch, BOTH economies — the stock deck reads the same flag, so the copy has
+                  // to name what it turned on in each of them.
+                  "Predictions trade real money on Polymarket; stocks trade from your Solana wallet, fees on us."
                 : staleConsent
                   ? "The terms changed — one more tap to switch."
                   : "Play money. Nothing you swipe costs anything."}
