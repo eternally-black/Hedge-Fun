@@ -17,7 +17,7 @@ import type { TokenBalance } from "./hedge/exposure";
 import type { RpcParsedTx } from "./stocks";
 import { deadlineLeftMs, boundedTimeoutMs } from "./deadline";
 
-const RPC_BASE = process.env.HELIUS_RPC_BASE ?? "https://mainnet.helius-rpc.com";
+const RPC_BASE = process.env.HELIUS_RPC_BASE || "https://mainnet.helius-rpc.com";
 const TIMEOUT_MS = 10_000;
 
 // Thrown when Helius can't answer (missing key, HTTP error, timeout). The wallet route turns this

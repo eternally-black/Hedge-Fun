@@ -21,7 +21,7 @@ import { deadlineLeftMs, boundedTimeoutMs } from "../src/lib/deadline";
 
 const prisma = new PrismaClient();
 
-const XSTOCKS_BASE = process.env.XSTOCKS_API_BASE ?? "https://api.xstocks.fi/api/v2";
+const XSTOCKS_BASE = process.env.XSTOCKS_API_BASE || "https://api.xstocks.fi/api/v2";
 const PAGE_SIZE = 100;
 const MAX_PAGES = 20; // ~9 pages today; the cap is a runaway guard, not a target
 const TIMEOUT_MS = 10_000;

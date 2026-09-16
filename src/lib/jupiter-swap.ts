@@ -34,7 +34,7 @@ import { JupiterUnavailableError } from "./prices";
 import { parseJupQuote, type JupQuoteParsed } from "./stocks";
 import { deadlineLeftMs, boundedTimeoutMs } from "./deadline";
 
-const BASE = process.env.JUPITER_SWAP_BASE ?? "https://lite-api.jup.ag/swap/v1";
+const BASE = process.env.JUPITER_SWAP_BASE || "https://lite-api.jup.ag/swap/v1";
 const TIMEOUT_MS = 10_000;
 
 export interface SwapQuote extends JupQuoteParsed {
