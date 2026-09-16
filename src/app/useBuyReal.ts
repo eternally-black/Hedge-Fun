@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { useLinkAccount, useConnectWallet } from "@privy-io/react-auth";
 import {
   useSignAndSendTransaction,
@@ -183,7 +183,14 @@ export function useBuyReal(p: {
   // whatever this picks, so the two must never be able to disagree.
   const { pickWallet, wallets: solWallets, embeddedAddress, ready: walletsReady } = useWalletPicker();
 
-  const wallet = pickWallet(screenCtx?.wallets ?? []);
+  // ONE source for "verified": /api/me's stockWallets — the same list the HUD picks its balance from.
+  // The deck/portfolio responses carry their own copy, but two snapshots can disagree for a beat
+  // (a wallet verified in another tab), and then the chip would show one wallet while the CTA spends
+  // another. Keyed by content so a /api/me refresh with the same wallets keeps callback identities.
+  const verifiedKey = (me?.stockWallets ?? []).join(",");
+  const verified = useMemo(() => (verifiedKey ? verifiedKey.split(",") : []), [verifiedKey]);
+  const hasMe = me !== null;
+  const wallet = pickWallet(verified);
   const walletAddress = wallet?.address ?? null;
   const embedded = walletAddress !== null && walletAddress === embeddedAddress;
 
@@ -319,13 +326,16 @@ export function useBuyReal(p: {
     async (target: BuyRealTarget, stakeCents: number, ctx: BuyRealCtx, opts?: { hedgeSuggestionId?: string }) => {
       // 1. Wallet. The verified set is the server's; the connected set is Privy's. With an embedded
       //    wallet there is always one to use, so the link/connect prompts are the no-wallet case only.
-      const w = pickWallet(ctx.wallets);
+      // `ctx.wallets` is only the fallback for a caller that has no /api/me yet; the pick itself uses
+      // the same list the HUD reads, so what is shown is what gets spent.
+      const verifiedNow = verified.length > 0 || hasMe ? verified : ctx.wallets;
+      const w = pickWallet(verifiedNow);
       if (!w) {
         // Privy provisions the embedded wallet on login, but it appears a beat later. Opening the
         // Phantom link modal in that beat would tell a user who already HAS a wallet to go get one.
         if (!walletsReady) {
           onToast("Setting up your wallet — try again in a moment");
-        } else if (ctx.wallets.length > 0) {
+        } else if (verifiedNow.length > 0) {
           connectWallet({ walletChainType: "solana-only" });
           onToast("Connect the wallet you linked, then tap again");
         } else {
@@ -335,7 +345,7 @@ export function useBuyReal(p: {
       }
       // The embedded wallet is brand new to the server on the first trade — /real/tx refuses a payer
       // it has not verified, so tell it first rather than bouncing the user through a link flow.
-      if (!ctx.wallets.includes(w.address)) {
+      if (!verifiedNow.includes(w.address)) {
         try {
           await ensureVerified(w.address);
         } catch (e) {
@@ -390,7 +400,7 @@ export function useBuyReal(p: {
       onToast(`Bought ${target.symbol} on Solana ✓`);
       onDone?.({ symbol: target.symbol, qtyBase: confirmed.qtyBase, costCents: confirmed.costCents });
     },
-    [api, connectWallet, ensureVerified, linkWallet, onDone, onToast, pickWallet, signSubmitConfirm, walletsReady],
+    [api, connectWallet, ensureVerified, hasMe, linkWallet, onDone, onToast, pickWallet, signSubmitConfirm, verified, walletsReady],
   );
 
   // The mirror image: sell ONE open REAL lot in full. Same three beats as a buy — build, sign, book —

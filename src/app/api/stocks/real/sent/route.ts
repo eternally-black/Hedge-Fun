@@ -4,8 +4,10 @@ import { rateLimit } from "@/lib/ratelimit";
 import { markSent, AttemptNotFoundError, TxRejectedError } from "@/lib/stocks-real";
 import type { StockRealSentRequest, StockRealSentResponse } from "@/lib/api-types";
 
-// Stamp the signature on the attempt as soon as the wallet has sent it, so the poller can recover a
-// buy whose tab died before /confirm.
+// Stamp the signature on a SELF-PAID attempt as soon as the wallet has sent it, so the poller can
+// recover a buy whose tab died before /confirm. A fee-sponsored attempt is refused (409
+// not_self_paid): its signature is the server's own and /real/submit stamps it before the send —
+// a client-supplied one could only ever bind some OTHER transaction to the attempt.
 export async function POST(req: Request) {
   const user = await authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });

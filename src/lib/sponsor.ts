@@ -143,13 +143,15 @@ export function patchCleanupDestination(ix: JupIx | null, sponsorFundedAccounts:
 // The token accounts the setup instructions will CREATE for the user in this transaction (the ATA
 // program's create-idempotent: [payer, ata, owner, mint, ...]). One balance read per setup mint —
 // an account that already exists costs the sponsor nothing and must keep its rent with the user.
-async function sponsorFundedAtas(setup: JupIx[], owner: string): Promise<Set<string>> {
-  const out = new Set<string>();
+// The mint travels with the account because the caller RECORDS this provenance (SponsorFundedAccount):
+// a later sell has only (payer, mint) to find the row by.
+async function sponsorFundedAtas(setup: JupIx[], owner: string): Promise<{ account: string; mint: string }[]> {
+  const out: { account: string; mint: string }[] = [];
   for (const ix of setup) {
     if (ix.programId !== ATA_PROGRAM || ix.accounts.length < 4) continue;
-    const ata = ix.accounts[1].pubkey;
+    const account = ix.accounts[1].pubkey;
     const mint = ix.accounts[3].pubkey;
-    if ((await getTokenAccounts(owner, mint)).length === 0) out.add(ata);
+    if ((await getTokenAccounts(owner, mint)).length === 0) out.push({ account, mint });
   }
   return out;
 }
@@ -193,12 +195,19 @@ function toKitIx(ix: JupIx): Instruction {
 
 // Assemble ONE unsigned v0 transaction: compute budget, setup (rent on us), the swap, any extra
 // instruction the caller needs inside the same atomic tx (the SELL close-account), cleanup, other.
-// Returns the wire tx for the wallet to sign and the hash that authorises our co-signature.
+// Returns the wire tx for the wallet to sign, the hash that authorises our co-signature, and the
+// accounts whose rent this transaction puts on the sponsor (the caller records that provenance —
+// only the account itself knows who fronted it, never the lot that happens to land in it).
 export async function buildSponsoredSwapTx(p: {
   quoteResponse: unknown;
   userPublicKey: string;
   extraInstructions?: JupIx[];
-}): Promise<{ swapTransaction: string; messageHash: string; lastValidBlockHeight: number }> {
+}): Promise<{
+  swapTransaction: string;
+  messageHash: string;
+  lastValidBlockHeight: number;
+  fundedAccounts: { account: string; mint: string }[];
+}> {
   const sponsor = sponsorAddress();
   if (!sponsor) throw new SponsorUnavailableError();
 
@@ -209,7 +218,7 @@ export async function buildSponsoredSwapTx(p: {
   });
 
   const funded = await sponsorFundedAtas(ix.setupInstructions, p.userPublicKey);
-  const cleanup = patchCleanupDestination(ix.cleanupInstruction, funded, sponsor);
+  const cleanup = patchCleanupDestination(ix.cleanupInstruction, new Set(funded.map((f) => f.account)), sponsor);
   const ordered: JupIx[] = [
     ...ix.computeBudgetInstructions,
     ...patchAtaPayer(ix.setupInstructions, sponsor),
@@ -255,6 +264,7 @@ export async function buildSponsoredSwapTx(p: {
     // Hash the ENCODED-then-decoded message, so what we store is exactly what a client will hash.
     messageHash: messageHashOf(wire),
     lastValidBlockHeight,
+    fundedAccounts: funded,
   };
 }
 

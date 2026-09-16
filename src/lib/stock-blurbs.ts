@@ -12,8 +12,10 @@
 
 import type { PrismaClient } from "@prisma/client";
 import { extractText, deepseekThinkingOff } from "./hedge/nlu";
+import { deadlineLeftMs, boundedTimeoutMs } from "./deadline";
 
 const BLURB_TIMEOUT_MS = 30_000; // a 20-item batch generates ~200 tokens; well past the NLU edge's 5s
+const BLURB_MIN_LEFT_MS = 5_000; // less budget than this left -> do not start another batch
 const API_BASE = process.env.NLU_API_BASE || "https://openrouter.ai/api/v1";
 const MODEL = process.env.NLU_MODEL || "deepseek/deepseek-v4";
 
@@ -35,12 +37,22 @@ const SYSTEM_PROMPT =
   "words. No hype, no tickers, no 'xStock', no trailing period. If unsure, describe the sector " +
   "only. Output only the JSON object.";
 
+// Catalog text is UNTRUSTED: it comes from the xStocks feed, and a name nobody bounded would become
+// a prompt nobody bounded (a megabyte of "name" is a megabyte of tokens, and control characters can
+// forge lines of their own). Clamp every field to what a real one needs and flatten it to one line.
+const clamp = (v: string | null | undefined, max: number): string =>
+  (v ?? "")
+    .replace(/\p{C}/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max);
+
 // One system+user prompt for the whole batch. STRICT JSON keyed by the symbol we asked for, so a
 // reordered or partial answer still maps back to the right asset.
 export function blurbPrompt(items: BlurbItem[]): string {
   const lines = items.map((i) => {
-    const isin = i.isin && i.isin.trim() ? `, ISIN ${i.isin.trim()}` : "";
-    return `- ${i.symbol}: ${i.name} (underlying ticker ${i.underlying}${isin})`;
+    const isin = clamp(i.isin, 16) ? `, ISIN ${clamp(i.isin, 16)}` : "";
+    return `- ${clamp(i.symbol, 16)}: ${clamp(i.name, 80)} (underlying ticker ${clamp(i.underlying, 12)}${isin})`;
   });
   return (
     `${SYSTEM_PROMPT}\n\n` +
@@ -127,6 +139,10 @@ export async function fillMissingBlurbs(
   });
   let written = 0;
   for (let i = 0; i < rows.length; i += batchSize) {
+    // Batches run one after another, each with its own 30 s timeout — two slow ones outlive the
+    // poller tick that asked for them. Stop while there is still time for the caller to finish.
+    const left = deadlineLeftMs();
+    if (left !== undefined && left < BLURB_MIN_LEFT_MS) break;
     const batch = rows.slice(i, i + batchSize);
     const blurbs = await generateBlurbs(batch, key);
     for (const r of batch) {
@@ -144,7 +160,7 @@ export async function fillMissingBlurbs(
 // empty map — the caller then writes nothing for this batch and the next tick retries it.
 async function generateBlurbs(items: BlurbItem[], key: string): Promise<Record<string, string>> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), BLURB_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), boundedTimeoutMs(BLURB_TIMEOUT_MS));
   try {
     const res = await fetch(`${API_BASE}/chat/completions`, {
       method: "POST",

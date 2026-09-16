@@ -1049,8 +1049,12 @@ model StockBuyAttempt {
   unsignedTx           String?
   // BUY: the sponsor paid the rent of the token account this swap created (the wallet held none for
   // the mint). Only then does the SELL that empties it send the rent back to the sponsor — a user
-  // who funded their own account keeps it.
+  // who funded their own account keeps it. Provenance per ACCOUNT lives in SponsorFundedAccount;
+  // this flag is kept for display (which lot's buy opened the account).
   rentFromSponsor      Boolean            @default(false)
+  // SELL: this transaction closes the emptied token account, so the confirm knows a rent refund
+  // happened and can retire the SponsorFundedAccount row.
+  closeAta             Boolean            @default(false)
   lastValidBlockHeight BigInt
   hedgeSuggestionId    String?
   status               StockAttemptStatus @default(PENDING)
@@ -1061,6 +1065,26 @@ model StockBuyAttempt {
   @@index([status, createdAt])
   @@index([userId, createdAt])
   @@map("stock_buy_attempts")
+}
+
+// WHO fronted a token ACCOUNT's rent — the question StockPosition.rentFromSponsor cannot answer,
+// because rent belongs to the account and lots share one: buy A opens the account (on the sponsor),
+// buy B lands in the same account (free), and the sell that finally empties it may well be B's. One
+// row per sponsor-funded account, written when the swap that creates it is BUILT, confirmed when
+// that swap lands, closed when a sell returns the rent. Deleted when the funding attempt dies
+// (EXPIRED/FAILED): no swap, no account, no rent.
+model SponsorFundedAccount {
+  account     String    @id // the token account (ATA) the sponsor's rent opened
+  userId      String
+  payer       String // the wallet that owns the account
+  mint        String
+  attemptId   String? // the StockBuyAttempt whose build funded it
+  fundedAt    DateTime  @default(now())
+  confirmedAt DateTime? // the funding swap landed — the rent was really spent
+  closedAt    DateTime? // a sell closed the account and the rent came back
+
+  @@index([payer, mint])
+  @@map("sponsor_funded_accounts")
 }
 
 // What the user told us about a life cost (category + amount + period + distance) — no raw text

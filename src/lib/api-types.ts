@@ -632,14 +632,19 @@ export interface StockRealSubmitResponse { sig: string }
 // the lot, the empty token account is closed in the same tx (rent back to whoever fronted it). Same
 // sign + /real/submit + /real/confirm loop as a buy. A retry while the first sell of this lot is
 // still in flight RETURNS THAT SAME attemptId and the same swapTransaction — re-signing and
-// re-submitting it is safe (same signature), and two sells of one lot are never built.
+// re-submitting it is safe (same signature), and two sells of one lot are never built. A sell that
+// was already SENT is resolved against the chain first: if it landed, this answers 409 lot_closed
+// (the lot is sold — re-read the portfolio) rather than building a second sale of the same tokens.
 // Errors: 400, 403 stock_consent_required |
 // wallet_not_verified, 404 position_not_found, 409 lot_closed | lot_moved | price_impact |
 // sponsor_unavailable, 502 swap_unavailable | rpc_unavailable.
 export interface StockRealSellTxRequest { positionId: string }
 export interface StockRealSellTxResponse { attemptId: string; swapTransaction: string; lastValidBlockHeight: number; payer: string; feePayer: string; quote: { inAmountBase: string; outAmountMicro: string; minOutMicro: string; priceImpactBp: number } }
-// ─── POST /api/stocks/real/sent ────  Auth: Bearer. Stamps the signature on the attempt as soon as
-// the wallet has sent it, so the poller can recover a buy whose tab died before /confirm.
+// ─── POST /api/stocks/real/sent ────  Auth: Bearer. SELF-PAID ONLY (feePayer was null): stamps the
+// signature on the attempt as soon as the wallet has sent it, so the poller can recover a buy whose
+// tab died before /confirm. A fee-sponsored attempt is refused — its signature is the server's own,
+// stamped by /real/submit before the send. Errors: 400 bad_sig, 404 attempt_not_found,
+// 409 not_self_paid (use /real/submit) | not_this_buy (already stamped with another signature).
 export interface StockRealSentRequest { attemptId: string; sig: string }
 export type StockRealSentResponse = { ok: true };
 // ─── POST /api/stocks/real/confirm ────  Auth: Bearer. Reads the landed tx from the chain and books

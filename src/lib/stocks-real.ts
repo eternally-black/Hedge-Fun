@@ -16,7 +16,7 @@
 
 import { createHash } from "node:crypto";
 import { isAddress } from "@solana/kit";
-import type { Prisma } from "@prisma/client";
+import type { Prisma, StockBuyAttempt } from "@prisma/client";
 import { prisma } from "./prisma";
 import { captureToGlitchTip } from "./glitchtip";
 import {
@@ -125,17 +125,62 @@ export async function recordStockConsent(userId: string, version: number): Promi
 // per-user advisory lock serialises a single user's concurrent builds and is released when the
 // transaction ends; two DIFFERENT users never wait on each other. Every attempt row — BUY, SELL,
 // sponsored or not — is created here so the quota can never be bypassed by a new call site.
-async function createAttempt(data: Prisma.StockBuyAttemptUncheckedCreateInput) {
+//
+// `reserve` runs INSIDE that same transaction, under the same lock, before the count: the caller's
+// reserve-or-reuse decision. A row it returns is re-served and nothing is created — which is how
+// "one live SELL per lot" survives two concurrent builds (each of which sees no pending sell of its
+// own accord, and would otherwise both insert one).
+async function createAttempt(
+  data: Prisma.StockBuyAttemptUncheckedCreateInput,
+  reserve?: (tx: Prisma.TransactionClient) => Promise<StockBuyAttempt | null>,
+): Promise<{ attempt: StockBuyAttempt; reserved: boolean }> {
   return prisma.$transaction(async (tx) => {
-    if (data.sponsored) {
+    if (data.sponsored || reserve) {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${data.userId}))`;
+    }
+    if (reserve) {
+      const existing = await reserve(tx);
+      if (existing) return { attempt: existing, reserved: true };
+    }
+    if (data.sponsored) {
       const used = await tx.stockBuyAttempt.count({
         where: { userId: data.userId, sponsored: true, createdAt: { gte: new Date(Date.now() - 24 * 3_600_000) } },
       });
       if (used >= STOCK_SPONSOR_MAX_PER_USER_PER_DAY) throw new SponsorLimitError();
     }
-    return tx.stockBuyAttempt.create({ data });
+    return { attempt: await tx.stockBuyAttempt.create({ data }), reserved: false };
   });
+}
+
+// One row per token account this sponsored build puts the sponsor's rent behind (F4: rent belongs to
+// the ACCOUNT, not to the lot that lands in it). Written at BUILD time — the only moment we know the
+// account did not exist — and retired again if the attempt never lands.
+async function recordSponsorFunding(
+  attempt: { id: string; userId: string; payer: string },
+  funded: { account: string; mint: string }[],
+): Promise<void> {
+  for (const f of funded) {
+    await prisma.sponsorFundedAccount.upsert({
+      where: { account: f.account },
+      create: { account: f.account, userId: attempt.userId, payer: attempt.payer, mint: f.mint, attemptId: attempt.id },
+      // A row can only be here for an account the chain no longer has (it was closed, or its funding
+      // attempt is still pending): this build is opening it again, so the provenance starts over.
+      update: {
+        userId: attempt.userId,
+        payer: attempt.payer,
+        mint: f.mint,
+        attemptId: attempt.id,
+        fundedAt: new Date(),
+        confirmedAt: null,
+        closedAt: null,
+      },
+    });
+  }
+}
+
+// An attempt that died (EXPIRED/FAILED) never created its accounts: no swap, no rent, no row.
+async function dropUnconfirmedFunding(attemptId: string, db: Prisma.TransactionClient = prisma): Promise<void> {
+  await db.sponsorFundedAccount.deleteMany({ where: { attemptId, confirmedAt: null } });
 }
 
 export async function buildAttempt(
@@ -212,9 +257,10 @@ export async function buildAttempt(
     : await buildSwapTx(quote.raw, p.payer).then((t) => ({
         ...t,
         messageHash: createHash("sha256").update(t.swapTransaction).digest("hex"),
+        fundedAccounts: [] as { account: string; mint: string }[], // self-paid: the wallet fronts its own rent
       }));
 
-  const attempt = await createAttempt({
+  const { attempt } = await createAttempt({
     userId: user.id,
     assetId: asset.id,
     payer: p.payer,
@@ -228,6 +274,7 @@ export async function buildAttempt(
     lastValidBlockHeight: BigInt(tx.lastValidBlockHeight),
     hedgeSuggestionId: p.hedgeSuggestionId ?? null,
   });
+  await recordSponsorFunding(attempt, tx.fundedAccounts);
 
   return {
     attemptId: attempt.id,
@@ -245,6 +292,34 @@ export async function buildAttempt(
 }
 
 // ─── build (SELL) ───────────────────────────────────────────────────────────────────────────────────
+
+// The newest PENDING sell of one lot — bytes or not. The reserve-or-expire decision reads it twice:
+// once cheaply (before a quote is spent) and once under the per-user lock, which is the one that counts.
+function pendingSell(db: Prisma.TransactionClient, userId: string, positionId: string) {
+  return db.stockBuyAttempt.findFirst({
+    where: { userId, positionId, kind: "SELL", status: "PENDING" },
+    orderBy: { createdAt: "desc" },
+  });
+}
+
+// Re-serving an attempt hands back exactly what the user already signed for: the amount in and the
+// MINIMUM out. The mid quote is not persisted, so the minimum stands in for it — a retry never
+// advertises more than the first build already guaranteed.
+function reservedSell(a: StockBuyAttempt, payer: string): StockRealSellTxResponse {
+  return {
+    attemptId: a.id,
+    swapTransaction: a.unsignedTx!,
+    lastValidBlockHeight: Number(a.lastValidBlockHeight),
+    payer,
+    feePayer: sponsorAddress()!,
+    quote: {
+      inAmountBase: String(a.inAmountMicro),
+      outAmountMicro: String(a.minOutBase),
+      minOutMicro: String(a.minOutBase),
+      priceImpactBp: 0,
+    },
+  };
+}
 
 // Sell ONE open REAL lot in full: ExactIn the lot's own qtyBase, xStock -> USDC, fee-sponsored. There
 // is no self-paid fallback — a wallet that bought through the sponsor has no SOL to pay with, so no
@@ -271,38 +346,45 @@ export async function buildSellAttempt(
 
   if (!sponsorConfigured()) throw new SponsorUnavailableError();
 
+  // A stamped pending sell may have LANDED with its confirm interrupted. Expiring it on block
+  // height alone books a SECOND sale of a lot that is already sold (and the first one then answers
+  // attempt_expired for a sale that took the user's tokens), so ask the chain first — one poll, no
+  // sleep. Outside the lock: this is RPC, and a receipt that matches closes the lot right here.
+  const stamped = await prisma.stockBuyAttempt.findFirst({
+    where: { userId: user.id, positionId: lot.id, kind: "SELL", status: "PENDING", sig: { not: null } },
+    orderBy: { createdAt: "desc" },
+  });
+  // One height read for both the pre-check and the locked decision below (it only moves forward, and
+  // an RPC call inside the transaction would hold this user's lock over the network).
+  const height = await getBlockHeight();
+  let terminalId: string | null = null; // a pending sell the locked step must retire
+  if (stamped?.sig) {
+    let landed = false;
+    try {
+      await confirmAttempt(user.id, stamped.id, stamped.sig, { polls: 1, sleepMs: 0 });
+      landed = true;
+    } catch (e) {
+      if (e instanceof TxNotFoundError) {
+        // Not on chain. Past its block height it never will be -> retire it; otherwise it may still
+        // land, and re-serving keeps the user on the ONE transaction that can.
+        if (height > Number(stamped.lastValidBlockHeight)) terminalId = stamped.id;
+      } else if (e instanceof TxRejectedError) {
+        // tx_failed (confirmSell already marked it FAILED) or not_this_buy: the signature is spent
+        // either way, so this attempt can never settle the lot and a fresh sale is allowed.
+        terminalId = stamped.id;
+      } else throw e;
+    }
+    if (landed) throw new StockUnavailableError("lot_closed");
+  }
+
   // A sell already in flight for this lot is RE-SERVED, never rebuilt: two live sell transactions
   // for one lot would both leave the wallet, but only the first can be booked against the lot — the
   // second would quietly sell ANOTHER lot of the same mint and could never be settled. The same
-  // bytes carry the same signature, so a retry is idempotent on chain. Past its block height the
-  // attempt can never land: expire it and build a fresh one.
-  const pending = await prisma.stockBuyAttempt.findFirst({
-    where: { userId: user.id, positionId: lot.id, kind: "SELL", status: "PENDING", unsignedTx: { not: null } },
-    orderBy: { createdAt: "desc" },
-  });
-  if (pending) {
-    if ((await getBlockHeight()) <= Number(pending.lastValidBlockHeight)) {
-      return {
-        attemptId: pending.id,
-        swapTransaction: pending.unsignedTx!,
-        lastValidBlockHeight: Number(pending.lastValidBlockHeight),
-        payer,
-        feePayer: sponsorAddress()!,
-        // Re-served from the attempt row, which holds exactly what the user signed: the amount in
-        // and the MINIMUM out. The mid quote is not persisted, so the minimum stands in for it — a
-        // retry never advertises more than the first build already guaranteed.
-        quote: {
-          inAmountBase: String(pending.inAmountMicro),
-          outAmountMicro: String(pending.minOutBase),
-          minOutMicro: String(pending.minOutBase),
-          priceImpactBp: 0,
-        },
-      };
-    }
-    await prisma.stockBuyAttempt.updateMany({
-      where: { id: pending.id, status: "PENDING" },
-      data: { status: "EXPIRED", resolvedAt: new Date() },
-    });
+  // bytes carry the same signature, so a retry is idempotent on chain. This read is the cheap path
+  // (it skips a quote and a build); the decision that counts is the locked one below.
+  const pending = await pendingSell(prisma, user.id, lot.id);
+  if (pending && pending.id !== terminalId && pending.unsignedTx && height <= Number(pending.lastValidBlockHeight)) {
+    return reservedSell(pending, payer);
   }
 
   // The wallet must still hold the lot. If it does not, the user moved or sold it elsewhere: close
@@ -329,14 +411,22 @@ export async function buildSellAttempt(
   // account; a user who funded their own keeps it). Only when exactly one account holds exactly the
   // lot — anything else and we do not know what else lives in there.
   const extraInstructions: JupIx[] = [];
+  let closeAta = false;
   if (held === lot.qtyBase && accounts.length === 1 && accounts[0].pubkey) {
     const mintAcc = await getAccountInfoBase64(lot.asset.mint);
     if (mintAcc) {
+      // Provenance is per ACCOUNT, not per lot: the account may have been opened by an OLDER buy,
+      // and this lot's own rentFromSponsor would then hand the sponsor's rent to the user.
+      const funded = await prisma.sponsorFundedAccount.findFirst({
+        where: { account: accounts[0].pubkey, confirmedAt: { not: null }, closedAt: null },
+        select: { account: true },
+      });
+      closeAta = true;
       extraInstructions.push(
         closeAccountIx({
           tokenProgram: mintAcc.owner, // Token or Token-2022 — CloseAccount is the same opcode in both
           account: accounts[0].pubkey,
-          destination: lot.rentFromSponsor ? sponsorAddress()! : payer,
+          destination: funded ? sponsorAddress()! : payer,
           owner: payer,
         }),
       );
@@ -345,20 +435,41 @@ export async function buildSellAttempt(
 
   const tx = await buildSponsoredSwapTx({ quoteResponse: quote.raw, userPublicKey: payer, extraInstructions });
 
-  const attempt = await createAttempt({
-    userId: user.id,
-    assetId: lot.assetId,
-    payer,
-    kind: "SELL",
-    positionId: lot.id,
-    sponsored: true,
-    stakeCents: lot.costCents, // what the lot cost — the basis the P&L is measured against
-    inAmountMicro: lot.qtyBase, // SELL: RAW xStock in (see the schema comment)
-    minOutBase: quote.minOutBase, // SELL: MINIMUM USDC micro out
-    msgHash: tx.messageHash,
-    unsignedTx: tx.swapTransaction, // a retry re-serves THESE bytes (see the in-flight branch above)
-    lastValidBlockHeight: BigInt(tx.lastValidBlockHeight),
-  });
+  const { attempt, reserved } = await createAttempt(
+    {
+      userId: user.id,
+      assetId: lot.assetId,
+      payer,
+      kind: "SELL",
+      positionId: lot.id,
+      sponsored: true,
+      stakeCents: lot.costCents, // what the lot cost — the basis the P&L is measured against
+      inAmountMicro: lot.qtyBase, // SELL: RAW xStock in (see the schema comment)
+      minOutBase: quote.minOutBase, // SELL: MINIMUM USDC micro out
+      msgHash: tx.messageHash,
+      unsignedTx: tx.swapTransaction, // a retry re-serves THESE bytes (see the in-flight branch above)
+      closeAta, // the confirm retires the account's funding row off this
+      lastValidBlockHeight: BigInt(tx.lastValidBlockHeight),
+    },
+    // The decision that counts, under this user's advisory lock: whatever the cheap read above saw,
+    // a concurrent build may have inserted its own sell in the meantime. Re-serve it rather than add
+    // a second live sale of one lot.
+    async (db) => {
+      const live = await pendingSell(db, user.id, lot.id);
+      if (!live) return null;
+      if (live.id !== terminalId && live.unsignedTx && height <= Number(live.lastValidBlockHeight)) return live;
+      // Past its block height, resolved as terminal above, or a legacy row with no bytes to
+      // re-serve: it can never settle this lot. Conditional — a confirm may have won the race.
+      await db.stockBuyAttempt.updateMany({
+        where: { id: live.id, status: "PENDING" },
+        data: { status: "EXPIRED", resolvedAt: new Date() },
+      });
+      await dropUnconfirmedFunding(live.id, db);
+      return null;
+    },
+  );
+  if (reserved) return reservedSell(attempt, payer);
+  await recordSponsorFunding(attempt, tx.fundedAccounts);
 
   return {
     attemptId: attempt.id,
@@ -412,14 +523,17 @@ export async function submitSigned(userId: string, attemptId: string, signedTran
   // Stamp BEFORE the send. The signature is already decided (it is the fee payer's), and a send that
   // times out after the broadcast would otherwise leave a swap on chain that no row points at: the
   // client would retry and buy twice. A stamped PENDING attempt is exactly what the sweep recovers.
-  await markSent(userId, attemptId, sig);
+  await stampSig(userId, attemptId, sig);
   await sendRawTransaction(wire);
   return sig;
 }
 
 // ─── sent ───────────────────────────────────────────────────────────────────────────────────────────
 
-export async function markSent(userId: string, attemptId: string, sig: string): Promise<void> {
+// INTERNAL: bind a signature to an attempt. The only caller that may do this for a SPONSORED attempt
+// is submitSigned, because there the signature is the server's OWN (the fee payer's, computed from
+// the bytes it is about to send) — never a value that came from a client.
+async function stampSig(userId: string, attemptId: string, sig: string): Promise<void> {
   const attempt = await prisma.stockBuyAttempt.findUnique({ where: { id: attemptId } });
   if (!attempt || attempt.userId !== userId) throw new AttemptNotFoundError();
   if (!sigBytesValid(sig)) throw new RangeError("bad_sig");
@@ -428,6 +542,20 @@ export async function markSent(userId: string, attemptId: string, sig: string): 
   } else if (attempt.sig !== sig) {
     throw new TxRejectedError("not_this_buy");
   }
+}
+
+// PUBLIC (POST /api/stocks/real/sent): the wallet SENT a self-paid transaction itself and reports
+// its signature, so the sweep can recover a buy whose tab died before /confirm.
+//
+// A sponsored attempt is refused outright: its signature belongs to us. Accepting a client-sent one
+// would let anyone stamp an arbitrary landed transaction onto an unsent sponsored attempt — and the
+// sweep, which trusts a stamped signature, would then confirm it against that receipt. -> 409.
+export async function markSent(userId: string, attemptId: string, sig: string): Promise<void> {
+  const attempt = await prisma.stockBuyAttempt.findUnique({ where: { id: attemptId } });
+  if (!attempt || attempt.userId !== userId) throw new AttemptNotFoundError();
+  if (!sigBytesValid(sig)) throw new RangeError("bad_sig");
+  if (attempt.sponsored) throw new TxRejectedError("not_self_paid");
+  await stampSig(userId, attemptId, sig);
 }
 
 // ─── confirm ────────────────────────────────────────────────────────────────────────────────────────
@@ -461,6 +589,12 @@ export async function confirmAttempt(
   if (!attempt || attempt.userId !== userId) throw new AttemptNotFoundError();
   if (!sigBytesValid(sig)) throw new RangeError("bad_sig");
 
+  // A receipt only ever speaks for the attempt it belongs to. Sponsored: the server stamped the
+  // signature itself before sending (submitSigned), so ANY other signature is a different
+  // transaction — refuse it BEFORE the kind dispatch, or a SELL could be confirmed (or marked
+  // FAILED) off any transaction its payer happens to have signed.
+  if (attempt.sponsored && attempt.sig !== sig) throw new TxRejectedError("not_this_buy");
+
   if (attempt.kind === "SELL") return confirmSell(attempt, sig, polls, sleepMs);
 
   // Already CONFIRMED: return the existing lot iff it is THIS signature.
@@ -483,11 +617,6 @@ export async function confirmAttempt(
     throw new TxRejectedError("not_this_buy");
   }
 
-  // A receipt only ever speaks for the attempt it belongs to. Sponsored: the server stamped the
-  // signature itself before sending (submitSigned), so ANY other signature is a different
-  // transaction — refuse it here, before a single row is touched.
-  if (attempt.sponsored && attempt.sig !== sig) throw new TxRejectedError("not_this_buy");
-
   const tx = await landedTx(sig, polls, sleepMs);
 
   // A failed tx books nothing and marks the attempt FAILED.
@@ -499,6 +628,7 @@ export async function confirmAttempt(
       where: { id: attemptId },
       data: { status: "FAILED", sig, resolvedAt: new Date() },
     });
+    await dropUnconfirmedFunding(attemptId); // a failed swap created no token account
     void captureToGlitchTip(new Error("stock buy attempt FAILED on chain"), { subsystem: "stocks", attemptId, userId, sig });
     throw new TxRejectedError("tx_failed");
   }
@@ -549,6 +679,9 @@ export async function confirmAttempt(
         where: { id: attemptId },
         data: { status: "CONFIRMED", sig, resolvedAt: now },
       });
+      // The swap landed, so the accounts this attempt funded really exist and the sponsor really
+      // paid their rent: from here the sell that empties one owes the refund to the sponsor.
+      await db.sponsorFundedAccount.updateMany({ where: { attemptId, confirmedAt: null }, data: { confirmedAt: now } });
       return { positionId: lot.id, qtyBase: String(lot.qtyBase), costCents: lot.costCents, alreadyConfirmed: false, kind: "BUY" };
     });
 
@@ -613,6 +746,10 @@ async function confirmSell(
   const positionId = attempt.positionId;
   if (!positionId) throw new TxRejectedError("not_this_buy"); // a SELL attempt with no lot is corrupt
 
+  // The receipt binding again, before ANY mutation: a sponsored sell can only ever be the signature
+  // the server sent. confirmAttempt checks this too — this is the guard for any future caller.
+  if (attempt.sponsored && attempt.sig !== sig) throw new TxRejectedError("not_this_buy");
+
   // Idempotent by signature: the lot carries the sell that closed it.
   const prior = await prisma.stockPosition.findUnique({ where: { sellTxSig: sig } });
   if (prior) {
@@ -633,6 +770,7 @@ async function confirmSell(
       where: { id: attempt.id },
       data: { status: "FAILED", sig, resolvedAt: new Date() },
     });
+    await dropUnconfirmedFunding(attempt.id);
     void captureToGlitchTip(new Error("stock sell attempt FAILED on chain"), {
       subsystem: "stocks",
       attemptId: attempt.id,
@@ -659,6 +797,10 @@ async function confirmSell(
 
   try {
     return await prisma.$transaction(async (db) => {
+      // The same per-user lock the reconciler takes: closing this lot and deciding which lots the
+      // wallet still backs are ONE decision. Without it the reconciler can read balances, this
+      // confirm can close lot A, and the reconciler then closes lot B off a set that no longer holds.
+      await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${userId}))`;
       const lot = await db.stockPosition.findUnique({ where: { id: positionId } });
       if (!lot || lot.userId !== userId) throw new TxRejectedError("not_this_buy");
       const pnlCents = proceedsCents - lot.costCents;
@@ -685,6 +827,15 @@ async function confirmSell(
           });
           return sellResponse(fresh, delta.qtyBase, true);
         }
+      }
+      // This tx carried the close-account instruction: the account is gone and its rent is back with
+      // whoever fronted it, so its funding row retires with it. (payer+mint identifies the account —
+      // a wallet holds at most one open sponsor-funded account per mint.)
+      if (attempt.closeAta) {
+        await db.sponsorFundedAccount.updateMany({
+          where: { payer: attempt.payer, mint: attempt.asset.mint, closedAt: null },
+          data: { closedAt: now },
+        });
       }
       await db.stockBuyAttempt.update({
         where: { id: attempt.id },
@@ -747,6 +898,27 @@ export async function sweepAttempts(
       data: { status: "EXPIRED", resolvedAt: now },
     });
     if (res.count === 1) expired++;
+    await dropUnconfirmedFunding(id);
+  };
+
+  // A STAMPED attempt whose receipt can never be booked (it is not this attempt's transaction, or it
+  // landed with an error) is finished: leaving it PENDING keeps it in the oldest-50 window for ever
+  // and starves every later attempt of a slot. Conditional, and loud — a signed transaction that
+  // resolved to nothing is a real user's real USDC.
+  const fail = async (id: string, code: string): Promise<void> => {
+    const res = await prisma.stockBuyAttempt.updateMany({
+      where: { id, status: "PENDING" },
+      data: { status: "FAILED", resolvedAt: now },
+    });
+    if (res.count === 1) {
+      failed++;
+      void captureToGlitchTip(new Error(`stock attempt stuck on ${code} — FAILED by the sweep`), {
+        subsystem: "stocks",
+        attemptId: id,
+        code,
+      });
+    }
+    await dropUnconfirmedFunding(id);
   };
 
   for (const attempt of attempts) {
@@ -789,8 +961,14 @@ export async function sweepAttempts(
         continue;
       }
       if (e instanceof TxRejectedError) {
-        if (e.message === "tx_failed") failed++;
-        // other TxRejectedError -> skip (keep PENDING; a later sweep may still match)
+        if (e.message === "tx_failed") {
+          failed++; // confirmAttempt already marked the row FAILED off the landed error
+          await dropUnconfirmedFunding(attempt.id);
+        } else if (attempt.sig && e.message === "not_this_buy") {
+          // The stamped signature landed as something else: this attempt is spent (see fail()).
+          await fail(attempt.id, e.message);
+        }
+        // anything else -> skip (keep PENDING; a later sweep may still match)
         continue;
       }
       console.warn(`sweepAttempts: attempt ${attempt.id} failed: ${(e as Error).message}`);
@@ -814,22 +992,7 @@ export async function reconcileRealLots(
   });
   if (lots.length === 0) return { closed: 0 };
 
-  // A sell in flight makes the balance a moving target: the tokens can already be gone while the lot
-  // they belong to is still open (its confirm is seconds away). Reconciling off that snapshot closes
-  // the WRONG lot — newest-first, i.e. one the wallet still backs — so every mint with a live sell
-  // is left entirely alone, walletCheckedAt included, until the sale resolves.
-  const selling = await prisma.stockBuyAttempt.findMany({
-    where: {
-      payer,
-      kind: "SELL",
-      status: "PENDING",
-      createdAt: { gte: new Date(now.getTime() - 2 * 3_600_000) },
-    },
-    select: { assetId: true },
-  });
-  const busy = new Set(selling.map((a) => a.assetId));
-
-  // Group by mint.
+  // Group by mint (one mint = one asset: StockAsset.mint is unique).
   const byMint = new Map<string, typeof lots>();
   for (const lot of lots) {
     const arr = byMint.get(lot.asset.mint) ?? [];
@@ -839,41 +1002,75 @@ export async function reconcileRealLots(
 
   let closed = 0;
   for (const [mint, group] of byMint) {
-    if (group.some((l) => busy.has(l.assetId))) continue;
+    const assetId = group[0].assetId;
+    // The balance read is RPC and stays OUTSIDE the transaction — holding this user's lock across a
+    // network call would block their own confirms.
     const bal = await getTokenBalanceRaw(payer, mint);
-    let need = 0n;
-    for (const lot of group) need += lot.qtyBase;
-    if (bal >= need) {
-      // All backed — stamp walletCheckedAt on the survivors.
-      await prisma.stockPosition.updateMany({
-        where: { id: { in: group.map((l) => l.id) }, closedAt: null },
-        data: { walletCheckedAt: now },
+    closed += await prisma.$transaction(async (db) => {
+      // Everything a confirmSell also takes, so the two cannot interleave: a sale landing between
+      // the balance read and this decision closes lot A, and closing "the rest" off the stale set
+      // would then close lot B — a lot the wallet still backs.
+      await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${userId}))`;
+
+      // A sell in flight makes the balance a moving target: the tokens can already be gone while the
+      // lot they belong to is still open (its confirm is seconds away). Every mint with a live sell
+      // is left entirely alone, walletCheckedAt included, until the sale resolves.
+      const selling = await db.stockBuyAttempt.count({
+        where: {
+          payer,
+          assetId,
+          kind: "SELL",
+          status: "PENDING",
+          createdAt: { gte: new Date(now.getTime() - 2 * 3_600_000) },
+        },
       });
-      continue;
-    }
-    // Close newest-first until the remaining sum fits under the live balance.
-    let remaining = need;
-    const toClose: string[] = [];
-    for (const lot of group) {
-      if (remaining <= bal) break;
-      toClose.push(lot.id);
-      remaining -= lot.qtyBase;
-    }
-    if (toClose.length > 0) {
-      const res = await prisma.stockPosition.updateMany({
-        where: { id: { in: toClose }, closedAt: null },
-        data: { closedAt: now, closeReason: "wallet" },
+      if (selling > 0) return 0;
+
+      // Re-read under the lock. If the open set moved since the balance was read, the balance no
+      // longer describes it — skip this mint and let the next pass decide on a consistent pair.
+      const fresh = await db.stockPosition.findMany({
+        where: { userId, payer, assetId, mode: "REAL", closedAt: null },
+        orderBy: { createdAt: "desc" },
       });
-      closed += res.count;
-    }
-    // Stamp the survivors.
-    const survivors = group.filter((l) => !toClose.includes(l.id)).map((l) => l.id);
-    if (survivors.length > 0) {
-      await prisma.stockPosition.updateMany({
-        where: { id: { in: survivors }, closedAt: null },
-        data: { walletCheckedAt: now },
-      });
-    }
+      const same = fresh.length === group.length && fresh.every((f) => group.some((g) => g.id === f.id));
+      if (!same) return 0;
+
+      let need = 0n;
+      for (const lot of fresh) need += lot.qtyBase;
+      if (bal >= need) {
+        // All backed — stamp walletCheckedAt on the survivors.
+        await db.stockPosition.updateMany({
+          where: { id: { in: fresh.map((l) => l.id) }, closedAt: null },
+          data: { walletCheckedAt: now },
+        });
+        return 0;
+      }
+      // Close newest-first until the remaining sum fits under the live balance.
+      let remaining = need;
+      const toClose: string[] = [];
+      for (const lot of fresh) {
+        if (remaining <= bal) break;
+        toClose.push(lot.id);
+        remaining -= lot.qtyBase;
+      }
+      let count = 0;
+      if (toClose.length > 0) {
+        const res = await db.stockPosition.updateMany({
+          where: { id: { in: toClose }, closedAt: null },
+          data: { closedAt: now, closeReason: "wallet" },
+        });
+        count = res.count;
+      }
+      // Stamp the survivors.
+      const survivors = fresh.filter((l) => !toClose.includes(l.id)).map((l) => l.id);
+      if (survivors.length > 0) {
+        await db.stockPosition.updateMany({
+          where: { id: { in: survivors }, closedAt: null },
+          data: { walletCheckedAt: now },
+        });
+      }
+      return count;
+    });
   }
 
   return { closed };
