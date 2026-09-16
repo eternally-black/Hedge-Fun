@@ -242,7 +242,7 @@ export const STOCK_ATTEMPT_SWEEP_AFTER_MS = 3 * 60_000; // a PENDING real buy ol
 // ─── Fee sponsorship (our own fee-payer; STOCK_SPONSOR_SECRET in env, base58 64-byte secret key) ──
 export const STOCK_SPONSOR_MAX_PER_USER_PER_DAY = 20; // sponsored attempts (buy + sell) per user per rolling 24 h
 export const STOCK_SPONSOR_MAX_PRIORITY_LAMPORTS = 100_000; // cap on the priority fee the sponsor pays per tx
-export const STOCK_SPONSOR_MIN_LAMPORTS = 50_000_000; // 0.05 SOL: below this the health probe is 503 and the poller pages
+export const STOCK_SPONSOR_MIN_LAMPORTS = 20_000_000; // 0.02 SOL ≈ 10 more new-mint buys of runway: below this the health probe is 503 and the poller pages
 export const STOCK_SPONSOR_LOW_ALERT_EVERY_MS = 3_600_000; // one "sponsor low" page per hour while it persists
 export const STOCK_HEALTH_MIN_DECK = 20; // /api/stocks/health is 503 below this many FRESH deck-eligible assets
 export const STOCK_HEALTH_STUCK_ATTEMPT_MS = 30 * 60_000; // a PENDING attempt older than this counts as stuck

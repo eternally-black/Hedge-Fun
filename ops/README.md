@@ -38,7 +38,7 @@ client-owned, cannot-be-automated setup. Two hosts: **VPS1** (the app,
    Jupiter price (dead poller, Jupiter outage, empty catalog) — the user-facing "empty stocks deck".
    The poller's own `[stocks]` / `[stock-attempts]` / `[stock-alerts]` blocks page through the
    existing 3-strike GlitchTip + Telegram path; a FAILED on-chain buy pages at once.
-   It ALSO goes 503 when the fee-payer wallet (`STOCK_SPONSOR_SECRET`) is below **0.05 SOL**
+   It ALSO goes 503 when the fee-payer wallet (`STOCK_SPONSOR_SECRET`) is below **0.02 SOL**
    (`sponsorOk:false`, `sponsorLamports` = the balance): we pay the network fees for every real
    buy/sell, so an empty sponsor fails them all with no other outside symptom. In parallel the
    poller's `[stock-sponsor]` block reads the balance every 5th tick and pages Telegram

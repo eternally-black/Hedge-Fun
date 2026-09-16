@@ -56,7 +56,7 @@ transaction matched the attempt the server had built.
   limitations text (thematic exposure ≠ hedge, XLEx is a basket, sizing is a product rule) lives there.
 - **Monitoring.** A public probe, `/api/stocks/health`, answers the two questions that kill the
   surface silently: is the deck still priced, and can we still pay for trades. It is 503 below 20
-  fresh deck assets or below 0.05 SOL in the fee-payer. The poller's `[stock-sponsor]` block reads
+  fresh deck assets or below 0.02 SOL in the fee-payer. The poller's `[stock-sponsor]` block reads
   the same balance every 5 minutes and pages Telegram once an hour while it is low.
 
 ## Verify it yourself
