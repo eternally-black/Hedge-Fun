@@ -5,13 +5,10 @@ import { type Me, usd } from "../ui";
 import { REAL_BALANCE_POLL_MS, STOCK_MIN_STAKE_CENTS } from "@/lib/config";
 import type { StockPortfolioResponse, StockPositionRow } from "@/lib/api-types";
 import { useBuyReal } from "../useBuyReal";
+import { useStockStake } from "../useStockStake";
 import { StockConsentSheet } from "./StockConsentSheet";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
-
-// What one "◎ Buy" tap on an open lot spends. The row has no stake chips (it is a lot you already
-// own, not a card you are sizing), so the amount is fixed here — and stated on the button.
-const REAL_BUY_CENTS = 1000;
 
 // The Portfolio (Stocklana): every tokenized-stock lot the user owns, paper and on-chain, in one
 // list. Open lots carry their live mark and a two-tap Sell (paper) or a Buy-on-Solana ghost button
@@ -36,6 +33,9 @@ export function PortfolioScreen({
   onOpenWallet: () => void;
 }) {
   const [data, setData] = useState<StockPortfolioResponse | null>(null);
+  // The row has no chips of its own (it is a lot you already own, not a card you are sizing), so it
+  // spends whatever the user last set on the deck — read-only here, and stated on the button.
+  const { stakeCents } = useStockStake();
   const [closedOpen, setClosedOpen] = useState(false);
   const [selling, setSelling] = useState<string | null>(null);
   // The armed key is `${row.id}:sell` or `${row.id}:buy` — ONE arm at a time across the screen, and
@@ -172,13 +172,13 @@ export function PortfolioScreen({
     [api, load, onRefreshMe, onToast],
   );
 
-  // What the "◎ Buy" button on a row will actually spend: the default buy, capped by what the
+  // What the "◎ Buy" button on a row will actually spend: the chosen stake, capped by what the
   // wallet holds so the label never promises more than it can pay. null = the wallet is under the
   // tradable minimum, and the button funds instead of buying.
   const buyCents =
     stocksUsdCents !== null && stocksUsdCents < STOCK_MIN_STAKE_CENTS
       ? null
-      : Math.min(REAL_BUY_CENTS, stocksUsdCents ?? REAL_BUY_CENTS);
+      : Math.min(stakeCents, stocksUsdCents ?? stakeCents);
 
   const open = data?.open ?? [];
   const closed = data?.closed ?? [];
@@ -250,7 +250,7 @@ export function PortfolioScreen({
                       disarm();
                       void real.buyReal(
                         { assetId: row.assetId, symbol: row.symbol },
-                        buyCents ?? REAL_BUY_CENTS,
+                        buyCents ?? stakeCents,
                         { wallets: data?.wallets ?? [], stockConsent: data?.stockConsent ?? false, sponsored: data?.sponsored },
                       );
                     }}

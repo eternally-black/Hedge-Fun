@@ -4,8 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { StockDeckCard, StockCardPreview } from "../StockCard";
 import { StockConsentSheet } from "./StockConsentSheet";
 import { useBuyReal } from "../useBuyReal";
+import { useStockStake } from "../useStockStake";
 import { type Me } from "../ui";
-import { STOCK_STAKE_PRESETS_CENTS } from "@/lib/config";
 import type { StockDeckCard as StockDeckCardType, StockDeckResponse } from "@/lib/api-types";
 import type { SwipeAction } from "../DeckCard";
 
@@ -68,7 +68,9 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksU
   onOpenWallet: () => void;
 }) {
   const [cards, setCards] = useState<StockDeckCardType[]>([]);
-  const [stakeCents, setStakeCents] = useState<number>(STOCK_STAKE_PRESETS_CENTS[0]);
+  // Not local state: the amount the user picked here is the amount the portfolio's Buy button spends
+  // too, and it outlives the mount (the deck unmounts every time they look at anything else).
+  const { stakeCents, setStakeCents } = useStockStake();
   const [wallets, setWallets] = useState<string[]>([]);
   const [stockConsent, setStockConsent] = useState(false);
   // The server holds a fee-payer: real buys are gasless, so the footer can promise it.

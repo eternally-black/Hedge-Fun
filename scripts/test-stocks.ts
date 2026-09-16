@@ -35,6 +35,7 @@ import {
   shouldDropPending,
   STOCK_PENDING_TTL_MS,
 } from "../src/lib/stock-pending";
+import { clampStakeCents } from "../src/app/useStockStake";
 
 // ─── xstockToAsset: Solana deployment selection, defaults, null trading ─────────────────────────────
 {
@@ -558,6 +559,21 @@ async function sponsorChecks() {
   assert.strictEqual(shouldDropPending(500), false, "server error");
   assert.strictEqual(shouldDropPending(502), false, "RPC busy");
   assert.strictEqual(shouldDropPending(undefined), false, "the network dropped — no status at all");
+}
+
+// ─── clampStakeCents: what the custom stake chip accepts ─────────────────────────────────────
+// The chip hands it raw keystrokes and the hook hands it whatever localStorage held, so every
+// refusal here is a stake that never reaches a buy route.
+{
+  assert.strictEqual(clampStakeCents("1"), 100, "a string is DOLLARS: $1 → 100c");
+  assert.strictEqual(clampStakeCents("1.5"), 150, "decimals are cents, not a second dollar");
+  assert.strictEqual(clampStakeCents("0.5"), null, "below the $1 floor");
+  assert.strictEqual(clampStakeCents("600"), null, "above the $500 fat-finger bound");
+  assert.strictEqual(clampStakeCents("abc"), null, "not a number at all");
+  assert.strictEqual(clampStakeCents(""), null, "an empty field is not $0");
+  assert.strictEqual(clampStakeCents("1e3"), null, "Number() would take it; a typed amount may not");
+  assert.strictEqual(clampStakeCents(2500), 2500, "a number is already CENTS — a preset round-trips");
+  assert.strictEqual(clampStakeCents(null), null, "a missing stored value falls back to the default");
 }
 
 // ─── fillMissingBlurbs honours the poller's wall-clock budget ─────────────────────────────────

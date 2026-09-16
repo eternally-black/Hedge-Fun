@@ -227,7 +227,9 @@ export const EXIT_QUOTES_MAX_IDS = 8;
 export const REAL_BALANCE_POLL_MS = 15_000;
 
 // ---- Tokenized stocks (xStocks on Solana — Stocklana) ----
-// Amount chips on a stock card; the first is the default. Paper money, so these are game sizes.
+// The DEFAULT amount chips on a stock card; the first is the stake a new browser starts on. Not the
+// whole range: the fourth chip takes a typed amount, so anything within [MIN, MAX] below is reachable
+// and the chosen amount is remembered per browser (src/app/useStockStake.ts).
 export const STOCK_STAKE_PRESETS_CENTS = [1_000, 2_500, 5_000] as const;
 export const STOCK_MIN_STAKE_CENTS = 100; // $1 — a hedge sizing may go this small
 export const STOCK_MAX_STAKE_CENTS = 50_000; // $500 fat-finger bound (= HEDGE_MAX_STAKE_CENTS)

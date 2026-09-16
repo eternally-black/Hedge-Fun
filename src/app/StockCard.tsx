@@ -1,7 +1,8 @@
 "use client";
 
-import { memo, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { usd } from "./ui";
+import { clampStakeCents } from "./useStockStake";
 import { STOCK_MIN_STAKE_CENTS, STOCK_STAKE_PRESETS_CENTS } from "@/lib/config";
 import { SwipeShell, PREVIEW_SCALE, PREVIEW_Y, useTick, type SwipeAction } from "./DeckCard";
 import type { StockDeckCard } from "@/lib/api-types";
@@ -129,38 +130,7 @@ export const StockCardFace = memo(function StockCardFace({ card, yesP, noP, skip
           </div>
         </div>
 
-        {/* stake chips — the amount a paper buy spends. pointerdown is stopped so picking a size can
-            never read as the start of a swipe (same rule as the deck's stake chip). */}
-        <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-          {STOCK_STAKE_PRESETS_CENTS.map((c) => {
-            const active = c === stakeCents;
-            return (
-              // A real <button>: the div with role="button" answered the mouse and ignored Enter/Space.
-              <button
-                key={c}
-                type="button"
-                aria-pressed={active}
-                onPointerDown={(e) => e.stopPropagation()}
-                onClick={(e) => { e.stopPropagation(); onPickStake(c); }}
-                style={{
-                  flex: 1,
-                  margin: 0,
-                  font: "inherit",
-                  textAlign: "center",
-                  background: "rgba(0,0,0,.4)",
-                  backdropFilter: "blur(6px)",
-                  border: "1px solid " + (active ? "var(--gold)" : "var(--line)"),
-                  padding: "8px 6px",
-                  borderRadius: 14,
-                  cursor: "pointer",
-                }}
-              >
-                <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 15, color: "#fff" }}>{usd(c)}</div>
-                <div style={{ fontSize: 8, letterSpacing: ".12em", color: "var(--muted)", textTransform: "uppercase" }}>Paper</div>
-              </button>
-            );
-          })}
-        </div>
+        <StakeChips stakeCents={stakeCents} onPickStake={onPickStake} />
 
         {card.tradable && !onBuyReal && (
           // Preview card: no CTA to offer, but its HEIGHT has to be here or the card jumps the
@@ -198,6 +168,108 @@ export const StockCardFace = memo(function StockCardFace({ card, yesP, noP, skip
     </>
   );
 });
+
+// The amount row: three preset sizes plus one the user types. Its own component because the custom
+// chip carries state (open, draft, refused) and StockCardFace is memo()'d — a keystroke must not
+// re-render the card behind it. Inert on the preview card, which turns pointer events off wholesale.
+function StakeChips({ stakeCents, onPickStake }: { stakeCents: number; onPickStake: (c: number) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  // A refused amount flashes. Without it a fat-fingered "600" just closes the input and leaves the
+  // old stake standing, which reads as a tap the card ignored.
+  const [refused, setRefused] = useState(false);
+  const flashTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(flashTimer.current), []);
+
+  // Any stake that is not a preset belongs to the custom chip — that is what puts a remembered $37
+  // back on the card instead of leaving all four chips looking unselected.
+  const custom = !(STOCK_STAKE_PRESETS_CENTS as readonly number[]).includes(stakeCents);
+
+  const commit = () => {
+    setEditing(false);
+    const cents = clampStakeCents(draft);
+    if (cents !== null) {
+      onPickStake(cents);
+      return;
+    }
+    if (draft.trim() === "") return; // opened the input and thought better of it — not a refusal
+    setRefused(true);
+    window.clearTimeout(flashTimer.current);
+    flashTimer.current = window.setTimeout(() => setRefused(false), 700);
+  };
+
+  return (
+    // pointerdown is stopped on every control so picking a size can never read as the start of a
+    // swipe (same rule as the deck's stake chip).
+    <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+      {STOCK_STAKE_PRESETS_CENTS.map((c) => {
+        const active = c === stakeCents;
+        return (
+          // A real <button>: the div with role="button" answered the mouse and ignored Enter/Space.
+          <button
+            key={c}
+            type="button"
+            aria-pressed={active}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => { e.stopPropagation(); onPickStake(c); }}
+            style={chipStyle(active)}
+          >
+            <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 15, color: "#fff" }}>{usd(c)}</div>
+            <div style={{ fontSize: 8, letterSpacing: ".12em", color: "var(--muted)", textTransform: "uppercase" }}>Paper</div>
+          </button>
+        );
+      })}
+
+      {editing ? (
+        // Twice the width of a preset while it is open: four chips across a 402px phone leaves ~65px
+        // each, which is not enough of a field to type "12.50" into and read it back.
+        <div onPointerDown={(e) => e.stopPropagation()} style={{ ...chipStyle(true), flex: 2, display: "flex", alignItems: "center", gap: 3, cursor: "text" }}>
+          <span aria-hidden="true" style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 15, color: "var(--muted)" }}>$</span>
+          <input
+            autoFocus
+            type="text"
+            inputMode="decimal"
+            placeholder="5"
+            aria-label="Custom amount"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") commit(); }}
+            onBlur={commit}
+            style={{ width: "100%", minWidth: 0, margin: 0, padding: 0, border: "none", outline: "none", background: "transparent", fontFamily: "var(--nf)", fontWeight: 700, fontSize: 15, color: "#fff" }}
+          />
+        </div>
+      ) : (
+        <button
+          type="button"
+          aria-label="Custom amount"
+          aria-pressed={custom}
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => { e.stopPropagation(); setDraft(""); setEditing(true); }}
+          style={chipStyle(custom, refused)}
+        >
+          <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 15, color: refused ? "var(--no)" : "#fff" }}>{custom ? usd(stakeCents) : "$…"}</div>
+          <div style={{ fontSize: 8, letterSpacing: ".12em", color: "var(--muted)", textTransform: "uppercase" }}>Custom</div>
+        </button>
+      )}
+    </div>
+  );
+}
+
+// One look for all four chips, so the typed one can never drift from the preset beside it.
+function chipStyle(selected: boolean, refused = false): React.CSSProperties {
+  return {
+    flex: 1,
+    margin: 0,
+    font: "inherit",
+    textAlign: "center",
+    background: "rgba(0,0,0,.4)",
+    backdropFilter: "blur(6px)",
+    border: "1px solid " + (refused ? "var(--no)" : selected ? "var(--gold)" : "var(--line)"),
+    padding: "8px 6px",
+    borderRadius: 14,
+    cursor: "pointer",
+  };
+}
 
 // The logo, with a two-letter fallback. A broken image URL is a real case (the issuer's CDN is not
 // ours), and a broken-image glyph on a card is worse than initials.
