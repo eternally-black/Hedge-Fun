@@ -40,11 +40,13 @@ transaction matched the attempt the server had built.
 | Sell QQQx → USDC (3-hop route via SOL and USDT; token account closed) | [4CQNUq68…CyPX](https://solscan.io/tx/4CQNUq68c4nyeqwHBfUzK3VpnX2s6FiabZXWSPCJNkh1ZR5nW8LyopEUBBFuU8rdkcvo1HdWobQrx4w14nuJCyPX) |
 | Buy $1.99 USDC → NFLXx | [5fpeQm54…Mea4](https://solscan.io/tx/5fpeQm54Mp5ufzGap4c1ZXLtmAjxGidN5s9CGBv2vguJQsq6hpmPHz2L5Lrx6nSgoG7EgHKRTh84Ppw4xWnNMea4) |
 | Sell NFLXx → USDC | [Maa7LVT6…D7Mb](https://solscan.io/tx/Maa7LVT6bibAVtTrK1mqyvKBdVsytfk5MJLa5EdYALnpxk9a4nWdA3jFLCCT2LRUaC5RSZa87ChPachXaqwD7Mb) |
+| Buy $1.94 USDC → PLTRx (swipe right in Real mode, no separate button) | [5FBqh6Pi…AddRR](https://solscan.io/tx/5FBqh6Pi1fJarsJMw4TfyGGAPuGWtqZKfN1eHZMduk6qwrg9Vw6oGw5UzzkyEU8JboDsJko5CrybD4edSMfAddRR) |
+| Sell PLTRx → USDC (two-tap Sell on the portfolio row) | [55E4zaFk…GKJC](https://solscan.io/tx/55E4zaFkxjea2DY7QfrYGXviVueAtrJc9NAizrC3EeNu3nRK6yVx6gdv4QG1VvXKAZAPGziwZGtyrjPiAAK5GKJC) |
 
 The first production sell exposed a leak: Jupiter's cleanup instruction refunds the wrapped-SOL
 account's rent to the user even when the sponsor funded it. Fixed the same hour (the refund now
 follows whoever paid); the NFLXx round trip cost the sponsor exactly 20,045 lamports — two network
-fees — with every rent it fronted returned.
+fees — with every rent it fronted returned. The PLTRx pair is the final flow: the same Paper/Real switch predictions use decides whose money a swipe spends; flipped to Paper, the same card and the same swipe held $10 of play money instead.
 
 ## What was built (4 days)
 
