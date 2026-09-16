@@ -11,6 +11,10 @@ import type { StockDeckCard } from "@/lib/api-types";
 // one of the market categories it sits beside.
 export const STOCK_ACCENT = "#34d399";
 
+// A stable no-op for the preview card: an inline `() => {}` is a new value every render, which is
+// exactly what memo() compares — the preview would re-render with the deck behind it for nothing.
+const NOOP = () => {};
+
 // ============================================================================
 // StockCardFace — the full card VISUALS, pure + memoized. Same layering discipline as CardFace:
 // background → directional overlays → stamps → content. No gesture, no clock of its own beyond the
@@ -45,20 +49,34 @@ export const StockCardFace = memo(function StockCardFace({ card, yesP, noP, skip
   const change = card.change24hBp;
   const changeText = change == null ? "—" : `${change >= 0 ? "+" : "−"}${(Math.abs(change) / 100).toFixed(2)}%`;
   const changeColor = change == null ? "var(--muted)" : change >= 0 ? "var(--yes)" : "var(--no)";
+  // ONE decision drives the label AND the tap. They used to be computed apart, so a user with no
+  // consent and an empty wallet read "Accept xStocks terms to buy" and got the wallet sheet — the
+  // consent step was unreachable. `connect` / `consent` / `buy` all go to the hook, which owns the
+  // link and consent prompts; only `fund` is ours, because funding is not something the hook can do.
   // Too little to trade: the tap has to lead somewhere, and "Buy" that always fails is the worst of
   // the options. Unknown balance (null) keeps the plain label — an amount we cannot state honestly.
   const underfunded = stocksUsdCents !== null && stocksUsdCents < STOCK_MIN_STAKE_CENTS;
-  const buyLabel = buyRealBusy
-    ? "Buying…"
+  const intent: "busy" | "connect" | "consent" | "fund" | "buy" = buyRealBusy
+    ? "busy"
     : !walletLinked
-      ? "Connect Phantom to buy on Solana"
+      ? "connect"
       : !consented
-        ? "Accept xStocks terms to buy"
+        ? "consent"
         : underfunded
-          ? "◎ Fund your wallet to buy on Solana"
-          : stocksUsdCents === null
-            ? "◎ Buy on Solana"
-            : `◎ Buy ${usd(Math.min(stakeCents, stocksUsdCents))} on Solana`;
+          ? "fund"
+          : "buy";
+  const buyLabel =
+    intent === "busy"
+      ? "Buying…"
+      : intent === "connect"
+        ? "Connect Phantom to buy on Solana"
+        : intent === "consent"
+          ? "Accept xStocks terms to buy"
+          : intent === "fund"
+            ? "◎ Fund your wallet to buy on Solana"
+            : stocksUsdCents === null
+              ? "◎ Buy on Solana"
+              : `◎ Buy ${usd(Math.min(stakeCents, stocksUsdCents))} on Solana`;
 
   return (
     <>
@@ -102,7 +120,8 @@ export const StockCardFace = memo(function StockCardFace({ card, yesP, noP, skip
           )}
           <div style={{ marginTop: 6, fontSize: 12, color: "rgba(255,255,255,.6)", letterSpacing: ".02em" }}>{card.underlying}</div>
           <div style={{ marginTop: 14, display: "flex", alignItems: "baseline", gap: 10 }}>
-            <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 40, lineHeight: 1, color: "#fff", animation: priceTick }}>{usd(card.priceCents)}</div>
+            {/* keyed on the price: a new key remounts the number, which is what restarts the pulse */}
+            <div key={card.priceCents} style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 40, lineHeight: 1, color: "#fff", animation: priceTick }}>{usd(card.priceCents)}</div>
             <div style={{ display: "flex", alignItems: "baseline", gap: 5 }}>
               <span style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 14, color: changeColor }}>{changeText}</span>
               <span style={{ fontSize: 10, color: "var(--muted)", letterSpacing: ".08em", textTransform: "uppercase" }}>24h</span>
@@ -116,14 +135,17 @@ export const StockCardFace = memo(function StockCardFace({ card, yesP, noP, skip
           {STOCK_STAKE_PRESETS_CENTS.map((c) => {
             const active = c === stakeCents;
             return (
-              <div
+              // A real <button>: the div with role="button" answered the mouse and ignored Enter/Space.
+              <button
                 key={c}
-                role="button"
-                tabIndex={0}
+                type="button"
+                aria-pressed={active}
                 onPointerDown={(e) => e.stopPropagation()}
                 onClick={(e) => { e.stopPropagation(); onPickStake(c); }}
                 style={{
                   flex: 1,
+                  margin: 0,
+                  font: "inherit",
                   textAlign: "center",
                   background: "rgba(0,0,0,.4)",
                   backdropFilter: "blur(6px)",
@@ -135,16 +157,22 @@ export const StockCardFace = memo(function StockCardFace({ card, yesP, noP, skip
               >
                 <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 15, color: "#fff" }}>{usd(c)}</div>
                 <div style={{ fontSize: 8, letterSpacing: ".12em", color: "var(--muted)", textTransform: "uppercase" }}>Paper</div>
-              </div>
+              </button>
             );
           })}
         </div>
+
+        {card.tradable && !onBuyReal && (
+          // Preview card: no CTA to offer, but its HEIGHT has to be here or the card jumps the
+          // moment this preview is promoted to the top slot.
+          <div aria-hidden="true" style={{ width: "100%", padding: "11px 14px", borderRadius: 14, border: "1px solid var(--line)", background: "rgba(0,0,0,.2)", fontSize: 13, fontWeight: 700 }}>&nbsp;</div>
+        )}
 
         {card.tradable && onBuyReal && (
           <button
             type="button"
             onPointerDown={(e) => e.stopPropagation()}
-            onClick={(e) => { e.stopPropagation(); if (underfunded) onOpenWallet?.(); else onBuyReal(); }}
+            onClick={(e) => { e.stopPropagation(); if (intent === "fund") onOpenWallet?.(); else onBuyReal(); }}
             disabled={buyRealBusy}
             style={{
               margin: 0,
@@ -193,7 +221,7 @@ function StockLogo({ card }: { card: StockDeckCard }) {
 export const StockCardPreview = memo(function StockCardPreview({ card, stakeCents }: { card: StockDeckCard; stakeCents: number }) {
   return (
     <div style={{ position: "absolute", inset: 0, borderRadius: 26, overflow: "hidden", background: "var(--panel2)", border: "1px solid var(--line)", filter: "brightness(.82)", pointerEvents: "none", transform: `scale(${PREVIEW_SCALE}) translateY(${PREVIEW_Y}px)`, transformOrigin: "center bottom" }}>
-      <StockCardFace card={card} yesP={0} noP={0} skipP={0} stakeCents={stakeCents} onPickStake={() => {}} walletLinked={false} consented={false} stocksUsdCents={null} />
+      <StockCardFace card={card} yesP={0} noP={0} skipP={0} stakeCents={stakeCents} onPickStake={NOOP} walletLinked={false} consented={false} stocksUsdCents={null} />
     </div>
   );
 });

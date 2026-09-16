@@ -301,6 +301,8 @@ function RevealCard({ row, onAdvance }: { row: ResultRow; onAdvance: () => void 
         onPointerDown={onPointerDown}
         onPointerMove={swipe.handlers.onPointerMove}
         onPointerUp={swipe.handlers.onPointerUp}
+
+        onPointerCancel={swipe.handlers.onPointerCancel}
         style={{
           ...cardShell(row),
           zIndex: 1, // above the burst sibling — keep cardShell's position:absolute/inset:0 (it sizes the card; relative would collapse it to 0 height)

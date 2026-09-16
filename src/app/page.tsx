@@ -195,10 +195,14 @@ function App() {
   // Solana wallet, the prediction surfaces mean the Polymarket balance, everything else is play
   // money. Derived from `screen`, not from effectiveScreen (computed below, past the boot gates):
   // the only difference is deck-predictions → feed, and both of those map to "predictions" anyway.
+  //
+  // The hedge tab counts as a STOCK surface: its only real-money action is "◎ Buy on Solana" on the
+  // stock leg, which spends the Solana wallet. The market side of a hedge is a paper bet, so calling
+  // it "predictions" left the one pocket the screen can actually spend unpolled.
   const pocket: Pocket =
-    (screen === "deck" && deckMode === "stocks") || screen === "portfolio"
+    (screen === "deck" && deckMode === "stocks") || screen === "portfolio" || screen === "hedge"
       ? "stocks"
-      : (screen === "deck" && deckMode === "predictions") || screen === "feed" || screen === "hedge"
+      : (screen === "deck" && deckMode === "predictions") || screen === "feed"
         ? "predictions"
         : "paper";
 

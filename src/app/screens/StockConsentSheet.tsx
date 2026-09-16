@@ -10,11 +10,17 @@ import { APP_SURFACE_ID } from "../appSurface";
 //
 // The checkbox is the point. This is a self-declaration that the user is not a US person and not in
 // a restricted jurisdiction — a claim only they can make, and one the button must not make for them.
-export function StockConsentSheet({ open, busy, sponsored, onAccept, onClose }: {
+export function StockConsentSheet({ open, busy, sponsored, mode = "consent", onAccept, onClose }: {
   open: boolean;
   busy: boolean;
   /** The server pays the Solana network fee for these swaps — say so before the user agrees. */
   sponsored?: boolean;
+  /**
+   * "consent" gates a trade behind the self-declaration. "info" is the SAME text opened from a
+   * ⓘ button: nothing is being agreed to, so there is no checkbox to tick and no way to get
+   * trapped reading it — the one button just closes.
+   */
+  mode?: "consent" | "info";
   onAccept: () => void;
   onClose: () => void;
 }) {
@@ -23,11 +29,13 @@ export function StockConsentSheet({ open, busy, sponsored, onAccept, onClose }: 
   if (!open || !host) return null;
   // The body (and its checkbox state) mounts fresh on every open: re-opening the sheet must not
   // remember a previous tick — the declaration is per-acceptance.
-  return createPortal(<SheetBody busy={busy} sponsored={sponsored} onAccept={onAccept} onClose={onClose} />, host);
+  return createPortal(<SheetBody busy={busy} sponsored={sponsored} mode={mode} onAccept={onAccept} onClose={onClose} />, host);
 }
 
-function SheetBody({ busy, sponsored, onAccept, onClose }: { busy: boolean; sponsored?: boolean; onAccept: () => void; onClose: () => void }) {
+function SheetBody({ busy, sponsored, mode, onAccept, onClose }: { busy: boolean; sponsored?: boolean; mode: "consent" | "info"; onAccept: () => void; onClose: () => void }) {
   const [checked, setChecked] = useState(false);
+  const info = mode === "info";
+  const blocked = busy || (!info && !checked);
 
   return (
     <div
@@ -75,26 +83,37 @@ function SheetBody({ busy, sponsored, onAccept, onClose }: { busy: boolean; spon
           xStocks are not available to US persons or in restricted jurisdictions.
         </div>
 
-        <label style={{ display: "flex", alignItems: "flex-start", gap: 10, marginTop: 16, cursor: "pointer" }}>
-          <input
-            type="checkbox"
-            checked={checked}
-            onChange={(e) => setChecked(e.target.checked)}
-            style={{ marginTop: 2, width: 16, height: 16, accentColor: "var(--energy)", flexShrink: 0 }}
-          />
-          <span style={{ fontSize: 12, color: "var(--text)", lineHeight: 1.5 }}>
-            I am not a US person and not in a restricted jurisdiction, and I accept the{" "}
+        {info ? (
+          // Reading the terms is not accepting them: the self-declaration belongs to the trade.
+          <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8, lineHeight: 1.55 }}>
+            You&apos;ll be asked to confirm this before your first buy. Full{" "}
             <a href="https://xstocks.com/terms" target="_blank" rel="noreferrer" style={{ color: "var(--energy)", textDecoration: "underline" }}>
               xStocks terms
             </a>
-          </span>
-        </label>
+            .
+          </div>
+        ) : (
+          <label style={{ display: "flex", alignItems: "flex-start", gap: 10, marginTop: 16, cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={checked}
+              onChange={(e) => setChecked(e.target.checked)}
+              style={{ marginTop: 2, width: 16, height: 16, accentColor: "var(--energy)", flexShrink: 0 }}
+            />
+            <span style={{ fontSize: 12, color: "var(--text)", lineHeight: 1.5 }}>
+              I am not a US person and not in a restricted jurisdiction, and I accept the{" "}
+              <a href="https://xstocks.com/terms" target="_blank" rel="noreferrer" style={{ color: "var(--energy)", textDecoration: "underline" }}>
+                xStocks terms
+              </a>
+            </span>
+          </label>
+        )}
 
         <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 18 }}>
           <button
             type="button"
-            onClick={busy || !checked ? undefined : onAccept}
-            disabled={busy || !checked}
+            onClick={blocked ? undefined : onAccept}
+            disabled={blocked}
             style={{
               margin: 0,
               font: "inherit",
@@ -106,12 +125,14 @@ function SheetBody({ busy, sponsored, onAccept, onClose }: { busy: boolean; spon
               border: "none",
               fontWeight: 800,
               fontSize: 14,
-              cursor: busy || !checked ? "default" : "pointer",
-              opacity: busy || !checked ? 0.5 : 1,
+              cursor: blocked ? "default" : "pointer",
+              opacity: blocked ? 0.5 : 1,
             }}
           >
-            {busy ? "Saving…" : "I understand, continue"}
+            {busy ? "Saving…" : info ? "Got it" : "I understand, continue"}
           </button>
+          {/* In info mode "Got it" IS the dismiss — a second button that also closes is noise. */}
+          {info ? null : (
           <button
             type="button"
             onClick={busy ? undefined : onClose}
@@ -132,6 +153,7 @@ function SheetBody({ busy, sponsored, onAccept, onClose }: { busy: boolean; spon
           >
             Not now
           </button>
+          )}
         </div>
       </div>
     </div>

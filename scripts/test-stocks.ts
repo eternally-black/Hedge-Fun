@@ -26,6 +26,13 @@ import {
   type RpcParsedTx,
 } from "../src/lib/stocks";
 import { blurbPrompt, parseBlurbs } from "../src/lib/stock-blurbs";
+import {
+  pendingKey,
+  pendingKeyV1,
+  parsePending,
+  shouldDropPending,
+  STOCK_PENDING_TTL_MS,
+} from "../src/lib/stock-pending";
 
 // ─── xstockToAsset: Solana deployment selection, defaults, null trading ─────────────────────────────
 {
@@ -497,6 +504,48 @@ async function sponsorChecks() {
   );
   assert.deepStrictEqual(parseBlurbs("not json at all", ["AAPLx"]), {}, "unparseable body yields nothing");
   assert.deepStrictEqual(parseBlurbs('{"AAPLx": 42}', ["AAPLx"]), {}, "a non-string value is dropped");
+}
+
+// ─── stock-pending: the record that says a spent dollar is still recoverable ──────────────────
+{
+  const now = 1_800_000_000_000;
+
+  assert.strictEqual(pendingKey("did:privy:abc", "Pay11"), "hf_stock_pending:v2:did:privy:abc:Pay11", "the key carries the version");
+  assert.strictEqual(pendingKeyV1("did:privy:abc", "Pay11"), "hf_stock_pending:did:privy:abc:Pay11", "the v1 key is the unversioned one");
+  assert.ok(!pendingKeyV1("did:privy:abc", "Pay11").startsWith("hf_stock_pending:v2:"), "a v1 prefix scan cannot match a v2 key");
+
+  // v1 MIGRATION: no createdAt at all. Kept (the money is already spent) and stamped as seen now, so
+  // the TTL below can eventually reach it — the v1 shape could never expire.
+  const v1 = JSON.stringify([{ attemptId: "a1", sig: "s1" }]);
+  assert.deepStrictEqual(parsePending(v1, now), [{ attemptId: "a1", sig: "s1", createdAt: now }], "a v1 entry migrates rather than being dropped");
+
+  // TTL: 48 h. One second under survives, one second over is gone.
+  const fresh = { attemptId: "a2", sig: "s2", createdAt: now - STOCK_PENDING_TTL_MS + 1000 };
+  const stale = { attemptId: "a3", sig: "s3", createdAt: now - STOCK_PENDING_TTL_MS - 1000 };
+  assert.deepStrictEqual(parsePending(JSON.stringify([fresh, stale]), now), [fresh], "expired entries are dropped on read");
+
+  // Malformed, in every shape a foreign build or a corrupt write can leave behind.
+  assert.deepStrictEqual(parsePending(null, now), [], "no value");
+  assert.deepStrictEqual(parsePending("{not json", now), [], "unparseable");
+  assert.deepStrictEqual(parsePending('{"attemptId":"a"}', now), [], "an object, not an array");
+  assert.deepStrictEqual(parsePending(JSON.stringify([null, 7, "x", {}, { attemptId: "a" }, { sig: "s" }, { attemptId: "", sig: "s" }]), now), [], "every broken entry is skipped");
+  assert.deepStrictEqual(
+    parsePending(JSON.stringify([{ attemptId: "a4", sig: "s4", createdAt: "yesterday" }]), now),
+    [{ attemptId: "a4", sig: "s4", createdAt: now }],
+    "a non-numeric createdAt is treated as unknown, not as year zero",
+  );
+
+  // DROP RULES: only a verdict on the attempt retires the entry. Everything else is transport, and
+  // dropping on transport loses the only client-side record that this dollar was spent.
+  assert.strictEqual(shouldDropPending(200), true, "booked");
+  assert.strictEqual(shouldDropPending(409), true, "the server's terminal verdict (tx_failed / not_this_buy / expired / lot_closed)");
+  assert.strictEqual(shouldDropPending(401), false, "a token that has not refreshed yet");
+  assert.strictEqual(shouldDropPending(403), false, "forbidden is not a verdict on the attempt");
+  assert.strictEqual(shouldDropPending(404), false, "the chain is a beat behind");
+  assert.strictEqual(shouldDropPending(429), false, "our own rate limit");
+  assert.strictEqual(shouldDropPending(500), false, "server error");
+  assert.strictEqual(shouldDropPending(502), false, "RPC busy");
+  assert.strictEqual(shouldDropPending(undefined), false, "the network dropped — no status at all");
 }
 
 sponsorChecks()

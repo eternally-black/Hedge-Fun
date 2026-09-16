@@ -8,6 +8,14 @@ import {
   type ConnectedStandardSolanaWallet,
 } from "@privy-io/react-auth/solana";
 import { STOCK_TERMS_VERSION } from "@/lib/config";
+import {
+  pendingKey,
+  parsePending,
+  shouldDropPending,
+  STOCK_PENDING_PREFIX,
+  STOCK_PENDING_PREFIX_V1,
+  type PendingEntry,
+} from "@/lib/stock-pending";
 import { usd, type Me } from "./ui";
 import { isWalletUnverified, useEnsureVerified, useWalletPicker } from "./useTradingWallet";
 import type {
@@ -82,24 +90,13 @@ function encodeBase64(bytes: Uint8Array): string {
   return btoa(s);
 }
 
-// A pending buy, parked in localStorage between "the wallet sent it" and "the server booked it".
-// The tab can die in that window (a phone call, a swipe-away), and the money is already gone — so
-// the signature is written down BEFORE the confirm call, and replayed on the next visit.
-type PendingEntry = { attemptId: string; sig: string };
-
-function pendingKey(userId: string, payer: string): string {
-  return `hf_stock_pending:${userId}:${payer}`;
-}
-
+// The localStorage half of the pending-buy record — the rules (shape, TTL, what "settled" means)
+// are pure and live in @/lib/stock-pending; only the storage access is here.
 function readPending(key: string): PendingEntry[] {
   try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((e): e is PendingEntry => !!e && typeof e === "object" && typeof (e as PendingEntry).attemptId === "string" && typeof (e as PendingEntry).sig === "string");
+    return parsePending(localStorage.getItem(key), Date.now());
   } catch {
-    return [];
+    return []; // storage blocked (private mode, disabled cookies)
   }
 }
 
@@ -109,6 +106,17 @@ function writePending(key: string, entries: PendingEntry[]): void {
     else localStorage.setItem(key, JSON.stringify(entries));
   } catch { /* storage blocked — the buy still confirms, it just cannot be replayed */ }
 }
+
+// Forget ONE attempt. Re-reads before writing rather than overwriting a list read minutes ago: two
+// screens can replay at the same time, and a stale write would resurrect what the other just booked.
+function dropPending(key: string, attemptId: string): void {
+  writePending(key, readPending(key).filter((e) => e.attemptId !== attemptId));
+}
+
+// Attempts a replay is confirming RIGHT NOW. Module-level because the guard has to span hook
+// instances: the deck and the portfolio each own a useBuyReal, and both replay on mount — without
+// this the same attempt is confirmed twice and the user is told twice.
+const replaying = new Set<string>();
 
 // Error status + code, read the way page.tsx reads them off a thrown api() failure.
 function errStatus(e: unknown): number | undefined {
@@ -143,7 +151,8 @@ export function useBuyReal(p: {
   sellReal: (positionId: string, opts?: { symbol?: string; ctx?: BuyRealCtx }) => Promise<void>;
   busy: boolean;
   consentOpen: boolean;
-  acceptConsent: () => Promise<void>;
+  /** True only when the server recorded the acceptance — the caller's local consent flag follows this. */
+  acceptConsent: () => Promise<boolean>;
   closeConsent: () => void;
   replayPending: () => Promise<number>;
   /** The wallet the next real trade will use — external-verified first, else the embedded one. */
@@ -156,6 +165,9 @@ export function useBuyReal(p: {
   ensureVerified: (address: string) => Promise<void>;
 } {
   const { api, me, onToast, onDone, onRefreshMe, ctx: screenCtx } = p;
+  // The only thing the callbacks below need off `me` is the id that namespaces the pending keys.
+  // Depending on the whole object would rebuild them on every /api/me refresh (rerender-dependencies).
+  const userId = me?.user.id ?? null;
   const [busy, setBusy] = useState(false);
   // ONE real trade at a time, whichever screen asked for it. `busy` cannot be the guard: it is state,
   // so two taps in the same tick both read it as false and both spend the user's USDC.
@@ -226,9 +238,11 @@ export function useBuyReal(p: {
           else if (status === 409 && code === "attempt_expired") onToast("That quote expired — try again");
           else if (status === 409 && code === "lot_closed") onToast("This lot was already sold");
           else if (status === 429) onToast("Daily limit of sponsored trades reached — try again tomorrow");
-          // 502 = the send was attempted with the signature already stamped on the attempt, so a lost
-          // acknowledgement is recovered by the sweep. Inviting a retry here would double-spend.
-          else if (status === 502) onToast("Solana is busy — if it went through, your lot appears within a few minutes");
+          // No status (the network dropped, the request timed out) or any 5xx: the send was ATTEMPTED
+          // with the signature already stamped on the attempt, so a lost acknowledgement is recovered
+          // by the server sweep. Inviting a retry here would double-spend — and a rebuild is refused
+          // with buy_in_flight anyway, so promising "try again" would be a lie as well.
+          else if (status === undefined || status >= 500) onToast("Solana is busy — if it went through, your lot appears within a few minutes");
           else onToast("Couldn't send the transaction");
           return null;
         }
@@ -249,15 +263,16 @@ export function useBuyReal(p: {
 
       // Write the signature down BEFORE telling the server. If the tab dies between here and the
       // confirm, the next visit replays it — the money is already gone at this point.
-      const key = me ? pendingKey(me.user.id, w.address) : null;
-      if (key) writePending(key, [...readPending(key), { attemptId: built.attemptId, sig }]);
+      const key = userId ? pendingKey(userId, w.address) : null;
+      if (key) writePending(key, [...readPending(key), { attemptId: built.attemptId, sig, createdAt: Date.now() }]);
 
       // Self-paid only: a sponsored tx was sent BY /real/submit, which already stamped the signature
       // on the attempt. A second stamp would be a write for nothing.
+      // Not awaited (async-defer-await): nothing below reads its answer, a failure is covered by the
+      // poller sweep, and the user is waiting on the confirm loop — not on a bookkeeping write.
       if (!built.feePayer) {
-        try {
-          await api("/api/stocks/real/sent", { method: "POST", body: JSON.stringify({ attemptId: built.attemptId, sig }) });
-        } catch { /* the poller sweep covers this */ }
+        void api("/api/stocks/real/sent", { method: "POST", body: JSON.stringify({ attemptId: built.attemptId, sig }) })
+          .catch(() => { /* the poller sweep covers this */ });
       }
 
       onToast("Confirming on Solana…");
@@ -292,10 +307,10 @@ export function useBuyReal(p: {
       }
 
       // Booked. Drop the pending entry; the caller says what happened.
-      if (key) writePending(key, readPending(key).filter((e) => e.sig !== sig));
+      if (key) dropPending(key, built.attemptId);
       return confirmed;
     },
-    [api, embeddedAddress, me, onToast, signAndSendTransaction, signTransaction],
+    [api, embeddedAddress, onToast, signAndSendTransaction, signTransaction, userId],
   );
 
   // The whole buy, from a resolved ctx to a booked position. Defined as a stable inner function so
@@ -491,20 +506,28 @@ export function useBuyReal(p: {
 
   // The consent sheet's accept. POSTs the CURRENT terms version, so a stale tab cannot accept a
   // text it never rendered, then resumes whichever trade opened the sheet.
-  const acceptConsent = useCallback(async () => {
+  //
+  // Returns whether the server RECORDED it: the caller flips its own consent flag off this answer.
+  // Resolving on a failed POST let the card say "Buy", the next /real/tx 403 and the sheet reopen —
+  // a loop with no way out.
+  const acceptConsent = useCallback(async (): Promise<boolean> => {
     // The resumed trade runs here, not through buyReal — so the same one-at-a-time guard applies.
-    if (inFlight.current) return;
+    if (inFlight.current) return false;
     inFlight.current = true;
     setBusy(true);
     try {
-      await api("/api/stocks/consent", { method: "POST", body: JSON.stringify({ version: STOCK_TERMS_VERSION }) });
+      try {
+        await api("/api/stocks/consent", { method: "POST", body: JSON.stringify({ version: STOCK_TERMS_VERSION }) });
+      } catch {
+        onToast("Couldn't record your acceptance — try again"); // the sheet stays open on purpose
+        return false;
+      }
       setConsentOpen(false);
       const held = heldRef.current;
       heldRef.current = null;
       if (held?.kind === "buy") await runBuy(held.target, held.stakeCents, { ...held.ctx, stockConsent: true }, held.opts);
       else if (held?.kind === "sell") await runSell(held.positionId, { ...held.ctx, stockConsent: true }, held.opts);
-    } catch {
-      onToast("Couldn't record your acceptance — try again");
+      return true;
     } finally {
       inFlight.current = false;
       setBusy(false);
@@ -520,36 +543,57 @@ export function useBuyReal(p: {
   // server's own poller is the backstop, and a client that hammers confirm on every load is worse
   // than one that tries once and leaves the rest to the sweep.
   const replayPending = useCallback(async (): Promise<number> => {
-    if (!me) return 0;
+    if (!userId) return 0;
     let landed = 0;
-    const keys: string[] = [];
+    const v2Prefix = `${STOCK_PENDING_PREFIX}${userId}:`;
+    const v1Prefix = `${STOCK_PENDING_PREFIX_V1}${userId}:`;
+    const keys = new Set<string>();
     try {
+      // Snapshot the key list BEFORE touching storage — the migration below removes keys, and
+      // localStorage.key(i) is positional.
+      const all: string[] = [];
       for (let i = 0; i < localStorage.length; i++) {
         const k = localStorage.key(i);
-        if (k && k.startsWith(`hf_stock_pending:${me.user.id}:`)) keys.push(k);
+        if (k) all.push(k);
+      }
+      for (const k of all) {
+        if (k.startsWith(v2Prefix)) keys.add(k);
+        else if (k.startsWith(v1Prefix)) {
+          // v1 → v2, once: fold the old entries into the versioned key (parsePending stamps them
+          // with a createdAt so the TTL can finally reach them) and delete the unversioned one.
+          const target = pendingKey(userId, k.slice(v1Prefix.length));
+          writePending(target, [...readPending(target), ...readPending(k)]);
+          localStorage.removeItem(k);
+          keys.add(target);
+        }
       }
     } catch {
       return 0;
     }
     for (const key of keys) {
+      // Re-writing what we just read prunes the expired and the malformed out of storage, not just
+      // out of this pass.
       const entries = readPending(key);
-      const keep: PendingEntry[] = [];
+      writePending(key, entries);
       for (const entry of entries) {
+        if (replaying.has(entry.attemptId)) continue; // another screen's replay owns this one
+        replaying.add(entry.attemptId);
         try {
           await api("/api/stocks/real/confirm", { method: "POST", body: JSON.stringify({ attemptId: entry.attemptId, sig: entry.sig }) });
+          // Dropped BEFORE the caller's toast: a second replay must not find it and say it again.
+          dropPending(key, entry.attemptId);
           landed++;
         } catch (e) {
-          const status = errStatus(e);
-          // 200 or 409 = the attempt is resolved (booked, or terminally failed) — drop it either way.
-          // 404/5xx = still in flight or the chain is unreachable — keep it for the next visit.
-          if (status !== 404 && status !== undefined && status < 500) continue;
-          keep.push(entry);
+          // Only a verdict on the attempt retires it (200/409). A 401 mid token-refresh, a 429, a
+          // 404 while the chain catches up or a dead network are all "ask again next visit".
+          if (shouldDropPending(errStatus(e))) dropPending(key, entry.attemptId);
+        } finally {
+          replaying.delete(entry.attemptId);
         }
       }
-      writePending(key, keep);
     }
     return landed;
-  }, [api, me]);
+  }, [api, userId]);
 
   return {
     buyReal,

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { REAL_BALANCE_POLL_MS } from "@/lib/config";
 import type { StockWalletResponse } from "@/lib/api-types";
 import { isWalletUnverified, useEnsureVerified } from "./useTradingWallet";
@@ -18,15 +18,33 @@ export function useStockWallet(api: Api, address: string | null, active: boolean
   refresh: () => Promise<void>;
   unverified: boolean;
 } {
-  const [usdCents, setUsdCents] = useState<number | null>(null);
+  // The balance is stored WITH the address it was read for. A wallet switch does not make the old
+  // number stale, it makes it someone else's money — so a mismatch reads as "not known yet" during
+  // render (calculate-derived-state), rather than being cleared by an effect that would paint the
+  // previous wallet's balance for one frame first.
+  const [last, setLast] = useState<{ address: string; usdCents: number } | null>(null);
   const [unverified, setUnverified] = useState(false);
   const ensureVerified = useEnsureVerified(api);
+  const usdCents = last && last.address === address ? last.usdCents : null;
+
+  // Four things ask for a read (the interval, a tab return, a window focus, a manual refresh) and
+  // their answers land in whatever order the network decides. Only the LATEST issued read may write:
+  // an older answer winning is how a user who just deposited sees the pre-deposit number again.
+  const seq = useRef(0);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true; // set on mount too — StrictMode's simulated unmount runs the cleanup
+    return () => { mounted.current = false; };
+  }, []);
 
   const refresh = useCallback(async () => {
     if (!address) return;
+    const mine = ++seq.current;
+    const current = () => mounted.current && seq.current === mine;
     const read = async () => {
       const r = (await api(`/api/stocks/wallet?address=${address}`)) as StockWalletResponse;
-      setUsdCents(r.usdcCents);
+      if (!current()) return;
+      setLast({ address, usdCents: r.usdcCents });
       setUnverified(false);
     };
     try {
@@ -43,6 +61,7 @@ export function useStockWallet(api: Api, address: string | null, active: boolean
       } catch (e2) {
         // Said in state, not in a toast: this runs on a poll, and a Privy outage would otherwise
         // repeat the same toast every REAL_BALANCE_POLL_MS until it cleared.
+        if (!current()) return;
         if (isWalletUnverified(e2)) setUnverified(true);
         else console.error(e2);
       }
@@ -60,20 +79,27 @@ export function useStockWallet(api: Api, address: string | null, active: boolean
       stop();
       timer = window.setInterval(() => void refresh(), REAL_BALANCE_POLL_MS);
     };
-    const onVis = () => {
+    // Returning to the tab fires visibilitychange AND focus, and a desktop window switch fires only
+    // focus — so both are listened to and the pair is collapsed to ONE read by the last-wake stamp.
+    let lastWake = 0;
+    const onWake = () => {
       if (document.hidden) return stop();
-      void refresh();
+      const now = Date.now();
+      if (now - lastWake > 1000) {
+        lastWake = now;
+        void refresh();
+      }
       start();
     };
     // "We are visible now" is the mount case too — read once, then start the clock. Going through
-    // onVis rather than calling refresh() here keeps the first setState off the effect body.
-    onVis();
-    document.addEventListener("visibilitychange", onVis);
-    window.addEventListener("focus", onVis);
+    // onWake rather than calling refresh() here keeps the first setState off the effect body.
+    onWake();
+    document.addEventListener("visibilitychange", onWake);
+    window.addEventListener("focus", onWake);
     return () => {
       stop();
-      document.removeEventListener("visibilitychange", onVis);
-      window.removeEventListener("focus", onVis);
+      document.removeEventListener("visibilitychange", onWake);
+      window.removeEventListener("focus", onWake);
     };
   }, [active, address, refresh]);
 

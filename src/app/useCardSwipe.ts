@@ -24,6 +24,9 @@ export type CardSwipe = {
     onPointerDown: (e: React.PointerEvent) => void;
     onPointerMove: (e: React.PointerEvent) => void;
     onPointerUp: (e: React.PointerEvent) => void;
+    // The browser took the pointer away mid-drag (a second finger, a system back-gesture, a
+    // scroll takeover). Without this the card freezes where the finger left it, stamp lit.
+    onPointerCancel: (e: React.PointerEvent) => void;
   };
   // Live transform/transition/opacity for the card element (drag-follow, fly-off, or spring-back).
   style: { transform: string; transition: string; opacity: number };
@@ -95,6 +98,14 @@ export function useCardSwipe(opts: {
     }
   }
 
+  // A cancelled pointer is a release that cannot commit: drop the press, spring back, hand the
+  // capture back to the browser (it usually already took it, hence the try).
+  function onPointerCancel(e: React.PointerEvent) {
+    start.current = null;
+    try { (e.currentTarget as Element).releasePointerCapture(e.pointerId); } catch { /* capture may already be gone */ }
+    reset();
+  }
+
   let transform = "translate(0,0) rotate(0deg)";
   let transition = "transform .45s cubic-bezier(.34,1.4,.5,1)"; // spring-back overshoot
   let opacity = 1;
@@ -110,7 +121,7 @@ export function useCardSwipe(opts: {
   }
 
   return {
-    handlers: { onPointerDown, onPointerMove, onPointerUp },
+    handlers: { onPointerDown, onPointerMove, onPointerUp, onPointerCancel },
     style: { transform, transition, opacity },
     active: drag.active,
     flying: fly != null,

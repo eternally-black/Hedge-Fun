@@ -23,9 +23,10 @@ import type {
   HedgeSuggestionsResponse,
   HedgeWalletResponse,
   HedgeWalletStateResponse,
+  StockPortfolioResponse,
 } from "@/lib/api-types";
 import { STOCK_RULES } from "@/lib/hedge/stock-rules";
-import { useBuyReal } from "../useBuyReal";
+import { useBuyReal, type BuyRealCtx } from "../useBuyReal";
 import { StockConsentSheet } from "./StockConsentSheet";
 
 // Whatever useApi resolves to — a thrown error carries `.status` (mirrors page.tsx's catch blocks).
@@ -294,17 +295,43 @@ export function HedgeScreen({
   const toggleWalletForm = useCallback(() => { setLinkError(null); setWalletFormOpen((v) => !v); }, []);
 
   // REAL stock buys (the "◎ Buy on Solana" ghost button on a stock hedge card). The hook owns the
-  // consent sheet + the Jupiter swap flow; we only hand it the target and the stake. No ctx passed:
-  // the hook reads the verified wallets + consent from /api/stocks/portfolio itself.
+  // consent sheet + the Jupiter swap flow; we only hand it the target and the stake.
   const real = useBuyReal({ api, me, onToast, onDone: () => { void onRefreshMe(); } });
   const buyReal = real.buyReal;
+  const acceptConsent = real.acceptConsent;
+
+  // The stock ctx (verified wallets + consent + fee sponsorship), read ONCE with the suggestions.
+  // Without it the hook re-fetches /api/stocks/portfolio on every single tap of a buy button.
+  // Best-effort: a failure leaves it undefined and the hook fetches it itself, exactly as before.
+  const [stockCtx, setStockCtx] = useState<BuyRealCtx | undefined>(undefined);
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const r = (await api("/api/stocks/portfolio")) as StockPortfolioResponse;
+        if (alive) setStockCtx({ wallets: r.wallets, stockConsent: r.stockConsent, sponsored: r.sponsored });
+      } catch {
+        /* undefined ctx → the hook reads it itself on the first buy */
+      }
+    })();
+    return () => { alive = false; };
+  }, [api]);
+
   const onBuyReal = useCallback(
     (s: HedgeSuggestion) => {
       if (!s.stock) return;
-      void buyReal({ assetId: "", symbol: s.stock.symbol }, s.proposedStakeCents, undefined, { hedgeSuggestionId: s.suggestionId });
+      void buyReal({ assetId: "", symbol: s.stock.symbol }, s.proposedStakeCents, stockCtx, { hedgeSuggestionId: s.suggestionId });
     },
-    [buyReal],
+    [buyReal, stockCtx],
   );
+
+  // Accepting consent inside the hook does NOT update our cached ctx, so without this the next buy
+  // would hand the hook a stale `stockConsent: false` and re-open the sheet on an already-accepted
+  // account. The hook returns true only when the POST actually recorded the acceptance.
+  const onAcceptConsent = useCallback(async () => {
+    const ok = await acceptConsent();
+    if (ok) setStockCtx((c) => (c ? { ...c, stockConsent: true } : c));
+  }, [acceptConsent]);
 
   return (
     <div className="hf-scroll" style={{ position: "absolute", inset: 0, overflowY: "auto", padding: "6px 16px 20px" }}>
@@ -336,6 +363,7 @@ export function HedgeScreen({
                 onDismiss={dismiss}
                 onImpression={fireImpression}
                 onBuyReal={onBuyReal}
+                buyRealBusy={real.busy}
               />
             ))}
           </div>
@@ -398,6 +426,7 @@ export function HedgeScreen({
                   onDismiss={dismiss}
                   onImpression={fireImpression}
                   onBuyReal={onBuyReal}
+                  buyRealBusy={real.busy}
                 />
               ))}
             </div>
@@ -417,11 +446,27 @@ export function HedgeScreen({
         onImpression={fireImpression}
         isDismissed={isDismissed}
         onBuyReal={onBuyReal}
+        buyRealBusy={real.busy}
       />
 
-      {/* The consent sheet doubles as the "how this works" text (the limitations live here only). */}
-      <StockConsentSheet open={real.consentOpen} busy={real.busy} onAccept={real.acceptConsent} onClose={real.closeConsent} />
-      <StockConsentSheet open={infoOpen} busy={false} onAccept={() => setInfoOpen(false)} onClose={() => setInfoOpen(false)} />
+      {/* The consent sheet doubles as the "how this works" text (the limitations live here only) —
+          but in info mode: no checkbox to tick just to close a page of reading. A real consent
+          takes priority, so the two can never be stacked on top of each other. */}
+      <StockConsentSheet
+        open={real.consentOpen}
+        busy={real.busy}
+        sponsored={me?.stockSponsored ?? false}
+        onAccept={onAcceptConsent}
+        onClose={real.closeConsent}
+      />
+      <StockConsentSheet
+        open={infoOpen && !real.consentOpen}
+        busy={false}
+        mode="info"
+        sponsored={me?.stockSponsored ?? false}
+        onAccept={() => setInfoOpen(false)}
+        onClose={() => setInfoOpen(false)}
+      />
     </div>
   );
 }
@@ -445,6 +490,7 @@ function LifeHedgeSection({
   onImpression,
   isDismissed,
   onBuyReal,
+  buyRealBusy,
 }: {
   api: Api;
   accepted: Map<string, AcceptedInfo>;
@@ -455,6 +501,7 @@ function LifeHedgeSection({
   onImpression: (suggestionId: string) => void;
   isDismissed: (id: string) => boolean;
   onBuyReal: (s: HedgeSuggestion) => void;
+  buyRealBusy: boolean;
 }) {
   const [pickers, setPickers] = useState<HedgePickerLeague[] | null>(null); // null = loading
   const [pickersError, setPickersError] = useState(false);
@@ -672,6 +719,7 @@ function LifeHedgeSection({
                   onDismiss={handleDismiss}
                   onImpression={onImpression}
                   onBuyReal={onBuyReal}
+                  buyRealBusy={buyRealBusy}
                 />
               ))}
             </div>
@@ -745,12 +793,31 @@ type HedgeCardProps = {
   onDismiss: (s: HedgeSuggestion) => void;
   onImpression: (suggestionId: string) => void;
   onBuyReal?: (s: HedgeSuggestion) => void; // stock cards only: the "◎ Buy on Solana" ghost button
+  buyRealBusy?: boolean; // a real buy is in flight — no second signature from any card
 };
+
+// A stock card has no countdown, so it must not be handed the screen's 15s clock: `{...props}` was
+// feeding it a nowMs it never reads, which defeated memo() and re-rendered every stock card on the
+// screen four times a minute.
+type StockHedgeCardProps = Omit<HedgeCardProps, "nowMs">;
 
 // HedgeCard — the hook-FREE dispatcher: a stock card renders StockHedgeCard, everything else the
 // market card. A component must not early-return before hooks, so the split lives here.
 const HedgeCard = memo(function HedgeCard(props: HedgeCardProps) {
-  return props.s.stock ? <StockHedgeCard {...props} /> : <MarketHedgeCard {...props} />;
+  return props.s.stock ? (
+    <StockHedgeCard
+      s={props.s}
+      acceptedInfo={props.acceptedInfo}
+      busy={props.busy}
+      onAccept={props.onAccept}
+      onDismiss={props.onDismiss}
+      onImpression={props.onImpression}
+      onBuyReal={props.onBuyReal}
+      buyRealBusy={props.buyRealBusy}
+    />
+  ) : (
+    <MarketHedgeCard {...props} />
+  );
 });
 
 const MarketHedgeCard = memo(function MarketHedgeCard({
@@ -919,9 +986,15 @@ const StockHedgeCard = memo(function StockHedgeCard({
   onDismiss,
   onImpression,
   onBuyReal,
-}: HedgeCardProps) {
+  buyRealBusy,
+}: StockHedgeCardProps) {
   const cardRef = useRef<HTMLDivElement>(null);
   useImpression(cardRef, s.suggestionId, onImpression);
+  // The real-money buy is two taps: the first states the amount and waits 3s, the second signs.
+  // The paper accept sits directly above it, and one tap must not be the difference between them.
+  const [armed, setArmed] = useState(false);
+  const armTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(armTimer.current), []);
 
   const stock = s.stock;
   if (!stock) return null; // unreachable: the dispatcher only routes stock cards here
@@ -999,7 +1072,24 @@ const StockHedgeCard = memo(function StockHedgeCard({
 
         {!acceptedInfo && stock.tradable && onBuyReal && (
           <div style={{ marginTop: 8 }}>
-            <GhostButton onClick={() => { if (!busy) onBuyReal(s); }} disabled={busy}>◎ Buy on Solana</GhostButton>
+            <GhostButton
+              armed={armed}
+              disabled={busy || buyRealBusy}
+              onClick={() => {
+                if (busy || buyRealBusy) return;
+                if (!armed) {
+                  setArmed(true);
+                  window.clearTimeout(armTimer.current);
+                  armTimer.current = window.setTimeout(() => setArmed(false), 3000);
+                  return;
+                }
+                window.clearTimeout(armTimer.current);
+                setArmed(false);
+                onBuyReal(s);
+              }}
+            >
+              {buyRealBusy ? "Buying…" : armed ? `Buy ${usd(s.proposedStakeCents)}?` : `◎ Buy ${usd(s.proposedStakeCents)} on Solana · real money`}
+            </GhostButton>
           </div>
         )}
 
@@ -1243,13 +1333,22 @@ function CenterNote({ children }: { children: React.ReactNode }) {
   );
 }
 
-function GhostButton({ onClick, disabled, children }: { onClick: () => void; disabled?: boolean; children: React.ReactNode }) {
+// `armed` is the second half of a two-tap: gold, exactly like the armed Sell on the Portfolio row,
+// so an armed control looks the same wherever the app asks "are you sure".
+function GhostButton({ onClick, disabled, armed, children }: { onClick: () => void; disabled?: boolean; armed?: boolean; children: React.ReactNode }) {
   return (
     <button
       type="button"
       onClick={disabled ? undefined : onClick}
       disabled={disabled}
-      style={{ padding: "7px 12px", borderRadius: 12, font: "inherit", fontSize: 11, fontWeight: 700, cursor: disabled ? "default" : "pointer", background: "var(--panel2)", border: "1px solid var(--line)", color: "var(--muted)", opacity: disabled ? 0.6 : 1 }}
+      style={{
+        padding: "7px 12px", borderRadius: 12, font: "inherit", fontSize: 11, fontWeight: 700,
+        cursor: disabled ? "default" : "pointer",
+        background: armed ? "var(--gold)" : "var(--panel2)",
+        border: "1px solid " + (armed ? "var(--gold)" : "var(--line)"),
+        color: armed ? "#1a1205" : "var(--muted)",
+        opacity: disabled ? 0.6 : 1,
+      }}
     >
       {children}
     </button>

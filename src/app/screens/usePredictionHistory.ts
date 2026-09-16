@@ -38,6 +38,10 @@ export type HistoryRowData = {
 // rows doesn't re-render every second for nothing.
 export function usePredictionHistory(api: Api) {
   const [rows, setRows] = useState<HistoryRowData[] | null>(null);
+  // Whether the LAST refresh failed. rows === null means "not loaded yet" and renders "Loading…", so
+  // a swallowed failure left that spinner up for good — the sheet needs to know the difference
+  // between "nothing yet" and "the call failed, offer a retry".
+  const [error, setError] = useState(false);
   const [pending, setPending] = useState(0);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   // Guards loadMore against concurrent calls — a double-tap on the button must not append the same
@@ -53,8 +57,13 @@ export function usePredictionHistory(api: Api) {
       setRows(r.rows);
       setPending(r.pendingCount);
       setNextCursor(r.nextCursor);
+      setError(false);
     } catch (e) {
       console.error(e);
+      // Rows already on screen stay (a dropped request is not news); an empty list replaces the
+      // "Loading…" that would otherwise never end.
+      setRows((cur) => cur ?? []);
+      setError(true);
     }
   }, [api]);
 
@@ -98,7 +107,7 @@ export function usePredictionHistory(api: Api) {
     return () => window.clearInterval(t);
   }, [needsTick]);
 
-  return { rows, pending, nowMs, refresh, hasMore: nextCursor !== null, loadMore };
+  return { rows, pending, nowMs, refresh, hasMore: nextCursor !== null, loadMore, error };
 }
 
 // Live mark-to-market for the closable rows on screen: what each position would fetch if sold right
@@ -107,16 +116,19 @@ export function usePredictionHistory(api: Api) {
 // "Close" is a decision made against the number in front of the user.
 //
 // Only CLOSABLE rows are asked for (a settled row has nothing to sell), and the poll stops entirely
-// when there are none. A row the server has no honest number for is simply absent from the map.
-export function useExitQuotes(api: Api, rows: HistoryRowData[] | null) {
+// when there are none — or when the tab is hidden, or when `active` says this list is not the one on
+// screen. A once-a-second call is the most expensive poll in the app to leave running for nobody.
+export function useExitQuotes(api: Api, rows: HistoryRowData[] | null, active = true) {
   const [quotes, setQuotes] = useState<Record<string, ExitQuoteRow>>({});
   // Sorted + joined so the effect re-runs when the SET of closable rows changes, not on every
   // refresh that hands back an equal array.
   const ids = (rows ?? []).filter((r) => r.closable).map((r) => r.id).sort().join(",");
 
   useEffect(() => {
-    if (!ids) return; // nothing sellable on screen — no poll, and the map below reads empty
+    if (!active || !ids) return; // nothing sellable on screen — no poll, and the map below reads empty
     let alive = true;
+    let timer: number | undefined;
+    const stop = () => window.clearInterval(timer);
     const tick = async () => {
       try {
         const r = (await api(`/api/real/exit-quote?ids=${encodeURIComponent(ids)}`)) as ExitQuotesResponse;
@@ -127,10 +139,18 @@ export function useExitQuotes(api: Api, rows: HistoryRowData[] | null) {
         // not news, and a value that flickers away and back is worse than a value one second old.
       }
     };
-    void tick();
-    const t = window.setInterval(tick, QUOTE_POLL_MS);
-    return () => { alive = false; window.clearInterval(t); };
-  }, [api, ids]);
+    // Same visibility gate as every other poll here: stop while hidden, one immediate read on return
+    // — the book has moved while the tab was away, and "Close" is decided against that number.
+    const start = () => { stop(); timer = window.setInterval(() => void tick(), QUOTE_POLL_MS); };
+    const onVis = () => {
+      if (document.hidden) return stop();
+      void tick();
+      start();
+    };
+    onVis();
+    document.addEventListener("visibilitychange", onVis);
+    return () => { alive = false; stop(); document.removeEventListener("visibilitychange", onVis); };
+  }, [active, api, ids]);
 
   // Empty when nothing is closable, rather than clearing state in the effect: a leftover entry for
   // a row that has since settled is never read (HistoryRow only marks up a closable row).

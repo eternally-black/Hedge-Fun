@@ -55,9 +55,12 @@ export function BalanceSheet({ me, api, realPusdMicro, stockWallet, stockSponsor
   stockSponsored: boolean;
 }) {
   const [tab, setTab] = useState<Tab>("calls");
-  const { rows, pending, nowMs, refresh, hasMore, loadMore } = usePredictionHistory(api);
+  const { rows, pending, nowMs, refresh, hasMore, loadMore, error } = usePredictionHistory(api);
   const { close, closing } = useClosePosition(api, me, onToast, refresh);
-  const exitQuotes = useExitQuotes(api, rows); // live value + P&L for the closable rows, 1s
+  // Which tabs actually show prediction rows. The Stocks tab shows none, so the 1s exit-quote poll
+  // has nothing on screen to price — it must not run there.
+  const callsVisible = tab === "calls" || tab === "hedges";
+  const exitQuotes = useExitQuotes(api, rows, callsVisible); // live value + P&L for the closable rows, 1s
   const stocks = useStockHistory(api, tab !== "calls");
   const [busy, setBusy] = useState(false);
 
@@ -84,6 +87,8 @@ export function BalanceSheet({ me, api, realPusdMicro, stockWallet, stockSponsor
   const stockRows = tab === "hedges" ? stocks?.filter((r) => r.source === "HEDGE") ?? null : tab === "stocks" ? stocks : null;
   const loading = (tab !== "stocks" && !rows) || (tab !== "calls" && !stocks);
   const empty = !loading && (callRows?.length ?? 0) + (stockRows?.length ?? 0) === 0;
+  // The history read failed on a tab that shows its rows — "no calls yet" would be a lie.
+  const failed = error && callsVisible;
   const emptyCopy =
     tab === "calls" ? "No predictions yet. Swipe a card to make your first call."
     : tab === "stocks" ? "No stocks yet. Swipe right on the Stocks deck to buy one."
@@ -181,10 +186,24 @@ export function BalanceSheet({ me, api, realPusdMicro, stockWallet, stockSponsor
 
         {loading ? (
           <div style={{ textAlign: "center", color: "var(--muted)", padding: 24 }}>Loading…</div>
-        ) : empty ? (
-          <div style={{ textAlign: "center", color: "var(--muted)", padding: 24, fontSize: 13 }}>{emptyCopy}</div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {/* A failed history read hands back an empty list, which is indistinguishable from "you
+                have never made a call" — and telling someone with open positions they have none is
+                the worst thing this sheet can say. Say it failed; the retry IS the thing they tap.
+                It sits above the rows rather than replacing them: on Hedges the stock legs loaded. */}
+            {failed ? (
+              <button
+                type="button"
+                onClick={() => void refresh()}
+                style={{ width: "100%", margin: 0, font: "inherit", padding: 24, borderRadius: 14, background: "var(--panel)", border: "1px solid var(--line)", color: "var(--muted)", fontSize: 13, cursor: "pointer" }}
+              >
+                Couldn&apos;t load — tap to retry
+              </button>
+            ) : null}
+            {empty && !failed ? (
+              <div style={{ textAlign: "center", color: "var(--muted)", padding: 24, fontSize: 13 }}>{emptyCopy}</div>
+            ) : null}
             {stockRows?.map((r) => <StockHistoryRow key={r.id} row={r} />)}
             {callRows?.map((r) => (
               <PredictionRow key={r.id} row={toPredictionRow(r)} nowMs={nowMs} onClosePosition={() => close(r)} closing={closing === r.id} exitQuote={exitQuotes[r.id]} />

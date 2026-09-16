@@ -82,6 +82,9 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksU
   const topping = useRef(false);
 
   const load = useCallback(async () => {
+    // Holds the refill guard for its whole flight: this IS a deck fetch, and the refill effect below
+    // fires on mount (an empty deck is a low deck) — without this the first paint costs two.
+    topping.current = true;
     try {
       const r = (await api("/api/stocks/deck")) as StockDeckResponse;
       setCards(r.cards.filter((c) => !served.current.has(c.id)));
@@ -91,6 +94,8 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksU
       setSponsored(r.sponsored);
     } catch (e) {
       console.error(e);
+    } finally {
+      topping.current = false;
     }
   }, [api]);
 
@@ -125,12 +130,13 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksU
   // the tap, by which time the user may have skipped past it — advancing the top then would throw
   // away a card they never acted on. A card already gone (skipped, passed) is a no-op.
   const removeCard = useCallback((id: string) => {
-    setCards((d) => {
-      const nextDeck = d.filter((c) => c.id !== id);
-      void topUpIfLow(nextDeck.length);
-      return nextDeck;
-    });
-  }, [topUpIfLow]);
+    setCards((d) => d.filter((c) => c.id !== id));
+  }, []);
+
+  // The refill is driven by the deck's LENGTH, not fired from inside the updater above: a state
+  // updater must be pure (React is free to call it twice), and a fetch in there is a second deck
+  // request on every removal in StrictMode.
+  useEffect(() => { void topUpIfLow(cards.length); }, [cards.length, topUpIfLow]);
 
   const act = useCallback(
     (card: StockDeckCardType, dir: SwipeAction) => {
@@ -183,26 +189,64 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksU
   // seconds to minutes — so which card it belongs to has to be remembered, not re-derived on done.
   const buyingId = useRef<string | null>(null);
 
+  // Memoized rather than inlined into the call below: an arrow here is a new onDone every render,
+  // which rebuilds useBuyReal's callbacks, which rebuilds the card's props — and the balance poll
+  // re-renders this component every few seconds (rerender-memo).
+  const onDone = useCallback(() => {
+    const id = buyingId.current;
+    buyingId.current = null;
+    if (id) removeCard(id);
+    void onRefreshMe();
+  }, [onRefreshMe, removeCard]);
+
   const real = useBuyReal({
     api,
     me,
     onToast,
     onRefreshMe,
     ctx: { wallets, stockConsent, sponsored },
-    onDone: () => {
-      const id = buyingId.current;
-      buyingId.current = null;
-      if (id) removeCard(id);
-      void onRefreshMe();
-    },
+    onDone,
   });
+  const { buyReal, replayPending, acceptConsent: acceptConsentReal } = real;
+
+  // A real buy STARTS here, so the tab that died between "the wallet sent it" and "the server booked
+  // it" died HERE — replaying only from the portfolio leaves that buy parked until the user happens
+  // to open a screen they have no reason to open. Once per mount (the ref survives StrictMode's
+  // double-invoke and the rebuild when `me` arrives); the replay itself is idempotent across screens.
+  const userId = me?.user.id ?? null;
+  const replayed = useRef(false);
+  useEffect(() => {
+    if (!userId || replayed.current) return;
+    replayed.current = true;
+    void (async () => {
+      try {
+        const n = await replayPending();
+        if (n > 0) {
+          onToast("Confirmed a pending Solana buy");
+          void load();
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    })();
+  }, [load, onToast, replayPending, userId]);
 
   // A consent accepted through the sheet flips the local flag immediately, so the card's buy button
-  // stops saying "Accept xStocks terms to buy" without waiting for the next deck fetch.
+  // stops saying "Accept xStocks terms to buy" without waiting for the next deck fetch — but only if
+  // the SERVER recorded it. Flipping it on a failed POST puts a Buy on the card that /real/tx then
+  // 403s, which reopens this same sheet: a loop the user cannot get out of.
   const acceptConsent = useCallback(async () => {
-    await real.acceptConsent();
-    setStockConsent(true);
-  }, [real]);
+    if (await acceptConsentReal()) setStockConsent(true);
+  }, [acceptConsentReal]);
+
+  // Stable card callbacks: StockCardFace is memo()'d, and a fresh closure per render defeats it —
+  // the card re-renders on every balance tick, restarting the price pulse mid-animation.
+  const onAction = useCallback((a: SwipeAction) => { if (top) act(top, a); }, [act, top]);
+  const onBuyReal = useCallback(() => {
+    if (!top) return;
+    buyingId.current = top.id;
+    void buyReal({ assetId: top.id, symbol: top.symbol }, stakeCents, { wallets, stockConsent, sponsored });
+  }, [buyReal, sponsored, stakeCents, stockConsent, top, wallets]);
 
   // A real buy locks the deck the same way a paper one does — harder, in fact: real money is moving,
   // and every action here (pass, skip, paper buy, swipe) changes which card is on top.
@@ -219,13 +263,10 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksU
             key={top.id}
             card={top}
             busy={locked}
-            onAction={(a) => act(top, a)}
+            onAction={onAction}
             stakeCents={stakeCents}
             onPickStake={setStakeCents}
-            onBuyReal={() => {
-              buyingId.current = top.id;
-              void real.buyReal({ assetId: top.id, symbol: top.symbol }, stakeCents, { wallets, stockConsent, sponsored });
-            }}
+            onBuyReal={onBuyReal}
             buyRealBusy={real.busy}
             // A usable wallet is a verified external one OR the embedded wallet Privy issues on
             // login — only a user with neither is told to go get Phantom.

@@ -38,19 +38,24 @@ type FaceProps = {
 // number just differs between frames, which reads exactly like a number that never moves. Returns
 // the animation to play — cheaper is a bright pulse (the same stake buys more), dearer is a dim one
 // — and nothing else, so a re-render mid-swipe can never shift the layout under a thumb.
+//
+// Derived during render from a ref of the previous value: no state, no effect, so a price change
+// costs zero extra renders. Restarting the animation is the CALLER's job — it keys the element on
+// the value it is showing, and a remount is what re-runs a CSS animation that already played. That
+// is also why two moves the same way inside one 460ms animation now pulse twice, as they should.
+/* eslint-disable react-hooks/refs -- the previous-value-during-render pattern, on purpose: the ref
+   is this hook's whole point, and the write is idempotent (a second render pass with the same value
+   changes nothing), so a double render cannot double-pulse. The alternative is the setState the
+   comment above describes. */
 export function useTick(value: number): string | undefined {
-  const prev = useRef(value);
-  const [anim, setAnim] = useState<string | undefined>(undefined);
-  useEffect(() => {
-    if (prev.current === value) return;
-    const down = value < prev.current; // a LOWER price is better for the buyer
-    prev.current = value;
-    setAnim(`${down ? "hfTickUp" : "hfTickDown"} .45s ease`);
-    const t = window.setTimeout(() => setAnim(undefined), 460);
-    return () => window.clearTimeout(t);
-  }, [value]);
-  return anim;
+  const prev = useRef({ value, anim: undefined as string | undefined });
+  if (prev.current.value !== value) {
+    const down = value < prev.current.value; // a LOWER price is better for the buyer
+    prev.current = { value, anim: `${down ? "hfTickUp" : "hfTickDown"} .45s ease` };
+  }
+  return prev.current.anim;
 }
+/* eslint-enable react-hooks/refs */
 
 export const CardFace = memo(function CardFace({ card, skinId, countdownText, urgent, windowText, yesP, noP, skipP, stakeCents, onEditStake }: FaceProps) {
   const cat = catOf(card);
@@ -127,11 +132,12 @@ export const CardFace = memo(function CardFace({ card, skinId, countdownText, ur
         {/* odds split — sides + CENTS (Polymarket-style), not % */}
         <div style={{ marginBottom: 14 }}>
           <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontFamily: "var(--nf)", fontWeight: 700, fontSize: 13, marginBottom: 6 }}>
-            <div style={{ color: "var(--no)", minWidth: 0, animation: noTick }}>
+            {/* keyed on the price: a new key remounts the block, which is what restarts the pulse */}
+            <div key={`no${card.noPriceBp}`} style={{ color: "var(--no)", minWidth: 0, animation: noTick }}>
               <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{labels.no}</div>
               <div>{cents(card.noPriceBp)}</div>
             </div>
-            <div style={{ color: "var(--yes)", minWidth: 0, textAlign: "right", animation: yesTick }}>
+            <div key={`yes${card.yesPriceBp}`} style={{ color: "var(--yes)", minWidth: 0, textAlign: "right", animation: yesTick }}>
               <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{labels.yes}</div>
               <div>{cents(card.yesPriceBp)}</div>
             </div>
@@ -147,28 +153,10 @@ export const CardFace = memo(function CardFace({ card, skinId, countdownText, ur
           {/* The chip IS the control. A stake is a per-swipe amount, so the place to change it is the
               place it is stated -- not a settings screen two taps away from the gesture it governs.
               pointerdown is stopped so opening it can never read as the start of a swipe. */}
-          <div
-            role={onEditStake ? "button" : undefined}
-            tabIndex={onEditStake ? 0 : undefined}
-            onPointerDown={onEditStake ? (e) => e.stopPropagation() : undefined}
-            onClick={onEditStake ? (e) => { e.stopPropagation(); onEditStake(); } : undefined}
-            style={{
-              background: "rgba(0,0,0,.4)",
-              backdropFilter: "blur(6px)",
-              border: "1px solid " + (onEditStake ? "var(--gold)" : "var(--line)"),
-              padding: "8px 12px",
-              borderRadius: 14,
-              cursor: onEditStake ? "pointer" : undefined,
-            }}
-          >
-            <div style={{ fontSize: 8, letterSpacing: ".12em", color: "var(--muted)", textTransform: "uppercase" }}>
-              Stake
-            </div>
-            <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 15, color: "#fff" }}>{usd(stakeCents)}</div>
-          </div>
+          <StakeChip stakeCents={stakeCents} onEditStake={onEditStake} />
           <div style={{ flex: 1, minWidth: 0, display: "flex", gap: 6 }}>
-            <PayBox label={labels.no} val={usd(winPayout(card.noPriceBp, stakeCents))} color="var(--no)" tick={noTick} />
-            <PayBox label={labels.yes} val={usd(winPayout(card.yesPriceBp, stakeCents))} color="var(--yes)" tick={yesTick} />
+            <PayBox key={`no${card.noPriceBp}`} label={labels.no} val={usd(winPayout(card.noPriceBp, stakeCents))} color="var(--no)" tick={noTick} />
+            <PayBox key={`yes${card.yesPriceBp}`} label={labels.yes} val={usd(winPayout(card.yesPriceBp, stakeCents))} color="var(--yes)" tick={yesTick} />
           </div>
         </div>
         <div style={{ textAlign: "center", marginTop: 12, fontSize: 11, color: "rgba(255,255,255,.55)", letterSpacing: ".02em" }}>Tap for details · swipe to call</div>
@@ -242,6 +230,7 @@ export function SwipeShell({ busy, onAction, onTap, children }: {
       onPointerDown={onPointerDown}
       onPointerMove={swipe.handlers.onPointerMove}
       onPointerUp={swipe.handlers.onPointerUp}
+      onPointerCancel={swipe.handlers.onPointerCancel}
       style={{
         position: "absolute", inset: 0, borderRadius: 26, overflow: "hidden",
         background: "var(--panel2)", border: "1px solid var(--line)",
@@ -296,6 +285,38 @@ function useCountdown(iso: string, _seed = 0) {
     return () => window.clearInterval(t);
   }, []);
   return countdown(iso, nowMs);
+}
+
+// The stake chip. A real <button> where it is editable (a div with role="button" answers the mouse
+// and ignores the keyboard), plain text where it is not — a preview card behind the top one must
+// not be reachable by Tab at all.
+function StakeChip({ stakeCents, onEditStake }: { stakeCents: number; onEditStake?: () => void }) {
+  const box: React.CSSProperties = {
+    background: "rgba(0,0,0,.4)",
+    backdropFilter: "blur(6px)",
+    border: "1px solid " + (onEditStake ? "var(--gold)" : "var(--line)"),
+    padding: "8px 12px",
+    borderRadius: 14,
+  };
+  const body = (
+    <>
+      <div style={{ fontSize: 8, letterSpacing: ".12em", color: "var(--muted)", textTransform: "uppercase" }}>
+        Stake
+      </div>
+      <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 15, color: "#fff" }}>{usd(stakeCents)}</div>
+    </>
+  );
+  if (!onEditStake) return <div style={box}>{body}</div>;
+  return (
+    <button
+      type="button"
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={(e) => { e.stopPropagation(); onEditStake(); }}
+      style={{ ...box, margin: 0, font: "inherit", textAlign: "left", cursor: "pointer" }}
+    >
+      {body}
+    </button>
+  );
 }
 
 function Stamp({ label, color, o, s, pos, rot }: { label: string; color: string; o: number; s: number; pos: React.CSSProperties; rot: number }) {
