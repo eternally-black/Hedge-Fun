@@ -953,6 +953,11 @@ const StockHedgeCard = memo(function StockHedgeCard({
           </div>
         </div>
 
+        {/* the one-line "what this is", when the server has one — the symbol alone says nothing */}
+        {stock.blurb && (
+          <div style={{ marginTop: 8, fontSize: 12, color: "var(--muted)", lineHeight: 1.3, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{stock.blurb}</div>
+        )}
+
         {/* row 2: the owner's headline — nothing else */}
         <div style={{ padding: "10px 0 8px", fontFamily: "var(--df)", fontSize: 18, lineHeight: 1.15, color: "var(--text)" }}>
           {s.rationale ?? s.question}

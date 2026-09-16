@@ -24,6 +24,8 @@ export interface XStockNode {
   symbol?: string | null;
   name?: string | null;
   logo?: string | null;
+  isin?: string | null; // the TOKEN's ISIN (Backed issues its own)
+  underlyingIsin?: string | null; // the real security's ISIN — the one that identifies the company
   underlyingSymbol?: string | null;
   isTradingHalted?: boolean | null;
   trading?: { tradingHoursMode?: string | null; openNow?: boolean | null } | null;
@@ -35,6 +37,7 @@ export interface StockAssetInput {
   symbol: string;
   name: string;
   underlying: string;
+  isin: string | null;
   logoUrl: string | null;
   halted: boolean;
   tradingHours: string | null;
@@ -57,11 +60,15 @@ export function xstockToAsset(n: XStockNode): StockAssetInput | null {
       : symbol.endsWith("x")
         ? symbol.slice(0, -1)
         : symbol;
+  // The UNDERLYING ISIN identifies the company ("US0378331005" = Apple); the node's own `isin` is the
+  // wrapper token's. Prefer the former, fall back to the latter — it is only a disambiguation hint.
+  const isinRaw = [n.underlyingIsin, n.isin].find((v) => typeof v === "string" && v.trim());
   return {
     mint: sol.address,
     symbol,
     name,
     underlying,
+    isin: typeof isinRaw === "string" ? isinRaw.trim() : null,
     logoUrl: typeof n.logo === "string" && n.logo ? n.logo : null,
     halted: n.isTradingHalted === true,
     tradingHours: n.trading?.tradingHoursMode ?? null,

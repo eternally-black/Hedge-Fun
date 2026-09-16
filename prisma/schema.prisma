@@ -940,6 +940,8 @@ model StockAsset {
   symbol            String    @unique // "AAPLx"
   name              String // "Apple xStock"
   underlying        String // "AAPL"
+  isin              String? // underlying security ISIN from the xStocks catalog — disambiguates the name for the blurb LLM
+  blurb             String? // ≤ 10-word plain-English "what this is", LLM-generated ONCE (fillMissingBlurbs only writes nulls); null = not written yet, safe to overwrite by hand
   logoUrl           String?
   decimals          Int       @default(8) // base-unit exponent, from Jupiter price v3
   halted            Boolean   @default(false) // xStocks isTradingHalted

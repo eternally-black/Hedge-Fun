@@ -23,6 +23,7 @@ import { refreshDeck } from "./refresh-deck";
 import { pruneMarkets } from "./prune-markets";
 import { refreshHedgeIndex } from "./refresh-hedge-index";
 import { refreshStockCatalog, refreshStockPrices } from "./refresh-stocks";
+import { fillMissingBlurbs } from "../src/lib/stock-blurbs";
 import { sweepAttempts } from "../src/lib/stocks-real";
 import { evalStockAlerts } from "../src/lib/stock-alerts";
 import { sponsorConfigured, sponsorAddress } from "../src/lib/sponsor";
@@ -87,6 +88,7 @@ const PRUNE_EVERY_N_TICKS = 5;
 const STOCK_PRICES_BUDGET_MS = 10_000;
 const STOCK_CATALOG_BUDGET_MS = 30_000;
 const STOCK_CATALOG_EVERY_N_TICKS = 5;
+const STOCK_BLURB_BUDGET_MS = 20_000; // card copy: at most two LLM calls, on the catalog tick only
 const STOCK_SWEEP_BUDGET_MS = 15_000; // pending real-buy attempts: a few Helius reads, or nothing at all
 const STOCK_SPONSOR_BUDGET_MS = 5_000; // fee-payer balance: one getBalance call, on the catalog tick only
 // Order reconciliation ping. The poller is deliberately SDK-free, so it cannot reconcile orders
@@ -302,6 +304,14 @@ async function tick() {
       // Zero priced with a non-empty catalog = Jupiter served nothing. Not thrown upstream (a
       // partial read is a success by design), but three ticks of it empties the deck silently.
       if (c.assets > 0 && c.priced === 0) throw new Error(`0 of ${c.assets} assets priced`);
+      // Card copy for the newly catalogued assets. Its own try/catch and its own budget: a blurb is
+      // decoration, and an LLM outage must never mark the stocks subsystem failed (no key = a no-op).
+      try {
+        const b = await withDeadline(STOCK_BLURB_BUDGET_MS, () => fillMissingBlurbs(prisma, { max: 40 }));
+        if (b.written > 0) console.log(`[stocks] blurbs +${b.written}`);
+      } catch (e) {
+        console.warn("[stocks] blurb fill error:", (e as Error).message);
+      }
     } else {
       const p = await withDeadline(STOCK_PRICES_BUDGET_MS, () => refreshStockPrices());
       console.log(`[stocks] repriced ${p.priced}/${p.requested}`);

@@ -455,7 +455,7 @@ export interface HedgeWalletStateResponse {
 // A tokenized stock behind a hedge card (Stocklana). When `stock` is set on a HedgeSuggestion the
 // DeckCard fields are SENTINELS (id "stock:<SYMBOL>", prices 0, deadline "") — render off `stock`,
 // never off the market fields.
-export interface HedgeStockRef { symbol: string; name: string; mint: string; logoUrl: string | null; priceCents: number; change24hBp: number | null; tradable: boolean }
+export interface HedgeStockRef { symbol: string; name: string; blurb?: string | null; mint: string; logoUrl: string | null; priceCents: number; change24hBp: number | null; tradable: boolean }
 // The parsed life situation a stock card answers (persisted per user+category, no raw text).
 export interface HedgeSituation { category: string; amountCents: number | null; period: "month" | "week" | "year" | "once" | null; distanceKm: number | null }
 export interface HedgeSuggestion extends DeckCard {
@@ -568,7 +568,9 @@ export interface HedgeSpottedResponse { suggestions: HedgeSuggestion[]; generate
 // (gates "Buy on Solana"); `stockConsent` = the caller accepted the current xStocks terms.
 // `tradable` = the mint has a Solana pool deep enough for a small REAL buy; false = paper only (the
 // price is the issuer's reference price) and the client must not offer "Buy on Solana".
-export interface StockDeckCard { id: string; symbol: string; name: string; underlying: string; logoUrl: string | null; mint: string; priceCents: number; change24hBp: number | null; uiMultiplierMicro: number | null; tradingHours: string | null; openNow: boolean; tradable: boolean; pricedAt: string }
+// `blurb` = a ≤ 10-word "what this company does" line, generated once server-side; null until then,
+// and the client renders NOTHING (not a placeholder) when it is null.
+export interface StockDeckCard { id: string; symbol: string; name: string; underlying: string; blurb: string | null; logoUrl: string | null; mint: string; priceCents: number; change24hBp: number | null; uiMultiplierMicro: number | null; tradingHours: string | null; openNow: boolean; tradable: boolean; pricedAt: string }
 // sponsored: the server holds a fee-payer key — real buys/sells are fee-sponsored (the user needs USDC only).
 export interface StockDeckResponse {
   sponsored: boolean; cards: StockDeckCard[]; wallets: string[]; stockConsent: boolean }
@@ -588,7 +590,7 @@ export type StockPassResponse = { ok: true };
 // ─── GET /api/stocks/portfolio ────  Auth: Bearer. Open + recent closed lots, both modes, priced from
 // the STORED asset price (refreshed every poller tick; `fresh` false when older than the staleness
 // bound). REAL lots are reconciled against the payer's live wallet balance at most every few hours.
-export interface StockPositionRow { id: string; assetId: string; symbol: string; name: string; logoUrl: string | null; mode: "PAPER" | "REAL"; source: "DECK" | "HEDGE"; qtyBase: string; decimals: number; uiMultiplierMicro: number | null; costCents: number; entryPriceCents: number; priceCents: number | null; valueCents: number | null; pnlCents: number | null; fresh: boolean; txSig: string | null; sellTxSig: string | null; payer: string | null; createdAt: string; closedAt: string | null; closeReason: string | null; proceedsCents: number | null }
+export interface StockPositionRow { id: string; assetId: string; symbol: string; name: string; blurb: string | null; logoUrl: string | null; mode: "PAPER" | "REAL"; source: "DECK" | "HEDGE"; qtyBase: string; decimals: number; uiMultiplierMicro: number | null; costCents: number; entryPriceCents: number; priceCents: number | null; valueCents: number | null; pnlCents: number | null; fresh: boolean; txSig: string | null; sellTxSig: string | null; payer: string | null; createdAt: string; closedAt: string | null; closeReason: string | null; proceedsCents: number | null }
 export interface StockTotals { costCents: number; valueCents: number; pnlCents: number }
 export interface StockPendingAttempt { id: string; symbol: string; stakeCents: number; status: "PENDING" | "CONFIRMED" | "EXPIRED" | "FAILED"; sig: string | null; createdAt: string }
 export interface StockPortfolioResponse { open: StockPositionRow[]; closed: StockPositionRow[]; totals: { paper: StockTotals; real: StockTotals }; wallets: string[]; stockConsent: boolean; sponsored: boolean; pendingAttempts: StockPendingAttempt[] }

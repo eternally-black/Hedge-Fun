@@ -29,9 +29,15 @@ const MINT_C = `mintC-${RUN}`;
 // Mutable price the test changes between steps. Any non-Jupiter URL is a stubbed outage.
 let priceUsd = 334.16;
 let jupiterDown = false;
+// The canned LLM answer for the blurb step, keyed by symbol; filled once the symbols are known.
+let blurbReply: Record<string, string> = {};
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async (input: RequestInfo | URL) => {
   const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  if (url.includes("/chat/completions")) {
+    const body = { choices: [{ message: { content: JSON.stringify(blurbReply) } }] };
+    return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+  }
   if (url.includes("lite-api.jup.ag/price")) {
     if (jupiterDown) throw new Error("stubbed outage");
     const body: Record<string, unknown> = {};
@@ -68,13 +74,15 @@ async function main() {
     const vb0 = await prisma.virtualBalance.findUniqueOrThrow({ where: { userId: user.id } });
 
     // Seed two deck-eligible assets (A, B) + a third (C) for the pass test.
-    const mkAsset = (mint: string, symbol: string) =>
+    // A carries a blurb, B and C do not — the deck card must mirror both cases verbatim.
+    const mkAsset = (mint: string, symbol: string, blurb?: string) =>
       prisma.stockAsset.create({
         data: {
           mint,
           symbol,
           name: `${symbol} xStock`,
           underlying: symbol.replace(/x$/, ""),
+          blurb: blurb ?? null,
           decimals: 8,
           deckEligible: true,
           priceCents: 33416,
@@ -83,7 +91,7 @@ async function main() {
         },
         select: { id: true },
       });
-    const A = await mkAsset(MINT_A, `AAAx-${RUN}`);
+    const A = await mkAsset(MINT_A, `AAAx-${RUN}`, "Makes phones and laptops");
     const B = await mkAsset(MINT_B, `BBBx-${RUN}`);
     const C = await mkAsset(MINT_C, `CCCx-${RUN}`);
     assetIds.push(A.id, B.id, C.id);
@@ -91,9 +99,11 @@ async function main() {
     // 1. Deck serves both seeded assets; wallets empty; stockConsent false.
     let res: Response = await deck.GET(get("http://x/api/stocks/deck"));
     assert.strictEqual(res.status, 200, "deck 200");
-    let body = (await res.json()) as { cards: { id: string }[]; wallets: string[]; stockConsent: boolean };
+    let body = (await res.json()) as { cards: { id: string; blurb: string | null }[]; wallets: string[]; stockConsent: boolean };
     const ids = new Set(body.cards.map((c) => c.id));
     assert.ok(ids.has(A.id) && ids.has(B.id), "deck serves both seeded assets");
+    assert.strictEqual(body.cards.find((c) => c.id === A.id)!.blurb, "Makes phones and laptops", "the card carries the stored blurb");
+    assert.strictEqual(body.cards.find((c) => c.id === B.id)!.blurb, null, "an asset with no blurb serves null, not a placeholder");
     assert.deepStrictEqual(body.wallets, [], "no verified wallets");
     assert.strictEqual(body.stockConsent, false, "no stock consent");
 
@@ -135,13 +145,13 @@ async function main() {
 
     // 5. Deck no longer serves A or B (open lots); pass C -> deck drops C; pass C again -> 200.
     res = await deck.GET(get("http://x/api/stocks/deck"));
-    body = (await res.json()) as { cards: { id: string }[]; wallets: string[]; stockConsent: boolean };
+    body = (await res.json()) as { cards: { id: string; blurb: string | null }[]; wallets: string[]; stockConsent: boolean };
     const ids2 = new Set(body.cards.map((c) => c.id));
     assert.ok(!ids2.has(A.id) && !ids2.has(B.id), "deck drops open lots");
     res = await pass.POST(post("http://x/api/stocks/pass", { assetId: C.id }));
     assert.strictEqual(res.status, 200, "pass C 200");
     res = await deck.GET(get("http://x/api/stocks/deck"));
-    body = (await res.json()) as { cards: { id: string }[]; wallets: string[]; stockConsent: boolean };
+    body = (await res.json()) as { cards: { id: string; blurb: string | null }[]; wallets: string[]; stockConsent: boolean };
     assert.ok(!new Set(body.cards.map((c) => c.id)).has(C.id), "deck drops passed C");
     res = await pass.POST(post("http://x/api/stocks/pass", { assetId: C.id }));
     assert.strictEqual(res.status, 200, "pass C again is idempotent");
@@ -199,7 +209,29 @@ async function main() {
     assert.strictEqual(await prisma.stockPosition.count({ where: { userId: user.id } }), before, "no lot on outage");
     jupiterDown = false;
 
-    // 10. Public stocks health probe: no auth, no secrets, counts only. 200/503 by fresh deck count.
+    // 10. Blurb fill: writes the assets that have none, NEVER overwrites the one that has.
+    const { fillMissingBlurbs } = await import("../src/lib/stock-blurbs");
+    assert.deepStrictEqual(await fillMissingBlurbs(prisma, { max: 5 }), { scanned: 0, written: 0, skipped: 0 }, "no key -> no call at all");
+    const symB = `BBBx-${RUN}`;
+    const symC = `CCCx-${RUN}`;
+    blurbReply = {
+      [symB]: "Runs cloud data centres.",
+      [symC]: `${symC} xStock`, // the name echoed back — must be rejected
+      [`AAAx-${RUN}`]: "OVERWRITTEN",
+    };
+    process.env.NLU_API_KEY = "test-key";
+    try {
+      await fillMissingBlurbs(prisma, { max: 40, batch: 20 });
+    } finally {
+      delete process.env.NLU_API_KEY;
+    }
+    const after = await prisma.stockAsset.findMany({ where: { id: { in: [A.id, B.id, C.id] } }, select: { id: true, blurb: true } });
+    const blurbOf = (id: string) => after.find((r) => r.id === id)!.blurb;
+    assert.strictEqual(blurbOf(A.id), "Makes phones and laptops", "an existing blurb is never overwritten");
+    assert.strictEqual(blurbOf(B.id), "Runs cloud data centres", "a missing blurb is filled, trailing period stripped");
+    assert.strictEqual(blurbOf(C.id), null, "the name echoed back is rejected, the row stays null");
+
+    // 11. Public stocks health probe: no auth, no secrets, counts only. 200/503 by fresh deck count.
     const health = await import("../src/app/api/stocks/health/route");
     const hres = await health.GET();
     const hbody = (await hres.json()) as Record<string, unknown>;

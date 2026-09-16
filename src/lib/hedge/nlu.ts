@@ -28,6 +28,15 @@ const NLU_TIMEOUT_MS = 5_000;
 const NLU_BASE = process.env.NLU_API_BASE || "https://openrouter.ai/api/v1";
 const NLU_MODEL = process.env.NLU_MODEL || "deepseek/deepseek-v4";
 
+// DeepSeek's own platform (api.deepseek.com) serves reasoning models that spend the entire max_tokens
+// on reasoning_content and return content "" with finish_reason "length" unless thinking is switched
+// off per request (verified live 2026-09-16: deepseek-flash at 400 and 2048 tokens → ""; with
+// thinking:{type:"disabled"} → the JSON in 43 tokens, 1.2 s). The field is DeepSeek-specific, so it
+// is only sent to that host — OpenRouter (the default base) never sees it.
+export function deepseekThinkingOff(base: string): { thinking?: { type: "disabled" } } {
+  return base.includes("api.deepseek.com") ? { thinking: { type: "disabled" } } : {};
+}
+
 const SYSTEM_PROMPT =
   "You are a strict NLU extractor for a hedging app. The user describes something they care about " +
   "or spend on: a sports team they support, an event, or a life cost (flights, fuel/driving, taxis, " +
@@ -119,6 +128,7 @@ export async function extractEntities(text: string): Promise<NluOutcome> {
       headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
       body: JSON.stringify({
         model: NLU_MODEL,
+        ...deepseekThinkingOff(NLU_BASE),
         // Reasoning models (DeepSeek v4, and every current small model worth using here) spend
         // completion tokens on reasoning BEFORE the answer, and max_tokens caps the sum. At 256 the
         // reasoning ate the whole budget: finish_reason "length", content "" — i.e. the NLU edge

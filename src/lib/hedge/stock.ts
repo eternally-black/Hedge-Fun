@@ -45,6 +45,7 @@ export interface StockAssetRow {
   id: string;
   symbol: string;
   name: string;
+  blurb: string | null;
   mint: string;
   logoUrl: string | null;
   priceCents: number;
@@ -68,6 +69,7 @@ export async function loadStockAssets(symbols: string[], nowMs: number): Promise
       id: r.id,
       symbol: r.symbol,
       name: r.name,
+      blurb: r.blurb,
       mint: r.mint,
       logoUrl: r.logoUrl,
       priceCents: r.priceCents,
@@ -133,6 +135,7 @@ export function buildStockSuggestion(a: StockAssetRow, p: BuildStockArgs): Hedge
     stock: {
       symbol: a.symbol,
       name: a.name,
+      blurb: a.blurb,
       mint: a.mint,
       logoUrl: a.logoUrl,
       priceCents: a.priceCents,

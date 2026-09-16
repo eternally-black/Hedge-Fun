@@ -25,6 +25,7 @@ import {
   USDC_MINT,
   type RpcParsedTx,
 } from "../src/lib/stocks";
+import { blurbPrompt, parseBlurbs } from "../src/lib/stock-blurbs";
 
 // ─── xstockToAsset: Solana deployment selection, defaults, null trading ─────────────────────────────
 {
@@ -33,6 +34,8 @@ import {
     name: "Apple xStock",
     logo: "https://example.com/AAPLx.png",
     underlyingSymbol: "AAPL",
+    isin: "LI1234567890",
+    underlyingIsin: "US0378331005",
     isTradingHalted: false,
     trading: { tradingHoursMode: "TwentyFourFive", openNow: true },
     deployments: [
@@ -46,6 +49,7 @@ import {
   assert.strictEqual(a!.symbol, "AAPLx");
   assert.strictEqual(a!.name, "Apple xStock");
   assert.strictEqual(a!.underlying, "AAPL");
+  assert.strictEqual(a!.isin, "US0378331005", "the UNDERLYING isin wins over the token's own");
   assert.strictEqual(a!.halted, false);
   assert.strictEqual(a!.tradingHours, "TwentyFourFive");
   assert.strictEqual(a!.openNow, true);
@@ -457,6 +461,42 @@ async function sponsorChecks() {
     assert.strictEqual(slots[sponsor.address], null, "the sponsor slot is still open");
     assert.strictEqual(slots[user.address]?.length, 64, "the user slot is filled with 64 bytes");
   }
+}
+
+// ─── blurbPrompt / parseBlurbs: the LLM is untrusted input ────────────────────────────────────
+{
+  const prompt = blurbPrompt([
+    { symbol: "AAPLx", name: "Apple xStock", underlying: "AAPL", isin: "US0378331005" },
+    { symbol: "SPYx", name: "SP500 xStock", underlying: "SPY", isin: null },
+  ]);
+  assert.ok(prompt.includes("at most 10 plain English words"), "prompt states the 10-word bound");
+  assert.ok(prompt.includes("- AAPLx: Apple xStock (underlying ticker AAPL, ISIN US0378331005)"), "item line carries name + ticker + ISIN");
+  assert.ok(prompt.includes("- SPYx: SP500 xStock (underlying ticker SPY)"), "a missing ISIN is simply absent");
+
+  // A fenced answer is the common model habit; symbols we did not ask for are dropped.
+  const raw = [
+    "```json",
+    '{"AAPLx": "Makes iPhones, Macs and consumer software.", "SPYx": "Tracks the S&P 500 index", "GOOGLx": "Search and ads"}',
+    "```",
+  ].join("\n");
+  assert.deepStrictEqual(
+    parseBlurbs(raw, ["AAPLx", "SPYx"]),
+    { AAPLx: "Makes iPhones, Macs and consumer software", SPYx: "Tracks the S&P 500 index" },
+    "fenced JSON parses, trailing period stripped, unrequested symbol dropped",
+  );
+
+  const thirteen = "one two three four five six seven eight nine ten eleven twelve thirteen";
+  assert.deepStrictEqual(parseBlurbs(`{"AAPLx": "${thirteen}"}`, ["AAPLx"]), {}, "13 words rejected");
+  assert.deepStrictEqual(parseBlurbs('{"AAPLx": ""}', ["AAPLx"]), {}, "empty rejected");
+  assert.deepStrictEqual(parseBlurbs(JSON.stringify({ AAPLx: "Makes phones.\nAnd computers." }), ["AAPLx"]), {}, "newline rejected");
+  assert.deepStrictEqual(parseBlurbs('{"AAPLx": "AAPL xStock"}', ["AAPLx"]), {}, "the ticker echoed back is not a description");
+  assert.deepStrictEqual(
+    parseBlurbs(JSON.stringify({ AAPLx: '"Consumer electronics and software xStock"' }), ["AAPLx"]),
+    { AAPLx: "Consumer electronics and software" },
+    "surrounding quotes and xStock stripped",
+  );
+  assert.deepStrictEqual(parseBlurbs("not json at all", ["AAPLx"]), {}, "unparseable body yields nothing");
+  assert.deepStrictEqual(parseBlurbs('{"AAPLx": 42}', ["AAPLx"]), {}, "a non-string value is dropped");
 }
 
 sponsorChecks()

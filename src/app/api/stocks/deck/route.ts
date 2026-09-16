@@ -35,6 +35,7 @@ export async function GET(req: Request) {
     symbol: a.symbol,
     name: a.name,
     underlying: a.underlying,
+    blurb: a.blurb,
     logoUrl: a.logoUrl,
     mint: a.mint,
     priceCents: a.priceCents ?? 0,

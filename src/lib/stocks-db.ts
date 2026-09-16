@@ -251,6 +251,7 @@ export function positionRow(
     assetId: p.assetId,
     symbol: a.symbol,
     name: a.name,
+    blurb: a.blurb,
     logoUrl: a.logoUrl,
     mode: p.mode,
     source: p.source === "HEDGE" ? "HEDGE" : "DECK",

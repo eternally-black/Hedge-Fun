@@ -83,6 +83,10 @@ export const StockCardFace = memo(function StockCardFace({ card, yesP, noP, skip
 
         <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center", padding: "14px 0" }}>
           <div style={{ fontFamily: "var(--df)", fontSize: 30, lineHeight: 1.06, letterSpacing: ".2px", color: "#fff", textShadow: "0 2px 20px rgba(0,0,0,.5)", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{card.name}</div>
+          {/* the one-line "what this is" — only when the server has one; no placeholder line. */}
+          {card.blurb && (
+            <div style={{ marginTop: 6, fontSize: 12, color: "var(--muted)", lineHeight: 1.3, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{card.blurb}</div>
+          )}
           <div style={{ marginTop: 6, fontSize: 12, color: "rgba(255,255,255,.6)", letterSpacing: ".02em" }}>{card.underlying}</div>
           <div style={{ marginTop: 14, display: "flex", alignItems: "baseline", gap: 10 }}>
             <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 40, lineHeight: 1, color: "#fff", animation: priceTick }}>{usd(card.priceCents)}</div>

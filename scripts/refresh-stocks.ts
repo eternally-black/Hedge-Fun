@@ -17,6 +17,7 @@ import { getPriceEntries } from "../src/lib/prices";
 import { xstockToAsset, priceFieldsFrom, isDeckEligible, deckRank, type XStockNode } from "../src/lib/stocks";
 import { STOCK_DECK_POOL } from "../src/lib/config";
 import { STOCK_RULES, WALLET_STOCK_RULES } from "../src/lib/hedge/stock-rules";
+import { fillMissingBlurbs } from "../src/lib/stock-blurbs";
 import { deadlineLeftMs, boundedTimeoutMs } from "../src/lib/deadline";
 
 const prisma = new PrismaClient();
@@ -71,6 +72,7 @@ export async function refreshStockCatalog(): Promise<CatalogResult> {
         symbol: a.symbol,
         name: a.name,
         underlying: a.underlying,
+        isin: a.isin,
         logoUrl: a.logoUrl,
         halted: a.halted,
         tradingHours: a.tradingHours,
@@ -83,6 +85,7 @@ export async function refreshStockCatalog(): Promise<CatalogResult> {
         symbol: a.symbol,
         name: a.name,
         underlying: a.underlying,
+        isin: a.isin,
         logoUrl: a.logoUrl,
         halted: a.halted,
         tradingHours: a.tradingHours,
@@ -174,13 +177,30 @@ async function priceAssets(mints: string[]): Promise<number> {
   return updated;
 }
 
-// Run directly (not when imported by the poller).
+// One-off dev fill: keep calling fillMissingBlurbs until a pass writes nothing (every remaining
+// asset failed validation, the key is missing, or we are done). The poller only does 40 per catalog
+// tick, so a fresh DB would take hours to fill itself; 30 × 40 = 1200 covers the whole catalog.
+async function fillAllBlurbs(): Promise<void> {
+  let total = 0;
+  for (let loop = 0; loop < 30; loop++) {
+    const r = await fillMissingBlurbs(prisma, { max: 40 });
+    total += r.written;
+    console.log(`refresh-stocks blurbs: pass ${loop + 1} scanned ${r.scanned}, wrote ${r.written} (total ${total})`);
+    if (r.written === 0) break;
+  }
+}
+
+// Run directly (not when imported by the poller). --blurbs is the blurb backfill ONLY — the catalog
+// pass is minutes of upstream reads and has nothing to do with filling in card copy.
 if (process.argv[1] && process.argv[1].endsWith("refresh-stocks.ts")) {
-  refreshStockCatalog()
-    .then((r) => {
-      console.log(`refresh-stocks: ${r.assets} assets, ${r.priced} priced, ${r.eligible} deck-eligible`);
-      return prisma.$disconnect();
-    })
+  const blurbsOnly = process.argv.includes("--blurbs");
+  (blurbsOnly
+    ? fillAllBlurbs()
+    : refreshStockCatalog().then((r) => {
+        console.log(`refresh-stocks: ${r.assets} assets, ${r.priced} priced, ${r.eligible} deck-eligible`);
+      })
+  )
+    .then(() => prisma.$disconnect())
     .catch((e) => {
       console.error("refresh-stocks failed:", e);
       process.exit(1);
