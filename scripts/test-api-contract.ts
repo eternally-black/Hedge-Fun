@@ -92,7 +92,7 @@ async function main() {
   // ---- (b) authed 200 + EXACT top-level key contract (Android binds to these) ----
   const meBody = await (await me.GET(authed("http://x/api/me"))).json();
   assert.deepStrictEqual(keysOf(meBody),
-    ["artifacts","balanceCents","cashCents","dev","isNewUser","lockedCents","loginMarkedToday","points","real","referrals","shards","shardsPerArtifact","skins","skips","stakeCents","streak","swipes","topup","unreadResults","unreadStockAlerts","user"],
+    ["artifacts","balanceCents","cashCents","dev","isNewUser","lockedCents","loginMarkedToday","points","real","referrals","shards","shardsPerArtifact","skins","skips","stakeCents","stockSponsored","stockWallets","streak","swipes","topup","unreadResults","unreadStockAlerts","user"],
     "/me top-level keys");
   // The Paper/Real switch binds to these, and the Android client reads the same payload — a rename
   // here is a broken toggle there, so the shape is pinned like every other block on this endpoint.

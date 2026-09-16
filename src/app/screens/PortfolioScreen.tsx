@@ -3,8 +3,8 @@
 import { type CSSProperties, useCallback, useEffect, useRef, useState } from "react";
 import { type Me, usd } from "../ui";
 import { REAL_BALANCE_POLL_MS } from "@/lib/config";
-import type { StockPortfolioResponse, StockPositionRow, StockWalletResponse } from "@/lib/api-types";
-import { isWalletUnverified, useBuyReal } from "../useBuyReal";
+import type { StockPortfolioResponse, StockPositionRow } from "@/lib/api-types";
+import { useBuyReal } from "../useBuyReal";
 import { StockConsentSheet } from "./StockConsentSheet";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
@@ -18,11 +18,18 @@ export function PortfolioScreen({
   me,
   onRefreshMe,
   onToast,
+  stocksUsdCents,
+  onOpenWallet,
 }: {
   api: Api;
   me: Me | null;
   onRefreshMe: () => void | Promise<void>;
   onToast: (m: string) => void;
+  // The REAL · STOCKS pocket. Read and polled by page.tsx (one owner for the whole app), shown here
+  // as a one-line link into the wallet sheet — the address, the copy button and the funding
+  // instructions live there now, in the same place as the other two pockets.
+  stocksUsdCents: number | null;
+  onOpenWallet: () => void;
 }) {
   const [data, setData] = useState<StockPortfolioResponse | null>(null);
   const [closedOpen, setClosedOpen] = useState(false);
@@ -147,16 +154,17 @@ export function PortfolioScreen({
         <div style={{ fontFamily: "var(--df)", fontSize: 26, marginTop: 4 }}>Portfolio</div>
         <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>Tokenized stocks you own — paper and on-chain.</div>
 
-        {real.embedded && real.walletAddress ? (
-          <FundPanel
-            api={api}
-            address={real.walletAddress}
-            sponsored={data?.sponsored ?? false}
-            verified={(data?.wallets ?? []).includes(real.walletAddress)}
-            ensureVerified={real.ensureVerified}
-            onToast={onToast}
-          />
-        ) : null}
+        {/* One line, one tap into the wallet sheet. The balance is stated here because this is the
+            screen you check before selling — but nothing is funded from here. */}
+        <button
+          type="button"
+          onClick={onOpenWallet}
+          style={{ margin: "14px 0 0", font: "inherit", width: "100%", display: "flex", alignItems: "center", gap: 10, background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 14, padding: "11px 13px", cursor: "pointer", color: "inherit", textAlign: "left" }}
+        >
+          <span style={{ flex: 1, fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700 }}>Wallet</span>
+          <span style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 15, color: "var(--gold)" }}>{stocksUsdCents == null ? "—" : usd(stocksUsdCents)}</span>
+          <span style={{ fontSize: 9, letterSpacing: ".14em", textTransform: "uppercase", color: "var(--muted)" }}>Real · Stocks ›</span>
+        </button>
 
         <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
           <TotalTile label="Paper" totals={paper} />
@@ -243,110 +251,6 @@ export function PortfolioScreen({
         onClose={real.closeConsent}
       />
     </>
-  );
-}
-
-// FundPanel — "send USDC here". An embedded wallet has no wallet app of its own to show a balance
-// or an address, so the app has to be that surface, or the user has nothing to fund and no way to
-// know it arrived. No QR: no QR library is installed and one dependency for one square is a bad
-// trade — the address is one tap away from the clipboard.
-function FundPanel({ api, address, sponsored, verified, ensureVerified, onToast }: {
-  api: Api;
-  address: string;
-  sponsored: boolean;
-  verified: boolean;
-  ensureVerified: (address: string) => Promise<void>;
-  onToast: (m: string) => void;
-}) {
-  const [usdcCents, setUsdcCents] = useState<number | null>(null);
-  // Said once, not every 15s: this load is on a poll, and a Privy outage would otherwise repeat the
-  // same toast until it clears.
-  const warnedUnverified = useRef(false);
-
-  const load = useCallback(async () => {
-    try {
-      // /stocks/wallet answers only for a VERIFIED address, and a freshly created embedded wallet is
-      // not one until we tell the server about it — this panel is usually the first place that needs it.
-      if (!verified) await ensureVerified(address);
-      const r = (await api(`/api/stocks/wallet?address=${address}`)) as StockWalletResponse;
-      setUsdcCents(r.usdcCents);
-    } catch (e) {
-      if (isWalletUnverified(e)) {
-        if (!warnedUnverified.current) {
-          warnedUnverified.current = true;
-          onToast("Couldn't verify your wallet — try again in a moment");
-        }
-        return;
-      }
-      console.error(e);
-    }
-  }, [address, api, ensureVerified, onToast, verified]);
-
-  // Same visibility-gated poll as the portfolio list. What is being watched here is USDC arriving
-  // from somewhere else entirely, so returning to the tab must re-read immediately.
-  useEffect(() => {
-    let timer: number | undefined;
-    const stop = () => window.clearInterval(timer);
-    const start = () => {
-      stop();
-      timer = window.setInterval(() => void load(), REAL_BALANCE_POLL_MS);
-    };
-    const onVis = () => {
-      if (document.hidden) return stop();
-      void load();
-      start();
-    };
-    // "We are visible now" is exactly the mount case too — read once, then start the clock. Going
-    // through onVis rather than calling load() here keeps the first setState off the effect body.
-    onVis();
-    document.addEventListener("visibilitychange", onVis);
-    window.addEventListener("focus", onVis);
-    return () => {
-      stop();
-      document.removeEventListener("visibilitychange", onVis);
-      window.removeEventListener("focus", onVis);
-    };
-  }, [load]);
-
-  const copy = () => {
-    void navigator.clipboard
-      .writeText(address)
-      .then(() => onToast("Address copied"))
-      .catch(() => onToast("Couldn't copy — select the address instead"));
-  };
-
-  return (
-    <div style={{ marginTop: 14, background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 14, padding: "12px 13px" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <div style={{ flex: 1, fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700 }}>Your Solana wallet</div>
-        <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 15 }}>{usdcCents == null ? "—" : usd(usdcCents)}</div>
-        <button
-          type="button"
-          onClick={() => void load()}
-          aria-label="Refresh balance"
-          style={{ margin: 0, font: "inherit", padding: "3px 8px", borderRadius: 8, background: "transparent", color: "var(--muted)", border: "1px solid var(--line)", fontWeight: 700, fontSize: 11, cursor: "pointer" }}
-        >
-          ↻
-        </button>
-      </div>
-
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 9 }}>
-        <div style={{ flex: 1, minWidth: 0, fontFamily: "ui-monospace,SFMono-Regular,Menlo,monospace", fontSize: 11, color: "var(--text)", overflowWrap: "anywhere", lineHeight: 1.4 }}>{address}</div>
-        <button
-          type="button"
-          onClick={copy}
-          style={{ margin: 0, font: "inherit", flexShrink: 0, padding: "6px 11px", borderRadius: 10, background: "transparent", color: "var(--muted)", border: "1px solid var(--line)", fontWeight: 700, fontSize: 11, cursor: "pointer" }}
-        >
-          Copy
-        </button>
-      </div>
-
-      <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 9, lineHeight: 1.5 }}>
-        {sponsored
-          ? "Send USDC (Solana) here. No SOL needed — network fees are on us."
-          : "Send USDC (Solana) here, plus ~0.01 SOL for network fees."}
-      </div>
-    </div>
   );
 }
 

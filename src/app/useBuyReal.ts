@@ -1,17 +1,16 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import { useLinkAccount, useConnectWallet, usePrivy, type WalletWithMetadata } from "@privy-io/react-auth";
+import { useLinkAccount, useConnectWallet } from "@privy-io/react-auth";
 import {
-  useWallets as useSolanaWallets,
   useSignAndSendTransaction,
   useSignTransaction,
   type ConnectedStandardSolanaWallet,
 } from "@privy-io/react-auth/solana";
 import { STOCK_TERMS_VERSION } from "@/lib/config";
 import { usd, type Me } from "./ui";
+import { isWalletUnverified, useEnsureVerified, useWalletPicker } from "./useTradingWallet";
 import type {
-  HedgeWalletResponse,
   StockPortfolioResponse,
   StockRealTxResponse,
   StockRealSellTxResponse,
@@ -119,12 +118,6 @@ function errCode(e: unknown): string | undefined {
   return (e as { body?: { error?: string } }).body?.error;
 }
 
-// ensureVerified's one refusal: the POST succeeded but the server could not confirm ownership, so
-// the address must NOT be treated as usable. Exported because the fund panel awaits it too.
-export function isWalletUnverified(e: unknown): boolean {
-  return e instanceof Error && e.message === "wallet_unverified";
-}
-
 // A deliberate cancel is the user's own decision — silent, no toast.
 function isUserReject(e: unknown): boolean {
   return /reject|denied|cancel/i.test(e instanceof Error ? e.message : String(e));
@@ -172,59 +165,17 @@ export function useBuyReal(p: {
   // not re-render, and it must survive the sheet's own open/close churn.
   const heldRef = useRef<Held | null>(null);
 
-  const { wallets: solWallets, ready: walletsReady } = useSolanaWallets();
   const { signAndSendTransaction } = useSignAndSendTransaction();
   const { signTransaction } = useSignTransaction();
-  const { user } = usePrivy();
-
-  // The Privy EMBEDDED Solana wallet. A ConnectedStandardSolanaWallet carries only `address` and
-  // `standardWallet`, so "is this one ours" cannot be asked of the connected wallet — it is asked of
-  // the LINKED ACCOUNT that created it, where walletClientType === 'privy' is the SDK's own marker.
-  const embeddedAddress =
-    user?.linkedAccounts.find(
-      (a): a is WalletWithMetadata => a.type === "wallet" && a.chainType === "solana" && a.walletClientType === "privy",
-    )?.address ?? null;
-
-  // Which wallet a real trade uses: a CONNECTED external wallet the server already verified wins —
-  // the user deliberately linked that one — else the embedded wallet, which every login now has.
-  const pickWallet = useCallback(
-    (verified: readonly string[]): ConnectedStandardSolanaWallet | null => {
-      const set = new Set(verified);
-      return (
-        solWallets.find((w) => w.address !== embeddedAddress && set.has(w.address)) ??
-        solWallets.find((w) => w.address === embeddedAddress) ??
-        null
-      );
-    },
-    [embeddedAddress, solWallets],
-  );
+  // Wallet selection lives in useTradingWallet — the HUD and the wallet sheet read the balance of
+  // whatever this picks, so the two must never be able to disagree.
+  const { pickWallet, wallets: solWallets, embeddedAddress, ready: walletsReady } = useWalletPicker();
 
   const wallet = pickWallet(screenCtx?.wallets ?? []);
   const walletAddress = wallet?.address ?? null;
   const embedded = walletAddress !== null && walletAddress === embeddedAddress;
 
-  // Addresses this session already handed to the server. An embedded wallet is a Privy LINKED
-  // account, so /api/hedge/wallet can verify it through Privy without a signature prompt — but it is
-  // a write, and both the first trade and the fund panel want it done, so it runs at most once.
-  const verifiedOnce = useRef<Set<string>>(new Set());
-  const ensureVerified = useCallback(
-    async (address: string): Promise<void> => {
-      if (verifiedOnce.current.has(address)) return;
-      verifiedOnce.current.add(address);
-      try {
-        // 200 is NOT "verified": the route never refuses on a Privy outage, it answers 200 with
-        // verified:false. Caching that would leave the wallet unusable for the rest of the session —
-        // every balance read 403s and a buy sends an embedded-wallet user into the link flow.
-        const r = (await api("/api/hedge/wallet", { method: "POST", body: JSON.stringify({ address }) })) as HedgeWalletResponse;
-        if (!r.verified) throw new Error("wallet_unverified");
-        await onRefreshMe?.();
-      } catch (e) {
-        verifiedOnce.current.delete(address); // a failed verify must stay retryable, not stick
-        throw e;
-      }
-    },
-    [api, onRefreshMe],
-  );
+  const ensureVerified = useEnsureVerified(api, onRefreshMe);
 
   // Linking a wallet is a VERIFYING action: Privy makes the wallet sign a challenge, and the server
   // records the address as verified. A pasted address is read-only and cannot pay for a swap.
@@ -396,7 +347,7 @@ export function useBuyReal(p: {
         } else if (status === 409 && code === "price_impact") {
           onToast("Too thin to buy right now");
         } else if (status === 409 && code === "insufficient_usdc") {
-          onToast("Not enough USDC — send at least $1 to your wallet");
+          onToast("Not enough in your Solana wallet — add at least $1");
         } else if (status === 409 && code === "asset_halted") {
           onToast("Trading is halted for this stock");
         } else if (status === 409 && code === "buy_in_flight") {
@@ -413,10 +364,10 @@ export function useBuyReal(p: {
         return;
       }
 
-      // The server sizes the swap to the wallet's USDC when the chip is larger than the balance
+      // The server sizes the swap to what the wallet holds when the chip is larger than the balance
       // (the quote carries the amount really used) — say so before the signature, not after.
       const usedCents = Math.floor(Number(tx.quote.inAmountMicro) / 10_000);
-      if (usedCents < stakeCents) onToast(`Buying with your full ${(usedCents / 100).toFixed(2)} USDC`);
+      if (usedCents < stakeCents) onToast(`Buying with your full ${usd(usedCents)}`);
 
       // 3. Sign, land, book — and only then advance the card.
       const confirmed = await signSubmitConfirm(tx, w);

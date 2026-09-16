@@ -56,13 +56,16 @@ export function DeckModePill({ mode, onMode }: { mode: DeckMode; onMode: (m: Dec
 // deck; a different card and a different economy. Right = buy (paper from the virtual balance, or
 // real through the user's own Phantom), left = pass (never dealt again), up = skip (session only).
 // ============================================================================
-export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode }: {
+export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksUsdCents, onOpenWallet }: {
   api: Api;
   me: Me | null;
   onRefreshMe: () => void | Promise<void>;
   onToast: (m: string) => void;
   mode: DeckMode;
   onMode: (m: DeckMode) => void;
+  // The REAL · STOCKS pocket, owned by page.tsx so the card's CTA and the HUD chip state one number.
+  stocksUsdCents: number | null;
+  onOpenWallet: () => void;
 }) {
   const [cards, setCards] = useState<StockDeckCardType[]>([]);
   const [stakeCents, setStakeCents] = useState<number>(STOCK_STAKE_PRESETS_CENTS[0]);
@@ -228,6 +231,8 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode }: {
             // login — only a user with neither is told to go get Phantom.
             walletLinked={wallets.length > 0 || real.walletAddress !== null}
             consented={stockConsent}
+            stocksUsdCents={stocksUsdCents}
+            onOpenWallet={onOpenWallet}
           />
         ) : (
           <div style={{ position: "absolute", inset: 0, borderRadius: 26, background: "var(--panel)", border: "1px solid var(--line)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, textAlign: "center" }}>

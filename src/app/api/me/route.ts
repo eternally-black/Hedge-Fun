@@ -18,6 +18,8 @@ import {
 } from "@/lib/config";
 import { isDevUser } from "@/lib/dev";
 import { effectiveRealMode } from "@/lib/real";
+import { verifiedWallets } from "@/lib/stocks-db";
+import { sponsorConfigured } from "@/lib/sponsor";
 import { rateLimit } from "@/lib/ratelimit";
 import type { MeResponse } from "@/lib/api-types";
 import { REAL_TERMS_VERSION } from "@/lib/real-terms";
@@ -50,7 +52,7 @@ export async function GET(req: Request) {
   ) {
     await evaluateStreak(user.id);
   }
-  const [points, balance, collectibles, streak, counter, loginMark, unreadResults, referrals] = await Promise.all([
+  const [points, balance, collectibles, streak, counter, loginMark, unreadResults, referrals, stockWallets] = await Promise.all([
     effectivePoints(prisma, user.id),
     prisma.virtualBalance.findUnique({ where: { userId: user.id } }),
     prisma.collectibleBalance.findUnique({ where: { userId: user.id } }),
@@ -69,6 +71,7 @@ export async function GET(req: Request) {
       },
     }),
     getReferralStats(user.id),
+    verifiedWallets(user.id),
   ]);
 
   // Cash/Locked split. balanceCents is the stored total; lockedCents is the held sum (maintained
@@ -150,6 +153,11 @@ export async function GET(req: Request) {
     referrals,
     // Brand-new account: streak never started AND no GM today → skip the open ritual (deck first).
     isNewUser: (streak?.currentLevel ?? 0) === 0 && !loginMark,
+    // The stock pocket, named here because the HUD states it on every screen: which wallets the
+    // server trusts (so the client can pick the one it will read), and whether fees are sponsored.
+    // One indexed read on a route that already fans out — cheaper than a portfolio fetch per screen.
+    stockWallets,
+    stockSponsored: sponsorConfigured(),
   };
   return NextResponse.json(body);
 }

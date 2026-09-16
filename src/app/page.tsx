@@ -6,7 +6,7 @@ import { usePrivy } from "@privy-io/react-auth";
 import { useApi } from "./useApi";
 import { DeckCard, CardPreview, type SwipeAction } from "./DeckCard";
 import { StockDeck, DeckModePill, type DeckMode } from "./screens/StockDeck";
-import { Hud } from "./screens/Hud";
+import { Hud, type Pocket } from "./screens/Hud";
 import { BottomNav, type NavKey } from "./screens/BottomNav";
 import { Onboarding } from "./screens/Onboarding";
 import { GmScreen } from "./screens/GmScreen";
@@ -21,6 +21,8 @@ import { PortfolioScreen } from "./screens/PortfolioScreen";
 import { RevealOverlay } from "./screens/RevealOverlay";
 import { type Card, type Me, type Screen } from "./ui";
 import { useRealCtx } from "./useRealCtx";
+import { useTradingWallet } from "./useTradingWallet";
+import { useStockWallet } from "./useStockWallet";
 import { APP_SURFACE_ID } from "./appSurface";
 import { placeRealOrder } from "@/lib/real-client";
 import { reportClientError } from "@/lib/client-report";
@@ -187,6 +189,26 @@ function App() {
       window.removeEventListener("focus", onVis);
     };
   }, [realMode, refreshRealBalance]);
+
+  // WHICH POCKET the screen is about. The app holds three separate pots of money and the HUD chip
+  // states exactly one of them, so the screen decides which: the stock surfaces mean the user's own
+  // Solana wallet, the prediction surfaces mean the Polymarket balance, everything else is play
+  // money. Derived from `screen`, not from effectiveScreen (computed below, past the boot gates):
+  // the only difference is deck-predictions → feed, and both of those map to "predictions" anyway.
+  const pocket: Pocket =
+    (screen === "deck" && deckMode === "stocks") || screen === "portfolio"
+      ? "stocks"
+      : (screen === "deck" && deckMode === "predictions") || screen === "feed" || screen === "hedge"
+        ? "predictions"
+        : "paper";
+
+  // ONE reader for the stock pocket, owned here rather than per-screen: the HUD states this number
+  // everywhere, the deck CTA spends it and the sheet funds it — three copies would drift. Polled
+  // only while that pocket is on screen or the wallet sheet is open.
+  const tradingWallet = useTradingWallet(me?.stockWallets ?? []);
+  const stockWallet = useStockWallet(api, tradingWallet.address, pocket === "stocks" || balanceOpen);
+  const stocksUsdCents = stockWallet.usdCents;
+
   // Every card id this session has already put in front of the user. The refill dedupes against
   // THIS, not against the current deck: a skipped card is gone from the deck, so dedupe-by-deck let
   // the server hand it straight back — and it does hand it back, because /api/skip records only a
@@ -673,12 +695,23 @@ function App() {
           onToast={flashToast}
         />
       )}
-      {balanceOpen && <BalanceSheet me={me} api={api} realPusdMicro={realPusdMicro} onClose={closeBalance} onTopupDone={refreshMe} onToast={flashToast} />}
-      <Hud me={me} pop={pop} realPusdMicro={realPusdMicro} onShards={goVault} onGM={goGmScreen} onBalance={openBalance} onBell={goNotifs} />
+      {balanceOpen && (
+        <BalanceSheet
+          me={me}
+          api={api}
+          realPusdMicro={realPusdMicro}
+          stockWallet={{ address: tradingWallet.address, embedded: tradingWallet.embedded, usdCents: stocksUsdCents, refresh: stockWallet.refresh, unverified: stockWallet.unverified }}
+          stockSponsored={me?.stockSponsored ?? false}
+          onClose={closeBalance}
+          onTopupDone={refreshMe}
+          onToast={flashToast}
+        />
+      )}
+      <Hud me={me} pop={pop} pocket={pocket} realPusdMicro={realPusdMicro} stocksUsdCents={stocksUsdCents} onShards={goVault} onGM={goGmScreen} onBalance={openBalance} onBell={goNotifs} />
 
       <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
         {effectiveScreen === "deck" && deckMode === "stocks" && (
-          <StockDeck api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} mode={deckMode} onMode={setDeckMode} />
+          <StockDeck api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} mode={deckMode} onMode={setDeckMode} stocksUsdCents={stocksUsdCents} onOpenWallet={openBalance} />
         )}
 
         {effectiveScreen === "deck" && deckMode === "predictions" && (
@@ -747,7 +780,7 @@ function App() {
         {effectiveScreen === "invite" && <InviteScreen me={me} />}
         {effectiveScreen === "you" && <ProfileScreen me={me} api={api} onRefresh={refresh} onLogout={doLogout} onToast={flashToast} pusdMicro={realPusdMicro} onNav={navTo} />}
         {effectiveScreen === "notifications" && <NotificationsScreen api={api} onSeen={markResultsSeen} onReplay={replayReveal} onOpenStock={() => setScreen("portfolio")} />}
-        {effectiveScreen === "portfolio" && <PortfolioScreen api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} />}
+        {effectiveScreen === "portfolio" && <PortfolioScreen api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} stocksUsdCents={stocksUsdCents} onOpenWallet={openBalance} />}
       </div>
 
       <BottomNav screen={effectiveScreen} onNav={navTo} deckLocked={deckLocked && deckMode === "predictions"} devFeed={!!me?.dev} />

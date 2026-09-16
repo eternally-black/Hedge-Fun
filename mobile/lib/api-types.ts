@@ -1,5 +1,4 @@
 // COPIED from src/lib/api-types.ts — sync manually, do not diverge
-// ─── API CONTRACT ──────────────────────────────────────────────────────────────────────────
 // The shapes the HTTP API (src/app/api/*) returns. This is the SINGLE SOURCE OF TRUTH for the
 // request/response contract shared by the web client AND the upcoming Android (Expo/RN) app.
 //
@@ -346,6 +345,13 @@ export interface MeResponse {
   // Open tokenized-stock lots with an unseen profit tier, BOTH modes — the bell adds it to
   // unreadResults. Optional so a stale client never sees a phantom badge.
   unreadStockAlerts?: number;
+  // The Solana addresses this account has VERIFIED (the stock pocket). The HUD needs it on every
+  // screen to know which wallet to read a balance from, and /api/me is the one call every screen
+  // already makes — the alternative was a stocks-portfolio fetch from the shell just to name a wallet.
+  stockWallets: string[];
+  // The server holds a fee-payer, so a stock buy needs no SOL. Drives one sentence in the wallet
+  // sheet ("network fees are on us"), which is why it rides along here instead of costing a fetch.
+  stockSponsored: boolean;
 }
 
 // ─── POST /api/skins ─────────────────────────────────────────────────────────────────────────────

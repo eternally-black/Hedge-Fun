@@ -3,15 +3,43 @@
 import { memo } from "react";
 import { type Me, num, usd, usdFromMicro } from "../ui";
 
-// Top HUD: points / streak / virtual-$ chips + the shard→artifact progress strip.
+// Top HUD: points / streak / money chips + the shard→artifact progress strip.
 // Ported from app design. Points pop animates on a +N event (pop prop). memo'd + stable
 // callbacks from the parent, so it only re-renders when me/pop actually change.
 // realPusdMicro: on-chain spendable balance, passed in only when the account is in REAL mode. Kept
 // as a prop rather than read here so the HUD stays a pure render of state someone else owns — and so
 // paper mode costs no extra fetch. null = in real mode but the balance has not arrived (or the RPC
 // failed), which renders "—" rather than a misleading $0.00.
-export const Hud = memo(function Hud({ me, pop, realPusdMicro, onShards, onGM, onBalance, onBell }: { me: Me | null; pop: { amt: number; color: string } | null; realPusdMicro?: string | null; onShards: () => void; onGM: () => void; onBalance: () => void; onBell: () => void }) {
+//
+// `pocket` is the whole point of this chip: the app holds THREE separate pots of money (play money,
+// the user's own Solana wallet, the Polymarket balance), and a chip that states one of them while
+// the screen spends another is the HUD lying about the user's money. page.tsx derives it from the
+// screen, so the number always belongs to what is on screen. Named by PURPOSE, never by token.
+export type Pocket = "paper" | "stocks" | "predictions";
+
+export const Hud = memo(function Hud({ me, pop, pocket, realPusdMicro, stocksUsdCents, onShards, onGM, onBalance, onBell }: { me: Me | null; pop: { amt: number; color: string } | null; pocket: Pocket; realPusdMicro?: string | null; stocksUsdCents: number | null; onShards: () => void; onGM: () => void; onBalance: () => void; onBell: () => void }) {
   const isReal = me?.real.mode === "REAL";
+  // Which rendering wins. Stocks falls back to paper while the balance is unknown (no wallet yet,
+  // first load): a gold "—" where the user expects their cash reads as money that went missing.
+  const showStocks = pocket === "stocks" && stocksUsdCents !== null;
+  const showPredictions = pocket === "predictions" && isReal;
+  const real = showStocks || showPredictions;
+  const amount = showStocks
+    ? usd(stocksUsdCents)
+    : showPredictions
+      ? realPusdMicro == null
+        ? "—"
+        : usdFromMicro(realPusdMicro)
+      : me
+        ? usd(me.cashCents)
+        : "—";
+  const label = showStocks
+    ? "Real · Stocks ›"
+    : showPredictions
+      ? "Real · Predictions ›"
+      : me && me.lockedCents > 0
+        ? `Paper · +${usd(me.lockedCents)} in play ›`
+        : "Paper ›";
   const shards = me?.shards ?? 0;
   const per = me?.shardsPerArtifact ?? 20;
   const shardPct = Math.round((shards / per) * 100);
@@ -36,20 +64,11 @@ export const Hud = memo(function Hud({ me, pop, realPusdMicro, onShards, onGM, o
         </button>
 
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
-          <button type="button" onClick={onBalance} aria-label={isReal ? "Real balance — open wallet" : "Cash balance — open wallet"} style={{ background: "var(--panel)", border: "1px solid var(--line)", margin: 0, font: "inherit", color: "inherit", display: "flex", alignItems: "center", gap: 7, padding: "6px 11px", borderRadius: 30, cursor: "pointer" }}>
+          <button type="button" onClick={onBalance} aria-label={showStocks ? "Real stocks balance — open wallet" : showPredictions ? "Real predictions balance — open wallet" : "Cash balance — open wallet"} style={{ background: "var(--panel)", border: "1px solid var(--line)", margin: 0, font: "inherit", color: "inherit", display: "flex", alignItems: "center", gap: 7, padding: "6px 11px", borderRadius: 30, cursor: "pointer" }}>
             <div style={{ lineHeight: 1, textAlign: "right" }}>
-              <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 14, color: isReal ? "var(--gold)" : "var(--yes)" }}>
-                {isReal
-                  ? realPusdMicro == null
-                    ? "—"
-                    : usdFromMicro(realPusdMicro)
-                  : me
-                    ? usd(me.cashCents)
-                    : "—"}
-              </div>
-              <div style={{ fontSize: 8, letterSpacing: ".14em", color: "var(--muted)", textTransform: "uppercase", marginTop: 1 }}>
-                {isReal ? "Real · pUSD ›" : me && me.lockedCents > 0 ? `+ ${usd(me.lockedCents)} locked ›` : "Cash ›"}
-              </div>
+              {/* gold = real money (either real pocket), green = play money. */}
+              <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 14, color: real ? "var(--gold)" : "var(--yes)" }}>{amount}</div>
+              <div style={{ fontSize: 8, letterSpacing: ".14em", color: "var(--muted)", textTransform: "uppercase", marginTop: 1 }}>{label}</div>
             </div>
           </button>
 

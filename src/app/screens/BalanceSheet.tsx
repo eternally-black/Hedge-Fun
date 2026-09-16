@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { type CSSProperties, useCallback, useEffect, useState } from "react";
 import type { StockPortfolioResponse, StockPositionRow } from "@/lib/api-types";
 import { type Me, usd } from "../ui";
 import { usePredictionHistory, useClosePosition, useExitQuotes, toPredictionRow } from "./usePredictionHistory";
@@ -10,11 +10,12 @@ import { RealDepositPanel } from "./RealDepositPanel";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
-// The ONE history sheet. Opens from the balance chip in the HUD (every screen) and from the History
-// row on the You screen. Top: the Cash / Locked / Total split and the Top-Up button. Below: three
-// tabs — Calls (prediction bets, /api/history), Stocks (tokenized-stock lots, /api/stocks/portfolio),
-// Hedges (the accepted hedge legs of both kinds). All money is derived from `me` during render —
-// no mirrored server state.
+// The ONE money + history sheet. Opens from the balance chip in the HUD (every screen) and from the
+// History row on the You screen. Top: the WALLET — one row per pocket, named by purpose (Paper, the
+// play balance; Real · Stocks, the user's own Solana wallet; Real · Predictions, the Polymarket
+// balance). Below: three tabs — Calls (prediction bets, /api/history), Stocks (tokenized-stock lots,
+// /api/stocks/portfolio), Hedges (the accepted hedge legs of both kinds). Paper money is derived
+// from `me` during render — no mirrored server state.
 type Tab = "calls" | "stocks" | "hedges";
 const TABS: { key: Tab; label: string }[] = [
   { key: "calls", label: "Calls" },
@@ -42,13 +43,16 @@ function useStockHistory(api: Api, wanted: boolean) {
   return rows;
 }
 
-export function BalanceSheet({ me, api, realPusdMicro, onClose, onTopupDone, onToast }: {
+export function BalanceSheet({ me, api, realPusdMicro, stockWallet, stockSponsored, onClose, onTopupDone, onToast }: {
   me: Me | null;
   api: Api;
   onClose: () => void;
   onTopupDone: () => void | Promise<void>;
   onToast: (msg: string) => void;
   realPusdMicro?: string | null;
+  // The stock pocket, owned and polled by page.tsx so this sheet and the HUD state the same number.
+  stockWallet: { address: string | null; embedded: boolean; usdCents: number | null; refresh: () => Promise<void>; unverified: boolean };
+  stockSponsored: boolean;
 }) {
   const [tab, setTab] = useState<Tab>("calls");
   const { rows, pending, nowMs, refresh, hasMore, loadMore } = usePredictionHistory(api);
@@ -115,15 +119,12 @@ export function BalanceSheet({ me, api, realPusdMicro, onClose, onTopupDone, onT
           <div style={{ width: 42, height: 5, borderRadius: 4, background: "var(--line)" }} />
         </button>
 
-        {/* REAL mode replaces this panel outright rather than adding to it: "free top-up" sitting
-            next to "send real USDC" is a mis-tap waiting to happen, and in real mode the free path
-            grants play money that cannot be traded anyway. */}
-        {me?.real.mode === "REAL" ? (
-          <RealDepositPanel me={me} api={api} pusdMicro={realPusdMicro ?? null} onToast={onToast} />
-        ) : (
-        /* Cash / Locked / Total split panel */
+        <div style={{ fontFamily: "var(--df)", fontSize: 26, marginBottom: 12 }}>Wallet</div>
+
+        {/* PAPER — play money. The top-up lives here and nowhere else: the pockets are now named, so
+            "claim free $200" can no longer be mistaken for a way to fund a real one. */}
         <div style={{ background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 18, padding: "16px 18px", marginBottom: 14 }}>
-          <div style={{ fontSize: 10, letterSpacing: ".14em", color: "var(--muted)", textTransform: "uppercase" }}>Cash</div>
+          <div style={LABEL}>Paper</div>
           <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 34, color: "var(--yes)", lineHeight: 1.05 }}>
             {me ? usd(Math.max(0, me.cashCents)) : "—"}
           </div>
@@ -133,7 +134,19 @@ export function BalanceSheet({ me, api, realPusdMicro, onClose, onTopupDone, onT
           </div>
           <TopupButton me={me} busy={busy} onTopup={doTopup} />
         </div>
-        )}
+
+        {/* REAL · STOCKS — the user's own Solana wallet. Always shown: every login gets an embedded
+            one, and a pocket you cannot see is a pocket you never fund. */}
+        <StockWalletRow wallet={stockWallet} sponsored={stockSponsored} onToast={onToast} />
+
+        {/* REAL · PREDICTIONS — the Polymarket balance. Only in real mode; the Paper/Real switch
+            itself lives on the You screen, so there is nothing to duplicate here. */}
+        {me?.real.mode === "REAL" ? (
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ ...LABEL, marginBottom: 6 }}>Real · Predictions</div>
+            <RealDepositPanel me={me} api={api} pusdMicro={realPusdMicro ?? null} onToast={onToast} />
+          </div>
+        ) : null}
 
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
           <div style={{ fontFamily: "var(--df)", fontSize: 26 }}>History</div>
@@ -188,6 +201,75 @@ export function BalanceSheet({ me, api, realPusdMicro, onClose, onTopupDone, onT
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// One pocket heading. Same 10px uppercase treatment for all three, so no pocket looks bigger than
+// another — they are three different kinds of money, not a hierarchy.
+const LABEL: CSSProperties = { fontSize: 10, letterSpacing: ".14em", color: "var(--muted)", textTransform: "uppercase", fontWeight: 700 };
+
+// REAL · STOCKS. An embedded wallet has no wallet app of its own to show a balance or an address, so
+// this sheet has to be that surface, or the user has nothing to fund and no way to know it arrived.
+// No QR: no QR library is installed and one dependency for one square is a bad trade — the address
+// is one tap away from the clipboard. This is one of the two places a token may be NAMED, because
+// the sender has to know what to send.
+function StockWalletRow({ wallet, sponsored, onToast }: {
+  wallet: { address: string | null; embedded: boolean; usdCents: number | null; refresh: () => Promise<void>; unverified: boolean };
+  sponsored: boolean;
+  onToast: (m: string) => void;
+}) {
+  const { address, embedded, usdCents, refresh, unverified } = wallet;
+  const copy = () => {
+    if (!address) return;
+    void navigator.clipboard
+      .writeText(address)
+      .then(() => onToast("Address copied"))
+      .catch(() => onToast("Couldn't copy — select the address instead"));
+  };
+
+  return (
+    <div style={{ background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 18, padding: "14px 18px", marginBottom: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ flex: 1, ...LABEL }}>Real · Stocks</div>
+        <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 18, color: "var(--gold)" }}>{usdCents == null ? "—" : usd(usdCents)}</div>
+        <button
+          type="button"
+          onClick={() => void refresh()}
+          aria-label="Refresh balance"
+          style={{ margin: 0, font: "inherit", padding: "3px 8px", borderRadius: 8, background: "transparent", color: "var(--muted)", border: "1px solid var(--line)", fontWeight: 700, fontSize: 11, cursor: "pointer" }}
+        >
+          ↻
+        </button>
+      </div>
+
+      {address ? (
+        <>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 9 }}>
+            <div style={{ flex: 1, minWidth: 0, fontFamily: "ui-monospace,SFMono-Regular,Menlo,monospace", fontSize: 11, color: "var(--text)", overflowWrap: "anywhere", lineHeight: 1.4 }}>{address}</div>
+            <button
+              type="button"
+              onClick={copy}
+              style={{ margin: 0, font: "inherit", flexShrink: 0, padding: "6px 11px", borderRadius: 10, background: "transparent", color: "var(--muted)", border: "1px solid var(--line)", fontWeight: 700, fontSize: 11, cursor: "pointer" }}
+            >
+              Copy
+            </button>
+          </div>
+          <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 9, lineHeight: 1.5 }}>
+            {unverified
+              // The server could not confirm ownership (usually a Privy hiccup). Say so instead of
+              // leaving a permanent "—" that looks like an empty wallet.
+              ? "Couldn't verify this wallet yet — tap ↻ to try again."
+              : !embedded
+                ? "This is the wallet you connected — fund it from your wallet app."
+                : sponsored
+                  ? "Send USDC on Solana to this address. No SOL needed — network fees are on us."
+                  : "Send USDC on Solana to this address, plus ~0.01 SOL for network fees."}
+          </div>
+        </>
+      ) : (
+        <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 9, lineHeight: 1.5 }}>Setting up your wallet…</div>
+      )}
     </div>
   );
 }

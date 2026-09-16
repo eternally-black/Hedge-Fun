@@ -2,7 +2,7 @@
 
 import { memo, useState } from "react";
 import { usd } from "./ui";
-import { STOCK_STAKE_PRESETS_CENTS } from "@/lib/config";
+import { STOCK_MIN_STAKE_CENTS, STOCK_STAKE_PRESETS_CENTS } from "@/lib/config";
 import { SwipeShell, PREVIEW_SCALE, PREVIEW_Y, useTick, type SwipeAction } from "./DeckCard";
 import type { StockDeckCard } from "@/lib/api-types";
 
@@ -28,9 +28,15 @@ type FaceProps = {
   buyRealBusy?: boolean;
   walletLinked: boolean;
   consented: boolean;
+  // What the REAL · STOCKS pocket holds, in cents (null = not known yet). The CTA states the amount
+  // it will actually spend, so a $50 chip over a $12 wallet says $12 before the signature, not after.
+  stocksUsdCents: number | null;
+  // Tapped instead of buying when the wallet cannot cover the minimum — the fix is funding, and the
+  // wallet sheet is where the address lives.
+  onOpenWallet?: () => void;
 };
 
-export const StockCardFace = memo(function StockCardFace({ card, yesP, noP, skipP, stakeCents, onPickStake, onBuyReal, buyRealBusy, walletLinked, consented }: FaceProps) {
+export const StockCardFace = memo(function StockCardFace({ card, yesP, noP, skipP, stakeCents, onPickStake, onBuyReal, buyRealBusy, walletLinked, consented, stocksUsdCents, onOpenWallet }: FaceProps) {
   // The price pulses exactly like the odds do on a prediction card: a number that changes between
   // frames reads as a number that never moves. Same hook, same animation names.
   const priceTick = useTick(card.priceCents);
@@ -39,13 +45,20 @@ export const StockCardFace = memo(function StockCardFace({ card, yesP, noP, skip
   const change = card.change24hBp;
   const changeText = change == null ? "—" : `${change >= 0 ? "+" : "−"}${(Math.abs(change) / 100).toFixed(2)}%`;
   const changeColor = change == null ? "var(--muted)" : change >= 0 ? "var(--yes)" : "var(--no)";
+  // Too little to trade: the tap has to lead somewhere, and "Buy" that always fails is the worst of
+  // the options. Unknown balance (null) keeps the plain label — an amount we cannot state honestly.
+  const underfunded = stocksUsdCents !== null && stocksUsdCents < STOCK_MIN_STAKE_CENTS;
   const buyLabel = buyRealBusy
     ? "Buying…"
     : !walletLinked
       ? "Connect Phantom to buy on Solana"
       : !consented
         ? "Accept xStocks terms to buy"
-        : "◎ Buy on Solana";
+        : underfunded
+          ? "◎ Fund your wallet to buy on Solana"
+          : stocksUsdCents === null
+            ? "◎ Buy on Solana"
+            : `◎ Buy ${usd(Math.min(stakeCents, stocksUsdCents))} on Solana`;
 
   return (
     <>
@@ -131,7 +144,7 @@ export const StockCardFace = memo(function StockCardFace({ card, yesP, noP, skip
           <button
             type="button"
             onPointerDown={(e) => e.stopPropagation()}
-            onClick={(e) => { e.stopPropagation(); onBuyReal(); }}
+            onClick={(e) => { e.stopPropagation(); if (underfunded) onOpenWallet?.(); else onBuyReal(); }}
             disabled={buyRealBusy}
             style={{
               margin: 0,
@@ -180,7 +193,7 @@ function StockLogo({ card }: { card: StockDeckCard }) {
 export const StockCardPreview = memo(function StockCardPreview({ card, stakeCents }: { card: StockDeckCard; stakeCents: number }) {
   return (
     <div style={{ position: "absolute", inset: 0, borderRadius: 26, overflow: "hidden", background: "var(--panel2)", border: "1px solid var(--line)", filter: "brightness(.82)", pointerEvents: "none", transform: `scale(${PREVIEW_SCALE}) translateY(${PREVIEW_Y}px)`, transformOrigin: "center bottom" }}>
-      <StockCardFace card={card} yesP={0} noP={0} skipP={0} stakeCents={stakeCents} onPickStake={() => {}} walletLinked={false} consented={false} />
+      <StockCardFace card={card} yesP={0} noP={0} skipP={0} stakeCents={stakeCents} onPickStake={() => {}} walletLinked={false} consented={false} stocksUsdCents={null} />
     </div>
   );
 });
@@ -199,6 +212,8 @@ export function StockDeckCard({
   buyRealBusy,
   walletLinked,
   consented,
+  stocksUsdCents,
+  onOpenWallet,
 }: {
   card: StockDeckCard;
   busy?: boolean;
@@ -209,11 +224,13 @@ export function StockDeckCard({
   buyRealBusy?: boolean;
   walletLinked: boolean;
   consented: boolean;
+  stocksUsdCents: number | null;
+  onOpenWallet?: () => void;
 }) {
   return (
     <SwipeShell busy={busy} onAction={onAction} onTap={() => {}}>
       {({ yesP, noP, skipP }) => (
-        <StockCardFace card={card} yesP={yesP} noP={noP} skipP={skipP} stakeCents={stakeCents} onPickStake={onPickStake} onBuyReal={onBuyReal} buyRealBusy={buyRealBusy} walletLinked={walletLinked} consented={consented} />
+        <StockCardFace card={card} yesP={yesP} noP={noP} skipP={skipP} stakeCents={stakeCents} onPickStake={onPickStake} onBuyReal={onBuyReal} buyRealBusy={buyRealBusy} walletLinked={walletLinked} consented={consented} stocksUsdCents={stocksUsdCents} onOpenWallet={onOpenWallet} />
       )}
     </SwipeShell>
   );
