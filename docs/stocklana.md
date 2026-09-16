@@ -32,6 +32,20 @@ transactions; the ≈0.00157 SOL rent was fronted on the buy and refunded on the
 sized down to the wallet's $2 USDC by the server, and the lot was booked only after the landed
 transaction matched the attempt the server had built.
 
+### Production, 2026-09-16 (app.hedgeyour.fun, same wallet, fee-sponsored)
+
+| Step | Signature |
+|---|---|
+| Buy $1.99 USDC → QQQx | [53TPRiKE…npaV](https://solscan.io/tx/53TPRiKEmP2d8cPiz2hbV5ozLFB41yPj2JdHu8gnRk4YjVTKZY1Pzn6gpPjMBaHbLqLYcR59zAf1YGF8QxpcnpaV) |
+| Sell QQQx → USDC (3-hop route via SOL and USDT; token account closed) | [4CQNUq68…CyPX](https://solscan.io/tx/4CQNUq68c4nyeqwHBfUzK3VpnX2s6FiabZXWSPCJNkh1ZR5nW8LyopEUBBFuU8rdkcvo1HdWobQrx4w14nuJCyPX) |
+| Buy $1.99 USDC → NFLXx | [5fpeQm54…Mea4](https://solscan.io/tx/5fpeQm54Mp5ufzGap4c1ZXLtmAjxGidN5s9CGBv2vguJQsq6hpmPHz2L5Lrx6nSgoG7EgHKRTh84Ppw4xWnNMea4) |
+| Sell NFLXx → USDC | [Maa7LVT6…D7Mb](https://solscan.io/tx/Maa7LVT6bibAVtTrK1mqyvKBdVsytfk5MJLa5EdYALnpxk9a4nWdA3jFLCCT2LRUaC5RSZa87ChPachXaqwD7Mb) |
+
+The first production sell exposed a leak: Jupiter's cleanup instruction refunds the wrapped-SOL
+account's rent to the user even when the sponsor funded it. Fixed the same hour (the refund now
+follows whoever paid); the NFLXx round trip cost the sponsor exactly 20,045 lamports — two network
+fees — with every rent it fronted returned.
+
 ## What was built (4 days)
 
 - **Catalog + prices.** xStocks public API (≈830 Solana assets) upserted every 5 min; Jupiter Price v3 every
