@@ -51,7 +51,7 @@ import {
 } from "@solana/kit";
 import { decodeBase58 } from "./stocks";
 import { swapInstructions, type JupIx } from "./jupiter-swap";
-import { getAccountInfoBase64, getLatestBlockhash, HeliusUnavailableError } from "./helius";
+import { getAccountInfoBase64, getLatestBlockhash, getTokenAccounts, HeliusUnavailableError } from "./helius";
 import { STOCK_SPONSOR_MAX_PRIORITY_LAMPORTS } from "./config";
 
 // The Associated Token program: its instructions fund a new token account out of accounts[0], which
@@ -125,6 +125,35 @@ export function patchAtaPayer(ixs: JupIx[], sponsor: string): JupIx[] {
   );
 }
 
+// Jupiter's cleanup instruction closes the wrapped-SOL account a multi-hop route needed, and hands its
+// rent to the USER — because Jupiter assumes the user funded it. When WE funded it (the account did
+// not exist before this transaction, so the patched setup instruction paid its rent), the refund
+// belongs to the sponsor. CloseAccount is [account(w), destination(w), owner(signer)] with data [9]
+// in both token programs; anything else is passed through untouched. An account the user already
+// owned is never touched: closing it to the sponsor would take THEIR rent. (Seen live 2026-09-16:
+// a QQQx→SOL→USDT→USDC sell refunded 1,488,440 lamports of sponsor rent to the user.)
+export function patchCleanupDestination(ix: JupIx | null, sponsorFundedAccounts: ReadonlySet<string>, sponsor: string): JupIx | null {
+  if (!ix || ix.accounts.length < 3) return ix;
+  const data = Buffer.from(ix.data, "base64");
+  const isClose = data.length === 1 && data[0] === 9;
+  if (!isClose || !sponsorFundedAccounts.has(ix.accounts[0].pubkey)) return ix;
+  return { ...ix, accounts: ix.accounts.map((a, i) => (i === 1 ? { ...a, pubkey: sponsor } : a)) };
+}
+
+// The token accounts the setup instructions will CREATE for the user in this transaction (the ATA
+// program's create-idempotent: [payer, ata, owner, mint, ...]). One balance read per setup mint —
+// an account that already exists costs the sponsor nothing and must keep its rent with the user.
+async function sponsorFundedAtas(setup: JupIx[], owner: string): Promise<Set<string>> {
+  const out = new Set<string>();
+  for (const ix of setup) {
+    if (ix.programId !== ATA_PROGRAM || ix.accounts.length < 4) continue;
+    const ata = ix.accounts[1].pubkey;
+    const mint = ix.accounts[3].pubkey;
+    if ((await getTokenAccounts(owner, mint)).length === 0) out.add(ata);
+  }
+  return out;
+}
+
 // The addresses stored in an on-chain Address Lookup Table account (56-byte header, then 32 bytes
 // each). A truncated tail is ignored rather than guessed.
 export function decodeLookupTable(data: Uint8Array): string[] {
@@ -179,12 +208,14 @@ export async function buildSponsoredSwapTx(p: {
     maxPriorityLamports: STOCK_SPONSOR_MAX_PRIORITY_LAMPORTS,
   });
 
+  const funded = await sponsorFundedAtas(ix.setupInstructions, p.userPublicKey);
+  const cleanup = patchCleanupDestination(ix.cleanupInstruction, funded, sponsor);
   const ordered: JupIx[] = [
     ...ix.computeBudgetInstructions,
     ...patchAtaPayer(ix.setupInstructions, sponsor),
     ix.swapInstruction,
     ...(p.extraInstructions ?? []),
-    ...(ix.cleanupInstruction ? [ix.cleanupInstruction] : []),
+    ...(cleanup ? [cleanup] : []),
     ...ix.otherInstructions,
   ];
 

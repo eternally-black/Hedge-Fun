@@ -25,8 +25,8 @@ export interface NluResult {
 const NLU_TIMEOUT_MS = 5_000;
 // No default base/model on purpose: an unset key already disables the edge, and guessing a provider
 // would silently point at someone's billing.
-const NLU_BASE = process.env.NLU_API_BASE ?? "https://openrouter.ai/api/v1";
-const NLU_MODEL = process.env.NLU_MODEL ?? "deepseek/deepseek-v4";
+const NLU_BASE = process.env.NLU_API_BASE || "https://openrouter.ai/api/v1";
+const NLU_MODEL = process.env.NLU_MODEL || "deepseek/deepseek-v4";
 
 const SYSTEM_PROMPT =
   "You are a strict NLU extractor for a hedging app. The user describes something they care about " +

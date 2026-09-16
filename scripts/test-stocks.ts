@@ -334,7 +334,7 @@ import {
 // ─── sponsor.ts: the pure pieces of the fee-sponsored builder ───────────────────────────────────────
 // Everything here is arithmetic on bytes — no network, no key material beyond a throwaway keypair.
 async function sponsorChecks() {
-  const { patchAtaPayer, decodeLookupTable, messageHashOf, closeAccountIx, ATA_PROGRAM } = await import("../src/lib/sponsor");
+  const { patchAtaPayer, patchCleanupDestination, decodeLookupTable, messageHashOf, closeAccountIx, ATA_PROGRAM } = await import("../src/lib/sponsor");
   const kit = await import("@solana/kit");
   const { generateKeyPairSync } = await import("node:crypto");
 
@@ -363,6 +363,23 @@ async function sponsorChecks() {
     assert.strictEqual(patchedAta.accounts[2].pubkey, USER, "the OWNER account is not touched");
     assert.deepStrictEqual(patchedSwap, swap, "a non-ATA instruction is left alone");
     assert.strictEqual(ata.accounts[0].pubkey, USER, "the input instruction is not mutated");
+  }
+
+  // patchCleanupDestination: Jupiter's wSOL close refunds the SPONSOR only for an account the sponsor funded.
+  {
+    const USER = "6dNVeTv6yzcYiRhRPfCnJfRQmUMKFJqPmPJcaNBRCGFT";
+    const SPONSOR = "GavgGKU9N3V1WjKLwQr3tapuXCCLFeJEeQpV6Bgq9rGf";
+    const WSOL_ATA = "SzmAATheFCG1bKvKVdRKmwyGsZLXHCVvwaZ1mWPiA7p";
+    const close = { programId: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", accounts: [{ pubkey: WSOL_ATA, isSigner: false, isWritable: true }, { pubkey: USER, isSigner: false, isWritable: true }, { pubkey: USER, isSigner: true, isWritable: false }], data: "CQ==" };
+    const funded = patchCleanupDestination(close, new Set([WSOL_ATA]), SPONSOR)!;
+    assert.strictEqual(funded.accounts[1].pubkey, SPONSOR, "sponsor-funded account: the refund goes to the sponsor");
+    assert.strictEqual(funded.accounts[0].pubkey, WSOL_ATA, "the closed account is untouched");
+    assert.strictEqual(funded.accounts[2].pubkey, USER, "the owner stays the user");
+    assert.deepStrictEqual(patchCleanupDestination(close, new Set(), SPONSOR), close, "user-owned account: left alone");
+    const notClose = { ...close, data: "AQ==" };
+    assert.deepStrictEqual(patchCleanupDestination(notClose, new Set([WSOL_ATA]), SPONSOR), notClose, "a non-close instruction is passed through");
+    assert.strictEqual(patchCleanupDestination(null, new Set([WSOL_ATA]), SPONSOR), null, "no cleanup -> null");
+    assert.strictEqual(close.accounts[1].pubkey, USER, "input not mutated");
   }
 
   // decodeLookupTable: 56-byte header, then packed 32-byte addresses.
