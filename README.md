@@ -1,6 +1,6 @@
 # Hedge Fun
 
-Swipe-prediction paper-trading app on real Polymarket markets. Web now (Next.js); Android (Expo) later reuses the same API.
+Swipe app over real Polymarket markets and tokenized stocks (xStocks on Solana), in paper or real money. Web now (Next.js); Android (Expo) later reuses the same API.
 
 Stack: Next.js (App Router) · Prisma · Postgres · Privy auth. Money in integer cents, points in a raw ledger, x2 multiplier applied at read time (one swappable strategy).
 
@@ -32,16 +32,30 @@ npm run smoke             # full daily loop end-to-end on live DB + live API
 
 ## Tokenized stocks (Stocklana)
 
-The deck also deals **xStocks** (tokenized US equities on Solana): swipe right = buy, left = pass.
-There is **one Paper/Real switch, the same as predictions** (You → Mode) — no separate buy button.
-In Paper a buy holds virtual cash like a bet; in **Real** the same swipe right buys on Solana from
-the user's own wallet (fees sponsored): a Jupiter USDC→xStock swap that the wallet signs — the server
-books the lot only from the landed transaction. That wallet is the
-Privy **embedded** Solana wallet an email login already creates (Phantom optional), and the swap is
-**fee-sponsored**: our own fee-payer (`STOCK_SPONSOR_SECRET`) co-signs and sends it, so a user needs
-USDC and no SOL. The Hedge tab
-turns a life cost ("$800 on flights this month") into a stock card, and profit alerts land in the inbox.
-Design, evidence and the verify-it-yourself commands: [docs/stocklana.md](docs/stocklana.md).
+The deck also deals **xStocks** (tokenized US equities on Solana): swipe right = buy, left = pass,
+up = skip. The stake is a chip on the card — `$10 · $25 · $50` or a fourth `$…` chip that takes any
+amount and remembers it.
+
+**Whose money a swipe spends is the app's ONE Paper/Real switch (You → Mode), the same one
+predictions use.** There is no separate "buy on Solana" button, no second deck and no per-card
+toggle: the mode changes what the same card, the same swipe and the same Sell row do.
+
+| | Paper money (default) | Real money |
+|---|---|---|
+| Card | chips read `PAPER`; every asset is dealt | chips read `REAL`, gold `REAL` tag on assets with a Solana pool; an asset with no pool stays `PAPER ONLY` |
+| Swipe right | holds virtual cash, like a bet | a Jupiter USDC→xStock swap from the user's own wallet; the lot is booked only from the landed transaction, sized down to the wallet's USDC when the chip exceeds it |
+| Portfolio Sell (two-tap) | closes the lot against the stored price | an xStock→USDC swap that also closes the emptied token account |
+| Hedge tab stock cards | "Hedge $X with SYM" holds virtual cash | the same card buys on Solana |
+| Balance chip in the HUD | `PAPER` pocket | `REAL · STOCKS` pocket (the wallet's USDC); predictions show their own `REAL · PREDICTIONS` pocket |
+
+The wallet is the Privy **embedded** Solana wallet an email login already creates (an external
+Phantom still works), and every real transaction is **fee-sponsored**: the server builds the swap, the
+wallet signs it, our own fee-payer (`STOCK_SPONSOR_SECRET`) co-signs and sends it, and fronts the
+token-account rent that comes back on the sell — so a user needs USDC and nothing else. The first real
+buy is gated by one consent sheet (eligibility self-declaration + xStocks terms). The UI names money
+by purpose (`$`, Paper, Real), never by token. The Hedge tab turns a life cost ("$800 on flights this
+month") into a stock card, and profit alerts land in the inbox. Design, on-chain proofs and the
+verify-it-yourself commands: [docs/stocklana.md](docs/stocklana.md).
 
 ## Where the open product rules land (change in one place)
 
