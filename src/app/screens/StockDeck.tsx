@@ -58,7 +58,7 @@ export function DeckModePill({ mode, onMode }: { mode: DeckMode; onMode: (m: Dec
 // skip (session only). WHOSE money a buy spends is the app's one Paper/Real switch (me.real.mode),
 // exactly as it is for predictions — the card has no second button to choose it.
 // ============================================================================
-export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksUsdCents, onOpenWallet }: {
+export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksUsdCents, onOpenWallet, onOpenPortfolio }: {
   api: Api;
   me: Me | null;
   onRefreshMe: () => void | Promise<void>;
@@ -68,6 +68,8 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksU
   // The REAL · STOCKS pocket, owned by page.tsx so the card's CTA and the HUD chip state one number.
   stocksUsdCents: number | null;
   onOpenWallet: () => void;
+  // The other way out of an empty wallet: sell a stock you hold (the Portfolio).
+  onOpenPortfolio: () => void;
 }) {
   const [cards, setCards] = useState<StockDeckCardType[]>([]);
   // Not local state: the amount the user picked here is the amount the portfolio's Buy button spends
@@ -316,15 +318,24 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksU
             <div style={{ fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700 }}>Real · Stocks</div>
             <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 34, color: "var(--gold)", lineHeight: 1.05 }}>{usd(stocksUsdCents ?? 0)}</div>
             <p style={{ color: "var(--muted)", fontSize: 13, lineHeight: 1.5, margin: 0 }}>
-              That&apos;s what your wallet holds. Add USDC to keep buying, or switch to paper money in Profile.
+              That&apos;s what your wallet holds. Add USDC, sell a stock you hold, or switch to paper money in Profile.
             </p>
-            <button
-              type="button"
-              onClick={onOpenWallet}
-              style={{ margin: "6px 0 0", font: "inherit", padding: "12px 22px", borderRadius: 12, fontWeight: 700, fontSize: 13, cursor: "pointer", background: "var(--gold)", color: "#1a1205", border: "none" }}
-            >
-              Add money
-            </button>
+            <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+              <button
+                type="button"
+                onClick={onOpenWallet}
+                style={{ margin: 0, font: "inherit", padding: "12px 20px", borderRadius: 12, fontWeight: 700, fontSize: 13, cursor: "pointer", background: "var(--gold)", color: "#1a1205", border: "none" }}
+              >
+                Add money
+              </button>
+              <button
+                type="button"
+                onClick={onOpenPortfolio}
+                style={{ margin: 0, font: "inherit", padding: "12px 20px", borderRadius: 12, fontWeight: 700, fontSize: 13, cursor: "pointer", background: "var(--panel2)", color: "var(--text)", border: "1px solid var(--line)" }}
+              >
+                Sell a stock
+              </button>
+            </div>
           </div>
         ) : null}
         {!broke && next && <StockCardPreview key={next.id} card={next} stakeCents={stakeCents} realMode={realMode} />}
