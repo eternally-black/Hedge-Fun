@@ -38,7 +38,10 @@ export default function Providers({ children }: { children: React.ReactNode }) {
         // Solana external wallets (Phantom etc.) enabled in the dashboard need
         // their connectors passed here, else Privy warns and connect is a no-op.
         externalWallets: { solana: { connectors: solanaConnectors } },
-        appearance: { theme: "dark", accentColor: "#6366f1" },
+        // The connect/link modal lists ONLY the Solana wallets installed in this browser (Phantom,
+        // Solflare, Backpack…) — not the registry of every wallet that exists. A user with none
+        // installed has the embedded wallet already; the list is for the one they actually use.
+        appearance: { theme: "dark", accentColor: "#6366f1", walletList: ["detected_solana_wallets"] },
       }}
     >
       {children}
