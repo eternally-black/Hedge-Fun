@@ -211,7 +211,11 @@ export function StockDeckScreen({ me, api, onRefreshMe, onToast, onNeedWallet }:
         // NOT removed here: only /confirm says a real buy happened, and onDone removes the card it
         // was started on — minutes later, by which time the top card may be a different one.
         buyingId.current = card.id;
-        void buyReal({ assetId: card.id, symbol: card.symbol }, stakeCents, { wallets, stockConsent, sponsored });
+        void buyReal({ assetId: card.id, symbol: card.symbol }, stakeCents, { wallets, stockConsent, sponsored }).then((outcome) => {
+          // "pending": the money moved (or may have) and the server books it — the card must not
+          // come back and invite a second buy. "confirmed" was removed by onDone; "failed" stays.
+          if (outcome === "pending") onDone();
+        });
         return;
       }
       // A paper buy. The cash gate is checked BEFORE the optimistic advance so the card is not
@@ -245,7 +249,7 @@ export function StockDeckScreen({ me, api, onRefreshMe, onToast, onNeedWallet }:
         })
         .finally(() => setBusy(false));
     },
-    [api, buyReal, me, onRefreshMe, onToast, realMode, removeCard, sponsored, stakeCents, stockConsent, wallets],
+    [api, buyReal, me, onDone, onRefreshMe, onToast, realMode, removeCard, sponsored, stakeCents, stockConsent, wallets],
   );
 
   // A consent accepted through the sheet flips the local flag immediately, so the next swipe does

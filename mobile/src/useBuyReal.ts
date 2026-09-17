@@ -1,7 +1,7 @@
 // useBuyReal (native) — the ONLY place the phone touches Solana. Native twin of src/app/useBuyReal.ts: the
 // server builds, the device signs, the server co-signs and books. The client never decides what a buy costs,
-// never holds a key, and never marks a position as bought — the card advances only when /confirm returns a
-// positionId.
+// never holds a key, and never marks a position as bought — the card advances when /confirm returns a
+// positionId, or once the money has moved ("pending") and only the booking is outstanding.
 //
 // Two differences from the web, both forced by the platform:
 //   • There is no Privy embedded wallet here. The verified set is /api/me's stockWallets and the wallet used
@@ -29,6 +29,8 @@ import type {
 
 export interface BuyRealTarget { assetId: string; symbol: string }
 export interface BuyRealCtx { wallets: string[]; stockConsent: boolean; sponsored?: boolean }
+/** "confirmed": booked. "pending": money moved (or may have), the server will book it. "failed": nothing happened. */
+export type BuyOutcome = "confirmed" | "pending" | "failed";
 
 // What the consent sheet interrupted. A buy and a sell both hit the same 403, and both must resume
 // on accept — so the held action carries its own kind rather than being assumed to be a buy.
@@ -66,7 +68,7 @@ export function useBuyReal(p: {
   // callback dependency — so the exposed callbacks stay stable.
   ctx?: BuyRealCtx;
 }): {
-  buyReal: (target: BuyRealTarget, stakeCents: number, ctx?: BuyRealCtx, opts?: { hedgeSuggestionId?: string }) => Promise<void>;
+  buyReal: (target: BuyRealTarget, stakeCents: number, ctx?: BuyRealCtx, opts?: { hedgeSuggestionId?: string }) => Promise<BuyOutcome>;
   sellReal: (positionId: string, opts?: { symbol?: string; ctx?: BuyRealCtx }) => Promise<void>;
   busy: boolean;
   consentOpen: boolean;
@@ -101,8 +103,10 @@ export function useBuyReal(p: {
 
   // sign → land → book: the one place a signature becomes a booked lot. A buy and a sell reach it
   // with different quotes and leave it with different toasts; everything between is identical.
+  // Resolves to the booked lot, to "pending" once the money has (or may have) moved and only the
+  // booking is outstanding (the server sweep finishes it), or to null when nothing happened at all.
   const signSubmitConfirm = useCallback(
-    async (built: BuiltSwap, kind: "buy" | "sell", payer: string): Promise<StockRealConfirmResponse | null> => {
+    async (built: BuiltSwap, kind: "buy" | "sell", payer: string): Promise<StockRealConfirmResponse | "pending" | null> => {
       // SPONSORED ONLY. A self-paid swap is signed AND sent by the wallet, and the MWA port signs only —
       // so the honest answer is to point at the web app rather than build a half-working path.
       if (built.feePayer === null) {
@@ -143,13 +147,14 @@ export function useBuyReal(p: {
         // with the signature already stamped on the attempt, so a lost acknowledgement is recovered
         // by the server sweep. Inviting a retry here would double-spend — and a rebuild is refused
         // with buy_in_flight anyway, so promising "try again" would be a lie as well.
-        else if (status === undefined || status >= 500)
+        else if (status === undefined || status >= 500) {
           onToast(
             kind === "buy"
               ? "Solana is busy — if it went through, your lot appears within a few minutes"
               : "Solana is busy — if it went through, the sale shows in your Portfolio within a few minutes",
           );
-        else onToast("Couldn't send the transaction");
+          return "pending"; // the send was attempted; the card must not come back
+        } else onToast("Couldn't send the transaction");
         return null;
       }
 
@@ -161,9 +166,10 @@ export function useBuyReal(p: {
       onToast("Confirming on Solana…");
 
       // Confirm, with retries. A 404 means the tx has not landed yet — the chain is a beat behind
-      // the server's own "sent" answer. Six attempts, 2s apart, is ~12s of patience.
+      // the server's own "sent" answer. Ten attempts, 0.8 s apart (the server itself polls for a few
+      // seconds inside each), so a landed swap is booked within a second of landing.
       let confirmed: StockRealConfirmResponse | null = null;
-      for (let i = 0; i < 6; i++) {
+      for (let i = 0; i < 10; i++) {
         try {
           confirmed = (await api("/api/stocks/real/confirm", {
             method: "POST",
@@ -172,21 +178,24 @@ export function useBuyReal(p: {
           break;
         } catch (e) {
           if (errStatus(e) === 404) {
-            await new Promise((r) => setTimeout(r, 2000));
+            await new Promise((r) => setTimeout(r, 800));
             continue;
           }
           const code = errCode(e);
-          if (errStatus(e) === 409 && code === "tx_failed") onToast("The transaction failed on Solana");
-          else if (errStatus(e) === 409 && code === "not_this_buy") onToast("That transaction didn't match");
+          if (errStatus(e) === 409 && code === "tx_failed") {
+            onToast("The transaction failed on Solana");
+            return null; // nothing moved — the card may come back
+          }
+          if (errStatus(e) === 409 && code === "not_this_buy") onToast("That transaction didn't match");
           else if (errStatus(e) === 409 && code === "attempt_expired") onToast("That quote expired — try again");
           else if (errStatus(e) === 502) onToast("Solana RPC is busy — it will be picked up automatically");
           else onToast("Couldn't confirm — it will be picked up automatically");
-          return null;
+          return "pending";
         }
       }
       if (!confirmed) {
         onToast("Still confirming — it will be picked up automatically");
-        return null;
+        return "pending";
       }
 
       return confirmed;
@@ -197,20 +206,20 @@ export function useBuyReal(p: {
   // The whole buy, from a resolved ctx to a booked position. Defined as a stable inner function so
   // acceptConsent can resume it without re-entering buyReal's own ctx fetch.
   const runBuy = useCallback(
-    async (target: BuyRealTarget, stakeCents: number, ctx: BuyRealCtx, opts?: { hedgeSuggestionId?: string }) => {
+    async (target: BuyRealTarget, stakeCents: number, ctx: BuyRealCtx, opts?: { hedgeSuggestionId?: string }): Promise<BuyOutcome> => {
       // 1. Wallet. There is no embedded wallet on the phone: the verified set is the server's, and the
       //    pick is the user's. `ctx.wallets` is only the fallback for a caller that has no /api/me yet;
       //    the pick itself uses the same list the Profile reads, so what is shown is what gets spent.
       if (!wallet.available) {
         onToast("Real-money trades aren't available in this build");
-        return;
+        return "failed";
       }
       const verifiedNow = verified.length > 0 || hasMe ? verified : ctx.wallets;
       const payer = pickTradingWallet(verifiedNow, walletAddress);
       if (payer === null) {
         onNeedWallet?.();
         onToast("Connect your wallet in Profile to buy with real money");
-        return;
+        return "failed";
       }
 
       // 2. Build. The server derives the swap from the asset + stake; nothing is spent here.
@@ -251,7 +260,7 @@ export function useBuyReal(p: {
         } else {
           onToast("Couldn't start that buy — try again");
         }
-        return;
+        return "failed";
       }
 
       // The server sizes the swap to what the wallet holds when the chip is larger than the balance
@@ -259,11 +268,13 @@ export function useBuyReal(p: {
       const usedCents = Math.floor(Number(tx.quote.inAmountMicro) / 10_000);
       if (usedCents < stakeCents) onToast(`Buying with your full ${usd(usedCents)}`);
 
-      // 3. Sign, land, book — and only then advance the card.
+      // 3. Sign, land, book.
       const confirmed = await signSubmitConfirm(tx, "buy", payer);
-      if (!confirmed) return;
+      if (confirmed === null) return "failed";
+      if (confirmed === "pending") return "pending";
       onToast(`Bought ${target.symbol} on Solana ✓`);
       onDone?.({ symbol: target.symbol, qtyBase: confirmed.qtyBase, costCents: confirmed.costCents });
+      return "confirmed";
     },
     [api, hasMe, onDone, onNeedWallet, onRefreshMe, onToast, signSubmitConfirm, verified, walletAddress],
   );
@@ -300,6 +311,8 @@ export function useBuyReal(p: {
           onToast("Too thin to sell right now");
         } else if (status === 502 && code === "swap_unavailable") {
           onToast("Jupiter is busy — try again");
+        } else if (status === 429) {
+          onToast("Daily limit of sponsored trades reached — try again tomorrow");
         } else if (status === 502) {
           onToast("Solana is busy — try again");
         } else {
@@ -313,7 +326,7 @@ export function useBuyReal(p: {
       // the account that holds the key (and refuses if it does not), and the server has already
       // checked that this lot belongs to the caller.
       const confirmed = await signSubmitConfirm(tx, "sell", tx.payer);
-      if (!confirmed) return;
+      if (!confirmed || confirmed === "pending") return; // pending: the sweep books the sale, the row shows it confirming
       const symbol = opts?.symbol ?? "";
       onToast(`Sold ${symbol}${symbol ? " " : ""}· ${signed(confirmed.pnlCents ?? 0)}`);
       onDone?.({ symbol, qtyBase: confirmed.qtyBase, costCents: confirmed.costCents });
@@ -338,25 +351,27 @@ export function useBuyReal(p: {
   );
 
   const buyReal = useCallback(
-    async (target: BuyRealTarget, stakeCents: number, ctx?: BuyRealCtx, opts?: { hedgeSuggestionId?: string }) => {
+    async (target: BuyRealTarget, stakeCents: number, ctx?: BuyRealCtx, opts?: { hedgeSuggestionId?: string }): Promise<BuyOutcome> => {
       // The flavor gate sits at the PUBLIC entry, before any request or consent sheet: a build with no
       // wallet must not even ask the user to accept stock terms it can never act on.
       if (!wallet.available) {
         onToast("Real-money trades aren't available in this build");
-        return;
+        return "failed";
       }
-      if (inFlight.current) return;
+      if (inFlight.current) return "failed";
       inFlight.current = true;
       setBusy(true);
       try {
         const resolved = await resolveCtx(ctx);
-        if (!resolved) return;
+        if (!resolved) return "failed";
         if (!resolved.stockConsent) {
+          // Held until the consent sheet answers; the resumed buy reports through onDone. To the
+          // caller, nothing has happened yet.
           heldRef.current = { kind: "buy", target, stakeCents, ctx: resolved, opts };
           setConsentOpen(true);
-          return;
+          return "failed";
         }
-        await runBuy(target, stakeCents, resolved, opts);
+        return await runBuy(target, stakeCents, resolved, opts);
       } finally {
         inFlight.current = false;
         setBusy(false);
