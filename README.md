@@ -48,8 +48,9 @@ toggle: the mode changes what the same card, the same swipe and the same Sell ro
 | Hedge tab stock cards | "Hedge $X with SYM" holds virtual cash | the same card buys on Solana; a life situation whose tickers have no pool yields no card |
 | Balance chip in the HUD | `PAPER` pocket, everywhere | never Paper: `REAL · STOCKS` on stock screens, `REAL · PREDICTIONS` on prediction screens, the current deck's pocket elsewhere |
 
-The wallet is the Privy **embedded** Solana wallet an email login already creates (an external
-Phantom still works), and every real transaction is **fee-sponsored**: the server builds the swap, the
+The wallet is the Privy **embedded** Solana wallet an email login already creates (a Phantom linked
+on the Hedge tab is read for exposure; trades always run from the embedded wallet), and every real
+transaction is **fee-sponsored**: the server builds the swap, the
 wallet signs it, our own fee-payer (`STOCK_SPONSOR_SECRET`) co-signs and sends it, and fronts the
 token-account rent that comes back on the sell — so a user needs USDC and nothing else. The first real
 buy is gated by one consent sheet (eligibility self-declaration + xStocks terms). The UI names money

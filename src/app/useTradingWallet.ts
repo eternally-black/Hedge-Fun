@@ -26,14 +26,17 @@ export function useWalletPicker() {
       (a): a is WalletWithMetadata => a.type === "wallet" && a.chainType === "solana" && a.walletClientType === "privy",
     )?.address ?? null;
 
-  // Which wallet a real trade uses: a CONNECTED external wallet the server already verified wins —
-  // the user deliberately linked that one — else the embedded wallet, which every login now has.
+  // Which wallet a real trade uses: the EMBEDDED wallet whenever the login has one — it is the one
+  // the app funds ("send USDC here, fees on us") and the one the HUD names, and a Phantom linked on
+  // the Hedge tab is linked to be READ for exposure, not to quietly become the wallet a swipe spends.
+  // Only a login with no embedded wallet falls back to a connected external wallet the server has
+  // verified.
   const pickWallet = useCallback(
     (verified: readonly string[]) => {
       const set = new Set(verified);
       return (
-        wallets.find((w) => w.address !== embeddedAddress && set.has(w.address)) ??
         wallets.find((w) => w.address === embeddedAddress) ??
+        wallets.find((w) => set.has(w.address)) ??
         null
       );
     },
