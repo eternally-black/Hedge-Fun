@@ -59,8 +59,8 @@ fees — with every rent it fronted returned. The PLTRx pair is the final flow: 
   assets with a Solana pool are dealt (nothing on a real-mode card is paper); in Paper every asset
   is. Toggle back to the prediction-market deck any time.
 - **Wallet + fees.** Email login mints a Privy embedded Solana wallet — no extension, no seed phrase;
-  a Phantom linked on the Hedge tab or the Profile is read for exposure, trades run from the embedded wallet. Real
-  buys and sells are **fee-sponsored**:
+  a Phantom linked on the Hedge tab or the Profile is read for exposure, and Profile → Wallet picks
+  which verified wallet trades (the embedded one by default). Real buys and sells are **fee-sponsored**:
   the server builds the swap, the user's wallet signs it, our fee-payer co-signs and sends it. The
   server re-derives the message before co-signing (it never signs bytes it did not build) and caps
   sponsored transactions per user per day. Funding a position needs USDC and nothing else.

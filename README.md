@@ -49,7 +49,8 @@ toggle: the mode changes what the same card, the same swipe and the same Sell ro
 | Balance chip in the HUD | `PAPER` pocket, everywhere | never Paper: `REAL · STOCKS` on stock screens, `REAL · PREDICTIONS` on prediction screens, the current deck's pocket elsewhere |
 
 The wallet is the Privy **embedded** Solana wallet an email login already creates (a Phantom linked
-on the Hedge tab or the Profile is read for exposure; trades always run from the embedded wallet), and every real
+on the Hedge tab or the Profile is read for exposure; trades run from the embedded wallet until you
+pick the connected one under Profile → Wallet), and every real
 transaction is **fee-sponsored**: the server builds the swap, the
 wallet signs it, our own fee-payer (`STOCK_SPONSOR_SECRET`) co-signs and sends it, and fronts the
 token-account rent that comes back on the sell — so a user needs USDC and nothing else. The first real

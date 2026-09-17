@@ -6,6 +6,7 @@ import { type Me, num, usd } from "../ui";
 import { XIcon, TelegramIcon } from "../icons";
 import { RealModeCard } from "./RealModeCard";
 import { useHedgeWalletLink, WalletForm } from "./WalletLink";
+import { setTradingWalletChoice, useTradingWallet, useWalletPicker } from "../useTradingWallet";
 import type { NavKey } from "./BottomNav";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
@@ -77,9 +78,17 @@ export function ProfileScreen({ me, api, onRefresh, onLogout, onToast, pusdMicro
 
   // The wallet connector, the same one the Hedge tab offers (see WalletLink.tsx). A fresh link is
   // reflected through /api/me (stockWallets) — that is what the list below renders.
-  const onWalletLinked = useCallback(async () => { onToast("Wallet linked"); await onRefresh(); }, [onRefresh, onToast]);
+  const onWalletLinked = useCallback(async () => { onToast("Wallet linked — tap Use to trade from it"); await onRefresh(); }, [onRefresh, onToast]);
   const wl = useHedgeWalletLink(api, { onLinked: onWalletLinked, onToast });
   const linkedWallets = me?.stockWallets ?? [];
+  // Which of them trades: the same answer the HUD and the wallet sheet give. "Use" on another row
+  // moves all of them at once; choosing the embedded wallet clears the pick (it is the default).
+  const { embeddedAddress } = useWalletPicker();
+  const active = useTradingWallet(linkedWallets).address;
+  const tradeFrom = (a: string) => {
+    setTradingWalletChoice(a === embeddedAddress ? null : a);
+    onToast(`Trading from ${a.slice(0, 4)}…${a.slice(-4)}`);
+  };
 
   const startLink = () => {
     setXError(null);
@@ -164,7 +173,8 @@ export function ProfileScreen({ me, api, onRefresh, onLogout, onToast, pusdMicro
 
       {/* Wallet — the connector the Hedge tab offers, one screen closer. A wallet connected through
           Privy (Phantom) is verified; a pasted address is read for exposure only. The list is what
-          the server already holds as verified, the embedded wallet the login created included. */}
+          the server already holds as verified, the embedded wallet the login created included, and
+          the one tagged ACTIVE is the one a stock swipe spends — "Use" switches. */}
       <div style={{ marginTop: 22, fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700 }}>Wallet</div>
       <div style={{ marginTop: 10, background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 14, padding: "12px 14px" }}>
         {linkedWallets.length > 0 ? (
@@ -172,7 +182,15 @@ export function ProfileScreen({ me, api, onRefresh, onLogout, onToast, pusdMicro
             {linkedWallets.map((a) => (
               <div key={a} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
                 <span style={{ fontFamily: "ui-monospace,SFMono-Regular,Menlo,monospace" }}>{a.slice(0, 4)}…{a.slice(-4)}</span>
-                <span style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: "var(--yes)", fontWeight: 700 }}>verified</span>
+                <span style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: "var(--muted)" }}>{a === embeddedAddress ? "embedded" : "connected"}</span>
+                <span style={{ flex: 1 }} />
+                {a === active ? (
+                  <span style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: "var(--gold)", fontWeight: 700 }}>active</span>
+                ) : (
+                  <button type="button" onClick={() => tradeFrom(a)} style={{ margin: 0, font: "inherit", background: "var(--panel2)", border: "1px solid var(--line)", color: "var(--text)", fontWeight: 700, fontSize: 11, padding: "5px 12px", borderRadius: 10, cursor: "pointer" }}>
+                    Use
+                  </button>
+                )}
               </div>
             ))}
           </div>
