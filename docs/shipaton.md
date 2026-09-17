@@ -254,6 +254,15 @@ rejected cached token was read as a user cancel; SIWS parsing was substring-base
 bound). Confirmed OK by Astra: SIWS cryptography, verified-wallet authority (SIWS ≡ Privy challenge in what it
 grants), the `sameOrigin` native clause, sponsored recovery, RN Modal/AppState/store lifecycles, flavor resolvers.
 Round 2 packet: `.scratch/astra-seeker-packet-2.md`.
+**Astra round 2 (report `.scratch/astra-review-seeker-2.md`):** 6 fixed, 4 partial, 1 deferred (signTransactions
+capability — device check), 2 new (P2 grant misbinding on a cache miss, P3 stale terms sheet). All partials and the
+two new ones addressed in the next commit: the BUY resolution is now status-driven (a not-yet-visible receipt keeps
+`buy_in_flight` until the sweep settles it — one `getTransaction → null` is not proof of absence), SIWS fields are
+singletons with a terminal `Resources:` list, wallet grants are bound only by `bindPayer` after the server verified
+the proof and matched against the whole `accounts` set, the Play flavor is paper on every surface. Astra's verdict:
+**a supervised $2 USDC Seeker smoke test is reasonable** — one freshly linked account, funded sponsor, submit once,
+inspect the attempt before any retry. Not a production sign-off: retry safety still rests on the sweep cadence.
+
 
 **Next, in order:**
 1. ~~a way to build an APK~~ — done, see the toolchain block above.
