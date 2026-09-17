@@ -179,6 +179,25 @@ export function messageHashOf(wireTxBytes: Uint8Array): string {
 
 // Phantom's Lighthouse program — the ONE program a wallet may add to a message we built.
 export const LIGHTHOUSE_PROGRAM = "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95";
+export const COMPUTE_BUDGET_PROGRAM = "ComputeBudget111111111111111111111111111111";
+// The ONE edit a wallet may make to an instruction of ours: raise SetComputeUnitLimit (opcode 2,
+// u32 LE) so its guards fit in the budget — seen live as 72,261 → 75,613 CU. Bounded, because the
+// raise is paid by the SPONSOR (cuPrice × the raise): at our price cap, 100k CU is a few thousand
+// lamports at most.
+const CU_LIMIT_RAISE_MAX = 100_000;
+
+// The decompiled instruction, whatever the message version: program, accounts with roles, data.
+type AnyIx = { programAddress: Address; accounts?: readonly { address: Address; role: AccountRole }[]; data?: ReadonlyUint8Array };
+
+function cuLimitOf(ix: AnyIx): number | null {
+  const d = ix.data;
+  if (ix.programAddress !== COMPUTE_BUDGET_PROGRAM || !d || d.length !== 5 || d[0] !== 2) return null;
+  return (d[1] | (d[2] << 8) | (d[3] << 16) | (d[4] << 24)) >>> 0;
+}
+function raisedCuLimit(ours: AnyIx, theirs: AnyIx): boolean {
+  const x = cuLimitOf(ours), y = cuLimitOf(theirs);
+  return x !== null && y !== null && y >= x && y - x <= CU_LIMIT_RAISE_MAX;
+}
 
 // The contents of every address table these messages load from — what decompiling them needs.
 async function lookupTablesFor(wires: Uint8Array[]): Promise<Record<Address, Address[]>> {
@@ -204,13 +223,15 @@ async function lookupTablesFor(wires: Uint8Array[]): Promise<Record<Address, Add
 
 // Is `signedWire` OUR message plus nothing but Lighthouse guards? An external wallet (Phantom)
 // rewrites an unsigned transaction on its way to the user: it appends assertions that make the
-// transaction fail if the outcome is not what the user saw in the simulation. Assertions cannot
-// move funds. So a message that is exactly ours — same fee payer, same signers, same blockhash,
-// every one of our instructions in order with the same program, accounts, roles and data — with
-// Lighthouse instructions added anywhere is still a message we built, and the sponsor may sign it.
-// Anything else (one more instruction of any other program, one byte of ours changed, one of ours
-// missing, ours reordered, an account demoted, a table we cannot read) is not. Pure given the table
-// contents; `lookup` must hold every table either message loads from.
+// transaction fail if the outcome is not what the user saw in the simulation, reorders the account
+// table, and raises the compute-unit limit so the assertions fit. Assertions cannot move funds. So a
+// message that is exactly ours — same fee payer, same signers, same blockhash, every one of our
+// instructions in order with the same program, accounts, roles and data (the unit limit may only be
+// raised, within CU_LIMIT_RAISE_MAX) — with Lighthouse instructions added anywhere is still a
+// message we built, and the sponsor may sign it. Anything else (one more instruction of any other
+// program, one byte of ours changed, one of ours missing, ours reordered, an account demoted, a table
+// we cannot read) is not. Pure given the table contents; `lookup` must hold every table either
+// message loads from.
 export function sameMessageModuloGuards(builtWire: Uint8Array, signedWire: Uint8Array, lookup: Record<Address, Address[]>): boolean {
   const dec = getCompiledTransactionMessageDecoder();
   let a: ReturnType<typeof dec.decode>, b: ReturnType<typeof dec.decode>;
@@ -235,14 +256,13 @@ export function sameMessageModuloGuards(builtWire: Uint8Array, signedWire: Uint8
   } catch {
     return false;
   }
-  // The decompiled instruction, whatever the message version: program, accounts with roles, data.
-  type AnyIx = { programAddress: Address; accounts?: readonly { address: Address; role: AccountRole }[]; data?: ReadonlyUint8Array };
   const key = (ix: AnyIx) =>
     [ix.programAddress, ...(ix.accounts ?? []).map((acc) => `${acc.address}:${acc.role}`), Buffer.from(ix.data ?? new Uint8Array()).toString("base64")].join("|");
-  const ours = (ma.instructions as unknown as readonly AnyIx[]).map(key);
+  const oursIx = ma.instructions as unknown as readonly AnyIx[];
+  const ours = oursIx.map(key);
   let i = 0;
   for (const ix of mb.instructions as unknown as readonly AnyIx[]) {
-    if (i < ours.length && key(ix) === ours[i]) {
+    if (i < ours.length && (key(ix) === ours[i] || raisedCuLimit(oursIx[i], ix))) {
       i++;
       continue;
     }

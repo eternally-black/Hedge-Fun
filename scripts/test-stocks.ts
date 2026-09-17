@@ -363,7 +363,7 @@ import { clampStakeCents } from "../src/app/useStockStake";
 // ─── sponsor.ts: the pure pieces of the fee-sponsored builder ───────────────────────────────────────
 // Everything here is arithmetic on bytes — no network, no key material beyond a throwaway keypair.
 async function sponsorChecks() {
-  const { patchAtaPayer, patchCleanupDestination, decodeLookupTable, messageHashOf, closeAccountIx, sameMessageModuloGuards, LIGHTHOUSE_PROGRAM, ATA_PROGRAM } = await import("../src/lib/sponsor");
+  const { patchAtaPayer, patchCleanupDestination, decodeLookupTable, messageHashOf, closeAccountIx, sameMessageModuloGuards, LIGHTHOUSE_PROGRAM, COMPUTE_BUDGET_PROGRAM, ATA_PROGRAM } = await import("../src/lib/sponsor");
   const kit = await import("@solana/kit");
   const { generateKeyPairSync } = await import("node:crypto");
 
@@ -457,6 +457,19 @@ async function sponsorChecks() {
     const demoted = wire([ro(ours([1])), ro(ours([2]))]);
     assert.ok(!sameMessageModuloGuards(built, demoted, lookup), "an account demoted");
     assert.ok(!sameMessageModuloGuards(built, new Uint8Array([1, 2, 3]), lookup), "garbage");
+
+    // The compute-unit limit: a wallet raises it to fit its guards (seen live 72,261 → 75,613). Only a
+    // raise, only within the bound, only that opcode.
+    const cu = (opcode: number, v: number): Instruction => ({
+      programAddress: address(COMPUTE_BUDGET_PROGRAM),
+      accounts: [],
+      data: new Uint8Array([opcode, v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff]),
+    });
+    const budgeted = wire([cu(2, 72_261), cu(3, 170_669), ours([1])]);
+    assert.ok(sameMessageModuloGuards(budgeted, wire([cu(2, 75_613), cu(3, 170_669), ours([1]), guard([9])]), lookup), "unit limit raised a little, guards appended");
+    assert.ok(!sameMessageModuloGuards(budgeted, wire([cu(2, 72_261 + 100_001), cu(3, 170_669), ours([1])]), lookup), "unit limit raised past the bound");
+    assert.ok(!sameMessageModuloGuards(budgeted, wire([cu(2, 60_000), cu(3, 170_669), ours([1])]), lookup), "unit limit lowered");
+    assert.ok(!sameMessageModuloGuards(budgeted, wire([cu(2, 72_261), cu(3, 200_000), ours([1])]), lookup), "unit PRICE changed");
   }
 
   // decodeLookupTable: 56-byte header, then packed 32-byte addresses.
