@@ -12,6 +12,7 @@
 
 import { prisma } from "../prisma";
 import { isTradable } from "../stocks";
+import { effectiveRealMode } from "../real";
 import { sizeByPct } from "./size";
 import { stockSuggestionId } from "./id";
 import {
@@ -54,15 +55,18 @@ export interface StockAssetRow {
   decimals: number;
 }
 
-// Load the offered assets for a set of symbols. ONE query; drops halted, unpriced, and stale rows.
-// The ONLY place this module reads StockAsset — callers pass the map around.
-export async function loadStockAssets(symbols: string[], nowMs: number): Promise<Map<string, StockAssetRow>> {
+// Load the offered assets for a set of symbols. ONE query; drops halted, unpriced, and stale rows —
+// and, with realOnly, every asset that cannot be bought on chain: in real mode a card is only ever
+// offered for something the swipe can actually buy. The ONLY place this module reads StockAsset —
+// callers pass the map around.
+export async function loadStockAssets(symbols: string[], nowMs: number, realOnly = false): Promise<Map<string, StockAssetRow>> {
   const out = new Map<string, StockAssetRow>();
   if (symbols.length === 0) return out;
   const rows = await prisma.stockAsset.findMany({ where: { symbol: { in: symbols } } });
   const cutoff = nowMs - HEDGE_STOCK_PRICE_MAX_AGE_MS;
   for (const r of rows) {
     if (r.halted) continue;
+    if (realOnly && !isTradable(r)) continue;
     if (r.priceCents == null || r.priceCents <= 0) continue;
     if (r.pricedAt == null || r.pricedAt.getTime() < cutoff) continue;
     out.set(r.symbol, {
@@ -79,6 +83,13 @@ export async function loadStockAssets(symbols: string[], nowMs: number): Promise
     });
   }
   return out;
+}
+
+// The app's ONE Paper/Real switch, as the hedge paths need it: true when this user's cards must be
+// buyable on chain. One small read per request; the four builders below all pass it to loadStockAssets.
+export async function realOnlyFor(userId: string): Promise<boolean> {
+  const u = await prisma.user.findUnique({ where: { id: userId }, select: { realMode: true, realConsentAt: true, realConsentVersion: true } });
+  return u !== null && effectiveRealMode(u) === "REAL";
 }
 
 // First ticker in preference order that is actually offered. null when none is — the caller skips
@@ -166,10 +177,10 @@ function allRuleTickers(): string[] {
 
 // ── S1-stock: wallet exposure → a tokenized-stock leg ─────────────────────────────────────────────
 
-export async function deriveWalletStock(snapshot: SnapshotData, nowMs: number): Promise<DerivedSuggestion[]> {
+export async function deriveWalletStock(snapshot: SnapshotData, nowMs: number, realOnly = false): Promise<DerivedSuggestion[]> {
   const rules = WALLET_STOCK_RULES;
   const tickers = [...new Set(rules.flatMap((r) => r.tickers))];
-  const assets = await loadStockAssets(tickers, nowMs);
+  const assets = await loadStockAssets(tickers, nowMs, realOnly);
 
   const items: DerivedSuggestion[] = [];
   const push = (asset: string, notionalCents: number, rule: (typeof rules)[number]) => {
@@ -295,7 +306,7 @@ export async function searchLife(userId: string, text: string, amountCents: numb
   }
 
   const tickers = [...new Set(hits.flatMap((h) => h.rule.tickers))];
-  const assets = await loadStockAssets(tickers, Date.now());
+  const assets = await loadStockAssets(tickers, Date.now(), await realOnlyFor(userId));
 
   const stockSuggestions: HedgeSuggestion[] = [];
   for (let i = 0; i < hits.length; i++) {
@@ -344,7 +355,7 @@ export async function deriveLifeStockForAccept(userId: string, nowMs: number): P
     const rule = ruleByCategory(row.category);
     if (rule) for (const t of rule.tickers) tickers.add(t);
   }
-  const assets = await loadStockAssets([...tickers], nowMs);
+  const assets = await loadStockAssets([...tickers], nowMs, await realOnlyFor(userId));
 
   const items: DerivedSuggestion[] = [];
 
@@ -404,7 +415,7 @@ export async function spottedForUser(userId: string): Promise<HedgeSuggestion[]>
   const nowMs = Date.now();
   const rows = await prisma.lifeSituation.findMany({ where: { userId } });
   const rowByCategory = new Map(rows.map((r) => [r.category, r]));
-  const assets = await loadStockAssets(allRuleTickers(), nowMs);
+  const assets = await loadStockAssets(allRuleTickers(), nowMs, await realOnlyFor(userId));
 
   const changeBp: Record<string, number> = {};
   for (const a of assets.values()) {

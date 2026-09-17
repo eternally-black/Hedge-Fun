@@ -105,6 +105,24 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksU
 
   useEffect(() => { void load(); }, [load]);
 
+  // Which economy a swipe-right spends. ONE switch for the whole app (me.real.mode, flipped on the
+  // You screen) — the stock deck does not get a second one.
+  const realMode = me?.real.mode === "REAL";
+  // The server deals a different deck per economy (real mode = on-chain assets only), so a flip
+  // while this deck is mounted re-deals from scratch: served is cleared because it is a new deal,
+  // not the tail of the old one. The first deal above is already dealt for the right economy (the
+  // server reads the mode), so only a CHANGE re-deals — never the arrival of /api/me itself.
+  const lastMode = useRef<boolean | null>(null);
+  const hasMe = me !== null;
+  useEffect(() => {
+    if (!hasMe) return;
+    if (lastMode.current !== null && lastMode.current !== realMode) {
+      served.current.clear();
+      void load();
+    }
+    lastMode.current = realMode;
+  }, [hasMe, load, realMode]);
+
   // Preload-ahead: refill well before the deck runs dry, so a fresh card is always buffered behind
   // the current one. `topping` dedupes so only one fetch is in flight.
   const topUpIfLow = useCallback(
@@ -166,13 +184,6 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksU
   });
   const { buyReal, replayPending, acceptConsent: acceptConsentReal } = real;
 
-  // Which economy a swipe-right spends. ONE switch for the whole app (me.real.mode, flipped on the
-  // You screen) — the stock deck does not get a second one.
-  const realMode = me?.real.mode === "REAL";
-  // A non-tradable stock in real mode still buys paper; say so ONCE per session rather than on every
-  // such card, which would be nagging about something the user cannot change.
-  const paperFallbackToasted = useRef(false);
-
   const act = useCallback(
     (card: StockDeckCardType, dir: SwipeAction) => {
       if (dir === "SKIP") {
@@ -200,10 +211,6 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksU
         buyingId.current = card.id;
         void buyReal({ assetId: card.id, symbol: card.symbol }, stakeCents, { wallets, stockConsent, sponsored });
         return;
-      }
-      if (realMode && !paperFallbackToasted.current) {
-        paperFallbackToasted.current = true;
-        onToast("This stock has no on-chain market yet — bought with paper");
       }
       // A paper buy. The cash gate is checked BEFORE the optimistic advance so the card is not
       // lost — it stays so the user can top up and retry.

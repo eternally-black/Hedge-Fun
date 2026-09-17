@@ -18,8 +18,8 @@ type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
 type Attempt = { id: string; state: string; usdceDeltaMicro: string; pusdDeltaMicro: string };
 
-const MUTED = { fontSize: 12, color: "var(--muted)" } as const;
-const ACTION = {
+export const MUTED = { fontSize: 12, color: "var(--muted)" } as const;
+export const ACTION = {
   margin: "14px 0 0",
   font: "inherit",
   flex: 1,
@@ -30,11 +30,13 @@ const ACTION = {
   cursor: "pointer",
 } as const;
 
-export function RealDepositPanel({ me, api, pusdMicro, onToast }: {
+export function RealDepositPanel({ me, api, pusdMicro, onToast, label = "Real balance" }: {
   me: Me | null;
   api: Api;
   pusdMicro: string | null;
   onToast: (m: string) => void;
+  // The pocket heading — the wallet sheet names it by purpose ("Real · Predictions").
+  label?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [withdrawOpen, setWithdrawOpen] = useState(false);
@@ -98,8 +100,8 @@ export function RealDepositPanel({ me, api, pusdMicro, onToast }: {
   return (
     <>
     <div style={{ background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 18, padding: "16px 18px", marginBottom: 14 }}>
-      <div style={{ fontSize: 10, letterSpacing: ".14em", color: "var(--muted)", textTransform: "uppercase" }}>
-        Real balance
+      <div style={{ fontSize: 10, letterSpacing: ".14em", color: "var(--muted)", textTransform: "uppercase", fontWeight: 700 }}>
+        {label}
       </div>
       <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 34, color: "var(--gold)", lineHeight: 1.05 }}>
         {pusdMicro == null ? "—" : usdFromMicro(pusdMicro)}

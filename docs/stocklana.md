@@ -55,8 +55,9 @@ fees — with every rent it fronted returned. The PLTRx pair is the final flow: 
   a Solana pool are `tradable` (real buy), the rest are paper-only at the issuer's reference price.
 - **Stocks deck.** Right = buy, left = pass, up = skip. Whose money a buy spends is the app's ONE
   Paper/Real switch, the same one predictions use (You → Mode): in Real mode a swipe right buys on
-  Solana from the user's own wallet, fees sponsored; in Paper it holds virtual cash. An asset with no
-  Solana pool stays paper in either mode. Toggle back to the prediction-market deck any time.
+  Solana from the user's own wallet, fees sponsored; in Paper it holds virtual cash. In Real only
+  assets with a Solana pool are dealt (nothing on a real-mode card is paper); in Paper every asset
+  is. Toggle back to the prediction-market deck any time.
 - **Wallet + fees.** Email login mints a Privy embedded Solana wallet — no extension, no seed phrase;
   an external Phantom still works for anyone who has one. Real buys and sells are **fee-sponsored**:
   the server builds the swap, the user's wallet signs it, our fee-payer co-signs and sends it. The

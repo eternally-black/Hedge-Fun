@@ -12,6 +12,7 @@
 // Needs DATABASE_URL (Docker DB). Run: npx tsx scripts/test-hedge-stock.ts
 import assert from "node:assert";
 import { PrivyClient } from "@privy-io/server-auth";
+import { REAL_TERMS_VERSION } from "../src/lib/real-terms";
 
 const RUN = `${process.pid}-${Date.now() & 0xffffff}`;
 const DID = `did:privy:stkhedge-${RUN}`;
@@ -116,6 +117,15 @@ async function main() {
     assert.strictEqual(dalCard.kind, "S3-stock", "kind S3-stock");
     assert.strictEqual(body.situation?.category, "travel", "situation category travel");
     assert.strictEqual(body.situation?.amountCents, 80000, "situation amount 80000");
+
+    // 1b. Real mode offers only assets with an on-chain market. No travel ticker has a pool here, so
+    // the same search yields NO travel card — never a paper one dressed as a hedge.
+    await prisma.user.update({ where: { id: userId }, data: { realMode: true, realConsentAt: new Date(), realConsentVersion: REAL_TERMS_VERSION } });
+    res = await search.POST(post("http://x/api/hedge/search", { text: "spending $800 on flights this month" }));
+    assert.strictEqual(res.status, 200, "real-mode search 200");
+    const realBody = (await res.json()) as { stockSuggestions: { stock: { symbol: string } }[] };
+    assert.deepStrictEqual(realBody.stockSuggestions.map((c) => c.stock.symbol), [], "real mode: a rule with no on-chain ticker yields no card");
+    await prisma.user.update({ where: { id: userId }, data: { realMode: false } });
     assert.strictEqual(body.isDiscovery, false, "not discovery");
     const lifeRow = await prisma.lifeSituation.findUniqueOrThrow({ where: { userId_category: { userId: user.id, category: "travel" } } });
     assert.strictEqual(lifeRow.amountCents, 80000, "LifeSituation amount 80000");

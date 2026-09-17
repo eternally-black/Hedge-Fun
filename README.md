@@ -42,11 +42,11 @@ toggle: the mode changes what the same card, the same swipe and the same Sell ro
 
 | | Paper money (default) | Real money |
 |---|---|---|
-| Card | chips read `PAPER`; every asset is dealt | chips read `REAL`, gold `REAL` tag on assets with a Solana pool; an asset with no pool stays `PAPER ONLY` |
+| Card | chips read `PAPER`; every asset is dealt (one with no Solana pool is tagged `PAPER ONLY`) | chips read `REAL` under a gold `REAL` tag; only assets with a Solana pool are dealt — nothing on a real-mode card is paper |
 | Swipe right | holds virtual cash, like a bet | a Jupiter USDC→xStock swap from the user's own wallet; the lot is booked only from the landed transaction, sized down to the wallet's USDC when the chip exceeds it |
 | Portfolio Sell (two-tap) | closes the lot against the stored price | an xStock→USDC swap that also closes the emptied token account |
-| Hedge tab stock cards | "Hedge $X with SYM" holds virtual cash | the same card buys on Solana |
-| Balance chip in the HUD | `PAPER` pocket | `REAL · STOCKS` pocket (the wallet's USDC); predictions show their own `REAL · PREDICTIONS` pocket |
+| Hedge tab stock cards | "Hedge $X with SYM" holds virtual cash | the same card buys on Solana; a life situation whose tickers have no pool yields no card |
+| Balance chip in the HUD | `PAPER` pocket, everywhere | never Paper: `REAL · STOCKS` on stock screens, `REAL · PREDICTIONS` on prediction screens, the current deck's pocket elsewhere |
 
 The wallet is the Privy **embedded** Solana wallet an email login already creates (an external
 Phantom still works), and every real transaction is **fee-sponsored**: the server builds the swap, the

@@ -10,7 +10,7 @@ import { suggestionId } from "./id";
 import { WSOL_MINT } from "./exposure";
 import type { HedgeAsset, ParsedDirection } from "./parse";
 import { getSnapshot, getCachedSnapshot, type SnapshotData } from "./snapshot";
-import { deriveWalletStock } from "./stock";
+import { deriveWalletStock, realOnlyFor } from "./stock";
 import { quoteSideForDisplay, sourceHasClobBook } from "../depth";
 import type { HedgeSuggestion, HedgeSuggestionKind } from "../api-types";
 
@@ -208,13 +208,14 @@ export async function deriveForUser(
   if (wallets.length === 0) return { items: [], walletLinked: false };
 
   const nowMs = Date.now();
+  const realOnly = await realOnlyFor(userId);
   const indexed = await loadIndexedMarkets();
   const items: DerivedSuggestion[] = [];
   for (const w of wallets) {
     const snap = opts.cacheOnly ? await getCachedSnapshot(w.address) : await getSnapshot(w.address);
     if (!snap) continue;
     items.push(...(await deriveSuggestions(snap, indexed, nowMs, { quoteDisplay: opts.quoteDisplay })));
-    items.push(...(await deriveWalletStock(snap, nowMs)));
+    items.push(...(await deriveWalletStock(snap, nowMs, realOnly)));
   }
   return { items, walletLinked: true };
 }

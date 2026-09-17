@@ -1011,9 +1011,9 @@ const StockHedgeCard = memo(function StockHedgeCard({
   const stock = s.stock;
   if (!stock) return null; // unreachable: the dispatcher only routes stock cards here
 
-  // ONE accept button, and the app's Paper/Real switch decides what it spends. An asset with no
-  // Solana pool has no on-chain market to buy in, so it stays a paper hedge even in real mode — and
-  // the label says why, rather than offering a button that would refuse.
+  // ONE accept button, and the app's Paper/Real switch decides what it spends. In real mode the
+  // server only offers assets with an on-chain market, so a card here is a real buy whenever the
+  // wallet can sign one; in paper mode it is a paper hedge.
   const spendsReal = realMode === true && stock.tradable && onBuyReal !== undefined;
   const accent = spendsReal ? "var(--gold)" : "var(--yes)";
   const ctaBusy = busy || buyRealBusy === true;
@@ -1023,7 +1023,7 @@ const StockHedgeCard = memo(function StockHedgeCard({
       ? "Buying…"
       : armed
         ? `Buy ${usd(s.proposedStakeCents)}?`
-        : `Hedge ${usd(s.proposedStakeCents)} with ${stock.symbol}${spendsReal ? " · real money" : realMode ? " · paper (no on-chain market yet)" : ""}`;
+        : `Hedge ${usd(s.proposedStakeCents)} with ${stock.symbol}${spendsReal ? " · real money" : ""}`;
   const longLabel = realMode === true && !ctaBusy && !armed;
   const onCta = () => {
     if (ctaBusy) return;

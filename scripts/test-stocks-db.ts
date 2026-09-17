@@ -6,6 +6,7 @@
 import assert from "node:assert";
 import { randomUUID } from "node:crypto";
 import { PrivyClient } from "@privy-io/server-auth";
+import { REAL_TERMS_VERSION } from "../src/lib/real-terms";
 
 const RUN = `${process.pid}-${Date.now() & 0xffffff}`;
 // The buy route requires a uuid-shaped requestId (hex + dashes); "req-…" strings are rejected with 400.
@@ -106,6 +107,21 @@ async function main() {
     assert.strictEqual(body.cards.find((c) => c.id === B.id)!.blurb, null, "an asset with no blurb serves null, not a placeholder");
     assert.deepStrictEqual(body.wallets, [], "no verified wallets");
     assert.strictEqual(body.stockConsent, false, "no stock consent");
+
+    // 1b. The deck is dealt per economy: D is deck-eligible on a reference price but has no Solana
+    // pool. Paper mode deals it; real mode never does (every real card must be buyable on chain).
+    const D = await prisma.stockAsset.create({
+      data: { mint: `mintD-${RUN}`, symbol: `DDDx-${RUN}`, name: "DDDx xStock", underlying: "DDD", decimals: 8, deckEligible: true, priceCents: 1000, liquidityCents: null, pricedAt: new Date() },
+      select: { id: true },
+    });
+    assetIds.push(D.id);
+    const dealt = async () => new Set(((await (await deck.GET(get("http://x/api/stocks/deck"))).json()) as { cards: { id: string }[] }).cards.map((c) => c.id));
+    assert.ok((await dealt()).has(D.id), "paper mode deals the pool-less asset");
+    await prisma.user.update({ where: { id: user.id }, data: { realMode: true, realConsentAt: new Date(), realConsentVersion: REAL_TERMS_VERSION } });
+    const realDeal = await dealt();
+    assert.ok(!realDeal.has(D.id), "real mode never deals an asset with no on-chain market");
+    assert.ok(realDeal.has(A.id) && realDeal.has(B.id), "real mode still deals the tradable ones");
+    await prisma.user.update({ where: { id: user.id }, data: { realMode: false } });
 
     // 2. Buy A: 1000c at 334.16 -> qtyBase 2992578, hold +1000, balance unchanged.
     const R1 = rid();

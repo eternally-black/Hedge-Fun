@@ -1,12 +1,12 @@
 "use client";
 
-import { type CSSProperties, useCallback, useEffect, useState } from "react";
+import { type CSSProperties, type ReactNode, useCallback, useEffect, useState } from "react";
 import type { StockPortfolioResponse, StockPositionRow } from "@/lib/api-types";
 import { type Me, usd } from "../ui";
 import { usePredictionHistory, useClosePosition, useExitQuotes, toPredictionRow } from "./usePredictionHistory";
 import { PredictionRow } from "./PredictionRow";
 import { StockHistoryRow } from "./PortfolioScreen";
-import { RealDepositPanel } from "./RealDepositPanel";
+import { ACTION, MUTED, RealDepositPanel } from "./RealDepositPanel";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 
@@ -93,6 +93,7 @@ export function BalanceSheet({ me, api, realPusdMicro, stockWallet, stockSponsor
     tab === "calls" ? "No predictions yet. Swipe a card to make your first call."
     : tab === "stocks" ? "No stocks yet. Swipe right on the Stocks deck to buy one."
     : "No hedges yet. The Hedge tab turns a life cost or a wallet into one.";
+  const isReal = me?.real.mode === "REAL";
 
   return (
     // Backdrop is a real button: click/Enter/Escape closes (matches the overlay-click-to-close).
@@ -126,32 +127,23 @@ export function BalanceSheet({ me, api, realPusdMicro, stockWallet, stockSponsor
 
         <div style={{ fontFamily: "var(--df)", fontSize: 26, marginBottom: 12 }}>Wallet</div>
 
-        {/* PAPER — play money. The top-up lives here and nowhere else: the pockets are now named, so
-            "claim free $200" can no longer be mistaken for a way to fund a real one. */}
-        <div style={{ background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 18, padding: "16px 18px", marginBottom: 14 }}>
-          <div style={LABEL}>Paper</div>
-          <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 34, color: "var(--yes)", lineHeight: 1.05 }}>
-            {me ? usd(Math.max(0, me.cashCents)) : "—"}
-          </div>
-          <div style={{ display: "flex", gap: 18, marginTop: 12 }}>
-            <SplitStat label="In play" value={me ? usd(me.lockedCents) : "—"} />
-            <SplitStat label="Total" value={me ? usd(me.balanceCents) : "—"} />
-          </div>
-          <TopupButton me={me} busy={busy} onTopup={doTopup} />
-        </div>
-
-        {/* REAL · STOCKS — the user's own Solana wallet. Always shown: every login gets an embedded
-            one, and a pocket you cannot see is a pocket you never fund. */}
-        <StockWalletRow wallet={stockWallet} sponsored={stockSponsored} onToast={onToast} />
-
-        {/* REAL · PREDICTIONS — the Polymarket balance. Only in real mode; the Paper/Real switch
-            itself lives on the You screen, so there is nothing to duplicate here. */}
-        {me?.real.mode === "REAL" ? (
-          <div style={{ marginBottom: 14 }}>
-            <div style={{ ...LABEL, marginBottom: 6 }}>Real · Predictions</div>
-            <RealDepositPanel me={me} api={api} pusdMicro={realPusdMicro ?? null} onToast={onToast} />
-          </div>
-        ) : null}
+        {/* The pockets, ONE layout each (heading · number · what it is · actions), ordered by the
+            app's Paper/Real switch: the pockets real mode spends first, play money last. In paper
+            mode the Polymarket pocket is not shown — the switch itself lives on the You screen, so
+            there is nothing to duplicate here. The Solana wallet is always shown: every login gets
+            an embedded one, and a pocket you cannot see is a pocket you never fund. */}
+        {isReal ? (
+          <>
+            <StockPocket wallet={stockWallet} sponsored={stockSponsored} onToast={onToast} />
+            <RealDepositPanel me={me} api={api} pusdMicro={realPusdMicro ?? null} onToast={onToast} label="Real · Predictions" />
+            <PaperPocket me={me} busy={busy} onTopup={doTopup} />
+          </>
+        ) : (
+          <>
+            <PaperPocket me={me} busy={busy} onTopup={doTopup} />
+            <StockPocket wallet={stockWallet} sponsored={stockSponsored} onToast={onToast} />
+          </>
+        )}
 
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
           <div style={{ fontFamily: "var(--df)", fontSize: 26 }}>History</div>
@@ -228,12 +220,40 @@ export function BalanceSheet({ me, api, realPusdMicro, stockWallet, stockSponsor
 // another — they are three different kinds of money, not a hierarchy.
 const LABEL: CSSProperties = { fontSize: 10, letterSpacing: ".14em", color: "var(--muted)", textTransform: "uppercase", fontWeight: 700 };
 
+// The one pocket layout — RealDepositPanel draws the Polymarket pocket in exactly this shape, so
+// the three read as three kinds of money in one wallet, not three widgets.
+function Pocket({ label, amount, color, note, children }: { label: string; amount: string; color: string; note: string; children?: ReactNode }) {
+  return (
+    <div style={{ background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 18, padding: "16px 18px", marginBottom: 14 }}>
+      <div style={LABEL}>{label}</div>
+      <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 34, color, lineHeight: 1.05 }}>{amount}</div>
+      <div style={{ ...MUTED, marginTop: 4, lineHeight: 1.5 }}>{note}</div>
+      {children}
+    </div>
+  );
+}
+
+// PAPER — play money. The top-up lives here and nowhere else: the pockets are named, so "claim free
+// $200" can no longer be mistaken for a way to fund a real one.
+function PaperPocket({ me, busy, onTopup }: { me: Me | null; busy: boolean; onTopup: (k: "free" | "artifact") => void }) {
+  return (
+    <Pocket
+      label="Paper"
+      amount={me ? usd(Math.max(0, me.cashCents)) : "—"}
+      color="var(--yes)"
+      note={me ? `Play money. ${usd(me.lockedCents)} in play · ${usd(me.balanceCents)} total.` : "Play money."}
+    >
+      <TopupButton me={me} busy={busy} onTopup={onTopup} />
+    </Pocket>
+  );
+}
+
 // REAL · STOCKS. An embedded wallet has no wallet app of its own to show a balance or an address, so
 // this sheet has to be that surface, or the user has nothing to fund and no way to know it arrived.
 // No QR: no QR library is installed and one dependency for one square is a bad trade — the address
 // is one tap away from the clipboard. This is one of the two places a token may be NAMED, because
 // the sender has to know what to send.
-function StockWalletRow({ wallet, sponsored, onToast }: {
+function StockPocket({ wallet, sponsored, onToast }: {
   wallet: { address: string | null; embedded: boolean; usdCents: number | null; refresh: () => Promise<void>; unverified: boolean };
   sponsored: boolean;
   onToast: (m: string) => void;
@@ -246,59 +266,34 @@ function StockWalletRow({ wallet, sponsored, onToast }: {
       .then(() => onToast("Address copied"))
       .catch(() => onToast("Couldn't copy — select the address instead"));
   };
+  const note = !address
+    ? "Your Solana wallet is being set up…"
+    : unverified
+      // The server could not confirm ownership (usually a Privy hiccup). Say so instead of leaving
+      // a permanent "—" that looks like an empty wallet.
+      ? "Couldn't verify this wallet yet — refresh to try again."
+      : !embedded
+        ? "The wallet you connected — fund it from your wallet app."
+        : sponsored
+          ? "Your Solana wallet. Send USDC to this address — no SOL needed, network fees are on us."
+          : "Your Solana wallet. Send USDC to this address, plus ~0.01 SOL for network fees.";
 
   return (
-    <div style={{ background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 18, padding: "14px 18px", marginBottom: 14 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <div style={{ flex: 1, ...LABEL }}>Real · Stocks</div>
-        <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 18, color: "var(--gold)" }}>{usdCents == null ? "—" : usd(usdCents)}</div>
-        <button
-          type="button"
-          onClick={() => void refresh()}
-          aria-label="Refresh balance"
-          style={{ margin: 0, font: "inherit", padding: "3px 8px", borderRadius: 8, background: "transparent", color: "var(--muted)", border: "1px solid var(--line)", fontWeight: 700, fontSize: 11, cursor: "pointer" }}
-        >
-          ↻
-        </button>
-      </div>
-
+    <Pocket label="Real · Stocks" amount={usdCents == null ? "—" : usd(usdCents)} color="var(--gold)" note={note}>
       {address ? (
         <>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 9 }}>
-            <div style={{ flex: 1, minWidth: 0, fontFamily: "ui-monospace,SFMono-Regular,Menlo,monospace", fontSize: 11, color: "var(--text)", overflowWrap: "anywhere", lineHeight: 1.4 }}>{address}</div>
-            <button
-              type="button"
-              onClick={copy}
-              style={{ margin: 0, font: "inherit", flexShrink: 0, padding: "6px 11px", borderRadius: 10, background: "transparent", color: "var(--muted)", border: "1px solid var(--line)", fontWeight: 700, fontSize: 11, cursor: "pointer" }}
-            >
-              Copy
+          <div style={{ marginTop: 10, fontFamily: "ui-monospace,SFMono-Regular,Menlo,monospace", fontSize: 11, color: "var(--text)", overflowWrap: "anywhere", lineHeight: 1.4 }}>{address}</div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="button" onClick={copy} style={{ ...ACTION, background: "var(--gold)", color: "#1a1205", border: "none" }}>
+              Copy address
+            </button>
+            <button type="button" onClick={() => void refresh()} style={{ ...ACTION, background: "var(--panel2)", color: "var(--text)", border: "1px solid var(--line)" }}>
+              ↻ Refresh
             </button>
           </div>
-          <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 9, lineHeight: 1.5 }}>
-            {unverified
-              // The server could not confirm ownership (usually a Privy hiccup). Say so instead of
-              // leaving a permanent "—" that looks like an empty wallet.
-              ? "Couldn't verify this wallet yet — tap ↻ to try again."
-              : !embedded
-                ? "This is the wallet you connected — fund it from your wallet app."
-                : sponsored
-                  ? "Send USDC on Solana to this address. No SOL needed — network fees are on us."
-                  : "Send USDC on Solana to this address, plus ~0.01 SOL for network fees."}
-          </div>
         </>
-      ) : (
-        <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 9, lineHeight: 1.5 }}>Setting up your wallet…</div>
-      )}
-    </div>
-  );
-}
-
-function SplitStat({ label, value }: { label: string; value: string }) {
-  return (
-    <div style={{ lineHeight: 1.1 }}>
-      <div style={{ fontSize: 10, letterSpacing: ".12em", color: "var(--muted)", textTransform: "uppercase" }}>{label}</div>
-      <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 15, color: "var(--text)", marginTop: 3 }}>{value}</div>
-    </div>
+      ) : null}
+    </Pocket>
   );
 }
 
@@ -323,19 +318,22 @@ function TopupButton({ me, busy, onTopup }: { me: Me | null; busy: boolean; onTo
 
   const disabled = kind === null || busy;
   return (
-    <button
-      type="button"
-      onClick={() => kind && onTopup(kind)}
-      disabled={disabled}
-      style={{
-        width: "100%", marginTop: 14, padding: "12px 14px", borderRadius: 14, fontFamily: "var(--nf)",
-        fontWeight: 700, fontSize: 14, cursor: disabled ? "default" : "pointer",
-        border: `1px solid ${primary ? "color-mix(in srgb,var(--yes) 50%,transparent)" : "var(--line)"}`,
-        background: primary ? "color-mix(in srgb,var(--yes) 16%,transparent)" : "var(--panel2)",
-        color: primary ? "var(--yes)" : "var(--muted)", opacity: busy ? 0.6 : 1,
-      }}
-    >
-      {busy ? "…" : label}
-    </button>
+    <div style={{ display: "flex" }}>
+      <button
+        type="button"
+        onClick={() => kind && onTopup(kind)}
+        disabled={disabled}
+        style={{
+          ...ACTION,
+          cursor: disabled ? "default" : "pointer",
+          border: primary ? "none" : "1px solid var(--line)",
+          background: primary ? "var(--yes)" : "var(--panel2)",
+          color: primary ? "#06140b" : "var(--muted)",
+          opacity: busy ? 0.6 : 1,
+        }}
+      >
+        {busy ? "…" : label}
+      </button>
+    </div>
   );
 }

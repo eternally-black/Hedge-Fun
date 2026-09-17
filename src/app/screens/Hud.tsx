@@ -15,19 +15,23 @@ import { type Me, num, usd, usdFromMicro } from "../ui";
 // the user's own Solana wallet, the Polymarket balance), and a chip that states one of them while
 // the screen spends another is the HUD lying about the user's money. page.tsx derives it from the
 // screen, so the number always belongs to what is on screen. Named by PURPOSE, never by token.
-export type Pocket = "paper" | "stocks" | "predictions";
+// There is no "paper" pocket to ask for: play money is what EVERY pocket renders as while the app's
+// one Paper/Real switch is on paper, and in real mode the chip never shows it.
+export type Pocket = "stocks" | "predictions";
 
 export const Hud = memo(function Hud({ me, pop, pocket, realPusdMicro, stocksUsdCents, onShards, onGM, onBalance, onBell }: { me: Me | null; pop: { amt: number; color: string } | null; pocket: Pocket; realPusdMicro?: string | null; stocksUsdCents: number | null; onShards: () => void; onGM: () => void; onBalance: () => void; onBell: () => void }) {
   const isReal = me?.real.mode === "REAL";
   // Which rendering wins. BOTH real pockets are gated on the app's one Paper/Real switch: in paper
-  // mode a stock swipe spends play money, so the chip must state the play balance on stock screens
-  // too. Stocks also falls back to paper while the balance is unknown (no wallet yet, first load):
-  // a gold "—" where the user expects their cash reads as money that went missing.
-  const showStocks = pocket === "stocks" && isReal && stocksUsdCents !== null;
+  // mode a stock swipe spends play money, so the chip states the play balance on stock screens too.
+  // In real mode the chip is ALWAYS a real pocket — a stock balance not read yet renders "—" under
+  // its own label rather than falling back to a play-money number real mode never spends.
+  const showStocks = pocket === "stocks" && isReal;
   const showPredictions = pocket === "predictions" && isReal;
   const real = showStocks || showPredictions;
   const amount = showStocks
-    ? usd(stocksUsdCents)
+    ? stocksUsdCents == null
+      ? "—"
+      : usd(stocksUsdCents)
     : showPredictions
       ? realPusdMicro == null
         ? "—"

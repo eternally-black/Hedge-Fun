@@ -3,7 +3,8 @@ import { prisma } from "@/lib/prisma";
 import { authUser } from "@/lib/privy";
 import { rateLimit } from "@/lib/ratelimit";
 import { shuffleNoRun } from "@/lib/deck-mix";
-import { STOCK_DECK_POOL, STOCK_DECK_SIZE, STOCK_PRICE_MAX_STALE_MS } from "@/lib/config";
+import { STOCK_DECK_POOL, STOCK_DECK_SIZE, STOCK_MIN_LIQUIDITY_CENTS, STOCK_PRICE_MAX_STALE_MS } from "@/lib/config";
+import { effectiveRealMode } from "@/lib/real";
 import { verifiedWallets, hasStockConsent } from "@/lib/stocks-db";
 import { isTradable } from "@/lib/stocks";
 import { sponsorConfigured } from "@/lib/sponsor";
@@ -19,10 +20,15 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "rate_limited" }, { status: 429 });
   }
 
+  // The deck is dealt for ONE economy. In REAL mode every card is there to be bought on chain, so an
+  // asset with no Solana pool is not dealt at all (same predicate as isTradable, as a where clause);
+  // in PAPER mode it is dealt like any other and bought with play money.
+  const realOnly = effectiveRealMode(user) === "REAL";
   const rows = await prisma.stockAsset.findMany({
     where: {
       deckEligible: true,
       pricedAt: { gt: new Date(Date.now() - STOCK_PRICE_MAX_STALE_MS) },
+      ...(realOnly ? { halted: false, liquidityCents: { gte: STOCK_MIN_LIQUIDITY_CENTS } } : {}),
       positions: { none: { userId: user.id, closedAt: null } },
       passes: { none: { userId: user.id } },
     },

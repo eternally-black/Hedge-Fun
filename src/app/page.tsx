@@ -198,15 +198,16 @@ function App() {
   //
   // The hedge tab counts as a STOCK surface: in real mode its stock leg spends the Solana wallet.
   // The market side of a hedge is a paper bet, so calling it "predictions" left the one pocket the
-  // screen can actually spend unpolled. The HUD still shows the PAPER chip on these screens while
-  // the app is in paper mode — the balance is read here regardless, because the wallet sheet and the
-  // Portfolio's wallet row state it in both modes (that is how you fund before switching).
+  // screen can actually spend unpolled. A screen that spends nothing (You, Vault, the inbox…) shows
+  // the pocket of the deck the user would swipe next. In paper mode the HUD shows play money whatever
+  // the pocket — the balance is read here regardless, because the wallet sheet and the Portfolio's
+  // wallet row state it in both modes (that is how you fund before switching).
   const pocket: Pocket =
     (screen === "deck" && deckMode === "stocks") || screen === "portfolio" || screen === "hedge"
       ? "stocks"
       : (screen === "deck" && deckMode === "predictions") || screen === "feed"
         ? "predictions"
-        : "paper";
+        : deckMode === "stocks" ? "stocks" : "predictions";
 
   // ONE reader for the stock pocket, owned here rather than per-screen: the HUD states this number
   // everywhere, the deck CTA spends it and the sheet funds it — three copies would drift. Polled
