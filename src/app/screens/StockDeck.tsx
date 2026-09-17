@@ -6,7 +6,7 @@ import { StockConsentSheet } from "./StockConsentSheet";
 import { useBuyReal } from "../useBuyReal";
 import { useStockStake } from "../useStockStake";
 import { STOCK_MIN_STAKE_CENTS } from "@/lib/config";
-import { type Me } from "../ui";
+import { type Me, usd } from "../ui";
 import type { StockDeckCard as StockDeckCardType, StockDeckResponse } from "@/lib/api-types";
 import type { SwipeAction } from "../DeckCard";
 
@@ -58,7 +58,7 @@ export function DeckModePill({ mode, onMode }: { mode: DeckMode; onMode: (m: Dec
 // skip (session only). WHOSE money a buy spends is the app's one Paper/Real switch (me.real.mode),
 // exactly as it is for predictions — the card has no second button to choose it.
 // ============================================================================
-export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksUsdCents, onOpenWallet }: {
+export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksUsdCents, onOpenWallet, onOpenPortfolio }: {
   api: Api;
   me: Me | null;
   onRefreshMe: () => void | Promise<void>;
@@ -68,6 +68,8 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksU
   // The REAL · STOCKS pocket, owned by page.tsx so the card's CTA and the HUD chip state one number.
   stocksUsdCents: number | null;
   onOpenWallet: () => void;
+  // The other way out of an empty wallet: sell a stock you hold (the Portfolio).
+  onOpenPortfolio: () => void;
 }) {
   const [cards, setCards] = useState<StockDeckCardType[]>([]);
   // Not local state: the amount the user picked here is the amount the portfolio's Buy button spends
@@ -163,6 +165,8 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksU
   // The card a real buy was started on. A REAL buy is a wallet signature plus a chain confirmation —
   // seconds to minutes — so which card it belongs to has to be remembered, not re-derived on done.
   const buyingId = useRef<string | null>(null);
+  // Its symbol, for the footer that narrates the buy while the card is already gone.
+  const [buyingSymbol, setBuyingSymbol] = useState<string | null>(null);
 
   // Memoized rather than inlined into the call below: an arrow here is a new onDone every render,
   // which rebuilds useBuyReal's callbacks, which rebuilds the card's props — and the balance poll
@@ -206,10 +210,18 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksU
           onToast("Add money to your wallet to buy");
           return;
         }
-        // NOT removed here: only /confirm says a real buy happened, and onDone removes the card it
-        // was started on — minutes later, by which time the top card may be a different one.
+        // The card leaves on the swipe, like a paper buy: a card that snaps back reads as a refused
+        // swipe, and the buy takes seconds (build, sign, send, confirm). The footer narrates those
+        // seconds. It comes back only when NOTHING happened ("failed"); once the money moved, or may
+        // have ("pending"), the server books it and the Portfolio shows it confirming.
         buyingId.current = card.id;
-        void buyReal({ assetId: card.id, symbol: card.symbol }, stakeCents, { wallets, stockConsent, sponsored });
+        setBuyingSymbol(card.symbol);
+        removeCard(card.id);
+        void buyReal({ assetId: card.id, symbol: card.symbol }, stakeCents, { wallets, stockConsent, sponsored })
+          .then((outcome) => {
+            if (outcome === "failed") setCards((d) => (d.some((c) => c.id === card.id) ? d : [card, ...d]));
+          })
+          .finally(() => setBuyingSymbol(null));
         return;
       }
       // A paper buy. The cash gate is checked BEFORE the optimistic advance so the card is not
@@ -283,13 +295,51 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksU
   // and every action here (pass, skip, paper buy, swipe) changes which card is on top.
   const locked = busy || real.busy;
 
+  // Real mode with nothing left to spend: the deck is switched off, not dealt. A card you cannot
+  // buy is a card that lies; the panel says what to do instead. Not while a buy is in flight — the
+  // balance dips below the minimum the moment the USDC leaves, before the lot is booked.
+  const broke = realMode && !real.busy && stocksUsdCents !== null && stocksUsdCents < STOCK_MIN_STAKE_CENTS;
+
+  // What the footer says while a real buy runs — the card is gone, this is where the seconds go.
+  const stageText =
+    real.stage === "build" ? "getting the best price…"
+    : real.stage === "sign" ? (real.embedded ? "signing…" : "confirm in your wallet…")
+    : real.stage === "send" ? "sending to Solana…"
+    : real.stage === "confirm" ? "confirming on Solana…"
+    : null;
+
   return (
     <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column" }}>
       <DeckModePill mode={mode} onMode={onMode} />
 
       <div style={{ position: "relative", flex: 1, margin: "6px 14px 0" }}>
-        {next && <StockCardPreview key={next.id} card={next} stakeCents={stakeCents} realMode={realMode} />}
-        {top ? (
+        {broke ? (
+          <div style={{ position: "absolute", inset: 0, borderRadius: 26, background: "var(--panel)", border: "1px solid var(--line)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 24, textAlign: "center", gap: 10 }}>
+            <div style={{ fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700 }}>Real · Stocks</div>
+            <div style={{ fontFamily: "var(--nf)", fontWeight: 700, fontSize: 34, color: "var(--gold)", lineHeight: 1.05 }}>{usd(stocksUsdCents ?? 0)}</div>
+            <p style={{ color: "var(--muted)", fontSize: 13, lineHeight: 1.5, margin: 0 }}>
+              That&apos;s what your wallet holds. Add USDC, sell a stock you hold, or switch to paper money in Profile.
+            </p>
+            <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+              <button
+                type="button"
+                onClick={onOpenWallet}
+                style={{ margin: 0, font: "inherit", padding: "12px 20px", borderRadius: 12, fontWeight: 700, fontSize: 13, cursor: "pointer", background: "var(--gold)", color: "#1a1205", border: "none" }}
+              >
+                Add money
+              </button>
+              <button
+                type="button"
+                onClick={onOpenPortfolio}
+                style={{ margin: 0, font: "inherit", padding: "12px 20px", borderRadius: 12, fontWeight: 700, fontSize: 13, cursor: "pointer", background: "var(--panel2)", color: "var(--text)", border: "1px solid var(--line)" }}
+              >
+                Sell a stock
+              </button>
+            </div>
+          </div>
+        ) : null}
+        {!broke && next && <StockCardPreview key={next.id} card={next} stakeCents={stakeCents} realMode={realMode} />}
+        {broke ? null : top ? (
           <StockDeckCard
             key={top.id}
             card={top}
@@ -307,16 +357,18 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksU
       </div>
 
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 18, padding: "14px 0 2px" }}>
-        <CircleBtn glyph="✕" label="Pass" color="var(--no)" size={56} disabled={locked || !top} onClick={() => top && act(top, "NO")} />
-        <CircleBtn glyph="↑" label="Skip" color="var(--skip)" size={46} disabled={locked || !top} onClick={() => top && act(top, "SKIP")} />
-        <CircleBtn glyph="✓" label="Buy" color="var(--yes)" size={56} disabled={locked || !top} onClick={() => top && act(top, "YES")} />
+        <CircleBtn glyph="✕" label="Pass" color="var(--no)" size={56} disabled={locked || !top || broke} onClick={() => top && act(top, "NO")} />
+        <CircleBtn glyph="↑" label="Skip" color="var(--skip)" size={46} disabled={locked || !top || broke} onClick={() => top && act(top, "SKIP")} />
+        <CircleBtn glyph="✓" label="Buy" color="var(--yes)" size={56} disabled={locked || !top || broke} onClick={() => top && act(top, "YES")} />
       </div>
-      <div style={{ textAlign: "center", fontSize: 10, color: "var(--muted)", paddingBottom: 8 }}>
-        {realMode
-          ? sponsored
-            ? "Real money · fees on us"
-            : "Real money · from your wallet"
-          : "Paper buys use play money · switch to real money in Profile"}
+      <div style={{ textAlign: "center", fontSize: 10, color: stageText ? "var(--gold)" : "var(--muted)", paddingBottom: 8 }}>
+        {stageText
+          ? `Buying ${buyingSymbol ?? ""} · ${stageText}`
+          : realMode
+            ? sponsored
+              ? "Real money · fees on us"
+              : "Real money · from your wallet"
+            : "Paper buys use play money · switch to real money in Profile"}
       </div>
 
       <StockConsentSheet open={real.consentOpen} busy={real.busy} sponsored={sponsored} onAccept={acceptConsent} onClose={real.closeConsent} />

@@ -18,6 +18,7 @@ import { createHash } from "node:crypto";
 import { isAddress } from "@solana/kit";
 import type { Prisma, StockBuyAttempt } from "@prisma/client";
 import { prisma } from "./prisma";
+import { embeddedSolanaWallet, getPrivyUser } from "./privy";
 import { STOCK_PRICE_MAX_STALE_MS } from "./config";
 import { captureToGlitchTip } from "./glitchtip";
 import {
@@ -34,7 +35,7 @@ import {
   signedBy,
   type RpcParsedTx,
 } from "./stocks";
-import { quoteSwap, buildSwapTx, type JupIx } from "./jupiter-swap";
+import { quoteSwapPreferDirect, buildSwapTx, type JupIx } from "./jupiter-swap";
 import {
   getTransaction,
   getSignaturesForAddress,
@@ -52,12 +53,14 @@ import {
   coSign,
   closeAccountIx,
   SponsorUnavailableError,
+  TxMismatchError,
 } from "./sponsor";
 import { verifiedWallets, hasStockConsent, StockUnavailableError } from "./stocks-db";
 import {
   STOCK_SWAP_SLIPPAGE_BPS,
   STOCK_MAX_PRICE_IMPACT_BP,
   STOCK_CONFIRM_POLLS,
+  STOCK_CONFIRM_SLEEP_MS,
   STOCK_ATTEMPT_SWEEP_AFTER_MS,
   STOCK_TERMS_VERSION,
   STOCK_SPONSOR_MAX_PER_USER_PER_DAY,
@@ -146,8 +149,20 @@ async function createAttempt(
       if (existing) return { attempt: existing, reserved: true };
     }
     if (data.sponsored) {
+      // What counts is what the sponsor paid for or may still pay for: an attempt that was SENT (its
+      // signature stamped) or one still LIVE (PENDING — it can still be signed and sent, so it holds
+      // its slot until the sweep expires it). A build the wallet never signed and that has since
+      // expired or failed — a quote that timed out, a scanner that blocked the prompt — cost nothing
+      // and must not eat the day's allowance (live 2026-09-18: a dozen expired Phantom attempts
+      // locked the user out of a sale with 7 real trades made). Counting live ones keeps the cap a
+      // cap: two concurrent builds at the last slot still resolve to one.
       const used = await tx.stockBuyAttempt.count({
-        where: { userId: data.userId, sponsored: true, createdAt: { gte: new Date(Date.now() - 24 * 3_600_000) } },
+        where: {
+          userId: data.userId,
+          sponsored: true,
+          createdAt: { gte: new Date(Date.now() - 24 * 3_600_000) },
+          OR: [{ sig: { not: null } }, { status: "PENDING" }],
+        },
       });
       if (used >= STOCK_SPONSOR_MAX_PER_USER_PER_DAY) throw new SponsorLimitError();
     }
@@ -186,8 +201,21 @@ async function dropUnconfirmedFunding(attemptId: string, db: Prisma.TransactionC
   await db.sponsorFundedAccount.deleteMany({ where: { attemptId, confirmedAt: null } });
 }
 
+// Whose SOL fronts the token-account rent of a sponsored transaction: the sponsor's for the embedded
+// wallet (it has none), the wallet's own for a connected external one — its scanner blocks rent
+// returning to anyone else, and it has SOL. Privy unreachable → the sponsor fronts it (today's
+// behaviour), never a refusal; a caller without a privyId (tests, tools) gets the same.
+async function rentOnSponsor(user: { privyId?: string }, payer: string): Promise<boolean> {
+  if (!user.privyId) return true;
+  try {
+    return embeddedSolanaWallet(await getPrivyUser(user.privyId)) === payer;
+  } catch {
+    return true;
+  }
+}
+
 export async function buildAttempt(
-  user: { id: string; stockConsentVersion: number | null },
+  user: { id: string; stockConsentVersion: number | null; privyId?: string },
   p: { assetId?: string; symbol?: string; stakeCents: number; payer: string; hedgeSuggestionId?: string },
 ): Promise<StockRealTxResponse> {
   if (!hasStockConsent(user)) throw new StockConsentRequiredError();
@@ -254,7 +282,7 @@ export async function buildAttempt(
     stakeCents = affordableCents;
   }
 
-  const quote = await quoteSwap({
+  const quote = await quoteSwapPreferDirect({
     inputMint: USDC_MINT,
     outputMint: asset.mint,
     amount: BigInt(stakeCents) * 10_000n,
@@ -268,12 +296,13 @@ export async function buildAttempt(
   // WHO pays the token account's rent, recorded at the only moment we can know it: the setup
   // instruction creates the account (on us) only when the wallet holds none for this mint. A wallet
   // that already has one — or that pays for its own — keeps that rent when the lot is sold.
-  const rentFromSponsor = sponsored && (await getTokenAccounts(p.payer, asset.mint)).length === 0;
+  const sponsorRent = sponsored && (await rentOnSponsor(user, p.payer));
+  const rentFromSponsor = sponsorRent && (await getTokenAccounts(p.payer, asset.mint)).length === 0;
   // Self-paid: the client sends back the very bytes we handed it, so hashing the base64 is enough.
   // Sponsored: the hash is over the compiled MESSAGE, because signing changes the bytes (the
   // signature slots) but never the message.
   const tx = sponsored
-    ? await buildSponsoredSwapTx({ quoteResponse: quote.raw, userPublicKey: p.payer })
+    ? await buildSponsoredSwapTx({ quoteResponse: quote.raw, userPublicKey: p.payer, sponsorRent })
     : await buildSwapTx(quote.raw, p.payer).then((t) => ({
         ...t,
         messageHash: createHash("sha256").update(t.swapTransaction).digest("hex"),
@@ -293,6 +322,10 @@ export async function buildAttempt(
     msgHash: tx.messageHash,
     lastValidBlockHeight: BigInt(tx.lastValidBlockHeight),
     hedgeSuggestionId: p.hedgeSuggestionId ?? null,
+    // The built bytes: what submit compares a wallet-rewritten message against (Phantom appends its
+    // guards). Sells stored them from day one for the retry; a BUY without them refused every
+    // Phantom buy as tx_mismatch (live 2026-09-18).
+    unsignedTx: sponsored ? tx.swapTransaction : null,
   });
   await recordSponsorFunding(attempt, tx.fundedAccounts);
 
@@ -346,7 +379,7 @@ function reservedSell(a: StockBuyAttempt, payer: string): StockRealSellTxRespons
 // key means no sell here (the user can always sell in their own wallet; reconcileRealLots then
 // closes the lot as "wallet").
 export async function buildSellAttempt(
-  user: { id: string; stockConsentVersion: number | null },
+  user: { id: string; stockConsentVersion: number | null; privyId?: string },
   positionId: string,
 ): Promise<StockRealSellTxResponse> {
   if (!hasStockConsent(user)) throw new StockConsentRequiredError();
@@ -418,7 +451,7 @@ export async function buildSellAttempt(
     throw new StockUnavailableError("lot_moved");
   }
 
-  const quote = await quoteSwap({
+  const quote = await quoteSwapPreferDirect({
     inputMint: lot.asset.mint,
     outputMint: USDC_MINT,
     amount: lot.qtyBase,
@@ -453,7 +486,7 @@ export async function buildSellAttempt(
     }
   }
 
-  const tx = await buildSponsoredSwapTx({ quoteResponse: quote.raw, userPublicKey: payer, extraInstructions });
+  const tx = await buildSponsoredSwapTx({ quoteResponse: quote.raw, userPublicKey: payer, extraInstructions, sponsorRent: await rentOnSponsor(user, payer) });
 
   const { attempt, reserved } = await createAttempt(
     {
@@ -535,11 +568,21 @@ export async function submitSigned(userId: string, attemptId: string, signedTran
     });
   }
 
-  const { wire, sig } = await coSign({
-    signedTransactionB64,
-    expectedMessageHash: attempt.msgHash,
-    userAddress: attempt.payer,
-  });
+  let wire: string, sig: string;
+  try {
+    ({ wire, sig } = await coSign({
+      signedTransactionB64,
+      expectedMessageHash: attempt.msgHash,
+      userAddress: attempt.payer,
+      builtTransactionB64: attempt.unsignedTx ?? undefined, // ours + Lighthouse guards (Phantom) is still ours
+    }));
+  } catch (e) {
+    // The message the wallet signed is neither the one we built nor ours plus Lighthouse guards. The
+    // bytes are logged so the difference can be read off the server (without the sponsor signature
+    // they cannot be broadcast).
+    if (e instanceof TxMismatchError) console.warn(`[stock-submit] tx_mismatch attempt=${attemptId} user=${userId} tx=${signedTransactionB64}`);
+    throw e;
+  }
   // Stamp BEFORE the send. The signature is already decided (it is the fee payer's), and a send that
   // times out after the broadcast would otherwise leave a swap on chain that no row points at: the
   // client would retry and buy twice. A stamped PENDING attempt is exactly what the sweep recovers.
@@ -603,7 +646,7 @@ export async function confirmAttempt(
   opts: ConfirmOpts = {},
 ): Promise<StockRealConfirmResponse> {
   const polls = opts.polls ?? STOCK_CONFIRM_POLLS;
-  const sleepMs = opts.sleepMs ?? 1_500;
+  const sleepMs = opts.sleepMs ?? STOCK_CONFIRM_SLEEP_MS;
 
   const attempt = await prisma.stockBuyAttempt.findUnique({ where: { id: attemptId }, include: { asset: true } });
   if (!attempt || attempt.userId !== userId) throw new AttemptNotFoundError();

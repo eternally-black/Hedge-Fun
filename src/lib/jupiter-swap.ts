@@ -67,6 +67,7 @@ export async function quoteSwap(p: {
   outputMint: string;
   amount: bigint;
   slippageBps: number;
+  onlyDirectRoutes?: boolean;
 }): Promise<SwapQuote> {
   const qs = new URLSearchParams({
     inputMint: p.inputMint,
@@ -74,11 +75,33 @@ export async function quoteSwap(p: {
     amount: p.amount.toString(),
     slippageBps: String(p.slippageBps),
     swapMode: "ExactIn",
+    ...(p.onlyDirectRoutes ? { onlyDirectRoutes: "true" } : {}),
   });
   const json = await jupFetch(`${BASE}/quote?${qs.toString()}`);
   const parsed = parseJupQuote(json);
   if (!parsed) throw new JupiterUnavailableError("quote_unparseable");
   return { ...parsed, raw: json };
+}
+
+// A DIRECT route first, any route only when none exists. A route through wrapped SOL makes the
+// sponsor open a wSOL account for the user and take its rent back in the same transaction — which
+// an external wallet's scanner reads as "your account was closed and the lamports went to a
+// stranger" and BLOCKS the request outright (seen live 2026-09-18: NVDAx, direct → Phantom signed;
+// AAPLx, via wSOL → "Request blocked"). A direct pool also leaves no intermediate token account
+// behind for the sponsor to have paid for. Every liquid xStock has a direct USDC pool; the size of a
+// stake here ($1–$500) never needs the extra hop for price.
+export async function quoteSwapPreferDirect(p: {
+  inputMint: string;
+  outputMint: string;
+  amount: bigint;
+  slippageBps: number;
+}): Promise<SwapQuote> {
+  try {
+    return await quoteSwap({ ...p, onlyDirectRoutes: true });
+  } catch (e) {
+    if (!(e instanceof JupiterUnavailableError)) throw e; // a real outage surfaces from the retry too
+  }
+  return quoteSwap(p);
 }
 
 // Turn a quote into a signable transaction. Both fields are validated here because the caller

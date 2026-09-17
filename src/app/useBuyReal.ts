@@ -136,6 +136,9 @@ function signed(cents: number): string {
   return `${cents >= 0 ? "+" : "−"}${usd(Math.abs(cents))}`;
 }
 
+export type BuyOutcome = "confirmed" | "pending" | "failed";
+export type BuyStage = "build" | "sign" | "send" | "confirm";
+
 export function useBuyReal(p: {
   api: Api;
   me: Me | null;
@@ -147,9 +150,12 @@ export function useBuyReal(p: {
   // callback dependency — so the exposed callbacks stay stable for the fund panel's poll effect.
   ctx?: BuyRealCtx;
 }): {
-  buyReal: (target: BuyRealTarget, stakeCents: number, ctx?: BuyRealCtx, opts?: { hedgeSuggestionId?: string }) => Promise<void>;
+  /** "confirmed": booked. "pending": money moved (or may have), the server will book it. "failed": nothing happened. */
+  buyReal: (target: BuyRealTarget, stakeCents: number, ctx?: BuyRealCtx, opts?: { hedgeSuggestionId?: string }) => Promise<BuyOutcome>;
   sellReal: (positionId: string, opts?: { symbol?: string; ctx?: BuyRealCtx }) => Promise<void>;
   busy: boolean;
+  /** Where the trade in flight is, for a surface that narrates it (the deck footer). null = idle. */
+  stage: BuyStage | null;
   consentOpen: boolean;
   /** True only when the server recorded the acceptance — the caller's local consent flag follows this. */
   acceptConsent: () => Promise<boolean>;
@@ -169,6 +175,7 @@ export function useBuyReal(p: {
   // Depending on the whole object would rebuild them on every /api/me refresh (rerender-dependencies).
   const userId = me?.user.id ?? null;
   const [busy, setBusy] = useState(false);
+  const [stage, setStage] = useState<BuyStage | null>(null);
   // ONE real trade at a time, whichever screen asked for it. `busy` cannot be the guard: it is state,
   // so two taps in the same tick both read it as false and both spend the user's USDC.
   const inFlight = useRef(false);
@@ -215,8 +222,10 @@ export function useBuyReal(p: {
   // sign → land → book: the one place a signature becomes a booked lot. A buy and a sell reach it
   // with different quotes and leave it with different toasts; everything between is identical, and
   // duplicating it is how one of the two paths ends up without the pending-replay stamp.
+  // Resolves to the booked lot, to "pending" once the money has (or may have) moved and only the
+  // booking is outstanding (the server sweep finishes it), or to null when nothing happened at all.
   const signSubmitConfirm = useCallback(
-    async (built: BuiltSwap, w: ConnectedStandardSolanaWallet): Promise<StockRealConfirmResponse | null> => {
+    async (built: BuiltSwap, w: ConnectedStandardSolanaWallet): Promise<StockRealConfirmResponse | "pending" | null> => {
       const bytes = Uint8Array.from(atob(built.swapTransaction), (c) => c.charCodeAt(0));
       const isEmbedded = w.address === embeddedAddress;
       let sig: string;
@@ -224,6 +233,7 @@ export function useBuyReal(p: {
       if (built.feePayer) {
         // SPONSORED: sign only. An embedded wallet raises no popup, so "Confirm in your wallet…"
         // would point the user at a window that never opens.
+        setStage("sign");
         onToast(isEmbedded ? "Signing…" : "Confirm in your wallet…");
         let signedTransaction: Uint8Array;
         try {
@@ -232,6 +242,7 @@ export function useBuyReal(p: {
           if (!isUserReject(e)) onToast("Couldn't sign the transaction");
           return null;
         }
+        setStage("send");
         try {
           const r = (await api("/api/stocks/real/submit", {
             method: "POST",
@@ -249,12 +260,15 @@ export function useBuyReal(p: {
           // with the signature already stamped on the attempt, so a lost acknowledgement is recovered
           // by the server sweep. Inviting a retry here would double-spend — and a rebuild is refused
           // with buy_in_flight anyway, so promising "try again" would be a lie as well.
-          else if (status === undefined || status >= 500) onToast("Solana is busy — if it went through, your lot appears within a few minutes");
-          else onToast("Couldn't send the transaction");
+          else if (status === undefined || status >= 500) {
+            onToast("Solana is busy — if it went through, your lot appears within a few minutes");
+            return "pending"; // the send was attempted; the card must not come back
+          } else onToast("Couldn't send the transaction");
           return null;
         }
       } else {
         // SELF-PAID: the wallet owns send as well as sign, and pays the network fee out of its SOL.
+        setStage("sign");
         onToast("Confirm in your wallet…");
         try {
           const { signature } = await signAndSendTransaction({ transaction: bytes, wallet: w, chain: SOLANA_MAINNET });
@@ -282,12 +296,14 @@ export function useBuyReal(p: {
           .catch(() => { /* the poller sweep covers this */ });
       }
 
+      setStage("confirm");
       onToast("Confirming on Solana…");
 
       // Confirm, with retries. A 404 means the tx has not landed yet — the chain is a beat behind
-      // the wallet's own "sent" answer. Six attempts, 2s apart, is ~12s of patience.
+      // the wallet's own "sent" answer. Ten attempts, 0.8 s apart (the server itself polls for a few
+      // seconds inside each), so a landed swap is booked within a second of landing.
       let confirmed: StockRealConfirmResponse | null = null;
-      for (let i = 0; i < 6; i++) {
+      for (let i = 0; i < 10; i++) {
         try {
           confirmed = (await api("/api/stocks/real/confirm", {
             method: "POST",
@@ -296,21 +312,24 @@ export function useBuyReal(p: {
           break;
         } catch (e) {
           if (errStatus(e) === 404) {
-            await new Promise((r) => setTimeout(r, 2000));
+            await new Promise((r) => setTimeout(r, 800));
             continue;
           }
           const code = errCode(e);
-          if (errStatus(e) === 409 && code === "tx_failed") onToast("The transaction failed on Solana");
-          else if (errStatus(e) === 409 && code === "not_this_buy") onToast("That transaction didn't match");
+          if (errStatus(e) === 409 && code === "tx_failed") {
+            onToast("The transaction failed on Solana");
+            return null; // nothing moved — the card may come back
+          }
+          if (errStatus(e) === 409 && code === "not_this_buy") onToast("That transaction didn't match");
           else if (errStatus(e) === 409 && code === "attempt_expired") onToast("That quote expired — try again");
           else if (errStatus(e) === 502) onToast("Solana RPC is busy — it will be picked up automatically");
           else onToast("Couldn't confirm — it will be picked up automatically");
-          return null;
+          return "pending";
         }
       }
       if (!confirmed) {
         onToast("Still confirming — it will be picked up automatically");
-        return null;
+        return "pending";
       }
 
       // Booked. Drop the pending entry; the caller says what happened.
@@ -323,7 +342,7 @@ export function useBuyReal(p: {
   // The whole buy, from a resolved ctx to a booked position. Defined as a stable inner function so
   // acceptConsent can resume it without re-entering buyReal's own ctx fetch.
   const runBuy = useCallback(
-    async (target: BuyRealTarget, stakeCents: number, ctx: BuyRealCtx, opts?: { hedgeSuggestionId?: string }) => {
+    async (target: BuyRealTarget, stakeCents: number, ctx: BuyRealCtx, opts?: { hedgeSuggestionId?: string }): Promise<BuyOutcome> => {
       // 1. Wallet. The verified set is the server's; the connected set is Privy's. With an embedded
       //    wallet there is always one to use, so the link/connect prompts are the no-wallet case only.
       // `ctx.wallets` is only the fallback for a caller that has no /api/me yet; the pick itself uses
@@ -341,7 +360,7 @@ export function useBuyReal(p: {
         } else {
           linkWallet({ walletChainType: "solana-only", description: "Connect the Phantom wallet you buy stocks with" });
         }
-        return;
+        return "failed";
       }
       // The embedded wallet is brand new to the server on the first trade — /real/tx refuses a payer
       // it has not verified, so tell it first rather than bouncing the user through a link flow.
@@ -350,11 +369,12 @@ export function useBuyReal(p: {
           await ensureVerified(w.address);
         } catch (e) {
           onToast(isWalletUnverified(e) ? "Couldn't verify your wallet — try again in a moment" : "Couldn't set up your wallet — try again");
-          return;
+          return "failed";
         }
       }
 
       // 2. Build. The server derives the swap from the asset + stake; nothing is spent here.
+      setStage("build");
       let tx: StockRealTxResponse;
       try {
         tx = (await api("/api/stocks/real/tx", {
@@ -390,7 +410,7 @@ export function useBuyReal(p: {
         } else {
           onToast("Couldn't start that buy — try again");
         }
-        return;
+        return "failed";
       }
 
       // The server sizes the swap to what the wallet holds when the chip is larger than the balance
@@ -398,11 +418,13 @@ export function useBuyReal(p: {
       const usedCents = Math.floor(Number(tx.quote.inAmountMicro) / 10_000);
       if (usedCents < stakeCents) onToast(`Buying with your full ${usd(usedCents)}`);
 
-      // 3. Sign, land, book — and only then advance the card.
+      // 3. Sign, land, book.
       const confirmed = await signSubmitConfirm(tx, w);
-      if (!confirmed) return;
+      if (confirmed === null) return "failed";
+      if (confirmed === "pending") return "pending";
       onToast(`Bought ${target.symbol} on Solana ✓`);
       onDone?.({ symbol: target.symbol, qtyBase: confirmed.qtyBase, costCents: confirmed.costCents });
+      return "confirmed";
     },
     [api, connectWallet, ensureVerified, hasMe, linkWallet, onDone, onRefreshMe, onToast, pickWallet, signSubmitConfirm, verified, walletsReady],
   );
@@ -432,6 +454,8 @@ export function useBuyReal(p: {
           onToast("Too thin to sell right now");
         } else if (status === 502 && code === "swap_unavailable") {
           onToast("Jupiter is busy — try again");
+        } else if (status === 429) {
+          onToast("Daily limit of sponsored trades reached — try again tomorrow");
         } else if (status === 502) {
           onToast("Solana is busy — try again");
         } else {
@@ -450,7 +474,7 @@ export function useBuyReal(p: {
       }
 
       const confirmed = await signSubmitConfirm(tx, w);
-      if (!confirmed) return;
+      if (!confirmed || confirmed === "pending") return; // pending: the sweep books the sale, the row shows it confirming
       const symbol = opts?.symbol ?? "";
       onToast(`Sold ${symbol}${symbol ? " " : ""}· ${signed(confirmed.pnlCents ?? 0)}`);
       onDone?.({ symbol, qtyBase: confirmed.qtyBase, costCents: confirmed.costCents });
@@ -475,22 +499,25 @@ export function useBuyReal(p: {
   );
 
   const buyReal = useCallback(
-    async (target: BuyRealTarget, stakeCents: number, ctx?: BuyRealCtx, opts?: { hedgeSuggestionId?: string }) => {
-      if (inFlight.current) return;
+    async (target: BuyRealTarget, stakeCents: number, ctx?: BuyRealCtx, opts?: { hedgeSuggestionId?: string }): Promise<BuyOutcome> => {
+      if (inFlight.current) return "failed";
       inFlight.current = true;
       setBusy(true);
       try {
         const resolved = await resolveCtx(ctx);
-        if (!resolved) return;
+        if (!resolved) return "failed";
         if (!resolved.stockConsent) {
+          // Held until the consent sheet answers; the resumed buy reports through onDone. To the
+          // caller, nothing has happened yet.
           heldRef.current = { kind: "buy", target, stakeCents, ctx: resolved, opts };
           setConsentOpen(true);
-          return;
+          return "failed";
         }
-        await runBuy(target, stakeCents, resolved, opts);
+        return await runBuy(target, stakeCents, resolved, opts);
       } finally {
         inFlight.current = false;
         setBusy(false);
+        setStage(null);
       }
     },
     [resolveCtx, runBuy],
@@ -613,6 +640,7 @@ export function useBuyReal(p: {
     buyReal,
     sellReal,
     busy,
+    stage,
     consentOpen,
     acceptConsent,
     closeConsent,

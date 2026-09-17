@@ -54,11 +54,13 @@ on the Hedge tab or the Profile is read for exposure; trades run from the embedd
 pick the connected one under Profile → Wallet), and every real
 transaction is **fee-sponsored**: the server builds the swap, the
 wallet signs it, our own fee-payer (`STOCK_SPONSOR_SECRET`) co-signs and sends it, and fronts the
-token-account rent that comes back on the sell — so a user needs USDC and nothing else. The first real
+token-account rent that comes back on the sell — so a user needs USDC and nothing else. A connected
+external wallet fronts its own rent (Phantom blocks rent returning to anyone else); the fee stays on us. The first real
 buy is gated by one consent sheet (eligibility self-declaration + xStocks terms). The UI names money
 by purpose (`$`, Paper, Real), never by token. The Hedge tab turns a life cost ("$800 on flights this
 month") into a stock card, and profit alerts land in the inbox. Design, on-chain proofs and the
-verify-it-yourself commands: [docs/stocklana.md](docs/stocklana.md).
+verify-it-yourself commands: [docs/stocklana.md](docs/stocklana.md); the requirement → evidence packet:
+[docs/SUBMISSION.md](docs/SUBMISSION.md).
 
 ## Where the open product rules land (change in one place)
 

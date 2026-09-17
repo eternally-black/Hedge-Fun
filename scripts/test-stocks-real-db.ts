@@ -8,6 +8,8 @@ import { PrivyClient } from "@privy-io/server-auth";
 import {
   createKeyPairSignerFromBytes,
   getBase58Decoder,
+  address,
+  getCompiledTransactionMessageCodec,
   getCompiledTransactionMessageDecoder,
   getTransactionDecoder,
   getTransactionEncoder,
@@ -71,11 +73,14 @@ const SIG24 = "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tj
   if (t === "good") return { userId: DID };
   throw new Error("bad token");
 };
+// The payer is the login's EMBEDDED wallet by default (the sponsor fronts its rent); one step flips
+// it to a connected external wallet, which fronts its own.
+let walletClient = "privy";
 (PrivyClient.prototype as unknown as { getUser: unknown }).getUser = async () => ({
   email: { address: `${DID}@test.local` },
   twitter: null,
   wallet: null,
-  linkedAccounts: [{ type: "wallet", chainType: "solana", walletClientType: "phantom", address: PAYER }],
+  linkedAccounts: [{ type: "wallet", chainType: "solana", walletClientType: walletClient, address: PAYER }],
 });
 
 process.env.HELIUS_API_KEY = "test";
@@ -570,6 +575,25 @@ async function main() {
     assert.deepStrictEqual(Object.keys(slots).sort(), [SPONSOR, PAYER].sort(), "sponsor + user signature slots");
     assert.strictEqual(slots[PAYER], null, "unsigned when handed to the client");
 
+    // 11b. A CONNECTED external wallet fronts its own rent (its scanner blocks rent returning to a
+    //      stranger): the setup instruction's payer is the WALLET, not the sponsor, and nothing is
+    //      recorded as sponsor-funded. The fee payer is still the sponsor.
+    walletClient = "phantom";
+    res = await post(txRoute, "/api/stocks/real/tx", { assetId, stakeCents: 100, payer: PAYER });
+    assert.strictEqual(res.status, 200, "external wallet: tx built");
+    const ext = (await res.json()) as { attemptId: string; swapTransaction: string };
+    {
+      const m = getCompiledTransactionMessageDecoder().decode(getTransactionDecoder().decode(bytes(ext.swapTransaction)).messageBytes);
+      const ata = m.instructions.find((ix) => m.staticAccounts[ix.programAddressIndex] === "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+      assert.ok(ata, "the route opens a token account, so there is a setup instruction");
+      // The stub hands back its own payer in that slot (real Jupiter: the user); what matters is that the
+      // sponsor was NOT written over it.
+      assert.notStrictEqual(m.staticAccounts[ata!.accountIndices![0]], SPONSOR, "an external wallet pays its own rent");
+      assert.strictEqual(m.staticAccounts[0], SPONSOR, "the fee payer is still the sponsor");
+    }
+    assert.strictEqual(await prisma.sponsorFundedAccount.count({ where: { attemptId: ext.attemptId } }), 0, "nothing recorded as sponsor-funded");
+    walletClient = "privy";
+
     // ── 12. A tx whose MESSAGE differs is never co-signed. Same attempt, a tx built one blockhash
     //       later: it decodes, it is signed, and it is still refused — nothing is sent.
     blockhashSeed = 9;
@@ -577,6 +601,11 @@ async function main() {
     assert.strictEqual(res.status, 200);
     const other = (await res.json()) as { attemptId: string; swapTransaction: string };
     assert.notStrictEqual(other.swapTransaction, spon.swapTransaction, "a different blockhash -> a different tx");
+    assert.strictEqual(
+      (await prisma.stockBuyAttempt.findUniqueOrThrow({ where: { id: other.attemptId } })).unsignedTx,
+      other.swapTransaction,
+      "a sponsored BUY stores its built bytes — the guard-tolerant submit compares against them",
+    );
     sent = [];
     res = await post(submitRoute, "/api/stocks/real/submit", {
       attemptId: spon.attemptId,
@@ -591,6 +620,53 @@ async function main() {
     assert.strictEqual(res.status, 409);
     assert.strictEqual(await err(res), "tx_mismatch", "the user signature is required");
     assert.strictEqual(sent.length, 0);
+
+    // 12b. Phantom's rewrite: OUR message with one more static account and one more instruction (a
+    //      Lighthouse guard) — every table-loaded index shifts by one — user-signed: co-signed. The
+    //      same rewrite with any other program: refused. (coSign directly: this attempt is not sent.)
+    const { coSign, LIGHTHOUSE_PROGRAM } = await import("../src/lib/sponsor");
+    const withExtra = (b64: string, program: string): string => {
+      const codec = getCompiledTransactionMessageCodec();
+      const m = codec.decode(getTransactionDecoder().decode(bytes(b64)).messageBytes);
+      const n = m.staticAccounts.length;
+      const shift = (i: number) => (i >= n ? i + 1 : i);
+      const rewritten = {
+        ...m,
+        header: { ...m.header, numReadonlyNonSignerAccounts: m.header.numReadonlyNonSignerAccounts + 1 },
+        staticAccounts: [...m.staticAccounts, address(program)],
+        instructions: [
+          ...m.instructions.map((ix) => ({ ...ix, programAddressIndex: shift(ix.programAddressIndex), accountIndices: ix.accountIndices?.map(shift) })),
+          { programAddressIndex: n, accountIndices: [1], data: new Uint8Array([7, 7]) },
+        ],
+      };
+      const messageBytes = codec.encode(rewritten);
+      const signatures: Record<string, null> = {};
+      for (const a of rewritten.staticAccounts.slice(0, m.header.numSignerAccounts)) signatures[a] = null;
+      return Buffer.from(getTransactionEncoder().encode({ messageBytes, signatures } as never)).toString("base64");
+    };
+    const otherHash = (await prisma.stockBuyAttempt.findUniqueOrThrow({ where: { id: other.attemptId } })).msgHash;
+    const co = await coSign({
+      signedTransactionB64: await signAsUser(withExtra(other.swapTransaction, LIGHTHOUSE_PROGRAM)),
+      expectedMessageHash: otherHash,
+      userAddress: PAYER,
+      builtTransactionB64: other.swapTransaction,
+    });
+    assert.ok(co.sig.length >= 64, "our message + a Lighthouse guard is co-signed");
+    await assert.rejects(
+      coSign({
+        signedTransactionB64: await signAsUser(withExtra(other.swapTransaction, "11111111111111111111111111111111")),
+        expectedMessageHash: otherHash,
+        userAddress: PAYER,
+        builtTransactionB64: other.swapTransaction,
+      }),
+      /tx_mismatch/,
+      "our message + anything else is refused",
+    );
+    await assert.rejects(
+      coSign({ signedTransactionB64: await signAsUser(withExtra(other.swapTransaction, LIGHTHOUSE_PROGRAM)), expectedMessageHash: otherHash, userAddress: PAYER }),
+      /tx_mismatch/,
+      "without the built bytes nothing but the exact message is accepted",
+    );
 
     // ── 13. The real thing: the user signs, we co-sign and send, the attempt carries the signature.
     //       The signature is the FEE PAYER's own — computed from the co-signed bytes before the send,
@@ -734,6 +810,8 @@ async function main() {
         inAmountMicro: 1_000_000n,
         minOutBase: 297_834n,
         msgHash: `cap-${i}`,
+        sig: `cap-sig-${RUN}-${i}`, // SENT attempts are what the cap counts
+        status: "CONFIRMED" as const, // and resolved, so buy_in_flight stays out of the way
         lastValidBlockHeight: 1000n,
       })),
     });
@@ -807,8 +885,9 @@ async function main() {
     await Promise.all([holder, blocked]);
 
     // Stage the wallet at EXACTLY cap-1, counting the sponsored attempts the cases above already made.
+    // SENT or still LIVE attempts count toward the cap — an expired, never-signed build is free.
     const usedSoFar = await prisma.stockBuyAttempt.count({
-      where: { userId, sponsored: true, createdAt: { gte: new Date(Date.now() - 24 * 3_600_000) } },
+      where: { userId, sponsored: true, createdAt: { gte: new Date(Date.now() - 24 * 3_600_000) }, OR: [{ sig: { not: null } }, { status: "PENDING" }] },
     });
     const toSeed = STOCK_SPONSOR_MAX_PER_USER_PER_DAY - 1 - usedSoFar;
     assert.ok(toSeed >= 0, `the daily cap has room to stage the race (used ${usedSoFar})`);
@@ -822,8 +901,14 @@ async function main() {
         inAmountMicro: 1_000_000n,
         minOutBase: 297_834n,
         msgHash: `race-${i}`,
+        sig: `race-sig-${RUN}-${i}`, // sent, so it counts
+        status: "CONFIRMED" as const,
         lastValidBlockHeight: 1000n,
       })),
+    });
+    // And an EXPIRED never-signed one does not: stage one, still exactly one slot left.
+    await prisma.stockBuyAttempt.create({
+      data: { userId: userId!, assetId: assetId!, payer: PAYER, sponsored: true, stakeCents: 100, inAmountMicro: 1_000_000n, minOutBase: 297_834n, msgHash: `race-unsigned-${RUN}`, lastValidBlockHeight: 1000n, status: "EXPIRED" },
     });
     const raced = await Promise.allSettled([buy(), buy()]);
     const won = raced.filter((r) => r.status === "fulfilled");

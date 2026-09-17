@@ -52,6 +52,18 @@ export function linkedSolanaWallets(pu: PrivyUser): string[] {
   return candidates.filter((w) => w.chainType === "solana").map((w) => w.address);
 }
 
+// The user's Privy EMBEDDED Solana wallet (walletClientType "privy"), or null when the login has none.
+// What tells a wallet the app made (no SOL of its own — the sponsor fronts rent) from one the user
+// connected (Phantom etc., with its own SOL and its own transaction scanner).
+export function embeddedSolanaWallet(pu: PrivyUser): string | null {
+  const candidates: Array<{ address: string; chainType?: string; walletClientType?: string }> = [];
+  if (pu.wallet) candidates.push(pu.wallet);
+  for (const acct of pu.linkedAccounts ?? []) {
+    if (acct.type === "wallet") candidates.push(acct);
+  }
+  return candidates.find((w) => w.chainType === "solana" && w.walletClientType === "privy")?.address ?? null;
+}
+
 // Read identity fields from the Privy user's linked accounts.
 export function extractIdentity(pu: PrivyUser): {
   authProvider: "EMAIL" | "TWITTER";

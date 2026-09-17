@@ -239,10 +239,11 @@ export const STOCK_DECK_SIZE = 50;
 export const STOCK_PRICE_MAX_STALE_MS = 15 * 60_000; // a dead poller must not serve day-old prices
 export const STOCK_SWAP_SLIPPAGE_BPS = 50; // Jupiter quote slippage 0.5%
 export const STOCK_MAX_PRICE_IMPACT_BP = 200; // refuse to build a swap whose quoted impact exceeds 2%
-export const STOCK_CONFIRM_POLLS = 4; // getTransaction attempts (×1.5 s) before 404 tx_not_found
+export const STOCK_CONFIRM_POLLS = 8; // getTransaction attempts (×STOCK_CONFIRM_SLEEP_MS) before 404 tx_not_found
+export const STOCK_CONFIRM_SLEEP_MS = 700; // a swap lands in 1–2 s; 8 × 0.7 s waits ~5.6 s and answers within 0.7 s of landing
 export const STOCK_ATTEMPT_SWEEP_AFTER_MS = 3 * 60_000; // a PENDING real buy older than this is swept by the poller
 // ─── Fee sponsorship (our own fee-payer; STOCK_SPONSOR_SECRET in env, base58 64-byte secret key) ──
-export const STOCK_SPONSOR_MAX_PER_USER_PER_DAY = 20; // sponsored attempts (buy + sell) per user per rolling 24 h
+export const STOCK_SPONSOR_MAX_PER_USER_PER_DAY = 100; // sponsored transactions (buy + sell, sent or still live) per user per rolling 24 h — a drain guard, not a product rule: ~$0.002 of fees each; owner set 100 on 2026-09-18
 export const STOCK_SPONSOR_MAX_PRIORITY_LAMPORTS = 100_000; // cap on the priority fee the sponsor pays per tx
 export const STOCK_SPONSOR_MIN_LAMPORTS = 20_000_000; // 0.02 SOL ≈ 10 more new-mint buys of runway: below this the health probe is 503 and the poller pages
 export const STOCK_SPONSOR_LOW_ALERT_EVERY_MS = 3_600_000; // one "sponsor low" page per hour while it persists
