@@ -55,7 +55,7 @@ export interface SiwsMessage {
   domain: string;
   address: string;
   statement: string | null;
-  fields: Map<string, string[]>;
+  fields: Map<string, string>; // every advanced field is a singleton; Resources = "" + "- <uri>" lines after it
 }
 const FIELD = /^([A-Z][A-Za-z ]*):(?: (.*))?$/;
 export function parseSiws(text: string): SiwsMessage | null {
@@ -79,18 +79,22 @@ export function parseSiws(text: string): SiwsMessage | null {
       i += 2;
     }
   }
-  const fields = new Map<string, string[]>();
+  const fields = new Map<string, string>();
   if (i < lines.length) {
     if (lines[i] !== "") return null; // the advanced fields are separated by exactly one blank line
+    let inResources = false;
     for (i++; i < lines.length; i++) {
       const line = lines[i];
       if (line.startsWith("- ")) {
-        if (!fields.has("Resources")) return null;
+        if (!inResources) return null; // a resource line only ever follows "Resources:"
         continue;
       }
+      if (inResources) return null; // and nothing but resource lines may follow it
       const m = FIELD.exec(line);
       if (!m) return null;
-      fields.set(m[1], [...(fields.get(m[1]) ?? []), m[2] ?? ""]);
+      if (fields.has(m[1])) return null; // a field appears once — a second one is not a wallet's message
+      fields.set(m[1], m[2] ?? "");
+      if (m[1] === "Resources") inResources = true;
     }
   }
   return { domain: head[1], address, statement, fields };
@@ -102,8 +106,8 @@ export type SiwsLinkError =
   | "domain_mismatch" // signed for another site
   | "address_mismatch" // message names a different account than the one that signed
   | "statement_mismatch" // not the link request we issued (or no statement at all)
-  | "uri_mismatch" // URI field missing, doubled, or pointing elsewhere
-  | "bad_nonce" // missing, doubled, not ours, or not this user's
+  | "uri_mismatch" // URI field missing or pointing elsewhere
+  | "bad_nonce" // missing, not ours, or not this user's (a doubled field is bad_message)
   | "nonce_expired"
   | "bad_signature";
 export type SiwsLinkResult = { ok: true; address: Address } | { ok: false; error: SiwsLinkError };
@@ -133,11 +137,10 @@ export async function verifySiwsLink(i: SiwsLinkInput): Promise<SiwsLinkResult> 
   if (i.expectedDomain && parsed.domain !== i.expectedDomain) return { ok: false, error: "domain_mismatch" };
   if (parsed.address !== address) return { ok: false, error: "address_mismatch" };
   if (parsed.statement !== i.expectedStatement) return { ok: false, error: "statement_mismatch" };
-  const uri = parsed.fields.get("URI");
-  if (i.expectedUri && (uri?.length !== 1 || uri[0] !== i.expectedUri)) return { ok: false, error: "uri_mismatch" };
-  const nonces = parsed.fields.get("Nonce");
-  if (!nonces || nonces.length !== 1) return { ok: false, error: "bad_nonce" };
-  const n = checkMwaNonce(nonces[0], i.userId, i.now, i.key);
+  if (i.expectedUri && parsed.fields.get("URI") !== i.expectedUri) return { ok: false, error: "uri_mismatch" };
+  const nonce = parsed.fields.get("Nonce");
+  if (!nonce) return { ok: false, error: "bad_nonce" };
+  const n = checkMwaNonce(nonce, i.userId, i.now, i.key);
   if (n !== "ok") return { ok: false, error: n === "expired" ? "nonce_expired" : "bad_nonce" };
 
   const key = await getPublicKeyFromAddress(address);

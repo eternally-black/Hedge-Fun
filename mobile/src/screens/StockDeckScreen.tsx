@@ -19,6 +19,7 @@ import { useBuyReal } from "../useBuyReal";
 import { useStockStake } from "../useStockStake";
 import { StockConsentSheet } from "../components/StockConsentSheet";
 import { StockDeckCard, StockCardPreview } from "../components/StockCard";
+import * as wallet from "../platform/wallet.flavor";
 import type { SwipeDir } from "../components/DeckCard";
 
 const REFILL_AT = 8; // preload-ahead threshold (same as web) — refill well before the deck runs dry
@@ -105,7 +106,9 @@ export function StockDeckScreen({ me, api, onRefreshMe, onToast, onNeedWallet }:
 
   // Which economy a swipe-right spends. ONE switch for the whole app (me.real.mode, flipped on the
   // You screen) — the stock deck does not get a second one.
-  const realMode = me?.real.mode === "REAL";
+  // A build with no wallet (Play flavor) is paper on this screen whatever the account's mode says:
+  // the server still deals the account's deck, but nothing here may render or spend real money.
+  const realMode = wallet.available && me?.real.mode === "REAL";
   // The server deals a different deck per economy (real mode = on-chain assets only), so a flip
   // while this deck is mounted re-deals from scratch: served is cleared because it is a new deal,
   // not the tail of the old one. The first deal above is already dealt for the right economy (the

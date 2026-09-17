@@ -226,19 +226,21 @@ export async function buildAttempt(
     if ((await getBlockHeight()) <= Number(inFlight.lastValidBlockHeight)) {
       throw new StockUnavailableError("buy_in_flight");
     }
-    // Past its block height it either LANDED (and the device's confirm was lost) or it never will.
-    // Resolve it BEFORE building another swap: the sweep only reaches it minutes later, and a retry
-    // inside that window is how one tap becomes two lots. Same shape as buildSellAttempt's stamped
-    // sell — a landed receipt books the lot right here and refuses the rebuild; not on chain (the
-    // sweep will EXPIRE it) or a spent/failed signature (confirm already marked it) allows a fresh buy.
-    let landed = false;
+    // Past its block height it either LANDED (and the device's confirm was lost) or it never will —
+    // and one `getTransaction → null` cannot tell the two apart (RPC receipt lag: "not found" also
+    // means "not yet visible"). So: try to confirm it right here (a landed receipt books the lot now),
+    // then let the ROW decide. Still PENDING → keep refusing; the sweep resolves it against the payer's
+    // signature history within minutes and EXPIREs or FAILs it. CONFIRMED → refuse with buy_landed.
+    // FAILED/EXPIRED → a fresh buy is allowed. A retry inside the ambiguous window is how one tap
+    // becomes two lots, so ambiguity errs on the side of waiting.
     try {
       await confirmAttempt(user.id, inFlight.id, inFlight.sig, { polls: 1, sleepMs: 0 });
-      landed = true;
     } catch (e) {
       if (!(e instanceof TxNotFoundError) && !(e instanceof TxRejectedError)) throw e;
     }
-    if (landed) throw new StockUnavailableError("buy_landed");
+    const after = await prisma.stockBuyAttempt.findUnique({ where: { id: inFlight.id }, select: { status: true } });
+    if (after?.status === "CONFIRMED") throw new StockUnavailableError("buy_landed");
+    if (after?.status === "PENDING") throw new StockUnavailableError("buy_in_flight");
   }
 
   // Size the buy to what the wallet actually holds: a chip larger than the USDC balance would become

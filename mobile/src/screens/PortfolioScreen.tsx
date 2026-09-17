@@ -148,12 +148,15 @@ export function PortfolioScreen({
     try { await load(); } finally { setRefreshing(false); }
   }, [load]);
 
-  const open = data?.open ?? [];
-  const closed = data?.closed ?? [];
-  const pending = data?.pendingAttempts ?? [];
+  // A build with no wallet (Play flavor) shows the paper economy only: on-chain lots, totals and
+  // pending attempts an account may own from the web are not this app's business to render.
+  const paperOnly = !wallet.available;
+  const open = (data?.open ?? []).filter((r) => !paperOnly || r.mode === "PAPER");
+  const closed = (data?.closed ?? []).filter((r) => !paperOnly || r.mode === "PAPER");
+  const pending = paperOnly ? [] : data?.pendingAttempts ?? [];
   const paper = data?.totals.paper ?? { costCents: 0, valueCents: 0, pnlCents: 0 };
   const realTotals = data?.totals.real ?? { costCents: 0, valueCents: 0, pnlCents: 0 };
-  const hasReal = realTotals.costCents > 0 || open.some((r) => r.mode === "REAL");
+  const hasReal = !paperOnly && (realTotals.costCents > 0 || open.some((r) => r.mode === "REAL"));
 
   return (
     <>

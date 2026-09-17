@@ -31,6 +31,23 @@ export function RealModeSwitch({ me, api, onRefreshMe, onToast }: {
   // The server's error code, when the failure carried one. Same convention as the web client.
   const codeOf = (e: unknown): string | undefined =>
     (e as { body?: { error?: string } }).body?.error;
+  // On a terms mismatch both routes name the version the server now requires (`termsVersion` on
+  // /real/mode, `version` on /real/consent). Same text as ours → the user just has to read it (open
+  // the sheet); newer than ours → this binary cannot accept it, only an update can.
+  const serverTerms = (e: unknown): string | undefined => {
+    const b = (e as { body?: { termsVersion?: string; version?: string } }).body;
+    return b?.termsVersion ?? b?.version;
+  };
+  const onTermsMismatch = async (e: unknown) => {
+    await onRefreshMe();
+    if (serverTerms(e) !== REAL_TERMS_VERSION) {
+      setSheetOpen(false);
+      onToast("Update the app to accept the new real-money terms");
+    } else {
+      onToast("The terms changed — read them again");
+      setSheetOpen(true);
+    }
+  };
 
   // POST /api/real/mode { real } — the one call both directions make. Returns true on success.
   const postMode = async (real: boolean): Promise<boolean> => {
@@ -45,9 +62,7 @@ export function RealModeSwitch({ me, api, onRefreshMe, onToast }: {
       } else if (status === 403 && code === "consent_required") {
         setSheetOpen(true);
       } else if (status === 409 && code === "terms_version_mismatch") {
-        onToast("The terms changed — read them again");
-        await onRefreshMe();
-        setSheetOpen(true);
+        await onTermsMismatch(e);
       } else if (status === 503) {
         onToast("Sign-in service is busy — try again");
       } else {
@@ -118,8 +133,7 @@ export function RealModeSwitch({ me, api, onRefreshMe, onToast }: {
       if (status === 403 && code === "real_disabled") {
         onToast("Real money isn't enabled for this account yet");
       } else if (status === 409 && code === "terms_version_mismatch") {
-        onToast("The terms changed — read them again");
-        await onRefreshMe();
+        await onTermsMismatch(e);
       } else if (status === 503) {
         onToast("Sign-in service is busy — try again");
       } else {

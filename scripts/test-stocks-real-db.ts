@@ -1371,12 +1371,16 @@ async function main() {
       assert.ok(fresh.attemptId, "a new attempt after the landed one was booked");
       await prisma.stockBuyAttempt.update({ where: { id: fresh.attemptId }, data: { status: "EXPIRED" } });
 
-      // 24c. Past the window and NOT on chain -> the sweep's problem; a fresh buy is allowed.
+      // 24c. Past the window and NOT visible on chain -> ambiguous (receipt lag or never landed): still
+      //      refused, the row stays PENDING for the sweep to settle against signature history.
       const ghost = await mkStamped(SIG_GHOST, "c");
+      await assert.rejects(buyAgain(), (e: unknown) => (e as Error).message === "buy_in_flight");
+      assert.strictEqual((await prisma.stockBuyAttempt.findUniqueOrThrow({ where: { id: ghost.id } })).status, "PENDING");
+      // 24d. Once the sweep has retired it (EXPIRED), a fresh buy is built.
+      await prisma.stockBuyAttempt.update({ where: { id: ghost.id }, data: { status: "EXPIRED" } });
       const fresh2 = await buyAgain();
       assert.ok(fresh2.attemptId && fresh2.attemptId !== ghost.id);
-      assert.strictEqual((await prisma.stockBuyAttempt.findUniqueOrThrow({ where: { id: ghost.id } })).status, "PENDING");
-      await prisma.stockBuyAttempt.updateMany({ where: { id: { in: [ghost.id, fresh2.attemptId] } }, data: { status: "EXPIRED" } });
+      await prisma.stockBuyAttempt.update({ where: { id: fresh2.attemptId }, data: { status: "EXPIRED" } });
     }
 
     console.log("test-stocks-real-db: OK");

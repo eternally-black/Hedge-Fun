@@ -339,6 +339,12 @@ export function useBuyReal(p: {
 
   const buyReal = useCallback(
     async (target: BuyRealTarget, stakeCents: number, ctx?: BuyRealCtx, opts?: { hedgeSuggestionId?: string }) => {
+      // The flavor gate sits at the PUBLIC entry, before any request or consent sheet: a build with no
+      // wallet must not even ask the user to accept stock terms it can never act on.
+      if (!wallet.available) {
+        onToast("Real-money trades aren't available in this build");
+        return;
+      }
       if (inFlight.current) return;
       inFlight.current = true;
       setBusy(true);
@@ -356,11 +362,15 @@ export function useBuyReal(p: {
         setBusy(false);
       }
     },
-    [resolveCtx, runBuy],
+    [onToast, resolveCtx, runBuy],
   );
 
   const sellReal = useCallback(
     async (positionId: string, opts?: { symbol?: string; ctx?: BuyRealCtx }) => {
+      if (!wallet.available) {
+        onToast("Real-money trades aren't available in this build");
+        return;
+      }
       if (inFlight.current) return;
       inFlight.current = true;
       setBusy(true);
@@ -378,7 +388,7 @@ export function useBuyReal(p: {
         setBusy(false);
       }
     },
-    [resolveCtx, runSell],
+    [onToast, resolveCtx, runSell],
   );
 
   // The consent sheet's accept. POSTs the CURRENT terms version, so a stale screen cannot accept a

@@ -613,7 +613,8 @@ export type StockConsentResponse = { ok: true; version: number };
 // stock_consent_required | wallet_not_verified, 404 asset_not_found, 409 asset_halted | price_impact
 // | buy_in_flight (a sponsored buy of this asset is already sent and may still land — wait for it)
 // | buy_landed (the previous sponsored buy of this asset had landed while its confirm was lost; it is booked
-//   NOW — re-read the portfolio instead of buying again)
+//   NOW — re-read the portfolio instead of buying again). A stamped buy past its block height that is NOT yet
+//   visible on chain still answers buy_in_flight until the poller sweep retires it (minutes) — ambiguity waits.
 // | hedge_already_accepted (that suggestion is already in a lot), 502 swap_unavailable.
 // `assetId` OR `symbol` names the asset (a hedge card knows only the symbol).
 export interface StockRealTxRequest { assetId?: string; symbol?: string; stakeCents: number; payer: string; hedgeSuggestionId?: string }

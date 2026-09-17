@@ -37,7 +37,9 @@ async function main() {
     uri?: string | null; // null = omit the URI field
     nonce?: string | null; // null = omit the Nonce field
     extraNonce?: string; // a second Nonce field
+    extraVersion?: boolean; // a second Version field
     resources?: string[];
+    afterResources?: string; // a field line placed after the resource list
     tail?: string; // raw text appended after the last field
   } = {}): string {
     const lines = [`${o.domain ?? DOMAIN} wants you to sign in with your Solana account:`, o.address ?? address];
@@ -45,10 +47,12 @@ async function main() {
     lines.push("");
     if (o.uri !== null) lines.push(`URI: ${o.uri ?? URI}`);
     lines.push("Version: 1", "Chain ID: mainnet");
+    if (o.extraVersion) lines.push("Version: 2");
     if (o.nonce !== null) lines.push(`Nonce: ${o.nonce ?? nonce}`);
     if (o.extraNonce) lines.push(`Nonce: ${o.extraNonce}`);
     lines.push(`Issued At: ${new Date(NOW).toISOString()}`);
     if (o.resources) lines.push("Resources:", ...o.resources.map((r) => `- ${r}`));
+    if (o.afterResources) lines.push(o.afterResources);
     return lines.join("\n") + (o.tail ?? "");
   }
   async function sign(text: string, key: CryptoKey = kp.privateKey) {
@@ -72,9 +76,13 @@ async function main() {
   assert.strictEqual(parsed.domain, DOMAIN);
   assert.strictEqual(parsed.address, address);
   assert.strictEqual(parsed.statement, SIWS_STATEMENT);
-  assert.deepStrictEqual(parsed.fields.get("Nonce"), [nonce]);
-  assert.deepStrictEqual(parsed.fields.get("URI"), [URI]);
-  assert.deepStrictEqual(parsed.fields.get("Resources"), [""]);
+  assert.strictEqual(parsed.fields.get("Nonce"), nonce);
+  assert.strictEqual(parsed.fields.get("URI"), URI);
+  assert.strictEqual(parsed.fields.get("Resources"), "");
+  assert.strictEqual(parseSiws(siws({ extraNonce: nonce })), null, "a doubled field is not a wallet's message");
+  assert.strictEqual(parseSiws(siws({ extraVersion: true })), null, "doubled Version");
+  assert.strictEqual(parseSiws(siws({ resources: ["https://a.example/x"], afterResources: "Request ID: 1" })), null, "a field after the resource list");
+  assert.strictEqual(parseSiws(siws({ tail: "\n- https://a.example/x" })), null, "a resource line without Resources:");
   assert.strictEqual(parseSiws(siws({ statement: null }))?.statement, null, "no statement block is legal SIWS");
   assert.strictEqual(parseSiws(siws({ statement: `Nonce: ${nonce}` }))?.statement, `Nonce: ${nonce}`, "a statement that looks like a field is a statement");
   assert.strictEqual(parseSiws("hello"), null);
@@ -111,7 +119,7 @@ async function main() {
   await fail("URI elsewhere", { ...base, ...(await sign(siws({ uri: "https://evil.example" }))) }, "uri_mismatch");
   await fail("no URI when enforced", { ...base, ...(await sign(siws({ uri: null }))) }, "uri_mismatch");
   await fail("no nonce", { ...base, ...(await sign(siws({ nonce: null }))) }, "bad_nonce");
-  await fail("two nonces", { ...base, ...(await sign(siws({ extraNonce: mwaNonce(USER, NOW, KEY) }))) }, "bad_nonce");
+  await fail("two nonces", { ...base, ...(await sign(siws({ extraNonce: mwaNonce(USER, NOW, KEY) }))) }, "bad_message");
   await fail("someone else's nonce", { ...base, ...(await sign(siws({ nonce: mwaNonce("intruder", NOW, KEY) }))) }, "bad_nonce");
   await fail("stale nonce", { ...base, now: NOW + MWA_NONCE_TTL_MS + 1, ...(await sign(siws())) }, "nonce_expired");
   await fail("CRLF message", { ...base, ...(await sign(siws().replace(/\n/g, "\r\n"))) }, "bad_message");

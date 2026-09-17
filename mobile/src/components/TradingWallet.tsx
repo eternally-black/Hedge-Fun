@@ -44,7 +44,7 @@ export function TradingWallet({ me, api, onRefreshMe, onToast }: {
   // One read whenever the active wallet changes (mount included). No poll: the Profile is not where
   // money moves, and the read is a Solana RPC call.
   useEffect(() => {
-    if (!active) return;
+    if (!active || !wallet.available) return; // a build with no wallet reads no balances
     let alive = true;
     void (async () => {
       try {
