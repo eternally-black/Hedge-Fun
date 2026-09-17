@@ -34,7 +34,7 @@ import {
   signedBy,
   type RpcParsedTx,
 } from "./stocks";
-import { quoteSwap, buildSwapTx, type JupIx } from "./jupiter-swap";
+import { quoteSwapPreferDirect, buildSwapTx, type JupIx } from "./jupiter-swap";
 import {
   getTransaction,
   getSignaturesForAddress,
@@ -238,7 +238,7 @@ export async function buildAttempt(
     stakeCents = affordableCents;
   }
 
-  const quote = await quoteSwap({
+  const quote = await quoteSwapPreferDirect({
     inputMint: USDC_MINT,
     outputMint: asset.mint,
     amount: BigInt(stakeCents) * 10_000n,
@@ -402,7 +402,7 @@ export async function buildSellAttempt(
     throw new StockUnavailableError("lot_moved");
   }
 
-  const quote = await quoteSwap({
+  const quote = await quoteSwapPreferDirect({
     inputMint: lot.asset.mint,
     outputMint: USDC_MINT,
     amount: lot.qtyBase,
