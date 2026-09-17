@@ -59,7 +59,8 @@ external wallet fronts its own rent (Phantom blocks rent returning to anyone els
 buy is gated by one consent sheet (eligibility self-declaration + xStocks terms). The UI names money
 by purpose (`$`, Paper, Real), never by token. The Hedge tab turns a life cost ("$800 on flights this
 month") into a stock card, and profit alerts land in the inbox. Design, on-chain proofs and the
-verify-it-yourself commands: [docs/stocklana.md](docs/stocklana.md).
+verify-it-yourself commands: [docs/stocklana.md](docs/stocklana.md); the requirement → evidence packet:
+[docs/SUBMISSION.md](docs/SUBMISSION.md).
 
 ## Where the open product rules land (change in one place)
 
