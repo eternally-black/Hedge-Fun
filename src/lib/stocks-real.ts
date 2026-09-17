@@ -18,6 +18,7 @@ import { createHash } from "node:crypto";
 import { isAddress } from "@solana/kit";
 import type { Prisma, StockBuyAttempt } from "@prisma/client";
 import { prisma } from "./prisma";
+import { STOCK_PRICE_MAX_STALE_MS } from "./config";
 import { captureToGlitchTip } from "./glitchtip";
 import {
   USDC_MINT,
@@ -28,6 +29,7 @@ import {
   usdcMicroToCents,
   usdcMicroToCentsFloor,
   entryPriceCents,
+  valueCents,
   sigBytesValid,
   signedBy,
   type RpcParsedTx,
@@ -39,6 +41,7 @@ import {
   getBlockHeight,
   getTokenBalanceRaw,
   getTokenAccounts,
+  getWalletTokensRaw,
   getAccountInfoBase64,
   sendRawTransaction,
 } from "./helius";
@@ -980,6 +983,51 @@ export async function sweepAttempts(
 
 // ─── reconcile ──────────────────────────────────────────────────────────────────────────────────────
 
+// ── Holdings that arrived without us ─────────────────────────────────────────────────────────────
+// A wallet a user connects can already hold xStocks bought elsewhere — in Phantom, on a DEX, months
+// ago. They are the user's stocks and belong in the Portfolio, so every verified wallet is read and
+// whatever it holds beyond the lots we booked is adopted as a lot of its own: source WALLET, entered
+// at the price of the day it was first seen (its real cost basis is unknowable here — the row says
+// "imported at", never "entry"), then sold, alerted on and reconciled exactly like a lot we bought.
+// Skipped per mint while a buy or sell is in flight (the tokens can be there before the lot is, or
+// gone before it closes) and while the asset has no fresh price (a lot needs a number). Idempotent:
+// the excess is computed under the user's lock from the open set, so a second read adopts nothing.
+export async function adoptWalletHoldings(userId: string, payer: string, now = new Date()): Promise<{ adopted: number }> {
+  const held = await getWalletTokensRaw(payer); // RPC, outside any lock
+  if (held.size === 0) return { adopted: 0 };
+  const assets = await prisma.stockAsset.findMany({ where: { mint: { in: [...held.keys()] } } });
+  const freshAfter = now.getTime() - STOCK_PRICE_MAX_STALE_MS;
+  let adopted = 0;
+  for (const asset of assets) {
+    const raw = held.get(asset.mint) ?? 0n;
+    if (raw <= 0n) continue;
+    if (asset.halted || asset.priceCents == null || asset.priceCents <= 0 || asset.pricedAt == null || asset.pricedAt.getTime() < freshAfter) continue;
+    const price = asset.priceCents;
+    adopted += await prisma.$transaction(async (db) => {
+      await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${userId}))`;
+      const inFlight = await db.stockBuyAttempt.count({
+        where: { payer, assetId: asset.id, status: "PENDING", createdAt: { gte: new Date(now.getTime() - 2 * 3_600_000) } },
+      });
+      if (inFlight > 0) return 0;
+      const open = await db.stockPosition.findMany({
+        where: { userId, payer, assetId: asset.id, mode: "REAL", closedAt: null },
+        select: { qtyBase: true },
+      });
+      let booked = 0n;
+      for (const l of open) booked += l.qtyBase;
+      const excess = raw - booked;
+      if (excess <= 0n) return 0;
+      const costCents = valueCents(excess, price, asset.decimals);
+      if (costCents <= 0) return 0; // dust — a row that reads $0 helps nobody
+      await db.stockPosition.create({
+        data: { userId, assetId: asset.id, mode: "REAL", source: "WALLET", qtyBase: excess, costCents, entryPriceCents: price, payer, walletCheckedAt: now },
+      });
+      return 1;
+    });
+  }
+  return { adopted };
+}
+
 export async function reconcileRealLots(
   userId: string,
   payer: string,
@@ -1045,10 +1093,12 @@ export async function reconcileRealLots(
         });
         return 0;
       }
-      // Close newest-first until the remaining sum fits under the live balance.
+      // Close until the remaining sum fits under the live balance: adopted (WALLET) lots first —
+      // they carry no provenance, a booked lot has a landed transaction behind it — then newest-first.
       let remaining = need;
       const toClose: string[] = [];
-      for (const lot of fresh) {
+      const order = [...fresh].sort((a, b) => Number(b.source === "WALLET") - Number(a.source === "WALLET"));
+      for (const lot of order) {
         if (remaining <= bal) break;
         toClose.push(lot.id);
         remaining -= lot.qtyBase;

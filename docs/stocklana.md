@@ -68,6 +68,8 @@ fees — with every rent it fronted returned. The PLTRx pair is the final flow: 
   REAL as a sponsored xStock→USDC swap that closes the emptied token account in the same transaction,
   so its ≈0.0016 SOL rent returns to the sponsor. Solscan link, pending real buys, lots "moved in
   wallet" when the user sold them elsewhere behind our back.
+  xStocks already sitting in a wallet the user connects are imported as lots (entered at the price of
+  the day they were first seen, labelled "imported at") and sold, alerted on and reconciled like any other.
 - **Hedge.** "$800 on flights this month" → *Hedge your travel costs with DALx* (10% sizing). Wallet
   holds BTC → *hedge 10% with GLDx*. Energy stocks +5% → *Spotted today* card for drivers. Deterministic
   rules first; the LLM only extracts entities/amounts when the rules miss.

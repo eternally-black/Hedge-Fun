@@ -257,13 +257,17 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       // The buy path sizes the swap to the wallet's USDC (usdcRaw, $100 by default so every stake fits);
       // the sell/reconcile paths read the xStock balance (walletRaw). A wallet with none of the mint
       // has NO token account at all — which is exactly when the sponsor pays the rent to open one.
-      const mint = (body.params?.[1] as { mint?: string } | undefined)?.mint;
+      // A read by mint (sell/reconcile) or by program (adoptWalletHoldings, which reads both programs —
+      // the xStock lives under Token-2022 only, so the classic program answers empty).
+      const filter = body.params?.[1] as { mint?: string; programId?: string } | undefined;
+      const mint = filter?.mint;
       const amount = mint === USDC_MINT ? String(usdcRaw) : String(walletRaw);
+      const wrongProgram = filter?.programId !== undefined && filter.programId !== "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
       result = {
         value:
-          amount === "0"
+          amount === "0" || wrongProgram
             ? []
-            : [{ pubkey: TOKEN_ACCOUNT, account: { data: { parsed: { info: { tokenAmount: { amount } } } } } }],
+            : [{ pubkey: TOKEN_ACCOUNT, account: { data: { parsed: { info: { mint: mint ?? MINT, tokenAmount: { amount } } } } } }],
       };
     } else if (body.method === "getLatestBlockhash") {
       result = {
@@ -311,7 +315,7 @@ async function main() {
   // The local .env may carry a real STOCK_SPONSOR_SECRET (the dev server uses one). This suite
   // drives BOTH modes explicitly, so it starts from a known state: sponsorship off.
   delete process.env.STOCK_SPONSOR_SECRET;
-  const { buildAttempt, buildSellAttempt, submitSigned, confirmAttempt, sweepAttempts, reconcileRealLots } = await import(
+  const { buildAttempt, buildSellAttempt, submitSigned, confirmAttempt, sweepAttempts, reconcileRealLots, adoptWalletHoldings } = await import(
     "../src/lib/stocks-real"
   );
 
@@ -479,6 +483,41 @@ async function main() {
     assert.strictEqual(closedLot.closeReason, "wallet");
     assert.strictEqual(closedLot.id, sweptLot.id, "the NEWEST lot is closed first");
 
+    walletRaw = 0n;
+    rec = await reconcileRealLots(userId!, PAYER);
+    assert.strictEqual(rec.closed, 1);
+    assert.strictEqual(await prisma.stockPosition.count({ where: { userId, mode: "REAL", closedAt: null } }), 0);
+
+    // 9b. adoptWalletHoldings: xStocks that arrived without us (bought in Phantom) become WALLET lots
+    //     at the price of the day; never twice; and the reconcile closes an adopted lot before a booked one.
+    await prisma.stockBuyAttempt.updateMany({ where: { userId, status: "PENDING" }, data: { status: "EXPIRED" } }); // clean slate: nothing in flight
+    await prisma.stockAsset.update({ where: { id: assetId }, data: { priceCents: 33416, pricedAt: new Date() } });
+    walletRaw = 500_000n;
+    let adopt = await adoptWalletHoldings(userId!, PAYER);
+    assert.strictEqual(adopt.adopted, 1, "a holding we never booked becomes a lot");
+    const adoptedLot = await prisma.stockPosition.findFirstOrThrow({ where: { userId, mode: "REAL", closedAt: null, source: "WALLET" } });
+    assert.strictEqual(adoptedLot.qtyBase, 500_000n, "the whole unbooked balance");
+    assert.strictEqual(adoptedLot.entryPriceCents, 33416, "entered at the price of the day");
+    assert.strictEqual(adoptedLot.payer, PAYER, "owned by the wallet it sits in");
+    assert.ok(adoptedLot.walletCheckedAt !== null, "counts as wallet-checked");
+    adopt = await adoptWalletHoldings(userId!, PAYER);
+    assert.strictEqual(adopt.adopted, 0, "never adopted twice");
+    walletRaw = 500_000n + 1_000n;
+    adopt = await adoptWalletHoldings(userId!, PAYER);
+    assert.strictEqual(adopt.adopted, 0, "dust (a third of a cent) is not a lot");
+    walletRaw = 500_000n + 100_000n;
+    adopt = await adoptWalletHoldings(userId!, PAYER);
+    assert.strictEqual(adopt.adopted, 1, "more tokens later → one more lot for the difference");
+    assert.strictEqual((await prisma.stockPosition.findFirstOrThrow({ where: { userId, source: "WALLET", closedAt: null, id: { not: adoptedLot.id } } })).qtyBase, 100_000n);
+    // A NEWER booked lot and a wallet that backs only it: the adopted lots go first, the booked one stays.
+    const bookedLot = await prisma.stockPosition.create({
+      data: { userId, assetId, mode: "REAL", source: "DECK", qtyBase: 299_330n, costCents: 100, entryPriceCents: 33416, payer: PAYER, txSig: `booked-${RUN}` },
+    });
+    walletRaw = 299_330n;
+    rec = await reconcileRealLots(userId!, PAYER);
+    assert.strictEqual(rec.closed, 2, "both adopted lots closed");
+    assert.strictEqual((await prisma.stockPosition.findUniqueOrThrow({ where: { id: adoptedLot.id } })).closeReason, "wallet", "the adopted lot is closed first");
+    assert.strictEqual((await prisma.stockPosition.findUniqueOrThrow({ where: { id: bookedLot.id } })).closedAt, null, "the booked lot survives");
     walletRaw = 0n;
     rec = await reconcileRealLots(userId!, PAYER);
     assert.strictEqual(rec.closed, 1);

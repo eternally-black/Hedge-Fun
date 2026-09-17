@@ -66,6 +66,7 @@ enum BetSource {
   DECK // the daily swipe deck: earns points (capped) + capped shards
   FEED // the post-cap feed: NO points, shards UNCAPPED
   HEDGE // an accepted hedge suggestion (wallet/life-event): VARIABLE stake, NO points, NO daily cap; settles via the SAME poller as a standard bet (D6/D8)
+  WALLET // a stock lot adopted from the user's own wallet (xStocks that were there before we booked anything): entered at the price of the day it was first seen
 }
 
 // Hedge suggestion kind (spec §2/§5). S1_* ship in this packet; S2/FALLBACK are reserved for the
@@ -976,7 +977,7 @@ model StockPosition {
   assetId           String
   asset             StockAsset @relation(fields: [assetId], references: [id])
   mode              BetMode    @default(PAPER)
-  source            BetSource  @default(DECK) // DECK | HEDGE (FEED unused)
+  source            BetSource  @default(DECK) // DECK | HEDGE | WALLET (FEED unused)
   requestId         String?    @unique // PAPER: client idempotency key (uuid) — a retried buy returns the same lot
   hedgeSuggestionId String? // set when a hedge suggestion was accepted into this lot
   qtyBase           BigInt // raw base units (10^-decimals)

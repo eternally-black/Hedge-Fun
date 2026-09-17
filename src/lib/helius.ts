@@ -127,6 +127,27 @@ export async function getBlockHeight(): Promise<number> {
   return r;
 }
 
+// Every token the owner holds, RAW amount per mint, across both token programs (xStocks are
+// Token-2022; the classic program is read too so a wallet is never half-described). What the
+// Portfolio adopts from a wallet the user connected. RAW on purpose: the Token-2022 ScaledUiAmount
+// multiplier scales only uiAmount.
+export async function getWalletTokensRaw(owner: string): Promise<Map<string, bigint>> {
+  const read = async (programId: string) =>
+    (await rpc("getTokenAccountsByOwner", [owner, { programId }, { encoding: "jsonParsed", commitment: "confirmed" }])) as
+      | { value?: { account?: { data?: { parsed?: { info?: { mint?: unknown; tokenAmount?: { amount?: unknown } } } } } }[] }
+      | null;
+  const [spl, t22] = await Promise.all([read(TOKEN_PROGRAM), read(TOKEN_2022_PROGRAM)]);
+  const out = new Map<string, bigint>();
+  for (const v of [...(spl?.value ?? []), ...(t22?.value ?? [])]) {
+    const info = v?.account?.data?.parsed?.info;
+    const mint = info?.mint;
+    const amount = info?.tokenAmount?.amount;
+    if (typeof mint !== "string" || typeof amount !== "string" || !/^\d+$/.test(amount)) continue;
+    out.set(mint, (out.get(mint) ?? 0n) + BigInt(amount));
+  }
+  return out;
+}
+
 // The owner's token accounts for one mint, with their RAW amounts (a wallet can hold several ATAs).
 // The pubkey matters to the SELL path: closing the emptied account returns its rent, and closing the
 // account the chain actually shows beats re-deriving an ATA that may not be the one holding the lot.

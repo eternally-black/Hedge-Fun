@@ -322,7 +322,9 @@ function OpenRow({
             <span style={{ fontWeight: 700, fontSize: 13 }}>{row.symbol}</span>
             <span style={{ fontSize: 11, color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.name}</span>
             {row.mode === "REAL" ? (
-              row.txSig ? (
+              row.source === "WALLET" ? (
+                <span style={{ fontSize: 10, fontWeight: 700, color: "var(--gold)", background: "color-mix(in srgb,var(--gold) 14%,var(--panel))", border: "1px solid color-mix(in srgb,var(--gold) 40%,var(--line))", padding: "2px 7px", borderRadius: 20 }}>◎ in wallet</span>
+              ) : row.txSig ? (
                 <a href={`https://solscan.io/tx/${row.txSig}`} target="_blank" rel="noreferrer" style={{ fontSize: 10, fontWeight: 700, color: "var(--gold)", background: "color-mix(in srgb,var(--gold) 14%,var(--panel))", border: "1px solid color-mix(in srgb,var(--gold) 40%,var(--line))", padding: "2px 7px", borderRadius: 20, textDecoration: "none" }}>◎ on-chain</a>
               ) : (
                 <span style={{ fontSize: 10, fontWeight: 700, color: "var(--gold)", background: "color-mix(in srgb,var(--gold) 14%,var(--panel))", border: "1px solid color-mix(in srgb,var(--gold) 40%,var(--line))", padding: "2px 7px", borderRadius: 20 }}>◎ on-chain</span>
@@ -335,7 +337,7 @@ function OpenRow({
             ) : null}
           </div>
           <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 3 }}>
-            {fmtQty(row)} · entry {usd(row.entryPriceCents)} → now {row.priceCents == null ? "—" : usd(row.priceCents)}
+            {fmtQty(row)} · {row.source === "WALLET" ? "imported at" : "entry"} {usd(row.entryPriceCents)} → now {row.priceCents == null ? "—" : usd(row.priceCents)}
           </div>
           <div style={{ fontSize: 11, marginTop: 2, color: pnlColor }}>
             {pnl == null ? "—" : signed(pnl)}
@@ -417,6 +419,7 @@ export function StockHistoryRow({ row }: { row: StockPositionRow }) {
           <span>{row.symbol}</span>
           <span style={row.mode === "REAL" ? { ...PILL, color: "var(--gold)" } : PILL}>{row.mode === "REAL" ? "◎ on-chain" : "PAPER"}</span>
           {row.source === "HEDGE" && <span style={PILL}>🛡 hedge</span>}
+          {row.source === "WALLET" && <span style={PILL}>imported</span>}
         </div>
         <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sub}</div>
       </div>

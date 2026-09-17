@@ -254,7 +254,7 @@ export function positionRow(
     blurb: a.blurb,
     logoUrl: a.logoUrl,
     mode: p.mode,
-    source: p.source === "HEDGE" ? "HEDGE" : "DECK",
+    source: p.source === "HEDGE" || p.source === "WALLET" ? p.source : "DECK",
     qtyBase: String(p.qtyBase),
     decimals: a.decimals,
     uiMultiplierMicro: a.uiMultiplierMicro,

@@ -18,7 +18,7 @@
 
 // String enums mirrored from Prisma so this file stays @prisma/client-free (RN has no Prisma).
 export type BetSide = "YES" | "NO";
-export type BetSource = "DECK" | "FEED" | "HEDGE"; // DECK = swipe deck (points + capped shards); FEED = post-cap feed (no points, uncapped shards); HEDGE = an accepted hedge leg (no points, no cap)
+export type BetSource = "DECK" | "FEED" | "HEDGE" | "WALLET"; // DECK = swipe deck (points + capped shards); FEED = post-cap feed (no points, uncapped shards); HEDGE = an accepted hedge leg (no points, no cap); WALLET = a stock lot adopted from the user's own wallet
 export type StreakState = "ACTIVE" | "BURNED_RECOVERABLE" | "LOST";
 export type PointsType = "SWIPE" | "LOGIN" | "REFERRAL" | "STREAK_X2";
 export type BetStatus = "PENDING" | "WIN" | "LOSS" | "PUSH";
@@ -596,7 +596,7 @@ export type StockPassResponse = { ok: true };
 // ─── GET /api/stocks/portfolio ────  Auth: Bearer. Open + recent closed lots, both modes, priced from
 // the STORED asset price (refreshed every poller tick; `fresh` false when older than the staleness
 // bound). REAL lots are reconciled against the payer's live wallet balance at most every few hours.
-export interface StockPositionRow { id: string; assetId: string; symbol: string; name: string; blurb: string | null; logoUrl: string | null; mode: "PAPER" | "REAL"; source: "DECK" | "HEDGE"; qtyBase: string; decimals: number; uiMultiplierMicro: number | null; costCents: number; entryPriceCents: number; priceCents: number | null; valueCents: number | null; pnlCents: number | null; fresh: boolean; txSig: string | null; sellTxSig: string | null; payer: string | null; createdAt: string; closedAt: string | null; closeReason: string | null; proceedsCents: number | null }
+export interface StockPositionRow { id: string; assetId: string; symbol: string; name: string; blurb: string | null; logoUrl: string | null; mode: "PAPER" | "REAL"; source: "DECK" | "HEDGE" | "WALLET"; qtyBase: string; decimals: number; uiMultiplierMicro: number | null; costCents: number; entryPriceCents: number; priceCents: number | null; valueCents: number | null; pnlCents: number | null; fresh: boolean; txSig: string | null; sellTxSig: string | null; payer: string | null; createdAt: string; closedAt: string | null; closeReason: string | null; proceedsCents: number | null }
 export interface StockTotals { costCents: number; valueCents: number; pnlCents: number }
 export interface StockPendingAttempt { id: string; symbol: string; stakeCents: number; status: "PENDING" | "CONFIRMED" | "EXPIRED" | "FAILED"; sig: string | null; createdAt: string }
 export interface StockPortfolioResponse { open: StockPositionRow[]; closed: StockPositionRow[]; totals: { paper: StockTotals; real: StockTotals }; wallets: string[]; stockConsent: boolean; sponsored: boolean; pendingAttempts: StockPendingAttempt[] }
