@@ -227,13 +227,22 @@ user level (new shells only). `mobile/.env` (gitignored, copied from the main ch
 Privy app id + mobile client id, so login works on device. Build:
 
 ```bash
-cd mobile && npx expo prebuild --platform android --no-install   # regenerates mobile/android (gitignored)
-cd android && ./gradlew assembleRelease                           # → app/build/outputs/apk/release/app-release.apk
+# Build from a SHORT path. Gradle canonicalises the project dir and ninja/CMake fail with
+# "build.ninja still dirty after 100 tries" / "ninja: error: Stat(...)" once native paths pass ~260
+# chars — a worktree under .claude\worktrees\... does. A junction does NOT help (Gradle resolves it).
+git worktree add --detach C:/hf2 HEAD          # once; later: git -C C:/hf2 checkout --detach <sha>
+cd C:/hf2/mobile && npm ci && cp <worktree>/mobile/.env .env
+npx expo prebuild --platform android --no-install                   # regenerates android/ (gitignored)
+cd android && ./gradlew.bat assembleRelease -PreactNativeArchitectures=arm64-v8a
+# → C:/hf2/mobile/android/app/build/outputs/apk/release/app-release.apk
 ```
 
 The release build type uses the debug signing config (Expo template default), so that APK installs on
-any phone for testing; the dApp Store upload needs a real keystore (§4.1). `APP_FLAVOR=play` before
-prebuild + gradle produces the Play package instead.
+any phone for testing; the dApp Store upload needs a real keystore (§4.1) — pass it with Gradle's
+`-Pandroid.injected.signing.store.file=… -Pandroid.injected.signing.store.password=…
+-Pandroid.injected.signing.key.alias=… -Pandroid.injected.signing.key.password=…` (no file edits).
+`APP_FLAVOR=play` before prebuild + gradle produces the Play package instead; drop
+`-PreactNativeArchitectures` for an emulator (x86_64) or a store upload (all ABIs).
 
 **Next, in order:**
 1. ~~a way to build an APK~~ — done, see the toolchain block above.
