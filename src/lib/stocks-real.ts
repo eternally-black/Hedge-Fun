@@ -266,12 +266,13 @@ export async function buildAttempt(
   // WHO pays the token account's rent, recorded at the only moment we can know it: the setup
   // instruction creates the account (on us) only when the wallet holds none for this mint. A wallet
   // that already has one — or that pays for its own — keeps that rent when the lot is sold.
-  const rentFromSponsor = sponsored && (await getTokenAccounts(p.payer, asset.mint)).length === 0;
+  const sponsorRent = sponsored && (await rentOnSponsor(user, p.payer));
+  const rentFromSponsor = sponsorRent && (await getTokenAccounts(p.payer, asset.mint)).length === 0;
   // Self-paid: the client sends back the very bytes we handed it, so hashing the base64 is enough.
   // Sponsored: the hash is over the compiled MESSAGE, because signing changes the bytes (the
   // signature slots) but never the message.
   const tx = sponsored
-    ? await buildSponsoredSwapTx({ quoteResponse: quote.raw, userPublicKey: p.payer, sponsorRent: await rentOnSponsor(user, p.payer) })
+    ? await buildSponsoredSwapTx({ quoteResponse: quote.raw, userPublicKey: p.payer, sponsorRent })
     : await buildSwapTx(quote.raw, p.payer).then((t) => ({
         ...t,
         messageHash: createHash("sha256").update(t.swapTransaction).digest("hex"),
@@ -291,6 +292,10 @@ export async function buildAttempt(
     msgHash: tx.messageHash,
     lastValidBlockHeight: BigInt(tx.lastValidBlockHeight),
     hedgeSuggestionId: p.hedgeSuggestionId ?? null,
+    // The built bytes: what submit compares a wallet-rewritten message against (Phantom appends its
+    // guards). Sells stored them from day one for the retry; a BUY without them refused every
+    // Phantom buy as tx_mismatch (live 2026-09-18).
+    unsignedTx: sponsored ? tx.swapTransaction : null,
   });
   await recordSponsorFunding(attempt, tx.fundedAccounts);
 

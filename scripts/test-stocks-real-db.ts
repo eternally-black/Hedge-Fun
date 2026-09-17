@@ -599,6 +599,11 @@ async function main() {
     assert.strictEqual(res.status, 200);
     const other = (await res.json()) as { attemptId: string; swapTransaction: string };
     assert.notStrictEqual(other.swapTransaction, spon.swapTransaction, "a different blockhash -> a different tx");
+    assert.strictEqual(
+      (await prisma.stockBuyAttempt.findUniqueOrThrow({ where: { id: other.attemptId } })).unsignedTx,
+      other.swapTransaction,
+      "a sponsored BUY stores its built bytes — the guard-tolerant submit compares against them",
+    );
     sent = [];
     res = await post(submitRoute, "/api/stocks/real/submit", {
       attemptId: spon.attemptId,
