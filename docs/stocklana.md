@@ -42,11 +42,18 @@ transaction matched the attempt the server had built.
 | Sell NFLXx → USDC | [Maa7LVT6…D7Mb](https://solscan.io/tx/Maa7LVT6bibAVtTrK1mqyvKBdVsytfk5MJLa5EdYALnpxk9a4nWdA3jFLCCT2LRUaC5RSZa87ChPachXaqwD7Mb) |
 | Buy $1.94 USDC → PLTRx (swipe right in Real mode, no separate button) | [5FBqh6Pi…AddRR](https://solscan.io/tx/5FBqh6Pi1fJarsJMw4TfyGGAPuGWtqZKfN1eHZMduk6qwrg9Vw6oGw5UzzkyEU8JboDsJko5CrybD4edSMfAddRR) |
 | Sell PLTRx → USDC (two-tap Sell on the portfolio row) | [55E4zaFk…GKJC](https://solscan.io/tx/55E4zaFkxjea2DY7QfrYGXviVueAtrJc9NAizrC3EeNu3nRK6yVx6gdv4QG1VvXKAZAPGziwZGtyrjPiAAK5GKJC) |
+| Sell NVDAx, imported from a connected **Phantom** (bought elsewhere months earlier) | [4SpmCLBJ…KuP3](https://solscan.io/tx/4SpmCLBJ1AGiU6ziqF5fw3EaMJC1zM43WicUg1vm3EYywsobfTVSdswjJWggRZnWG7nyEUxvDv8z1sHwZogrKuP3) |
+| Sell AAPLx, imported from Phantom | [3ziD9awA…MA5W](https://solscan.io/tx/3ziD9awAHFrzgkCf8g2i8ZZLaDKSJwPmqNV2QEeYMhJrGp1tXKGeLqZpjjJxB86eystfKYdLNWVLCdT2mqg5MA5W) |
+| Buy $1.11 USDC → TSMx from Phantom (fee sponsored, rent the wallet’s own, Phantom’s Lighthouse guards accepted) | [nsLUDZeS…Apit](https://solscan.io/tx/nsLUDZeSDUADmtywFQh4vCV6aYPqxNKitX8jP4ZxJ1waCqXXZhsRoJVjTSx1PMh5UwKaDCw9NPcvzrmZ9NfApit) |
+| Sell TSMx → USDC from Phantom | [3wFWumhv…HXoh](https://solscan.io/tx/3wFWumhvxyXnRtUykQXMZBJz7U6h6sNuEd7tTtzTxgBESsKRLAsKm4iykpahkpkuugYV1URsuQvzUvKevaxBHXoh) |
 
 The first production sell exposed a leak: Jupiter's cleanup instruction refunds the wrapped-SOL
 account's rent to the user even when the sponsor funded it. Fixed the same hour (the refund now
 follows whoever paid); the NFLXx round trip cost the sponsor exactly 20,045 lamports — two network
-fees — with every rent it fronted returned. The PLTRx pair is the final flow: the same Paper/Real switch predictions use decides whose money a swipe spends; flipped to Paper, the same card and the same swipe held $10 of play money instead.
+fees — with every rent it fronted returned. The Phantom rows (2026-09-18) are the external-wallet path: Phantom rewrites an
+unsigned transaction on sign (appends Lighthouse guard instructions, re-sorts accounts, raises the compute
+limit), so the sponsor co-signs a message that is ours plus nothing but those guards; its scanner blocks
+rent returning to anyone else, so a connected wallet fronts its own rent and routes are quoted direct. The PLTRx pair is the final flow: the same Paper/Real switch predictions use decides whose money a swipe spends; flipped to Paper, the same card and the same swipe held $10 of play money instead.
 
 ## What was built (4 days)
 
