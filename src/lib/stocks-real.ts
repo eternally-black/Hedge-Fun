@@ -521,12 +521,16 @@ export async function submitSigned(userId: string, attemptId: string, signedTran
 
   let wire: string, sig: string;
   try {
-    ({ wire, sig } = await coSign({ signedTransactionB64, expectedMessageHash: attempt.msgHash, userAddress: attempt.payer }));
+    ({ wire, sig } = await coSign({
+      signedTransactionB64,
+      expectedMessageHash: attempt.msgHash,
+      userAddress: attempt.payer,
+      builtTransactionB64: attempt.unsignedTx ?? undefined, // ours + Lighthouse guards (Phantom) is still ours
+    }));
   } catch (e) {
-    // The message the wallet signed is not the one we built. The bytes are logged so the difference
-    // can be read off the server: without the sponsor signature they cannot be broadcast, and an
-    // external wallet is known to rewrite transactions (Phantom appends its Lighthouse guards) — the
-    // evidence decides what rewrite, if any, submit can accept.
+    // The message the wallet signed is neither the one we built nor ours plus Lighthouse guards. The
+    // bytes are logged so the difference can be read off the server (without the sponsor signature
+    // they cannot be broadcast).
     if (e instanceof TxMismatchError) console.warn(`[stock-submit] tx_mismatch attempt=${attemptId} user=${userId} tx=${signedTransactionB64}`);
     throw e;
   }

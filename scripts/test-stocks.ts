@@ -3,6 +3,21 @@
 // Run: npx tsx scripts/test-stocks.ts
 import assert from "node:assert";
 import {
+  AccountRole,
+  address,
+  appendTransactionMessageInstructions,
+  compileTransaction,
+  compressTransactionMessageUsingAddressLookupTables,
+  createTransactionMessage,
+  getTransactionEncoder,
+  pipe,
+  setTransactionMessageFeePayer,
+  setTransactionMessageLifetimeUsingBlockhash,
+  type Address,
+  type Blockhash,
+  type Instruction,
+} from "@solana/kit";
+import {
   xstockToAsset,
   priceFieldsFrom,
   isDeckEligible,
@@ -348,7 +363,7 @@ import { clampStakeCents } from "../src/app/useStockStake";
 // ─── sponsor.ts: the pure pieces of the fee-sponsored builder ───────────────────────────────────────
 // Everything here is arithmetic on bytes — no network, no key material beyond a throwaway keypair.
 async function sponsorChecks() {
-  const { patchAtaPayer, patchCleanupDestination, decodeLookupTable, messageHashOf, closeAccountIx, ATA_PROGRAM } = await import("../src/lib/sponsor");
+  const { patchAtaPayer, patchCleanupDestination, decodeLookupTable, messageHashOf, closeAccountIx, sameMessageModuloGuards, LIGHTHOUSE_PROGRAM, ATA_PROGRAM } = await import("../src/lib/sponsor");
   const kit = await import("@solana/kit");
   const { generateKeyPairSync } = await import("node:crypto");
 
@@ -394,6 +409,54 @@ async function sponsorChecks() {
     assert.deepStrictEqual(patchCleanupDestination(notClose, new Set([WSOL_ATA]), SPONSOR), notClose, "a non-close instruction is passed through");
     assert.strictEqual(patchCleanupDestination(null, new Set([WSOL_ATA]), SPONSOR), null, "no cleanup -> null");
     assert.strictEqual(close.accounts[1].pubkey, USER, "input not mutated");
+  }
+
+  // sameMessageModuloGuards: OUR message plus Lighthouse guards is still ours; anything else is not.
+  {
+    const SPONSOR = address("GavgGKU9N3V1WjKLwQr3tapuXCCLFeJEeQpV6Bgq9rGf");
+    const USER = address("6dNVeTv6yzcYiRhRPfCnJfRQmUMKFJqPmPJcaNBRCGFT");
+    const PROG = address("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4");
+    const LUT = address("2vtyH7Sawno2NXQr5JQYA6Qmhs14jLVo63qvnaKVZJdp");
+    const FROM_LUT = address("SzmAATheFCG1bKvKVdRKmwyGsZLXHCVvwaZ1mWPiA7p");
+    const BH = "XsbEhLAtcf6HdfpFZ5xEMdqW8nfAvcsP5bdudRLJzJp" as Blockhash;
+    const OTHER_BH = "Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh" as Blockhash;
+    const lookup: Record<Address, Address[]> = { [LUT]: [FROM_LUT] };
+    const ours = (data: number[]): Instruction => ({
+      programAddress: PROG,
+      accounts: [{ address: USER, role: AccountRole.WRITABLE_SIGNER }, { address: FROM_LUT, role: AccountRole.WRITABLE }],
+      data: new Uint8Array(data),
+    });
+    const guard = (data: number[]): Instruction => ({ programAddress: address(LIGHTHOUSE_PROGRAM), accounts: [{ address: USER, role: AccountRole.READONLY }], data: new Uint8Array(data) });
+    const wire = (ixs: Instruction[], bh: Blockhash = BH) =>
+      new Uint8Array(
+        getTransactionEncoder().encode(
+          compileTransaction(
+            pipe(
+              createTransactionMessage({ version: 0 }),
+              (m) => setTransactionMessageFeePayer(SPONSOR, m),
+              (m) => setTransactionMessageLifetimeUsingBlockhash({ blockhash: bh, lastValidBlockHeight: 1000n }, m),
+              (m) => appendTransactionMessageInstructions(ixs, m),
+              (m) => compressTransactionMessageUsingAddressLookupTables(m, lookup),
+            ),
+          ),
+        ),
+      );
+    const built = wire([ours([1]), ours([2])]);
+    assert.ok(sameMessageModuloGuards(built, built, lookup), "identical");
+    assert.ok(sameMessageModuloGuards(built, wire([ours([1]), ours([2]), guard([9])]), lookup), "a guard appended");
+    assert.ok(sameMessageModuloGuards(built, wire([guard([8]), ours([1]), guard([7]), ours([2]), guard([9])]), lookup), "guards anywhere around ours");
+    assert.ok(!sameMessageModuloGuards(built, wire([ours([1]), ours([2]), { ...ours([3]), programAddress: address("11111111111111111111111111111111") }]), lookup), "an extra non-guard instruction");
+    assert.ok(!sameMessageModuloGuards(built, wire([ours([1]), ours([5])]), lookup), "our data changed");
+    assert.ok(!sameMessageModuloGuards(built, wire([ours([1])]), lookup), "one of ours missing");
+    assert.ok(!sameMessageModuloGuards(built, wire([ours([2]), ours([1])]), lookup), "ours reordered");
+    assert.ok(!sameMessageModuloGuards(built, wire([ours([1]), ours([2]), guard([9])], OTHER_BH), lookup), "a different blockhash");
+    assert.ok(!sameMessageModuloGuards(built, wire([ours([1]), ours([2]), guard([9])]), {}), "a table we cannot read → cannot vouch");
+    // Compilation keeps ONE flag per account, so a demotion only exists once no instruction needs the
+    // account writable — that is the message that would differ on chain.
+    const ro = (ix: Instruction): Instruction => ({ ...ix, accounts: [{ address: USER, role: AccountRole.WRITABLE_SIGNER }, { address: FROM_LUT, role: AccountRole.READONLY }] });
+    const demoted = wire([ro(ours([1])), ro(ours([2]))]);
+    assert.ok(!sameMessageModuloGuards(built, demoted, lookup), "an account demoted");
+    assert.ok(!sameMessageModuloGuards(built, new Uint8Array([1, 2, 3]), lookup), "garbage");
   }
 
   // decodeLookupTable: 56-byte header, then packed 32-byte addresses.

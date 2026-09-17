@@ -8,6 +8,8 @@ import { PrivyClient } from "@privy-io/server-auth";
 import {
   createKeyPairSignerFromBytes,
   getBase58Decoder,
+  address,
+  getCompiledTransactionMessageCodec,
   getCompiledTransactionMessageDecoder,
   getTransactionDecoder,
   getTransactionEncoder,
@@ -589,6 +591,53 @@ async function main() {
     assert.strictEqual(res.status, 409);
     assert.strictEqual(await err(res), "tx_mismatch", "the user signature is required");
     assert.strictEqual(sent.length, 0);
+
+    // 12b. Phantom's rewrite: OUR message with one more static account and one more instruction (a
+    //      Lighthouse guard) — every table-loaded index shifts by one — user-signed: co-signed. The
+    //      same rewrite with any other program: refused. (coSign directly: this attempt is not sent.)
+    const { coSign, LIGHTHOUSE_PROGRAM } = await import("../src/lib/sponsor");
+    const withExtra = (b64: string, program: string): string => {
+      const codec = getCompiledTransactionMessageCodec();
+      const m = codec.decode(getTransactionDecoder().decode(bytes(b64)).messageBytes);
+      const n = m.staticAccounts.length;
+      const shift = (i: number) => (i >= n ? i + 1 : i);
+      const rewritten = {
+        ...m,
+        header: { ...m.header, numReadonlyNonSignerAccounts: m.header.numReadonlyNonSignerAccounts + 1 },
+        staticAccounts: [...m.staticAccounts, address(program)],
+        instructions: [
+          ...m.instructions.map((ix) => ({ ...ix, programAddressIndex: shift(ix.programAddressIndex), accountIndices: ix.accountIndices?.map(shift) })),
+          { programAddressIndex: n, accountIndices: [1], data: new Uint8Array([7, 7]) },
+        ],
+      };
+      const messageBytes = codec.encode(rewritten);
+      const signatures: Record<string, null> = {};
+      for (const a of rewritten.staticAccounts.slice(0, m.header.numSignerAccounts)) signatures[a] = null;
+      return Buffer.from(getTransactionEncoder().encode({ messageBytes, signatures } as never)).toString("base64");
+    };
+    const otherHash = (await prisma.stockBuyAttempt.findUniqueOrThrow({ where: { id: other.attemptId } })).msgHash;
+    const co = await coSign({
+      signedTransactionB64: await signAsUser(withExtra(other.swapTransaction, LIGHTHOUSE_PROGRAM)),
+      expectedMessageHash: otherHash,
+      userAddress: PAYER,
+      builtTransactionB64: other.swapTransaction,
+    });
+    assert.ok(co.sig.length >= 64, "our message + a Lighthouse guard is co-signed");
+    await assert.rejects(
+      coSign({
+        signedTransactionB64: await signAsUser(withExtra(other.swapTransaction, "11111111111111111111111111111111")),
+        expectedMessageHash: otherHash,
+        userAddress: PAYER,
+        builtTransactionB64: other.swapTransaction,
+      }),
+      /tx_mismatch/,
+      "our message + anything else is refused",
+    );
+    await assert.rejects(
+      coSign({ signedTransactionB64: await signAsUser(withExtra(other.swapTransaction, LIGHTHOUSE_PROGRAM)), expectedMessageHash: otherHash, userAddress: PAYER }),
+      /tx_mismatch/,
+      "without the built bytes nothing but the exact message is accepted",
+    );
 
     // ── 13. The real thing: the user signs, we co-sign and send, the attempt carries the signature.
     //       The signature is the FEE PAYER's own — computed from the co-signed bytes before the send,

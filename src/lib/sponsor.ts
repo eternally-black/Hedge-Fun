@@ -35,7 +35,9 @@ import {
   compressTransactionMessageUsingAddressLookupTables,
   createKeyPairSignerFromBytes,
   createTransactionMessage,
+  decompileTransactionMessage,
   getBase58Decoder,
+  getCompiledTransactionMessageDecoder,
   getBase64EncodedWireTransaction,
   getSignatureFromTransaction,
   getTransactionDecoder,
@@ -48,6 +50,7 @@ import {
   type Blockhash,
   type Instruction,
   type KeyPairSigner,
+  type ReadonlyUint8Array,
 } from "@solana/kit";
 import { decodeBase58 } from "./stocks";
 import { swapInstructions, type JupIx } from "./jupiter-swap";
@@ -174,6 +177,80 @@ export function messageHashOf(wireTxBytes: Uint8Array): string {
   return createHash("sha256").update(Buffer.from(tx.messageBytes)).digest("hex");
 }
 
+// Phantom's Lighthouse program — the ONE program a wallet may add to a message we built.
+export const LIGHTHOUSE_PROGRAM = "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95";
+
+// The contents of every address table these messages load from — what decompiling them needs.
+async function lookupTablesFor(wires: Uint8Array[]): Promise<Record<Address, Address[]>> {
+  const dec = getCompiledTransactionMessageDecoder();
+  const luts = new Set<string>();
+  for (const w of wires) {
+    let m: ReturnType<typeof dec.decode>;
+    try {
+      m = dec.decode(getTransactionDecoder().decode(w).messageBytes);
+    } catch {
+      continue;
+    }
+    if ("addressTableLookups" in m) for (const l of m.addressTableLookups ?? []) luts.add(l.lookupTableAddress);
+  }
+  const out: Record<Address, Address[]> = {};
+  for (const lut of luts) {
+    const acc = await getAccountInfoBase64(lut);
+    if (!acc) throw new HeliusUnavailableError(`lookup table ${lut} not found`);
+    out[address(lut)] = decodeLookupTable(acc.data).map((a) => address(a));
+  }
+  return out;
+}
+
+// Is `signedWire` OUR message plus nothing but Lighthouse guards? An external wallet (Phantom)
+// rewrites an unsigned transaction on its way to the user: it appends assertions that make the
+// transaction fail if the outcome is not what the user saw in the simulation. Assertions cannot
+// move funds. So a message that is exactly ours — same fee payer, same signers, same blockhash,
+// every one of our instructions in order with the same program, accounts, roles and data — with
+// Lighthouse instructions added anywhere is still a message we built, and the sponsor may sign it.
+// Anything else (one more instruction of any other program, one byte of ours changed, one of ours
+// missing, ours reordered, an account demoted, a table we cannot read) is not. Pure given the table
+// contents; `lookup` must hold every table either message loads from.
+export function sameMessageModuloGuards(builtWire: Uint8Array, signedWire: Uint8Array, lookup: Record<Address, Address[]>): boolean {
+  const dec = getCompiledTransactionMessageDecoder();
+  let a: ReturnType<typeof dec.decode>, b: ReturnType<typeof dec.decode>;
+  try {
+    a = dec.decode(getTransactionDecoder().decode(builtWire).messageBytes);
+    b = dec.decode(getTransactionDecoder().decode(signedWire).messageBytes);
+  } catch {
+    return false;
+  }
+  if (a.lifetimeToken !== b.lifetimeToken) return false;
+  if (a.header.numSignerAccounts !== b.header.numSignerAccounts) return false;
+  if (a.header.numReadonlySignerAccounts !== b.header.numReadonlySignerAccounts) return false;
+  if (a.staticAccounts[0] !== b.staticAccounts[0]) return false; // the fee payer
+  const signersA = [...a.staticAccounts.slice(0, a.header.numSignerAccounts)].sort().join(",");
+  const signersB = [...b.staticAccounts.slice(0, b.header.numSignerAccounts)].sort().join(",");
+  if (signersA !== signersB) return false;
+
+  let ma: ReturnType<typeof decompileTransactionMessage>, mb: ReturnType<typeof decompileTransactionMessage>;
+  try {
+    ma = decompileTransactionMessage(a, { addressesByLookupTableAddress: lookup });
+    mb = decompileTransactionMessage(b, { addressesByLookupTableAddress: lookup });
+  } catch {
+    return false;
+  }
+  // The decompiled instruction, whatever the message version: program, accounts with roles, data.
+  type AnyIx = { programAddress: Address; accounts?: readonly { address: Address; role: AccountRole }[]; data?: ReadonlyUint8Array };
+  const key = (ix: AnyIx) =>
+    [ix.programAddress, ...(ix.accounts ?? []).map((acc) => `${acc.address}:${acc.role}`), Buffer.from(ix.data ?? new Uint8Array()).toString("base64")].join("|");
+  const ours = (ma.instructions as unknown as readonly AnyIx[]).map(key);
+  let i = 0;
+  for (const ix of mb.instructions as unknown as readonly AnyIx[]) {
+    if (i < ours.length && key(ix) === ours[i]) {
+      i++;
+      continue;
+    }
+    if (ix.programAddress !== LIGHTHOUSE_PROGRAM) return false;
+  }
+  return i === ours.length;
+}
+
 function toKitIx(ix: JupIx): Instruction {
   return {
     programAddress: address(ix.programId),
@@ -281,18 +358,27 @@ export async function coSign(p: {
   signedTransactionB64: string;
   expectedMessageHash: string;
   userAddress: string;
+  // The bytes the attempt was built from. With them, a message that does not hash to the expected
+  // value is still accepted when it is ours plus nothing but Lighthouse guards (sameMessageModuloGuards).
+  builtTransactionB64?: string;
 }): Promise<{ wire: string; sig: string }> {
   const signer = await sponsorSigner();
 
+  const signedWire = new Uint8Array(Buffer.from(p.signedTransactionB64, "base64"));
   let tx: ReturnType<ReturnType<typeof getTransactionDecoder>["decode"]>;
   try {
-    tx = getTransactionDecoder().decode(new Uint8Array(Buffer.from(p.signedTransactionB64, "base64")));
+    tx = getTransactionDecoder().decode(signedWire);
   } catch {
     throw new TxMismatchError(); // not even a transaction
   }
 
   const hash = createHash("sha256").update(Buffer.from(tx.messageBytes)).digest("hex");
-  if (hash !== p.expectedMessageHash) throw new TxMismatchError();
+  if (hash !== p.expectedMessageHash) {
+    if (!p.builtTransactionB64) throw new TxMismatchError();
+    const builtWire = new Uint8Array(Buffer.from(p.builtTransactionB64, "base64"));
+    const lookup = await lookupTablesFor([builtWire, signedWire]);
+    if (!sameMessageModuloGuards(builtWire, signedWire, lookup)) throw new TxMismatchError();
+  }
 
   // The user must actually have signed. Their slot exists because they are a signer of the swap.
   const userSig = (tx.signatures as Record<string, Uint8Array | null>)[p.userAddress];
