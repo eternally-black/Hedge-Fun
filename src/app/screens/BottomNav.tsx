@@ -13,7 +13,7 @@ const ITEMS: { key: NavKey; glyph: string; label: string }[] = [
   { key: "hedge", glyph: "🛡", label: "Hedge" },
   { key: "portfolio", glyph: "▲", label: "Stocks" },
   { key: "feed", glyph: "≋", label: "Feed" }, // DEV-ONLY (testing). Real users reach the feed via the post-cap Deck tab.
-  { key: "you", glyph: "◉", label: "You" },
+  { key: "you", glyph: "◉", label: "Profile" },
 ];
 // Screens that live behind the You tab keep it lit.
 const UNDER_YOU: ReadonlySet<Screen> = new Set<Screen>(["you", "vault", "invite"]);

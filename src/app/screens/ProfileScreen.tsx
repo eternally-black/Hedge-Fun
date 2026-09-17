@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useLinkAccount, usePrivy } from "@privy-io/react-auth";
 import { type Me, num, usd } from "../ui";
 import { XIcon, TelegramIcon } from "../icons";
 import { RealModeCard } from "./RealModeCard";
+import { useHedgeWalletLink, WalletForm } from "./WalletLink";
 import type { NavKey } from "./BottomNav";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
@@ -58,7 +59,9 @@ export function ProfileScreen({ me, api, onRefresh, onLogout, onToast, pusdMicro
   };
 
   const { linkTwitter } = useLinkAccount({
-    onSuccess: () => { setXError(null); void syncTwitter(); }, // popup flow; redirect flow → effect below
+    // popup flow; redirect flow → effect below. Type-checked: a wallet linked from the Wallet section
+    // below arrives here too, and it is not an X account.
+    onSuccess: ({ linkedAccount }) => { if (linkedAccount?.type !== "twitter_oauth") return; setXError(null); void syncTwitter(); },
     onError: () => setBusyX(null),
   });
 
@@ -71,6 +74,12 @@ export function ProfileScreen({ me, api, onRefresh, onLogout, onToast, pusdMicro
     if (privyTwitter && me && !me.user.twitter) void syncTwitter();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [privyTwitter, me?.user.twitter]);
+
+  // The wallet connector, the same one the Hedge tab offers (see WalletLink.tsx). A fresh link is
+  // reflected through /api/me (stockWallets) — that is what the list below renders.
+  const onWalletLinked = useCallback(async () => { onToast("Wallet linked"); await onRefresh(); }, [onRefresh, onToast]);
+  const wl = useHedgeWalletLink(api, { onLinked: onWalletLinked, onToast });
+  const linkedWallets = me?.stockWallets ?? [];
 
   const startLink = () => {
     setXError(null);
@@ -152,6 +161,24 @@ export function ProfileScreen({ me, api, onRefresh, onLogout, onToast, pusdMicro
       )}
 
       <RealModeCard me={me} api={api} onRefresh={onRefresh} onToast={onToast} pusdMicro={pusdMicro} />
+
+      {/* Wallet — the connector the Hedge tab offers, one screen closer. A wallet connected through
+          Privy (Phantom) is verified; a pasted address is read for exposure only. The list is what
+          the server already holds as verified, the embedded wallet the login created included. */}
+      <div style={{ marginTop: 22, fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700 }}>Wallet</div>
+      <div style={{ marginTop: 10, background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 14, padding: "12px 14px" }}>
+        {linkedWallets.length > 0 ? (
+          <div style={{ marginBottom: 12, display: "flex", flexDirection: "column", gap: 6 }}>
+            {linkedWallets.map((a) => (
+              <div key={a} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+                <span style={{ fontFamily: "ui-monospace,SFMono-Regular,Menlo,monospace" }}>{a.slice(0, 4)}…{a.slice(-4)}</span>
+                <span style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: "var(--yes)", fontWeight: 700 }}>verified</span>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        <WalletForm address={wl.address} busy={wl.busy} error={wl.error} onAddress={wl.setAddress} onSubmit={wl.submit} onConnect={wl.connect} />
+      </div>
 
       {/* Account / sign out. Shows who's signed in (email or @handle) + a logout action. */}
       <div style={{ marginTop: 22, fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700 }}>Account</div>

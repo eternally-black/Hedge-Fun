@@ -316,7 +316,7 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksU
           ? sponsored
             ? "Real money · fees on us"
             : "Real money · from your wallet"
-          : "Paper buys use play money · switch to real money in You"}
+          : "Paper buys use play money · switch to real money in Profile"}
       </div>
 
       <StockConsentSheet open={real.consentOpen} busy={real.busy} sponsored={sponsored} onAccept={acceptConsent} onClose={real.closeConsent} />

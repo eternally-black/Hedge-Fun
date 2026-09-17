@@ -129,7 +129,7 @@ export function BalanceSheet({ me, api, realPusdMicro, stockWallet, stockSponsor
 
         {/* The pockets, ONE layout each (heading · number · what it is · actions), ordered by the
             app's Paper/Real switch: the pockets real mode spends first, play money last. In paper
-            mode the Polymarket pocket is not shown — the switch itself lives on the You screen, so
+            mode the Polymarket pocket is not shown — the switch itself lives on the Profile screen, so
             there is nothing to duplicate here. The Solana wallet is always shown: every login gets
             an embedded one, and a pocket you cannot see is a pocket you never fund. */}
         {isReal ? (

@@ -36,7 +36,7 @@ The deck also deals **xStocks** (tokenized US equities on Solana): swipe right =
 up = skip. The stake is a chip on the card — `$10 · $25 · $50` or a fourth `$…` chip that takes any
 amount and remembers it.
 
-**Whose money a swipe spends is the app's ONE Paper/Real switch (You → Mode), the same one
+**Whose money a swipe spends is the app's ONE Paper/Real switch (Profile → Mode), the same one
 predictions use.** There is no separate "buy on Solana" button, no second deck and no per-card
 toggle: the mode changes what the same card, the same swipe and the same Sell row do.
 
@@ -49,7 +49,7 @@ toggle: the mode changes what the same card, the same swipe and the same Sell ro
 | Balance chip in the HUD | `PAPER` pocket, everywhere | never Paper: `REAL · STOCKS` on stock screens, `REAL · PREDICTIONS` on prediction screens, the current deck's pocket elsewhere |
 
 The wallet is the Privy **embedded** Solana wallet an email login already creates (a Phantom linked
-on the Hedge tab is read for exposure; trades always run from the embedded wallet), and every real
+on the Hedge tab or the Profile is read for exposure; trades always run from the embedded wallet), and every real
 transaction is **fee-sponsored**: the server builds the swap, the
 wallet signs it, our own fee-payer (`STOCK_SPONSOR_SECRET`) co-signs and sends it, and fronts the
 token-account rent that comes back on the sell — so a user needs USDC and nothing else. The first real

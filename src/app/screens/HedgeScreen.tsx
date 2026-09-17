@@ -1,7 +1,6 @@
 "use client";
 
 import { memo, useCallback, useEffect, useRef, useState } from "react";
-import { useLinkAccount } from "@privy-io/react-auth";
 import {
   type Me,
   bgGrad,
@@ -28,6 +27,7 @@ import type {
 import { STOCK_RULES } from "@/lib/hedge/stock-rules";
 import { useBuyReal, type BuyRealCtx } from "../useBuyReal";
 import { StockConsentSheet } from "./StockConsentSheet";
+import { useHedgeWalletLink, WalletForm, type LinkError } from "./WalletLink";
 
 // Whatever useApi resolves to — a thrown error carries `.status` (mirrors page.tsx's catch blocks).
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
@@ -36,20 +36,10 @@ type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 // still in flight. Success reconciles to the server-returned stakeCents/already; any failure rolls the
 // entry back out of the map (card returns to actionable) + a non-blocking retry toast.
 type AcceptedInfo = { stakeCents: number; already: boolean; placing: boolean };
-type LinkError = "invalid" | "unavailable" | "generic";
 type LoadError = "unavailable" | "generic";
 
 // Light client-side sanity check ONLY — the server does the real validation (isAddress). Base58
 // alphabet (no 0/O/I/l), 32–44 chars covers a 32-byte Solana address.
-const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
-
-const LINK_ERROR_COPY: Record<LinkError, string> = {
-  invalid: "That doesn't look like a Solana address — check for typos and paste it again.",
-  unavailable:
-    "Balances/prices are unreachable right now (upstream outage). The address is saved — hit retry in a moment to read its exposure.",
-  generic: "Something went sideways linking that wallet. Try again.",
-};
-
 // ============================================================================
 // HedgeScreen — the S1 wallet-hedge surface (phase 2). Link a READ-ONLY Solana address, get
 // deterministic paper-hedge suggestions matched to what it holds: 5–10% of a major (SOL / BTC /
@@ -81,9 +71,6 @@ export function HedgeScreen({
   const [loadError, setLoadError] = useState<LoadError | null>(null);
   const [exposure, setExposure] = useState<HedgeWalletResponse | null>(null); // set by a wallet POST this session
   const [walletFormOpen, setWalletFormOpen] = useState(false); // "different wallet" inline form
-  const [address, setAddress] = useState("");
-  const [linkBusy, setLinkBusy] = useState(false);
-  const [linkError, setLinkError] = useState<LinkError | null>(null);
   const [accepted, setAccepted] = useState<Map<string, AcceptedInfo>>(new Map());
   const [pending, setPending] = useState<ReadonlySet<string>>(new Set()); // in-flight accept/dismiss, for render
 
@@ -149,56 +136,22 @@ export function HedgeScreen({
   // First load on mount.
   useEffect(() => { void loadWalletState(); void loadSuggestions(); void loadSpotted(); }, [loadWalletState, loadSuggestions, loadSpotted]);
 
-  // POST the wallet link (the Refresh button reuses it with the already-linked address). The server
-  // validates, links (idempotent), builds/refreshes the cached snapshot, and returns the exposure
-  // summary we render verbatim. Returns success so a caller without a visible form can toast instead.
-  const fetchWallet = useCallback(
-    async (addr: string): Promise<boolean> => {
-      setLinkBusy(true);
-      setLinkError(null);
-      try {
-        const res = (await api("/api/hedge/wallet", {
-          method: "POST",
-          body: JSON.stringify({ address: addr }),
-        })) as HedgeWalletResponse;
-        setExposure(res);
-        setWalletLinked(true);
-        setAddress("");
-        setWalletFormOpen(false);
-        await loadSuggestions(); // a (re)linked wallet can change the suggestion set
-        return true;
-      } catch (e) {
-        const status = (e as { status?: number }).status;
-        setLinkError(status === 400 ? "invalid" : status === 502 ? "unavailable" : "generic");
-        return false;
-      } finally {
-        setLinkBusy(false);
-      }
+  // The wallet-link flow shared with the Profile (paste = read-only, Privy connect = verified). What
+  // this screen does with a fresh link: draw the exposure, close the "different wallet" form, and
+  // re-derive the suggestions — a (re)linked wallet can change the set.
+  const onLinked = useCallback(
+    async (res: HedgeWalletResponse) => {
+      setExposure(res);
+      setWalletLinked(true);
+      setWalletFormOpen(false);
+      await loadSuggestions();
     },
-    [api, loadSuggestions],
+    [loadSuggestions],
   );
-
-  const linkWallet = useCallback(() => {
-    const addr = address.trim();
-    if (!BASE58_RE.test(addr)) { setLinkError("invalid"); return; }
-    void fetchWallet(addr);
-  }, [address, fetchWallet]);
-
-  // Connect through Privy (Phantom etc.) instead of pasting: the wallet signs Privy's challenge, so
-  // the server marks the link VERIFIED and the withdraw form may offer it as a destination. A paste
-  // stays read-only. Privy's modal owns the UX; we only post the address it hands back.
-  const { linkWallet: linkViaPrivy } = useLinkAccount({
-    onSuccess: ({ linkedAccount }) => {
-      if (linkedAccount?.type === "wallet" && linkedAccount.chainType === "solana") void fetchWallet(linkedAccount.address);
-    },
-    onError: (error) => {
-      if (error !== "exited_link_flow") onToast("Couldn't connect the wallet — paste the address instead");
-    },
-  });
-  const connectWallet = useCallback(() => {
-    if (linkBusy) return;
-    linkViaPrivy({ walletChainType: "solana-only", description: "Connect the Solana wallet you hedge with" });
-  }, [linkBusy, linkViaPrivy]);
+  const {
+    address, setAddress, busy: linkBusy, error: linkError, clearError: clearLinkError,
+    link: fetchWallet, submit: linkWallet, connect: connectWallet,
+  } = useHedgeWalletLink(api, { onLinked, onToast });
 
   // Refresh from the exposure panel — the form is closed, so a failure has no inline error to show:
   // surface it as a toast instead of failing silently.
@@ -292,7 +245,7 @@ export function HedgeScreen({
 
   const retryLoad = useCallback(() => { setLoadError(null); void loadSuggestions(); }, [loadSuggestions]);
   // Opening the form wipes any stale link error left by a previous attempt/refresh.
-  const toggleWalletForm = useCallback(() => { setLinkError(null); setWalletFormOpen((v) => !v); }, []);
+  const toggleWalletForm = useCallback(() => { clearLinkError(); setWalletFormOpen((v) => !v); }, [clearLinkError]);
 
   // REAL stock buys — what a stock hedge card's ONE accept button does while the app is in real
   // mode. The hook owns the consent sheet + the Jupiter swap flow; we hand it the target and stake.
@@ -1277,72 +1230,6 @@ function WalletIntro({
       </p>
       <div style={{ marginTop: 14 }}>
         <WalletForm address={address} busy={busy} error={error} onAddress={onAddress} onSubmit={onSubmit} onConnect={onConnect} />
-      </div>
-    </div>
-  );
-}
-
-// The paste-an-address form shared by the intro and the "different wallet" panel. Validation is a
-// light client-side pre-check only; the server does the real base58 check.
-function WalletForm({
-  address,
-  busy,
-  error,
-  onAddress,
-  onSubmit,
-  onConnect,
-}: {
-  address: string;
-  busy: boolean;
-  error: LinkError | null;
-  onAddress: (v: string) => void;
-  onSubmit: () => void;
-  onConnect: () => void; // Privy wallet-connect: the linked wallet is VERIFIED, a paste is read-only
-}) {
-  return (
-    <div>
-      <input
-        value={address}
-        onChange={(e) => onAddress(e.target.value)}
-        onKeyDown={(e) => { if (e.key === "Enter" && !busy) onSubmit(); }}
-        placeholder="Solana address (base58)"
-        spellCheck={false}
-        autoCapitalize="off"
-        autoCorrect="off"
-        aria-label="Solana address"
-        style={{ width: "100%", background: "var(--panel2)", border: "1px solid var(--line)", borderRadius: 14, padding: "12px 14px", color: "var(--text)", fontFamily: "var(--nf)", fontSize: 12, outline: "none" }}
-      />
-      {error && (
-        <div style={{ fontSize: 11, color: "var(--no)", marginTop: 6, lineHeight: 1.4 }}>{LINK_ERROR_COPY[error]}</div>
-      )}
-      <button
-        type="button"
-        onClick={busy ? undefined : onSubmit}
-        disabled={busy}
-        style={{
-          width: "100%", marginTop: 10, padding: "12px 14px", borderRadius: 14, fontFamily: "var(--nf)",
-          fontWeight: 700, fontSize: 14, cursor: busy ? "default" : "pointer",
-          border: "1px solid color-mix(in srgb,var(--energy) 50%,transparent)",
-          background: "color-mix(in srgb,var(--energy) 16%,transparent)",
-          color: "var(--energy)", opacity: busy ? 0.6 : 1,
-        }}
-      >
-        {busy ? "Reading wallet…" : "Link wallet"}
-      </button>
-      <button
-        type="button"
-        onClick={busy ? undefined : onConnect}
-        disabled={busy}
-        style={{
-          width: "100%", marginTop: 8, padding: "11px 14px", borderRadius: 14, fontFamily: "var(--nf)",
-          fontWeight: 700, fontSize: 13, cursor: busy ? "default" : "pointer",
-          border: "1px solid var(--line)", background: "var(--panel2)", color: "var(--text)", opacity: busy ? 0.6 : 1,
-        }}
-      >
-        Connect wallet (Phantom)
-      </button>
-      <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 6, lineHeight: 1.4 }}>
-        A connected wallet is verified and can be offered as a withdrawal destination. A pasted address is read-only.
       </div>
     </div>
   );
