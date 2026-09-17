@@ -54,6 +54,10 @@ jobs:
       - run: npm ci                 # strict install from lockfile (postinstall = prisma generate)
       - run: npm run lint
       - run: npm run contract:check   # mobile/contract/* must equal src/lib/* (scripts/sync-mobile-contract.ts)
+      - run: npm ci                   # the Expo app has its own lockfile and its own deps
+        working-directory: mobile
+      - run: npx tsc --noEmit         # mobile type-check (no Android SDK needed)
+        working-directory: mobile
       - run: npm test               # DB-free units (no DATABASE_URL needed)
       - run: npm run test:db:run    # DB-backed: cash gate, settle, referral, streak recovery
 

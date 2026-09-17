@@ -22,3 +22,10 @@ export const DECK_MIN_LEAD_MS = 5 * 60_000;
 // QUOTE_POLL_MS). Books churn every ~5s, so this keeps the payout the user is staring at honest
 // while they deliberate. Only the top card polls; next-up cards are cold-rendered until they surface.
 export const QUOTE_POLL_MS = 3_000;
+
+// ─── Stocks (mirrors src/lib/config.ts — the server enforces every bound; these size the UI) ───
+export const STOCK_STAKE_PRESETS_CENTS = [1_000, 2_500, 5_000] as const;
+export const STOCK_MIN_STAKE_CENTS = 100; // $1
+export const STOCK_MAX_STAKE_CENTS = 50_000; // $500 fat-finger bound
+export const STOCK_TERMS_VERSION = 1; // bump with the xStocks consent text (the server refuses a stale one)
+export const REAL_BALANCE_POLL_MS = 15_000; // how often a visible real-money balance re-reads

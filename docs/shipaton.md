@@ -188,6 +188,52 @@ Executor topology: Flash writes the hunks, Fable specs / applies / verifies
 | Available through 13 Oct | no unpublish; Pro trial ≥ judging window or promo codes | ⬜ |
 | #BuildInPublic | X thread links (one per gate) | ⬜ |
 
+## 6b. Build log — Seeker first (owner has no Play account yet; decided 2026-09-17)
+
+The order flipped: the Seeker flavor is built first, the Play flavor stays a build-time switch
+(§4) that becomes worth finishing only when the owner has an organization Play account.
+
+**Done 2026-09-17 (branch `claude/playmarket-seeker-architecture-cdce8e`, tsc + Metro export green for
+both flavors, `npm test` + `scripts/test-mwa-link.ts` green):**
+- Two-flavor Expo project: `mobile/app.config.ts` (`APP_FLAVOR=seeker|play` → package, extra.flavor),
+  `mobile/eas.json` (dev-seeker / seeker APK / play AAB), Metro resolves `x.flavor` → `x.<flavor>.ts`
+  and `@contract/*` → `mobile/contract/*` (GENERATED copies of `src/lib/{api-types,share,time,real-terms}.ts`
+  by `npm run contract:sync`; CI runs `contract:check` + a mobile `tsc`). Metro cannot bundle files
+  outside `mobile/` in this project — verified, hence copies, not imports.
+- Wallet port `mobile/src/platform/wallet.{seeker,play}.ts` (contract `wallet.flavor.d.ts`): Seeker = MWA
+  raw protocol (`@solana-mobile/mobile-wallet-adapter-protocol` 2.3.0, base64 in/out, auth token cached
+  in SecureStore, `isUserCancel`/`isNoWallet`); Play = unavailable. The Play bundle contains no MWA call
+  sites (checked by grepping the exported bundle).
+- Server: `GET/POST /api/link/mwa` (SIWS nonce, stateless HMAC, 10-min TTL; ed25519 verify via
+  `@solana/kit`; upserts `HedgeWallet.verifiedAt`), `sameOrigin()` native clause (no `Origin` +
+  `x-hf-client`), `share.ts` base param. Client sends `x-hf-client: <flavor>` on every call.
+- Mobile screens (ported from web by Flash, reviewed): `useBuyReal.ts` (sponsored-only, no pending
+  replay), `StockCard.tsx`, `StockDeckScreen.tsx` (+ `DeckModePill`), `PortfolioScreen.tsx`,
+  `StockConsentSheet.tsx`, `RealModeSheet.tsx` + `RealModeSwitch.tsx`, `TradingWallet.tsx` (MWA connect,
+  pick, USDC balance), `useStockStake.ts`, `tradingWallet.ts`. Root: four tabs (Deck · Hedge · Stocks · You),
+  Deck tab = pill between Stocks and Predictions, Profile carries the mode switch + wallet.
+
+**Deliberate ceilings (ponytail):** self-paid (`feePayer: null`) trades are refused on the phone with a
+pointer at the web app (prod is sponsored); no device-side pending replay (server sweep + wallet-lot
+adoption cover it); no HUD stocks pocket (the Profile shows the USDC balance); predictions stay paper on
+the phone (MWA is Solana-only, Polymarket needs the Privy EVM signer); hedge stock cards not ported.
+
+**Next, in order:**
+1. **[HUMAN/dev machine]** a way to build an APK: `eas login` (Expo account) → `eas build -p android
+   --profile dev-seeker`, or install Android Studio (JDK 17 + SDK) for `npx expo run:android`. Nothing
+   on this machine can produce a native build today.
+2. First device run (any Android phone + a MWA wallet such as Phantom, or a Seeker): login, Profile →
+   Connect wallet (SIWS round trip), Real money on, Stocks deck swipe-right → sign → lot in Portfolio →
+   two-tap sell. Expect the wallet to warn about an unverified dApp identity until step 3.
+3. **Digital Asset Links** for the MWA identity (`uri: https://app.hedgeyour.fun`): serve
+   `public/.well-known/assetlinks.json` from the web app with the Seeker package
+   (`fun.hedgeyour.seeker`) and the signing-cert SHA-256 of whichever key signs the APK.
+4. dApp Store publishing: `npx dapp-store init` in `mobile/` (config.yaml committed), icon 512,
+   banner 1200×600, ≥4 screenshots, publisher wallet **[HUMAN — owner keeps the keypair]**, then
+   publish through the portal.
+5. Play flavor (only once an organization Play account exists): RevenueCat Pro (§3), `/api/me`
+   gating for `play`, listing assets, reviewer test account.
+
 ## 7. Risks, ranked
 
 1. **Play account type** (§2.1). Binary. Ask first.

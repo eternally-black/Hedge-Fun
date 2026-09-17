@@ -16,5 +16,12 @@ export async function signTransaction(_txBase64: string): Promise<string> {
 
 export async function disconnect(): Promise<void> {}
 
-const _port: typeof import("./wallet.flavor") = { available, connect, signTransaction, disconnect };
+export function isUserCancel(_e: unknown): boolean {
+  return false;
+}
+export function isNoWallet(_e: unknown): boolean {
+  return false;
+}
+
+const _port: typeof import("./wallet.flavor") = { available, connect, signTransaction, disconnect, isUserCancel, isNoWallet };
 void _port;

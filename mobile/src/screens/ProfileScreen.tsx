@@ -14,10 +14,13 @@ import { clearRefCode, saveRefCode } from "../refCode";
 import { composeTgShare, composeXShare, INVITE_TG, INVITE_X, refLink } from "@contract/share";
 import { SHARE_BASE_URL } from "../../lib/config";
 import { openShareNative } from "../openShareNative";
+import { RealModeSwitch } from "../components/RealModeSwitch";
+import { TradingWallet } from "../components/TradingWallet";
 
-export function ProfileScreen({ me, api, onLogout, onToast }: {
+export function ProfileScreen({ me, api, onRefreshMe, onLogout, onToast }: {
   me: MeResponse | null;
   api: Api;
+  onRefreshMe: () => Promise<void>;
   onLogout: () => void;
   onToast: (msg: string) => void;
 }) {
@@ -85,6 +88,11 @@ export function ProfileScreen({ me, api, onLogout, onToast }: {
         <Tile label="◆ Shards" value={me ? `${me.shards}/${me.shardsPerArtifact}` : "—"} color={colors.gold} />
         <Tile label="Artifacts" value={me ? String(me.artifacts) : "—"} color={colors.gold} />
       </View>
+
+      {/* Paper/Real switch + the trading wallet — both render nothing on a build without a wallet
+          port (the Play flavor), so this screen is the same file for both stores. */}
+      <RealModeSwitch me={me} api={api} onRefreshMe={onRefreshMe} onToast={onToast} />
+      <TradingWallet me={me} api={api} onRefreshMe={onRefreshMe} onToast={onToast} />
 
       {/* invite — stats from me.referrals, share via the native opener (deep-link → tab → sheet) */}
       <Text style={styles.sectionLabel}>Invite</Text>

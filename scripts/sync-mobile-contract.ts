@@ -8,7 +8,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-const FILES = ["api-types.ts", "share.ts", "time.ts"];
+const FILES = ["api-types.ts", "share.ts", "time.ts", "real-terms.ts"];
 const SRC = join(__dirname, "..", "src", "lib");
 const OUT = join(__dirname, "..", "mobile", "contract");
 

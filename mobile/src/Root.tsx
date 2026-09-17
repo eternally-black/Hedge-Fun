@@ -17,12 +17,19 @@ import { DeckScreen } from "./screens/DeckScreen";
 import { HedgeScreen } from "./screens/HedgeScreen";
 import { ResultsScreen } from "./screens/ResultsScreen";
 import { ProfileScreen } from "./screens/ProfileScreen";
+import { DeckModePill, StockDeckScreen, type DeckMode } from "./screens/StockDeckScreen";
+import { PortfolioScreen } from "./screens/PortfolioScreen";
+import { loadTradingWalletChoice } from "./tradingWallet";
 
 export default function Root() {
   const { isReady, user, logout } = usePrivy();
   const api = useApi();
   const [me, setMe] = useState<MeResponse | null>(null);
   const [screen, setScreen] = useState<Screen>("deck");
+  // Which deck occupies the Deck tab — the same pill the web shows above the card slot.
+  const [deckMode, setDeckMode] = useState<DeckMode>("predictions");
+  // The remembered trading-wallet pick (Profile → Wallet → Use) is read once, before any real trade.
+  useEffect(() => { void loadTradingWalletChoice(); }, []);
   // First-paint gate: spinner until me + results are loaded and the landing screen is decided —
   // the first content frame is already the right screen (mirrors the web boot).
   const [booted, setBooted] = useState(false);
@@ -112,6 +119,8 @@ export default function Root() {
   const goHome = useCallback(() => setScreen("home"), []);
   const goResults = useCallback(() => setScreen("results"), []);
   const goDeck = useCallback(() => setScreen("deck"), []);
+  const goProfile = useCallback(() => setScreen("profile"), []);
+  const goStocksDeck = useCallback(() => setDeckMode("stocks"), []);
 
   if (!isReady) return <Boot />;
   if (!user) return <LoginScreen />;
@@ -123,25 +132,36 @@ export default function Root() {
       <Hud me={me} onGM={goHome} onBalance={openTopup} onBell={goResults} />
       <View style={styles.body}>
         {screen === "home" && <HomeScreen me={me} api={api} onRefreshMe={refreshMe} onEnterDeck={goDeck} />}
-        {/* Real-money accounts must not be handed the paper deck: the server follows the account's
-            mode for history/results, so swipes here would write PAPER bets while /api/history reads
-            REAL — two economies on one screen. Send them to the web app instead. */}
-        {screen === "deck" && me?.real?.mode === "REAL" ? (
-          <View style={styles.realNotice}>
-            <Text style={styles.realNoticeTitle}>Real-money mode is on</Text>
-            <Text style={styles.realNoticeBody}>
-              Trade with real money in the web app — the Android deck plays the paper game.
-            </Text>
-            <TouchableOpacity style={styles.realNoticeBtn} onPress={goHome} accessibilityRole="button">
-              <Text style={styles.realNoticeBtnText}>Back to home</Text>
-            </TouchableOpacity>
+        {/* The Deck tab holds two decks behind one pill. Stocks trade in whichever economy the account
+            is in (real money = the connected wallet, via the Seeker flavor's wallet port). Predictions
+            are paper-only on the phone: a real-money account must not be handed the paper deck (the
+            server follows the account's mode for history/results, so swipes here would write PAPER
+            bets while /api/history reads REAL) — real predictions stay in the web app. */}
+        {screen === "deck" && (
+          <View style={styles.body}>
+            <DeckModePill mode={deckMode} onMode={setDeckMode} />
+            {deckMode === "stocks" ? (
+              <StockDeckScreen me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onNeedWallet={goProfile} />
+            ) : me?.real?.mode === "REAL" ? (
+              <View style={styles.realNotice}>
+                <Text style={styles.realNoticeTitle}>Real-money mode is on</Text>
+                <Text style={styles.realNoticeBody}>
+                  On the phone, real money buys stocks — real-money predictions live in the web app.
+                  Open the Stocks deck, or switch back to play money in Profile.
+                </Text>
+                <TouchableOpacity style={styles.realNoticeBtn} onPress={goStocksDeck} accessibilityRole="button">
+                  <Text style={styles.realNoticeBtnText}>Open the Stocks deck</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <DeckScreen me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openTopup} />
+            )}
           </View>
-        ) : screen === "deck" ? (
-          <DeckScreen me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openTopup} />
-        ) : null}
+        )}
+        {screen === "stocks" && <PortfolioScreen me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onNeedWallet={goProfile} />}
         {screen === "hedge" && <HedgeScreen me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openTopup} />}
         {screen === "results" && <ResultsScreen api={api} onSeen={markResultsSeen} />}
-        {screen === "profile" && <ProfileScreen me={me} api={api} onLogout={doLogout} onToast={flashToast} />}
+        {screen === "profile" && <ProfileScreen me={me} api={api} onRefreshMe={refreshMe} onLogout={doLogout} onToast={flashToast} />}
       </View>
       <BottomNav screen={screen} onNav={setScreen} />
       {toast && (

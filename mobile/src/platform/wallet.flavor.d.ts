@@ -24,3 +24,9 @@ export function signTransaction(txBase64: string): Promise<string>;
 
 /** Forget the cached wallet authorization (the server-side link is untouched). */
 export function disconnect(): Promise<void>;
+
+/** The user dismissed the wallet (declined, closed the sheet, did not sign): silent, no toast. */
+export function isUserCancel(e: unknown): boolean;
+
+/** No compatible wallet app is installed on this phone. */
+export function isNoWallet(e: unknown): boolean;

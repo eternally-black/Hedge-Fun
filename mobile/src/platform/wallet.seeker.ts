@@ -1,7 +1,15 @@
 // Seeker flavor — Mobile Wallet Adapter (raw protocol, no web3.js/kit on the device: MWA speaks
 // base64 payloads, our server speaks base64 payloads, nothing to decode in between).
 // Contract: ./wallet.flavor.d.ts.
-import { transact, type AuthorizationResult, type MobileWallet } from "@solana-mobile/mobile-wallet-adapter-protocol";
+import {
+  SolanaMobileWalletAdapterError,
+  SolanaMobileWalletAdapterErrorCode,
+  SolanaMobileWalletAdapterProtocolError,
+  SolanaMobileWalletAdapterProtocolErrorCode,
+  transact,
+  type AuthorizationResult,
+  type MobileWallet,
+} from "@solana-mobile/mobile-wallet-adapter-protocol";
 import * as SecureStore from "expo-secure-store";
 import type { MwaLinkNonceResponse, MwaLinkRequest } from "@contract/api-types";
 import { API_BASE } from "../../lib/config";
@@ -67,6 +75,28 @@ export async function disconnect(): Promise<void> {
   await SecureStore.deleteItemAsync(AUTH_KEY).catch(() => undefined);
 }
 
+// The two outcomes a screen must tell apart from a real failure: the user backed out (the sheet
+// was dismissed, authorization declined, nothing signed) and there is no wallet app at all.
+export function isUserCancel(e: unknown): boolean {
+  if (e instanceof SolanaMobileWalletAdapterError) {
+    return (
+      e.code === SolanaMobileWalletAdapterErrorCode.ERROR_ASSOCIATION_CANCELLED ||
+      e.code === SolanaMobileWalletAdapterErrorCode.ERROR_SESSION_CLOSED ||
+      e.code === SolanaMobileWalletAdapterErrorCode.ERROR_SESSION_TIMEOUT
+    );
+  }
+  if (e instanceof SolanaMobileWalletAdapterProtocolError) {
+    return (
+      e.code === SolanaMobileWalletAdapterProtocolErrorCode.ERROR_AUTHORIZATION_FAILED ||
+      e.code === SolanaMobileWalletAdapterProtocolErrorCode.ERROR_NOT_SIGNED
+    );
+  }
+  return false;
+}
+export function isNoWallet(e: unknown): boolean {
+  return e instanceof SolanaMobileWalletAdapterError && e.code === SolanaMobileWalletAdapterErrorCode.ERROR_WALLET_NOT_FOUND;
+}
+
 // Conformance to the port — a signature drift here is a tsc error, not a runtime surprise.
-const _port: typeof import("./wallet.flavor") = { available, connect, signTransaction, disconnect };
+const _port: typeof import("./wallet.flavor") = { available, connect, signTransaction, disconnect, isUserCancel, isNoWallet };
 void _port;

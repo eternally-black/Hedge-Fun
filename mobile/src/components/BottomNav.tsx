@@ -1,15 +1,15 @@
-// Bottom tab bar for the vertical slice: Deck / Hedge / GM / Results / You.
+// Bottom tab bar — FOUR tabs, the owner's rule (web BottomNav.tsx): Deck · Hedge · Stocks · You.
+// GM and the results inbox are screens, not tabs: the HUD's streak chip and bell open them.
 import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { colors } from "../theme";
 
-export type Screen = "deck" | "hedge" | "home" | "results" | "profile";
+export type Screen = "deck" | "hedge" | "stocks" | "home" | "results" | "profile";
 
 const TABS: { key: Screen; glyph: string; label: string }[] = [
-  { key: "deck", glyph: "🃏", label: "Deck" },
+  { key: "deck", glyph: "⚡", label: "Deck" },
   { key: "hedge", glyph: "🛡", label: "Hedge" },
-  { key: "home", glyph: "🔥", label: "GM" },
-  { key: "results", glyph: "🔔", label: "Results" },
-  { key: "profile", glyph: "👤", label: "You" },
+  { key: "stocks", glyph: "▲", label: "Stocks" },
+  { key: "profile", glyph: "◉", label: "You" },
 ];
 
 export function BottomNav({ screen, onNav }: { screen: Screen; onNav: (s: Screen) => void }) {
