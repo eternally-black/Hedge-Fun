@@ -68,6 +68,8 @@ export async function POST(req: Request) {
     signatureB64: body.signature,
     userId: user.id,
     expectedDomain: site.enforced ? site.domain : null,
+    expectedUri: site.enforced ? site.origin : null,
+    expectedStatement: SIWS_STATEMENT,
   });
   if (!verdict.ok) return NextResponse.json({ error: verdict.error }, { status: 400 });
 

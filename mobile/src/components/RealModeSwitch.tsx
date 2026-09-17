@@ -10,6 +10,7 @@ import { type Api, statusOf } from "../api";
 import { colors } from "../theme";
 import * as wallet from "../platform/wallet.flavor";
 import { RealModeSheet } from "./RealModeSheet";
+import { REAL_TERMS_VERSION } from "@contract/real-terms";
 
 export function RealModeSwitch({ me, api, onRefreshMe, onToast }: {
   me: MeResponse | null;
@@ -20,11 +21,12 @@ export function RealModeSwitch({ me, api, onRefreshMe, onToast }: {
   const [busy, setBusy] = useState(false);
   const [sheetOpen, setSheetOpen] = useState(false);
 
-  // No wallet in this build (Play flavor) → no real money, no switch. No account yet → nothing to
-  // switch. Both are silent: the row simply isn't there.
-  if (!wallet.available || !me) return null;
-
+  if (!me) return null;
   const isReal = me.real.mode === "REAL";
+  // A build with no wallet (the Play flavor) has no way INTO real money — but always a way OUT: an
+  // account flipped to real on the web must be able to return to play money from this phone too.
+  const canGoReal = wallet.available;
+  if (!canGoReal && !isReal) return null;
 
   // The server's error code, when the failure carried one. Same convention as the web client.
   const codeOf = (e: unknown): string | undefined =>
@@ -57,8 +59,14 @@ export function RealModeSwitch({ me, api, onRefreshMe, onToast }: {
 
   const goReal = async () => {
     if (busy) return;
+    // The sheet shows the text BUNDLED in this binary. If the server now requires a newer version,
+    // accepting here would record consent to words the user never saw — the store update carries them.
+    if (me.real.termsVersion !== REAL_TERMS_VERSION) {
+      onToast("Update the app to accept the new real-money terms");
+      return;
+    }
     // Consent is stale (or never given) → read the terms first; the sheet's accept does the rest.
-    if (me.real.consentVersion !== me.real.termsVersion) {
+    if (me.real.consentVersion !== REAL_TERMS_VERSION) {
       setSheetOpen(true);
       return;
     }
@@ -98,7 +106,7 @@ export function RealModeSwitch({ me, api, onRefreshMe, onToast }: {
     try {
       await api("/api/real/consent", {
         method: "POST",
-        body: JSON.stringify({ accept: true, version: me.real.termsVersion }),
+        body: JSON.stringify({ accept: true, version: REAL_TERMS_VERSION }), // the version this binary rendered
       });
       await api("/api/real/mode", { method: "POST", body: JSON.stringify({ real: true }) });
       setSheetOpen(false);
@@ -134,17 +142,21 @@ export function RealModeSwitch({ me, api, onRefreshMe, onToast }: {
           >
             <Text style={[styles.segText, !isReal && styles.segTextOn]}>Play money</Text>
           </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.segBtn, isReal && styles.segBtnOn]}
-            onPress={() => void goReal()}
-            disabled={busy || isReal}
-          >
-            <Text style={[styles.segText, isReal && styles.segTextOn]}>Real money</Text>
-          </TouchableOpacity>
+          {canGoReal ? (
+            <TouchableOpacity
+              style={[styles.segBtn, isReal && styles.segBtnOn]}
+              onPress={() => void goReal()}
+              disabled={busy || isReal}
+            >
+              <Text style={[styles.segText, isReal && styles.segTextOn]}>Real money</Text>
+            </TouchableOpacity>
+          ) : null}
         </View>
       </View>
       <Text style={styles.hint}>
-        Real money buys tokenized stocks with USDC from your connected wallet. Predictions stay play money on the phone.
+        {canGoReal
+          ? "Real money buys tokenized stocks with USDC from your connected wallet. Predictions stay play money on the phone."
+          : "Real money isn't available in this app. Switch back to play money here; manage real trades on the web."}
       </Text>
 
       <RealModeSheet

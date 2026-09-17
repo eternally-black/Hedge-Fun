@@ -377,6 +377,10 @@ export function useBuyReal(p: {
           onToast("Trading is halted for this stock");
         } else if (status === 409 && code === "buy_in_flight") {
           onToast("Your previous buy of this stock is still confirming — give it a minute");
+        } else if (status === 409 && code === "buy_landed") {
+          // The earlier buy had landed while its confirm was lost; the server just booked it.
+          onToast("Your previous buy of this stock just landed — check your Portfolio");
+          void onRefreshMe?.();
         } else if (status === 409 && code === "hedge_already_accepted") {
           onToast("You already hold this hedge");
         } else if (status === 502 && code === "swap_unavailable") {
@@ -400,7 +404,7 @@ export function useBuyReal(p: {
       onToast(`Bought ${target.symbol} on Solana ✓`);
       onDone?.({ symbol: target.symbol, qtyBase: confirmed.qtyBase, costCents: confirmed.costCents });
     },
-    [api, connectWallet, ensureVerified, hasMe, linkWallet, onDone, onToast, pickWallet, signSubmitConfirm, verified, walletsReady],
+    [api, connectWallet, ensureVerified, hasMe, linkWallet, onDone, onRefreshMe, onToast, pickWallet, signSubmitConfirm, verified, walletsReady],
   );
 
   // The mirror image: sell ONE open REAL lot in full. Same three beats as a buy — build, sign, book —

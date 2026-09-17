@@ -60,6 +60,8 @@ const SIG17 = "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tj
 const SIG18 = "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUo";
 const SIG19 = "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUp";
 const SIG20 = "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUq";
+const SIG_LANDED = "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUv";
+const SIG_GHOST = "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUw";
 const SIG21 = "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUr";
 const SIG22 = "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUs";
 const SIG23 = "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUt";
@@ -1326,6 +1328,56 @@ async function main() {
     assert.strictEqual(getBalanceCalls, 1, "one sponsor balance read for five concurrent probes");
     const bodies = (await Promise.all(probes.map((r) => r.json()))) as unknown[];
     for (const b of bodies) assert.deepStrictEqual(b, bodies[0], "every probe gets the same answer");
+
+    // 24. A stamped BUY past its block height is RESOLVED before another buy of the same asset is built
+    //     (Astra 2026-09-18 P1: the phone has no pending replay, so a lost confirm + a retry inside the
+    //     sweep window must not become two lots).
+    {
+      const meB = { id: userId!, stockConsentVersion: STOCK_TERMS_VERSION };
+      const mkStamped = (sig: string, tag: string) =>
+        prisma.stockBuyAttempt.create({
+          data: {
+            userId: userId!,
+            assetId: assetId!,
+            payer: PAYER,
+            stakeCents: 100,
+            inAmountMicro: 1_000_000n,
+            minOutBase: 297_834n,
+            msgHash: `landed-${tag}`,
+            lastValidBlockHeight: 1000n,
+            sponsored: true,
+            sig,
+          },
+        });
+      await prisma.stockBuyAttempt.deleteMany({ where: { userId: userId!, assetId: assetId!, kind: "BUY", status: "PENDING" } });
+      usdcRaw = 100_000_000n;
+      walletRaw = 0n;
+      const buyAgain = () => buildAttempt(meB, { assetId: assetId!, stakeCents: 100, payer: PAYER });
+
+      // 24a. Still inside the block-height window -> buy_in_flight (unchanged behaviour).
+      const inFlight = await mkStamped(SIG_LANDED, "a");
+      height = 900;
+      await assert.rejects(buyAgain(), (e: unknown) => (e as Error).message === "buy_in_flight");
+
+      // 24b. Past the window and the tx LANDED (confirm was lost) -> the lot is booked now, rebuild refused.
+      height = 2000;
+      TXS[SIG_LANDED] = makeTx(1_000_000n, 299_330n);
+      await assert.rejects(buyAgain(), (e: unknown) => (e as Error).message === "buy_landed");
+      assert.strictEqual((await prisma.stockBuyAttempt.findUniqueOrThrow({ where: { id: inFlight.id } })).status, "CONFIRMED");
+      const landedLot = await prisma.stockPosition.findUniqueOrThrow({ where: { attemptId: inFlight.id } });
+      assert.strictEqual(landedLot.qtyBase, 299_330n);
+      // The same tap again: nothing stamped is pending any more -> a fresh buy IS built.
+      const fresh = await buyAgain();
+      assert.ok(fresh.attemptId, "a new attempt after the landed one was booked");
+      await prisma.stockBuyAttempt.update({ where: { id: fresh.attemptId }, data: { status: "EXPIRED" } });
+
+      // 24c. Past the window and NOT on chain -> the sweep's problem; a fresh buy is allowed.
+      const ghost = await mkStamped(SIG_GHOST, "c");
+      const fresh2 = await buyAgain();
+      assert.ok(fresh2.attemptId && fresh2.attemptId !== ghost.id);
+      assert.strictEqual((await prisma.stockBuyAttempt.findUniqueOrThrow({ where: { id: ghost.id } })).status, "PENDING");
+      await prisma.stockBuyAttempt.updateMany({ where: { id: { in: [ghost.id, fresh2.attemptId] } }, data: { status: "EXPIRED" } });
+    }
 
     console.log("test-stocks-real-db: OK");
   } finally {

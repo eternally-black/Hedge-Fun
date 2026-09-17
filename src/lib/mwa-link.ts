@@ -42,16 +42,58 @@ export function checkMwaNonce(nonce: string, userId: string, now = Date.now(), k
   return now - issuedAt > MWA_NONCE_TTL_MS ? "expired" : "ok";
 }
 
-// The SIWS message the wallet signed (phantom/sign-in-with-solana ABNF): line 1 is
-// "<domain> wants you to sign in with your Solana account:", line 2 the base58 address, then an
-// optional statement and optional "Key: value" advanced fields. Only the three we bind are read.
-export function parseSiws(text: string): { domain: string; address: string; nonce: string | null } | null {
+// The SIWS message the wallet signed, read STRUCTURALLY (phantom/sign-in-with-solana ABNF, LF only):
+//
+//   <domain> wants you to sign in with your Solana account:
+//   <address>
+//   [ blank line, <statement> ]
+//   [ blank line, "Key: value" lines — "Resources:" is followed by "- <uri>" lines ]
+//
+// Position decides what a line is: a statement that reads "Nonce: …" is still the statement, and a
+// field may appear once. Searching the text for "Nonce:" would let a statement stand in for the field.
+export interface SiwsMessage {
+  domain: string;
+  address: string;
+  statement: string | null;
+  fields: Map<string, string[]>;
+}
+const FIELD = /^([A-Z][A-Za-z ]*):(?: (.*))?$/;
+export function parseSiws(text: string): SiwsMessage | null {
+  if (text.includes("\r")) return null; // the ABNF is LF-only; a CRLF message was not built by a wallet
   const lines = text.split("\n");
+  if (lines.length > 2 && lines[lines.length - 1] === "") lines.pop(); // tolerate ONE trailing newline
   const head = /^(.+) wants you to sign in with your Solana account:$/.exec(lines[0] ?? "");
-  const address = (lines[1] ?? "").trim();
+  const address = lines[1] ?? "";
   if (!head || !address) return null;
-  const nonceLine = lines.find((l) => l.startsWith("Nonce: "));
-  return { domain: head[1], address, nonce: nonceLine ? nonceLine.slice("Nonce: ".length).trim() : null };
+
+  let i = 2;
+  let statement: string | null = null;
+  // A statement is the line between two blank lines (ABNF: LF LF statement, then LF before each field).
+  // Fields never have a blank line among them, so "blank, X, blank" makes X the statement even when X
+  // reads like a field ("Nonce: …"). A lone trailing X (no fields at all) is a statement unless it parses
+  // as a field — either way it cannot carry the nonce we need.
+  if (lines[i] === "" && lines[i + 1] !== undefined && lines[i + 1] !== "") {
+    const atEnd = i + 2 >= lines.length;
+    if (lines[i + 2] === "" || (atEnd && !FIELD.test(lines[i + 1]))) {
+      statement = lines[i + 1];
+      i += 2;
+    }
+  }
+  const fields = new Map<string, string[]>();
+  if (i < lines.length) {
+    if (lines[i] !== "") return null; // the advanced fields are separated by exactly one blank line
+    for (i++; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.startsWith("- ")) {
+        if (!fields.has("Resources")) return null;
+        continue;
+      }
+      const m = FIELD.exec(line);
+      if (!m) return null;
+      fields.set(m[1], [...(fields.get(m[1]) ?? []), m[2] ?? ""]);
+    }
+  }
+  return { domain: head[1], address, statement, fields };
 }
 
 export type SiwsLinkError =
@@ -59,7 +101,9 @@ export type SiwsLinkError =
   | "bad_message" // not a SIWS message
   | "domain_mismatch" // signed for another site
   | "address_mismatch" // message names a different account than the one that signed
-  | "bad_nonce" // not ours / not this user's
+  | "statement_mismatch" // not the link request we issued (or no statement at all)
+  | "uri_mismatch" // URI field missing, doubled, or pointing elsewhere
+  | "bad_nonce" // missing, doubled, not ours, or not this user's
   | "nonce_expired"
   | "bad_signature";
 export type SiwsLinkResult = { ok: true; address: Address } | { ok: false; error: SiwsLinkError };
@@ -71,6 +115,8 @@ export interface SiwsLinkInput {
   signatureB64: string;
   userId: string; // whose nonce it must be
   expectedDomain: string | null; // null = not enforced (APP_ORIGIN unset, dev)
+  expectedUri: string | null; // the origin we issued in GET /api/link/mwa; null = not enforced (dev)
+  expectedStatement: string; // the statement we issued — binds the signature to THIS request
   now?: number;
   key?: string;
 }
@@ -86,8 +132,12 @@ export async function verifySiwsLink(i: SiwsLinkInput): Promise<SiwsLinkResult> 
   if (!parsed) return { ok: false, error: "bad_message" };
   if (i.expectedDomain && parsed.domain !== i.expectedDomain) return { ok: false, error: "domain_mismatch" };
   if (parsed.address !== address) return { ok: false, error: "address_mismatch" };
-  if (!parsed.nonce) return { ok: false, error: "bad_nonce" };
-  const n = checkMwaNonce(parsed.nonce, i.userId, i.now, i.key);
+  if (parsed.statement !== i.expectedStatement) return { ok: false, error: "statement_mismatch" };
+  const uri = parsed.fields.get("URI");
+  if (i.expectedUri && (uri?.length !== 1 || uri[0] !== i.expectedUri)) return { ok: false, error: "uri_mismatch" };
+  const nonces = parsed.fields.get("Nonce");
+  if (!nonces || nonces.length !== 1) return { ok: false, error: "bad_nonce" };
+  const n = checkMwaNonce(nonces[0], i.userId, i.now, i.key);
   if (n !== "ok") return { ok: false, error: n === "expired" ? "nonce_expired" : "bad_nonce" };
 
   const key = await getPublicKeyFromAddress(address);

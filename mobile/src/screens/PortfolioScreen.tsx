@@ -10,6 +10,7 @@ import { colors, withAlpha } from "../theme";
 import { usd } from "../format";
 import { useBuyReal } from "../useBuyReal";
 import { StockConsentSheet } from "../components/StockConsentSheet";
+import * as wallet from "../platform/wallet.flavor";
 import { REAL_BALANCE_POLL_MS } from "../../lib/config";
 
 // The Portfolio (Stocklana): every tokenized-stock lot the user owns, paper and on-chain, in one
@@ -67,6 +68,7 @@ export function PortfolioScreen({
     me,
     onToast,
     onNeedWallet,
+    onRefreshMe,
     ctx: { wallets: data?.wallets ?? [], stockConsent: data?.stockConsent ?? false, sponsored: data?.sponsored },
     onDone,
   });
@@ -200,6 +202,7 @@ export function PortfolioScreen({
                   <OpenRow
                     key={row.id}
                     row={row}
+                    canSell={row.mode === "PAPER" || wallet.available}
                     armedSell={armed === row.id}
                     selling={selling === row.id}
                     onArmSell={() => arm(row.id)}
@@ -277,12 +280,15 @@ function fmtQty(row: StockPositionRow): string {
 
 function OpenRow({
   row,
+  canSell,
   armedSell,
   selling,
   onArmSell,
   onSell,
 }: {
   row: StockPositionRow;
+  // false on a build with no wallet (Play flavor): an on-chain lot is shown, never sold from here.
+  canSell: boolean;
   armedSell: boolean;
   selling: boolean;
   onArmSell: () => void;
@@ -330,19 +336,23 @@ function OpenRow({
       <View style={styles.rowActions}>
         {/* Same two-tap for both modes — a REAL sell is a swap back to USDC, which is no more
             undoable than a paper one, so it gets the same "are you sure" gesture and the same look. */}
-        <TouchableOpacity
-          disabled={selling}
-          onPress={armedSell ? onSell : onArmSell}
-          style={[
-            styles.sellBtn,
-            armedSell && styles.sellBtnArmed,
-            selling && styles.sellBtnDisabled,
-          ]}
-        >
-          <Text style={[styles.sellText, armedSell && styles.sellTextArmed]}>
-            {selling ? "Selling…" : armedSell ? "Sell?" : row.mode === "REAL" ? "◎ Sell on Solana" : "Sell"}
-          </Text>
-        </TouchableOpacity>
+        {canSell ? (
+          <TouchableOpacity
+            disabled={selling}
+            onPress={armedSell ? onSell : onArmSell}
+            style={[
+              styles.sellBtn,
+              armedSell && styles.sellBtnArmed,
+              selling && styles.sellBtnDisabled,
+            ]}
+          >
+            <Text style={[styles.sellText, armedSell && styles.sellTextArmed]}>
+              {selling ? "Selling…" : armedSell ? "Sell?" : row.mode === "REAL" ? "◎ Sell on Solana" : "Sell"}
+            </Text>
+          </TouchableOpacity>
+        ) : (
+          <Text style={styles.sellOnWeb}>Sell on the web</Text>
+        )}
       </View>
     </View>
   );
@@ -432,6 +442,7 @@ const styles = StyleSheet.create({
   sellBtnDisabled: { opacity: 0.5 },
   sellText: { color: colors.muted, fontWeight: "700", fontSize: 11 },
   sellTextArmed: { color: "#1a1205" },
+  sellOnWeb: { color: colors.muted, fontSize: 11, paddingVertical: 7 },
   closedSection: { marginTop: 20 },
   closedToggle: { flexDirection: "row", alignItems: "center", gap: 8 },
   closedToggleText: { color: colors.muted, fontSize: 11, letterSpacing: 1.4, textTransform: "uppercase", fontWeight: "700" },

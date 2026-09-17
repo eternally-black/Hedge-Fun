@@ -72,6 +72,8 @@ export function StockDeckScreen({ me, api, onRefreshMe, onToast, onNeedWallet }:
   // The server holds a fee-payer: real buys are gasless, so the footer can promise it.
   const [sponsored, setSponsored] = useState(false);
   const [busy, setBusy] = useState(false);
+  // The server dealt nothing new on the last refill: stop asking until a card leaves the deck.
+  const [exhausted, setExhausted] = useState(false);
 
   // Every card id this session has already put in front of the user. Same rationale as the
   // prediction deck's freshness prune: a passed card is gone from the deck, so dedupe-by-deck would
@@ -114,6 +116,7 @@ export function StockDeckScreen({ me, api, onRefreshMe, onToast, onNeedWallet }:
     if (!hasMe) return;
     if (lastMode.current !== null && lastMode.current !== realMode) {
       served.current.clear();
+      setExhausted(false);
       void load();
     }
     lastMode.current = realMode;
@@ -123,12 +126,17 @@ export function StockDeckScreen({ me, api, onRefreshMe, onToast, onNeedWallet }:
   // the current one. `topping` dedupes so only one fetch is in flight.
   const topUpIfLow = useCallback(
     async (remaining: number) => {
-      if (remaining > REFILL_AT || topping.current) return;
+      if (remaining > REFILL_AT || topping.current || exhausted) return;
       topping.current = true;
       try {
         const r = (await api("/api/stocks/deck")) as StockDeckResponse;
-        setCards((cur) => [...(cur ?? []), ...r.cards.filter((c) => !served.current.has(c.id))]);
+        // Decide what is new BEFORE touching `served` (a state updater must stay pure), and leave the
+        // array untouched when nothing is: a fresh identity for the same cards would re-fire the
+        // count-driven refill below and fetch in a loop while the server has ≤ REFILL_AT cards left.
+        const fresh = r.cards.filter((c) => !served.current.has(c.id));
         for (const c of r.cards) served.current.add(c.id);
+        if (fresh.length === 0) setExhausted(true);
+        else setCards((cur) => [...(cur ?? []), ...fresh]);
         setWallets(r.wallets);
         setStockConsent(r.stockConsent);
         setSponsored(r.sponsored);
@@ -138,7 +146,7 @@ export function StockDeckScreen({ me, api, onRefreshMe, onToast, onNeedWallet }:
         topping.current = false;
       }
     },
-    [api],
+    [api, exhausted],
   );
 
   const top = cards?.[0];
@@ -149,12 +157,14 @@ export function StockDeckScreen({ me, api, onRefreshMe, onToast, onNeedWallet }:
   // away a card they never acted on. A card already gone (skipped, passed) is a no-op.
   const removeCard = useCallback((id: string) => {
     setCards((d) => (d ?? []).filter((c) => c.id !== id));
+    setExhausted(false); // a card left — the server may have something new by now
   }, []);
 
   // The refill is driven by the deck's LENGTH, not fired from inside the updater above: a state
   // updater must be pure (React is free to call it twice), and a fetch in there is a second deck
   // request on every removal in StrictMode.
-  useEffect(() => { if (cards !== null) void topUpIfLow(cards.length); }, [cards, topUpIfLow]);
+  const count = cards?.length ?? -1; // -1 = not loaded yet
+  useEffect(() => { if (count >= 0) void topUpIfLow(count); }, [count, topUpIfLow]);
 
   // The card a real buy was started on. A REAL buy is a wallet signature plus a chain confirmation —
   // seconds to minutes — so which card it belongs to has to be remembered, not re-derived on done.
@@ -174,6 +184,7 @@ export function StockDeckScreen({ me, api, onRefreshMe, onToast, onNeedWallet }:
     me,
     onToast,
     onNeedWallet,
+    onRefreshMe,
     ctx: { wallets, stockConsent, sponsored },
     onDone,
   });

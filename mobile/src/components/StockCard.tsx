@@ -229,6 +229,8 @@ export function StockDeckCard({
   const committedRef = useRef(false);
   const onCommitRef = useRef(onAction);
   useEffect(() => { onCommitRef.current = onAction; }, [onAction]);
+  const mounted = useRef(true);
+  useEffect(() => () => { mounted.current = false; }, []);
 
   const responder = useRef(
     PanResponder.create({
@@ -252,6 +254,15 @@ export function StockDeckCard({
           Animated.timing(pan, { toValue, duration: FLY_MS, useNativeDriver: false }).start();
           // Hand off mid-fling so the next card starts rising at the 50% point (overlap).
           setTimeout(() => onCommitRef.current(dir), Math.round(FLY_MS / 2));
+          // A paper buy, a pass and a skip remove this card at once (it unmounts). A REAL buy keeps it
+          // until /confirm books the lot — and a cancelled or failed one keeps it for good. If the card
+          // is still mounted once the fling is over, nothing removed it: bring it back and re-arm the
+          // gesture, so the deck the user sees is the deck the buttons act on.
+          setTimeout(() => {
+            if (!mounted.current) return;
+            committedRef.current = false;
+            Animated.spring(pan, { toValue: { x: 0, y: 0 }, useNativeDriver: false, bounciness: 14 }).start();
+          }, FLY_MS + 150);
         } else {
           Animated.spring(pan, { toValue: { x: 0, y: 0 }, useNativeDriver: false, bounciness: 14 }).start();
         }

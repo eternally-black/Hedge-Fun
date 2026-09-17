@@ -66,6 +66,9 @@ export function TradingWallet({ me, api, onRefreshMe, onToast }: {
       const siws = (await api("/api/link/mwa")) as MwaLinkNonceResponse;
       const proof = await wallet.connect(siws);
       const res = (await api("/api/link/mwa", { method: "POST", body: JSON.stringify(proof) })) as MwaLinkResponse;
+      // File this wallet's grant under the verified base58 address, so signing for it later re-uses
+      // the same wallet account instead of whichever one the wallet app opens first.
+      await wallet.bindPayer(res.address, proof.address);
       setTradingWalletChoice(res.address);
       await onRefreshMe();
       onToast("Wallet connected ✓");

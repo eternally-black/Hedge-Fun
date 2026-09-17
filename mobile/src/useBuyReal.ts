@@ -60,6 +60,8 @@ export function useBuyReal(p: {
   onDone?: (r: { symbol: string; qtyBase: string; costCents: number }) => void;
   // The screen's way to send the user to Profile → Connect wallet. There is no in-place link flow on the phone.
   onNeedWallet?: () => void;
+  // Re-read /api/me — the server may have booked something on our behalf (buy_landed).
+  onRefreshMe?: () => void | Promise<void>;
   // What the screen already knows (wallets / consent / sponsored). Read during render only — never a
   // callback dependency — so the exposed callbacks stay stable.
   ctx?: BuyRealCtx;
@@ -76,7 +78,7 @@ export function useBuyReal(p: {
   /** The server holds a fee-payer: the user needs USDC only, no SOL. */
   sponsored: boolean;
 } {
-  const { api, me, onToast, onDone, onNeedWallet, ctx: screenCtx } = p;
+  const { api, me, onToast, onDone, onNeedWallet, onRefreshMe, ctx: screenCtx } = p;
   const [busy, setBusy] = useState(false);
   // ONE real trade at a time, whichever screen asked for it. `busy` cannot be the guard: it is state,
   // so two taps in the same tick both read it as false and both spend the user's USDC.
@@ -100,7 +102,7 @@ export function useBuyReal(p: {
   // sign → land → book: the one place a signature becomes a booked lot. A buy and a sell reach it
   // with different quotes and leave it with different toasts; everything between is identical.
   const signSubmitConfirm = useCallback(
-    async (built: BuiltSwap): Promise<StockRealConfirmResponse | null> => {
+    async (built: BuiltSwap, kind: "buy" | "sell", payer: string): Promise<StockRealConfirmResponse | null> => {
       // SPONSORED ONLY. A self-paid swap is signed AND sent by the wallet, and the MWA port signs only —
       // so the honest answer is to point at the web app rather than build a half-working path.
       if (built.feePayer === null) {
@@ -113,11 +115,12 @@ export function useBuyReal(p: {
       let signedTransaction: string;
       try {
         // Base64 in, base64 out — the wallet port speaks the wire format, no byte conversion here.
-        signedTransaction = await wallet.signTransaction(built.swapTransaction);
+        signedTransaction = await wallet.signTransaction(built.swapTransaction, payer);
       } catch (e) {
         // A deliberate cancel is the user's own decision — silent, no toast.
         if (wallet.isUserCancel(e)) return null;
         if (wallet.isNoWallet(e)) onToast("No Solana wallet app found on this phone");
+        else if (e instanceof Error && e.message === "wallet_account_mismatch") onToast("The wallet opened a different account — switch to the one you connected, then tap again");
         else onToast("Couldn't sign the transaction");
         return null;
       }
@@ -140,7 +143,12 @@ export function useBuyReal(p: {
         // with the signature already stamped on the attempt, so a lost acknowledgement is recovered
         // by the server sweep. Inviting a retry here would double-spend — and a rebuild is refused
         // with buy_in_flight anyway, so promising "try again" would be a lie as well.
-        else if (status === undefined || status >= 500) onToast("Solana is busy — if it went through, your lot appears within a few minutes");
+        else if (status === undefined || status >= 500)
+          onToast(
+            kind === "buy"
+              ? "Solana is busy — if it went through, your lot appears within a few minutes"
+              : "Solana is busy — if it went through, the sale shows in your Portfolio within a few minutes",
+          );
         else onToast("Couldn't send the transaction");
         return null;
       }
@@ -229,12 +237,17 @@ export function useBuyReal(p: {
           onToast("Trading is halted for this stock");
         } else if (status === 409 && code === "buy_in_flight") {
           onToast("Your previous buy of this stock is still confirming — give it a minute");
+        } else if (status === 409 && code === "buy_landed") {
+          // The earlier buy had landed while its confirm was lost; the server just booked it.
+          onToast("Your previous buy of this stock just landed — check your Portfolio");
+          void onRefreshMe?.();
         } else if (status === 409 && code === "hedge_already_accepted") {
           onToast("You already hold this hedge");
         } else if (status === 502 && code === "swap_unavailable") {
           onToast("Jupiter is busy — try again");
         } else if (status === 502 && code === "rpc_unavailable") {
-          onToast("Solana RPC is busy — your buy will be picked up automatically");
+          // Nothing was signed yet, so nothing can be "picked up" — this one is a plain retry.
+          onToast("Solana RPC is busy — try again");
         } else {
           onToast("Couldn't start that buy — try again");
         }
@@ -247,18 +260,23 @@ export function useBuyReal(p: {
       if (usedCents < stakeCents) onToast(`Buying with your full ${usd(usedCents)}`);
 
       // 3. Sign, land, book — and only then advance the card.
-      const confirmed = await signSubmitConfirm(tx);
+      const confirmed = await signSubmitConfirm(tx, "buy", payer);
       if (!confirmed) return;
       onToast(`Bought ${target.symbol} on Solana ✓`);
       onDone?.({ symbol: target.symbol, qtyBase: confirmed.qtyBase, costCents: confirmed.costCents });
     },
-    [api, hasMe, onDone, onNeedWallet, onToast, signSubmitConfirm, verified, walletAddress],
+    [api, hasMe, onDone, onNeedWallet, onRefreshMe, onToast, signSubmitConfirm, verified, walletAddress],
   );
 
   // The mirror image: sell ONE open REAL lot in full. Same three beats as a buy — build, sign, book —
   // through the same tail.
   const runSell = useCallback(
     async (positionId: string, ctx: BuyRealCtx, opts?: { symbol?: string }) => {
+      // Same gate as a buy: a build without a wallet never builds a sale either.
+      if (!wallet.available) {
+        onToast("Real-money trades aren't available in this build");
+        return;
+      }
       let tx: StockRealSellTxResponse;
       try {
         tx = (await api("/api/stocks/real/sell-tx", { method: "POST", body: JSON.stringify({ positionId }) })) as StockRealSellTxResponse;
@@ -294,7 +312,7 @@ export function useBuyReal(p: {
       // answer (tx.payer), not our pick. There is no wallet list to search — the wallet app signs with
       // the account that holds the key (and refuses if it does not), and the server has already
       // checked that this lot belongs to the caller.
-      const confirmed = await signSubmitConfirm(tx);
+      const confirmed = await signSubmitConfirm(tx, "sell", tx.payer);
       if (!confirmed) return;
       const symbol = opts?.symbol ?? "";
       onToast(`Sold ${symbol}${symbol ? " " : ""}· ${signed(confirmed.pnlCents ?? 0)}`);

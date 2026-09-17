@@ -222,8 +222,23 @@ export async function buildAttempt(
     where: { userId: user.id, assetId: asset.id, kind: "BUY", status: "PENDING", sponsored: true, sig: { not: null } },
     orderBy: { createdAt: "desc" },
   });
-  if (inFlight && (await getBlockHeight()) <= Number(inFlight.lastValidBlockHeight)) {
-    throw new StockUnavailableError("buy_in_flight");
+  if (inFlight?.sig) {
+    if ((await getBlockHeight()) <= Number(inFlight.lastValidBlockHeight)) {
+      throw new StockUnavailableError("buy_in_flight");
+    }
+    // Past its block height it either LANDED (and the device's confirm was lost) or it never will.
+    // Resolve it BEFORE building another swap: the sweep only reaches it minutes later, and a retry
+    // inside that window is how one tap becomes two lots. Same shape as buildSellAttempt's stamped
+    // sell — a landed receipt books the lot right here and refuses the rebuild; not on chain (the
+    // sweep will EXPIRE it) or a spent/failed signature (confirm already marked it) allows a fresh buy.
+    let landed = false;
+    try {
+      await confirmAttempt(user.id, inFlight.id, inFlight.sig, { polls: 1, sleepMs: 0 });
+      landed = true;
+    } catch (e) {
+      if (!(e instanceof TxNotFoundError) && !(e instanceof TxRejectedError)) throw e;
+    }
+    if (landed) throw new StockUnavailableError("buy_landed");
   }
 
   // Size the buy to what the wallet actually holds: a chip larger than the USDC balance would become

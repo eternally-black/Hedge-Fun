@@ -613,6 +613,8 @@ export type StockConsentResponse = { ok: true; version: number };
 // VERIFIED wallet `payer` and records a StockBuyAttempt. Nothing is spent here. Errors: 400, 403
 // stock_consent_required | wallet_not_verified, 404 asset_not_found, 409 asset_halted | price_impact
 // | buy_in_flight (a sponsored buy of this asset is already sent and may still land — wait for it)
+// | buy_landed (the previous sponsored buy of this asset had landed while its confirm was lost; it is booked
+//   NOW — re-read the portfolio instead of buying again)
 // | hedge_already_accepted (that suggestion is already in a lot), 502 swap_unavailable.
 // `assetId` OR `symbol` names the asset (a hedge card knows only the symbol).
 export interface StockRealTxRequest { assetId?: string; symbol?: string; stakeCents: number; payer: string; hedgeSuggestionId?: string }
@@ -663,7 +665,8 @@ export interface MwaLinkNonceResponse { domain: string; uri: string; statement: 
 // ─── POST /api/link/mwa ────  Auth: Bearer + same-origin (native clause: no Origin + `x-hf-client`). Body = the
 // wallet's `sign_in_result` verbatim — all three fields base64 (MWA spec). A valid proof marks the address a
 // VERIFIED hedge wallet (the flag Privy-linked wallets carry), so /api/stocks/real/tx accepts it as `payer`.
-// Errors: 400 { error: bad_request | bad_encoding | bad_message | domain_mismatch | address_mismatch | bad_nonce |
-// nonce_expired | bad_signature }, 401, 403 bad_origin, 429, 503 auth_unavailable.
+// Errors: 400 { error: bad_request | bad_encoding | bad_message | domain_mismatch | address_mismatch |
+// statement_mismatch | uri_mismatch | bad_nonce | nonce_expired | bad_signature }, 401, 403 bad_origin, 429,
+// 503 auth_unavailable.
 export interface MwaLinkRequest { address: string; signed_message: string; signature: string }
 export interface MwaLinkResponse { address: string; verified: true } // base58 — what the client stores as its trading wallet
