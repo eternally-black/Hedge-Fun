@@ -42,6 +42,12 @@ export function effectiveRealMode(user: {
 export function sameOrigin(req: Request): boolean {
   const appOrigin = process.env.APP_ORIGIN;
   if (!appOrigin) return true;
-  return req.headers.get("origin") === appOrigin;
+  const origin = req.headers.get("origin");
+  if (origin === appOrigin) return true;
+  // Native clients (the Expo app, mobile/src/api.ts) have no Origin. A browser cannot omit Origin
+  // on a cross-site POST, and the custom header would force a CORS preflight this server never
+  // answers — so "no Origin + x-hf-client" can only come from a non-browser holding a Bearer token.
+  return origin === null && NATIVE_CLIENTS.has(req.headers.get("x-hf-client") ?? "");
 }
+const NATIVE_CLIENTS = new Set(["seeker", "play"]);
 export const ORIGIN_ENFORCED = !!process.env.APP_ORIGIN;

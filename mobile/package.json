@@ -6,6 +6,7 @@
     "@ethersproject/shims": "^5.8.0",
     "@privy-io/expo": "^0.70.3",
     "@privy-io/expo-native-extensions": "^0.0.12",
+    "@solana-mobile/mobile-wallet-adapter-protocol": "^2.3.0",
     "expo": "~57.0.7",
     "expo-apple-authentication": "~57.0.1",
     "expo-application": "~57.0.2",

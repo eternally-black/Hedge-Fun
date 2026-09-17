@@ -3,7 +3,7 @@
 // Burned streaks can be revived with 1 artifact right here (POST /api/recover).
 import { useCallback, useState } from "react";
 import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View } from "react-native";
-import type { MeResponse, StreakState } from "../../lib/api-types";
+import type { MeResponse, StreakState } from "@contract/api-types";
 import { type Api } from "../api";
 import { colors } from "../theme";
 import { readRefCode } from "../refCode";

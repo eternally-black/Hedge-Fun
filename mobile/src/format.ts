@@ -1,6 +1,6 @@
 // Display helpers — a NATIVE PORT of the pure, deck-mix-free parts of src/app/ui.ts.
 // Prices/labels/countdowns are derived from server data only; the economy is never re-derived.
-import type { DeckCard, ResultRow } from "../lib/api-types";
+import type { DeckCard, ResultRow } from "@contract/api-types";
 
 // Price as Polymarket shows it: cents per share. bp/100 = cents (5150bp -> 51.5¢). Whole cents
 // when integer, one decimal otherwise. Sides need NOT sum to 100¢ (spread is real) — no rounding.

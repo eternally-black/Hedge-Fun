@@ -53,6 +53,7 @@ jobs:
           cache: npm
       - run: npm ci                 # strict install from lockfile (postinstall = prisma generate)
       - run: npm run lint
+      - run: npm run contract:check   # mobile/contract/* must equal src/lib/* (scripts/sync-mobile-contract.ts)
       - run: npm test               # DB-free units (no DATABASE_URL needed)
       - run: npm run test:db:run    # DB-backed: cash gate, settle, referral, streak recovery
 

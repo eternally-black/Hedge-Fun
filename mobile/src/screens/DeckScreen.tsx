@@ -4,7 +4,7 @@
 // hard stop. The economy stays server-owned — the client renders /api/me and never re-derives it.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, AppState, StyleSheet, Text, TouchableOpacity, View } from "react-native";
-import type { DeckCard as DeckCardT, DeckResponse, MeResponse, QuotesResponse } from "../../lib/api-types";
+import type { DeckCard as DeckCardT, DeckResponse, MeResponse, QuotesResponse } from "@contract/api-types";
 import { priceMovedBp, statusOf, type Api } from "../api";
 import { colors } from "../theme";
 import { DECK_MIN_LEAD_MS, QUOTE_POLL_MS } from "../../lib/config";

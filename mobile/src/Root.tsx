@@ -7,7 +7,7 @@ import { usePrivy } from "@privy-io/expo";
 import { useApi, statusOf } from "./api";
 import { colors } from "./theme";
 import { clearRefCode, readInstallReferrerCode, readRefCode, saveRefCode } from "./refCode";
-import type { CaptureRefResponse, MeResponse, ResultsResponse } from "../lib/api-types";
+import type { CaptureRefResponse, MeResponse, ResultsResponse } from "@contract/api-types";
 import { Hud } from "./components/Hud";
 import { BottomNav, type Screen } from "./components/BottomNav";
 import { TopupSheet } from "./components/TopupSheet";

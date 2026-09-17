@@ -29,7 +29,7 @@ import type {
   HedgeWalletResponse,
   HedgeWalletStateResponse,
   MeResponse,
-} from "../../lib/api-types";
+} from "@contract/api-types";
 import { statusOf, type Api } from "../api";
 import { colors } from "../theme";
 import { HedgeCard, type AcceptedInfo } from "../components/HedgeCard";

@@ -1,4 +1,4 @@
-// COPIED from src/lib/api-types.ts — sync manually, do not diverge
+// GENERATED from src/lib/api-types.ts by scripts/sync-mobile-contract.ts — do not edit here.
 // ─── API CONTRACT ──────────────────────────────────────────────────────────────────────────
 // The shapes the HTTP API (src/app/api/*) returns. This is the SINGLE SOURCE OF TRUTH for the
 // request/response contract shared by the web client AND the upcoming Android (Expo/RN) app.
@@ -19,7 +19,7 @@
 
 // String enums mirrored from Prisma so this file stays @prisma/client-free (RN has no Prisma).
 export type BetSide = "YES" | "NO";
-export type BetSource = "DECK" | "FEED" | "HEDGE"; // DECK = swipe deck (points + capped shards); FEED = post-cap feed (no points, uncapped shards); HEDGE = an accepted hedge leg (no points, no cap)
+export type BetSource = "DECK" | "FEED" | "HEDGE" | "WALLET"; // DECK = swipe deck (points + capped shards); FEED = post-cap feed (no points, uncapped shards); HEDGE = an accepted hedge leg (no points, no cap); WALLET = a stock lot adopted from the user's own wallet
 export type StreakState = "ACTIVE" | "BURNED_RECOVERABLE" | "LOST";
 export type PointsType = "SWIPE" | "LOGIN" | "REFERRAL" | "STREAK_X2";
 export type BetStatus = "PENDING" | "WIN" | "LOSS" | "PUSH";
@@ -597,7 +597,7 @@ export type StockPassResponse = { ok: true };
 // ─── GET /api/stocks/portfolio ────  Auth: Bearer. Open + recent closed lots, both modes, priced from
 // the STORED asset price (refreshed every poller tick; `fresh` false when older than the staleness
 // bound). REAL lots are reconciled against the payer's live wallet balance at most every few hours.
-export interface StockPositionRow { id: string; assetId: string; symbol: string; name: string; blurb: string | null; logoUrl: string | null; mode: "PAPER" | "REAL"; source: "DECK" | "HEDGE"; qtyBase: string; decimals: number; uiMultiplierMicro: number | null; costCents: number; entryPriceCents: number; priceCents: number | null; valueCents: number | null; pnlCents: number | null; fresh: boolean; txSig: string | null; sellTxSig: string | null; payer: string | null; createdAt: string; closedAt: string | null; closeReason: string | null; proceedsCents: number | null }
+export interface StockPositionRow { id: string; assetId: string; symbol: string; name: string; blurb: string | null; logoUrl: string | null; mode: "PAPER" | "REAL"; source: "DECK" | "HEDGE" | "WALLET"; qtyBase: string; decimals: number; uiMultiplierMicro: number | null; costCents: number; entryPriceCents: number; priceCents: number | null; valueCents: number | null; pnlCents: number | null; fresh: boolean; txSig: string | null; sellTxSig: string | null; payer: string | null; createdAt: string; closedAt: string | null; closeReason: string | null; proceedsCents: number | null }
 export interface StockTotals { costCents: number; valueCents: number; pnlCents: number }
 export interface StockPendingAttempt { id: string; symbol: string; stakeCents: number; status: "PENDING" | "CONFIRMED" | "EXPIRED" | "FAILED"; sig: string | null; createdAt: string }
 export interface StockPortfolioResponse { open: StockPositionRow[]; closed: StockPositionRow[]; totals: { paper: StockTotals; real: StockTotals }; wallets: string[]; stockConsent: boolean; sponsored: boolean; pendingAttempts: StockPendingAttempt[] }
@@ -655,3 +655,15 @@ export type StockRealSentResponse = { ok: true };
 export interface StockRealConfirmRequest { attemptId: string; sig: string }
 // kind SELL: positionId = the lot that was closed; proceedsCents/pnlCents are set; qtyBase = raw sold.
 export interface StockRealConfirmResponse { positionId: string; qtyBase: string; costCents: number; alreadyConfirmed: boolean; kind: "BUY" | "SELL"; proceedsCents?: number; pnlCents?: number }
+
+// ─── GET /api/link/mwa ────  Auth: Bearer. Native (Seeker flavor) only: the Sign-In-With-Solana input the
+// app hands to the Mobile Wallet Adapter `authorize` call. `nonce` is bound to the caller and lives
+// MWA_NONCE_TTL_MS (10 min); `domain`/`uri` are the site the signature is bound to (APP_ORIGIN).
+export interface MwaLinkNonceResponse { domain: string; uri: string; statement: string; nonce: string }
+// ─── POST /api/link/mwa ────  Auth: Bearer + same-origin (native clause: no Origin + `x-hf-client`). Body = the
+// wallet's `sign_in_result` verbatim — all three fields base64 (MWA spec). A valid proof marks the address a
+// VERIFIED hedge wallet (the flag Privy-linked wallets carry), so /api/stocks/real/tx accepts it as `payer`.
+// Errors: 400 { error: bad_request | bad_encoding | bad_message | domain_mismatch | address_mismatch | bad_nonce |
+// nonce_expired | bad_signature }, 401, 403 bad_origin, 429, 503 auth_unavailable.
+export interface MwaLinkRequest { address: string; signed_message: string; signature: string }
+export interface MwaLinkResponse { address: string; verified: true } // base58 — what the client stores as its trading wallet

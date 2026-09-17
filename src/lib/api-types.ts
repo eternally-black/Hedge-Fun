@@ -654,3 +654,15 @@ export type StockRealSentResponse = { ok: true };
 export interface StockRealConfirmRequest { attemptId: string; sig: string }
 // kind SELL: positionId = the lot that was closed; proceedsCents/pnlCents are set; qtyBase = raw sold.
 export interface StockRealConfirmResponse { positionId: string; qtyBase: string; costCents: number; alreadyConfirmed: boolean; kind: "BUY" | "SELL"; proceedsCents?: number; pnlCents?: number }
+
+// ─── GET /api/link/mwa ────  Auth: Bearer. Native (Seeker flavor) only: the Sign-In-With-Solana input the
+// app hands to the Mobile Wallet Adapter `authorize` call. `nonce` is bound to the caller and lives
+// MWA_NONCE_TTL_MS (10 min); `domain`/`uri` are the site the signature is bound to (APP_ORIGIN).
+export interface MwaLinkNonceResponse { domain: string; uri: string; statement: string; nonce: string }
+// ─── POST /api/link/mwa ────  Auth: Bearer + same-origin (native clause: no Origin + `x-hf-client`). Body = the
+// wallet's `sign_in_result` verbatim — all three fields base64 (MWA spec). A valid proof marks the address a
+// VERIFIED hedge wallet (the flag Privy-linked wallets carry), so /api/stocks/real/tx accepts it as `payer`.
+// Errors: 400 { error: bad_request | bad_encoding | bad_message | domain_mismatch | address_mismatch | bad_nonce |
+// nonce_expired | bad_signature }, 401, 403 bad_origin, 429, 503 auth_unavailable.
+export interface MwaLinkRequest { address: string; signed_message: string; signature: string }
+export interface MwaLinkResponse { address: string; verified: true } // base58 — what the client stores as its trading wallet

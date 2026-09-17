@@ -9,7 +9,7 @@
 // RETURNED (it may be clamped to free Cash — said out loud when it happens).
 import { memo } from "react";
 import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
-import type { HedgeSuggestion } from "../../lib/api-types";
+import type { HedgeSuggestion } from "@contract/api-types";
 import { colors, withAlpha } from "../theme";
 import { catOf, cents, countdown, displayQuestion, sideLabels, usd, winPayout } from "../format";
 
