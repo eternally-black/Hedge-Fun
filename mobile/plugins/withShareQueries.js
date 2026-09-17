@@ -8,8 +8,12 @@ const { withAndroidManifest } = require("expo/config-plugins");
 const withShareQueries = (config) =>
   withAndroidManifest(config, (cfg) => {
     const manifest = cfg.modResults.manifest;
+    // xml2js shape: <queries> is an ARRAY of query blocks (one per tag), each { intent?, package?, provider? }.
+    // Treating it as an object put an `intent` property on an array, which xmlbuilder then tried to
+    // serialise as an element with an array index for a name -> "Invalid character in name" at prebuild.
     manifest.queries = manifest.queries ?? [];
-    const queries = manifest.queries;
+    if (manifest.queries.length === 0) manifest.queries.push({});
+    const queries = manifest.queries[0];
 
     // Keep it idempotent — prebuild can run the plugin more than once.
     queries.intent = queries.intent ?? [];
