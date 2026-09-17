@@ -36,7 +36,7 @@ export async function POST(req: Request) {
 
   try {
     const result = await buildAttempt(
-      { id: user.id, stockConsentVersion: user.stockConsentVersion },
+      { id: user.id, stockConsentVersion: user.stockConsentVersion, privyId: user.privyId },
       {
         assetId: body.assetId || undefined,
         symbol: body.symbol || undefined,

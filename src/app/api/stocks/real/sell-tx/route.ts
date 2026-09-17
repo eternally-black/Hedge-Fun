@@ -29,7 +29,7 @@ export async function POST(req: Request) {
 
   try {
     const res: StockRealSellTxResponse = await buildSellAttempt(
-      { id: user.id, stockConsentVersion: user.stockConsentVersion },
+      { id: user.id, stockConsentVersion: user.stockConsentVersion, privyId: user.privyId },
       body.positionId,
     );
     return NextResponse.json(res);
