@@ -51,8 +51,7 @@ import {
   buildSponsoredSwapTx,
   coSign,
   closeAccountIx,
-  SponsorUnavailableError,
-} from "./sponsor";
+  SponsorUnavailableError,, TxMismatchError } from "./sponsor";
 import { verifiedWallets, hasStockConsent, StockUnavailableError } from "./stocks-db";
 import {
   STOCK_SWAP_SLIPPAGE_BPS,
@@ -518,11 +517,17 @@ export async function submitSigned(userId: string, attemptId: string, signedTran
     });
   }
 
-  const { wire, sig } = await coSign({
-    signedTransactionB64,
-    expectedMessageHash: attempt.msgHash,
-    userAddress: attempt.payer,
-  });
+  let wire: string, sig: string;
+  try {
+    ({ wire, sig } = await coSign({ signedTransactionB64, expectedMessageHash: attempt.msgHash, userAddress: attempt.payer }));
+  } catch (e) {
+    // The message the wallet signed is not the one we built. The bytes are logged so the difference
+    // can be read off the server: without the sponsor signature they cannot be broadcast, and an
+    // external wallet is known to rewrite transactions (Phantom appends its Lighthouse guards) — the
+    // evidence decides what rewrite, if any, submit can accept.
+    if (e instanceof TxMismatchError) console.warn(`[stock-submit] tx_mismatch attempt=${attemptId} user=${userId} tx=${signedTransactionB64}`);
+    throw e;
+  }
   // Stamp BEFORE the send. The signature is already decided (it is the fee payer's), and a send that
   // times out after the broadcast would otherwise leave a swap on chain that no row points at: the
   // client would retry and buy twice. A stamped PENDING attempt is exactly what the sweep recovers.

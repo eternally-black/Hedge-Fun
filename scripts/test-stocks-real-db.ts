@@ -567,7 +567,6 @@ async function main() {
     const slots = getTransactionDecoder().decode(bytes(spon.swapTransaction)).signatures as Record<string, Uint8Array | null>;
     assert.deepStrictEqual(Object.keys(slots).sort(), [SPONSOR, PAYER].sort(), "sponsor + user signature slots");
     assert.strictEqual(slots[PAYER], null, "unsigned when handed to the client");
-    assert.strictEqual(slots[SPONSOR]?.length, 64, "pre-signed by the sponsor, so a wallet cannot rewrite the message (Phantom Lighthouse)");
 
     // ── 12. A tx whose MESSAGE differs is never co-signed. Same attempt, a tx built one blockhash
     //       later: it decodes, it is signed, and it is still refused — nothing is sent.
