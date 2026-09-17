@@ -218,10 +218,25 @@ pointer at the web app (prod is sponsored); no device-side pending replay (serve
 adoption cover it); no HUD stocks pocket (the Profile shows the USDC balance); predictions stay paper on
 the phone (MWA is Solana-only, Polymarket needs the Privy EVM signer); hedge stock cards not ported.
 
+**Local Android toolchain (installed 2026-09-17 on the dev machine, headless — no Studio wizard needed):**
+JDK 17 `C:\Program Files\Microsoft\jdk-17.0.20.101-hotspot` (winget Microsoft.OpenJDK.17), SDK
+`%LOCALAPPDATA%\Android\Sdk` with cmdline-tools 22, platform-tools, `platforms;android-36`,
+`build-tools;36.0.0`, `ndk;27.1.12297006`, `cmake;3.22.1` (what Expo 57 / RN 0.86 default to), plus
+Android Studio via winget (Google.AndroidStudio). `ANDROID_HOME`, `JAVA_HOME` and PATH are set at
+user level (new shells only). `mobile/.env` (gitignored, copied from the main checkout) carries the
+Privy app id + mobile client id, so login works on device. Build:
+
+```bash
+cd mobile && npx expo prebuild --platform android --no-install   # regenerates mobile/android (gitignored)
+cd android && ./gradlew assembleRelease                           # → app/build/outputs/apk/release/app-release.apk
+```
+
+The release build type uses the debug signing config (Expo template default), so that APK installs on
+any phone for testing; the dApp Store upload needs a real keystore (§4.1). `APP_FLAVOR=play` before
+prebuild + gradle produces the Play package instead.
+
 **Next, in order:**
-1. **[HUMAN/dev machine]** a way to build an APK: `eas login` (Expo account) → `eas build -p android
-   --profile dev-seeker`, or install Android Studio (JDK 17 + SDK) for `npx expo run:android`. Nothing
-   on this machine can produce a native build today.
+1. ~~a way to build an APK~~ — done, see the toolchain block above.
 2. First device run (any Android phone + a MWA wallet such as Phantom, or a Seeker): login, Profile →
    Connect wallet (SIWS round trip), Real money on, Stocks deck swipe-right → sign → lot in Portfolio →
    two-tap sell. Expect the wallet to warn about an unverified dApp identity until step 3.
