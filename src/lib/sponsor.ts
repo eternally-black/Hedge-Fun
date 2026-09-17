@@ -299,6 +299,12 @@ export async function buildSponsoredSwapTx(p: {
   quoteResponse: unknown;
   userPublicKey: string;
   extraInstructions?: JupIx[];
+  // Whose SOL fronts the token-account rent. Default (the embedded wallet, which has none): the
+  // sponsor pays it and takes it back when the account closes. false (a connected external wallet):
+  // the wallet's own — its scanner BLOCKS a transaction that closes the user's account with the
+  // lamports going to a stranger (Phantom, live 2026-09-18), and it has SOL of its own anyway. The
+  // network fee is the sponsor's either way.
+  sponsorRent?: boolean;
 }): Promise<{
   swapTransaction: string;
   messageHash: string;
@@ -314,11 +320,12 @@ export async function buildSponsoredSwapTx(p: {
     maxPriorityLamports: STOCK_SPONSOR_MAX_PRIORITY_LAMPORTS,
   });
 
-  const funded = await sponsorFundedAtas(ix.setupInstructions, p.userPublicKey);
-  const cleanup = patchCleanupDestination(ix.cleanupInstruction, new Set(funded.map((f) => f.account)), sponsor);
+  const sponsorRent = p.sponsorRent !== false;
+  const funded = sponsorRent ? await sponsorFundedAtas(ix.setupInstructions, p.userPublicKey) : [];
+  const cleanup = sponsorRent ? patchCleanupDestination(ix.cleanupInstruction, new Set(funded.map((f) => f.account)), sponsor) : ix.cleanupInstruction;
   const ordered: JupIx[] = [
     ...ix.computeBudgetInstructions,
-    ...patchAtaPayer(ix.setupInstructions, sponsor),
+    ...(sponsorRent ? patchAtaPayer(ix.setupInstructions, sponsor) : ix.setupInstructions),
     ix.swapInstruction,
     ...(p.extraInstructions ?? []),
     ...(cleanup ? [cleanup] : []),

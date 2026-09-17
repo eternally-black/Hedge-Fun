@@ -18,6 +18,7 @@ import { createHash } from "node:crypto";
 import { isAddress } from "@solana/kit";
 import type { Prisma, StockBuyAttempt } from "@prisma/client";
 import { prisma } from "./prisma";
+import { embeddedSolanaWallet, getPrivyUser } from "./privy";
 import { STOCK_PRICE_MAX_STALE_MS } from "./config";
 import { captureToGlitchTip } from "./glitchtip";
 import {
@@ -187,8 +188,21 @@ async function dropUnconfirmedFunding(attemptId: string, db: Prisma.TransactionC
   await db.sponsorFundedAccount.deleteMany({ where: { attemptId, confirmedAt: null } });
 }
 
+// Whose SOL fronts the token-account rent of a sponsored transaction: the sponsor's for the embedded
+// wallet (it has none), the wallet's own for a connected external one — its scanner blocks rent
+// returning to anyone else, and it has SOL. Privy unreachable → the sponsor fronts it (today's
+// behaviour), never a refusal; a caller without a privyId (tests, tools) gets the same.
+async function rentOnSponsor(user: { privyId?: string }, payer: string): Promise<boolean> {
+  if (!user.privyId) return true;
+  try {
+    return embeddedSolanaWallet(await getPrivyUser(user.privyId)) === payer;
+  } catch {
+    return true;
+  }
+}
+
 export async function buildAttempt(
-  user: { id: string; stockConsentVersion: number | null },
+  user: { id: string; stockConsentVersion: number | null; privyId?: string },
   p: { assetId?: string; symbol?: string; stakeCents: number; payer: string; hedgeSuggestionId?: string },
 ): Promise<StockRealTxResponse> {
   if (!hasStockConsent(user)) throw new StockConsentRequiredError();
@@ -257,7 +271,7 @@ export async function buildAttempt(
   // Sponsored: the hash is over the compiled MESSAGE, because signing changes the bytes (the
   // signature slots) but never the message.
   const tx = sponsored
-    ? await buildSponsoredSwapTx({ quoteResponse: quote.raw, userPublicKey: p.payer })
+    ? await buildSponsoredSwapTx({ quoteResponse: quote.raw, userPublicKey: p.payer, sponsorRent: await rentOnSponsor(user, p.payer) })
     : await buildSwapTx(quote.raw, p.payer).then((t) => ({
         ...t,
         messageHash: createHash("sha256").update(t.swapTransaction).digest("hex"),
@@ -330,7 +344,7 @@ function reservedSell(a: StockBuyAttempt, payer: string): StockRealSellTxRespons
 // key means no sell here (the user can always sell in their own wallet; reconcileRealLots then
 // closes the lot as "wallet").
 export async function buildSellAttempt(
-  user: { id: string; stockConsentVersion: number | null },
+  user: { id: string; stockConsentVersion: number | null; privyId?: string },
   positionId: string,
 ): Promise<StockRealSellTxResponse> {
   if (!hasStockConsent(user)) throw new StockConsentRequiredError();
@@ -437,7 +451,7 @@ export async function buildSellAttempt(
     }
   }
 
-  const tx = await buildSponsoredSwapTx({ quoteResponse: quote.raw, userPublicKey: payer, extraInstructions });
+  const tx = await buildSponsoredSwapTx({ quoteResponse: quote.raw, userPublicKey: payer, extraInstructions, sponsorRent: await rentOnSponsor(user, payer) });
 
   const { attempt, reserved } = await createAttempt(
     {

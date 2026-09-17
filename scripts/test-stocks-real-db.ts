@@ -71,11 +71,14 @@ const SIG24 = "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tj
   if (t === "good") return { userId: DID };
   throw new Error("bad token");
 };
+// The payer is the login's EMBEDDED wallet by default (the sponsor fronts its rent); one step flips
+// it to a connected external wallet, which fronts its own.
+let walletClient = "privy";
 (PrivyClient.prototype as unknown as { getUser: unknown }).getUser = async () => ({
   email: { address: `${DID}@test.local` },
   twitter: null,
   wallet: null,
-  linkedAccounts: [{ type: "wallet", chainType: "solana", walletClientType: "phantom", address: PAYER }],
+  linkedAccounts: [{ type: "wallet", chainType: "solana", walletClientType: walletClient, address: PAYER }],
 });
 
 process.env.HELIUS_API_KEY = "test";
@@ -569,6 +572,25 @@ async function main() {
     const slots = getTransactionDecoder().decode(bytes(spon.swapTransaction)).signatures as Record<string, Uint8Array | null>;
     assert.deepStrictEqual(Object.keys(slots).sort(), [SPONSOR, PAYER].sort(), "sponsor + user signature slots");
     assert.strictEqual(slots[PAYER], null, "unsigned when handed to the client");
+
+    // 11b. A CONNECTED external wallet fronts its own rent (its scanner blocks rent returning to a
+    //      stranger): the setup instruction's payer is the WALLET, not the sponsor, and nothing is
+    //      recorded as sponsor-funded. The fee payer is still the sponsor.
+    walletClient = "phantom";
+    res = await post(txRoute, "/api/stocks/real/tx", { assetId, stakeCents: 100, payer: PAYER });
+    assert.strictEqual(res.status, 200, "external wallet: tx built");
+    const ext = (await res.json()) as { attemptId: string; swapTransaction: string };
+    {
+      const m = getCompiledTransactionMessageDecoder().decode(getTransactionDecoder().decode(bytes(ext.swapTransaction)).messageBytes);
+      const ata = m.instructions.find((ix) => m.staticAccounts[ix.programAddressIndex] === "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+      assert.ok(ata, "the route opens a token account, so there is a setup instruction");
+      // The stub hands back its own payer in that slot (real Jupiter: the user); what matters is that the
+      // sponsor was NOT written over it.
+      assert.notStrictEqual(m.staticAccounts[ata!.accountIndices![0]], SPONSOR, "an external wallet pays its own rent");
+      assert.strictEqual(m.staticAccounts[0], SPONSOR, "the fee payer is still the sponsor");
+    }
+    assert.strictEqual(await prisma.sponsorFundedAccount.count({ where: { attemptId: ext.attemptId } }), 0, "nothing recorded as sponsor-funded");
+    walletClient = "privy";
 
     // ── 12. A tx whose MESSAGE differs is never co-signed. Same attempt, a tx built one blockhash
     //       later: it decodes, it is signed, and it is still refused — nothing is sent.
