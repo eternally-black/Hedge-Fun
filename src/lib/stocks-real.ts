@@ -51,7 +51,9 @@ import {
   buildSponsoredSwapTx,
   coSign,
   closeAccountIx,
-  SponsorUnavailableError,, TxMismatchError } from "./sponsor";
+  SponsorUnavailableError,
+  TxMismatchError,
+} from "./sponsor";
 import { verifiedWallets, hasStockConsent, StockUnavailableError } from "./stocks-db";
 import {
   STOCK_SWAP_SLIPPAGE_BPS,
