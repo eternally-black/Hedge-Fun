@@ -244,6 +244,17 @@ any phone for testing; the dApp Store upload needs a real keystore (§4.1) — p
 `APP_FLAVOR=play` before prebuild + gradle produces the Play package instead; drop
 `-PreactNativeArchitectures` for an emulator (x86_64) or a store upload (all ABIs).
 
+**Astra review round 1 (2026-09-18, Codex gpt-6-astra, report `.scratch/astra-review-seeker.md`):** 11 findings
+(4×P1, 7×P2), all addressed in `9e7a5c0` — SecureStore key with `:` broke every MWA write; a stamped BUY past its
+block height could be rebuilt inside the sweep window (server: `buildAttempt` now resolves it first → `409 buy_landed`,
+DB case 24); consent recorded the server's terms version while showing the bundled text; the Play build could reach
+real surfaces (`runSell` gate, "Sell on the web", play-money-only switch); a flung card never came back after a
+cancelled real buy; the refill effect looped on an exhausted server; wallet grants were not bound to the payer; a
+rejected cached token was read as a user cancel; SIWS parsing was substring-based (now positional, statement + URI
+bound). Confirmed OK by Astra: SIWS cryptography, verified-wallet authority (SIWS ≡ Privy challenge in what it
+grants), the `sameOrigin` native clause, sponsored recovery, RN Modal/AppState/store lifecycles, flavor resolvers.
+Round 2 packet: `.scratch/astra-seeker-packet-2.md`.
+
 **Next, in order:**
 1. ~~a way to build an APK~~ — done, see the toolchain block above.
 2. First device run (any Android phone + a MWA wallet such as Phantom, or a Seeker): login, Profile →
