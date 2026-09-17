@@ -149,8 +149,20 @@ async function createAttempt(
       if (existing) return { attempt: existing, reserved: true };
     }
     if (data.sponsored) {
+      // What counts is what the sponsor paid for or may still pay for: an attempt that was SENT (its
+      // signature stamped) or one still LIVE (PENDING — it can still be signed and sent, so it holds
+      // its slot until the sweep expires it). A build the wallet never signed and that has since
+      // expired or failed — a quote that timed out, a scanner that blocked the prompt — cost nothing
+      // and must not eat the day's allowance (live 2026-09-18: a dozen expired Phantom attempts
+      // locked the user out of a sale with 7 real trades made). Counting live ones keeps the cap a
+      // cap: two concurrent builds at the last slot still resolve to one.
       const used = await tx.stockBuyAttempt.count({
-        where: { userId: data.userId, sponsored: true, createdAt: { gte: new Date(Date.now() - 24 * 3_600_000) } },
+        where: {
+          userId: data.userId,
+          sponsored: true,
+          createdAt: { gte: new Date(Date.now() - 24 * 3_600_000) },
+          OR: [{ sig: { not: null } }, { status: "PENDING" }],
+        },
       });
       if (used >= STOCK_SPONSOR_MAX_PER_USER_PER_DAY) throw new SponsorLimitError();
     }

@@ -450,6 +450,8 @@ export function useBuyReal(p: {
           onToast("Too thin to sell right now");
         } else if (status === 502 && code === "swap_unavailable") {
           onToast("Jupiter is busy — try again");
+        } else if (status === 429) {
+          onToast("Daily limit of sponsored trades reached — try again tomorrow");
         } else if (status === 502) {
           onToast("Solana is busy — try again");
         } else {

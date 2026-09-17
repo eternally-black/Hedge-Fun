@@ -808,6 +808,8 @@ async function main() {
         inAmountMicro: 1_000_000n,
         minOutBase: 297_834n,
         msgHash: `cap-${i}`,
+        sig: `cap-sig-${RUN}-${i}`, // SENT attempts are what the cap counts
+        status: "CONFIRMED" as const, // and resolved, so buy_in_flight stays out of the way
         lastValidBlockHeight: 1000n,
       })),
     });
@@ -881,8 +883,9 @@ async function main() {
     await Promise.all([holder, blocked]);
 
     // Stage the wallet at EXACTLY cap-1, counting the sponsored attempts the cases above already made.
+    // SENT or still LIVE attempts count toward the cap — an expired, never-signed build is free.
     const usedSoFar = await prisma.stockBuyAttempt.count({
-      where: { userId, sponsored: true, createdAt: { gte: new Date(Date.now() - 24 * 3_600_000) } },
+      where: { userId, sponsored: true, createdAt: { gte: new Date(Date.now() - 24 * 3_600_000) }, OR: [{ sig: { not: null } }, { status: "PENDING" }] },
     });
     const toSeed = STOCK_SPONSOR_MAX_PER_USER_PER_DAY - 1 - usedSoFar;
     assert.ok(toSeed >= 0, `the daily cap has room to stage the race (used ${usedSoFar})`);
@@ -896,8 +899,14 @@ async function main() {
         inAmountMicro: 1_000_000n,
         minOutBase: 297_834n,
         msgHash: `race-${i}`,
+        sig: `race-sig-${RUN}-${i}`, // sent, so it counts
+        status: "CONFIRMED" as const,
         lastValidBlockHeight: 1000n,
       })),
+    });
+    // And an EXPIRED never-signed one does not: stage one, still exactly one slot left.
+    await prisma.stockBuyAttempt.create({
+      data: { userId: userId!, assetId: assetId!, payer: PAYER, sponsored: true, stakeCents: 100, inAmountMicro: 1_000_000n, minOutBase: 297_834n, msgHash: `race-unsigned-${RUN}`, lastValidBlockHeight: 1000n, status: "EXPIRED" },
     });
     const raced = await Promise.allSettled([buy(), buy()]);
     const won = raced.filter((r) => r.status === "fulfilled");

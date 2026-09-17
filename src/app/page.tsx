@@ -590,6 +590,7 @@ function App() {
 
   // Stable nav callbacks so memo'd Hud/BottomNav don't re-render on unrelated state changes.
   const goVault = useCallback(() => setScreen("vault"), []);
+  const goPortfolio = useCallback(() => setScreen("portfolio"), []);
   const goGmScreen = useCallback(() => setScreen("gm"), []);
   const openBalance = useCallback(() => setBalanceOpen(true), []);
   const closeBalance = useCallback(() => setBalanceOpen(false), []);
@@ -718,7 +719,7 @@ function App() {
 
       <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
         {effectiveScreen === "deck" && deckMode === "stocks" && (
-          <StockDeck api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} mode={deckMode} onMode={setDeckMode} stocksUsdCents={stocksUsdCents} onOpenWallet={openBalance} />
+          <StockDeck api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} mode={deckMode} onMode={setDeckMode} stocksUsdCents={stocksUsdCents} onOpenWallet={openBalance} onOpenPortfolio={goPortfolio} />
         )}
 
         {effectiveScreen === "deck" && deckMode === "predictions" && (
