@@ -60,6 +60,7 @@ import {
   STOCK_SWAP_SLIPPAGE_BPS,
   STOCK_MAX_PRICE_IMPACT_BP,
   STOCK_CONFIRM_POLLS,
+  STOCK_CONFIRM_SLEEP_MS,
   STOCK_ATTEMPT_SWEEP_AFTER_MS,
   STOCK_TERMS_VERSION,
   STOCK_SPONSOR_MAX_PER_USER_PER_DAY,
@@ -616,7 +617,7 @@ export async function confirmAttempt(
   opts: ConfirmOpts = {},
 ): Promise<StockRealConfirmResponse> {
   const polls = opts.polls ?? STOCK_CONFIRM_POLLS;
-  const sleepMs = opts.sleepMs ?? 1_500;
+  const sleepMs = opts.sleepMs ?? STOCK_CONFIRM_SLEEP_MS;
 
   const attempt = await prisma.stockBuyAttempt.findUnique({ where: { id: attemptId }, include: { asset: true } });
   if (!attempt || attempt.userId !== userId) throw new AttemptNotFoundError();
