@@ -258,7 +258,18 @@ export async function buildSponsoredSwapTx(p: {
   );
 
   const tx = compileTransaction(message);
-  const wire = new Uint8Array(getTransactionEncoder().encode(tx));
+  // Signed by the sponsor HERE, before the user ever sees it. An external wallet (Phantom) rewrites an
+  // UNSIGNED transaction on its way to the user — it appends its Lighthouse guard instructions when
+  // the simulation shows balances moving — and the rewritten message no longer hashes to the one the
+  // attempt recorded, so /real/submit refuses it (seen live 2026-09-17: three 409 tx_mismatch on a
+  // Phantom sell that the user had approved). A transaction that already carries a signature cannot
+  // be rewritten without invalidating it, so wallets leave it alone. Nothing else moves: the sponsor
+  // still signs only bytes it built, the attempt still records this exact message, submit still
+  // refuses any other, and coSign re-signs the same message into the same slot (ed25519 is
+  // deterministic). The daily cap is taken when the attempt is created, not at submit, so a tx the
+  // user could now broadcast on their own is one the sponsor had already agreed to pay for.
+  const signed = await partiallySignTransaction([(await sponsorSigner()).keyPair], tx);
+  const wire = new Uint8Array(getTransactionEncoder().encode(signed));
   return {
     swapTransaction: Buffer.from(wire).toString("base64"),
     // Hash the ENCODED-then-decoded message, so what we store is exactly what a client will hash.
