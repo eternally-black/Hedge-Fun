@@ -3,7 +3,7 @@
 // Custom Tab, then the OS share sheet. canOpenURL for the custom schemes needs the Android
 // manifest <queries> entries — added by plugins/withShareQueries.js.
 import { Linking, Share } from "react-native";
-import type { ShareIntent } from "../lib/share";
+import type { ShareIntent } from "@contract/share";
 
 export async function openShareNative(intent: ShareIntent) {
   // 1. Try the native app deep-link (best UX: lands in the real composer).

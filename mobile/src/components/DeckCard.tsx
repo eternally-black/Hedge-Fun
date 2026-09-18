@@ -4,7 +4,7 @@
 // so the next card rises in sync (same hand-off as web).
 import { useEffect, useRef, useState } from "react";
 import { Animated, PanResponder, StyleSheet, Text, View } from "react-native";
-import type { DeckCard as DeckCardT } from "../../lib/api-types";
+import type { DeckCard as DeckCardT } from "@contract/api-types";
 import { colors } from "../theme";
 import { catOf, cents, countdown, displayQuestion, isMatchClock, isUpDown, marketHint, sideLabels, usd, winPayout } from "../format";
 

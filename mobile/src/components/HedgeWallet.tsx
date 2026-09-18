@@ -3,7 +3,7 @@
 // validation), and the exposure panel (per-major notional, SPL long-tail row, staleness stamp,
 // refresh / different-wallet). Every number comes from POST /api/hedge/wallet verbatim.
 import { StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
-import type { HedgeWalletResponse } from "../../lib/api-types";
+import type { HedgeWalletResponse } from "@contract/api-types";
 import { colors } from "../theme";
 import { usd } from "../format";
 

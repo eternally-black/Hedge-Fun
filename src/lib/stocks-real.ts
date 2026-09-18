@@ -250,8 +250,25 @@ export async function buildAttempt(
     where: { userId: user.id, assetId: asset.id, kind: "BUY", status: "PENDING", sponsored: true, sig: { not: null } },
     orderBy: { createdAt: "desc" },
   });
-  if (inFlight && (await getBlockHeight()) <= Number(inFlight.lastValidBlockHeight)) {
-    throw new StockUnavailableError("buy_in_flight");
+  if (inFlight?.sig) {
+    if ((await getBlockHeight()) <= Number(inFlight.lastValidBlockHeight)) {
+      throw new StockUnavailableError("buy_in_flight");
+    }
+    // Past its block height it either LANDED (and the device's confirm was lost) or it never will —
+    // and one `getTransaction → null` cannot tell the two apart (RPC receipt lag: "not found" also
+    // means "not yet visible"). So: try to confirm it right here (a landed receipt books the lot now),
+    // then let the ROW decide. Still PENDING → keep refusing; the sweep resolves it against the payer's
+    // signature history within minutes and EXPIREs or FAILs it. CONFIRMED → refuse with buy_landed.
+    // FAILED/EXPIRED → a fresh buy is allowed. A retry inside the ambiguous window is how one tap
+    // becomes two lots, so ambiguity errs on the side of waiting.
+    try {
+      await confirmAttempt(user.id, inFlight.id, inFlight.sig, { polls: 1, sleepMs: 0 });
+    } catch (e) {
+      if (!(e instanceof TxNotFoundError) && !(e instanceof TxRejectedError)) throw e;
+    }
+    const after = await prisma.stockBuyAttempt.findUnique({ where: { id: inFlight.id }, select: { status: true } });
+    if (after?.status === "CONFIRMED") throw new StockUnavailableError("buy_landed");
+    if (after?.status === "PENDING") throw new StockUnavailableError("buy_in_flight");
   }
 
   // Size the buy to what the wallet actually holds: a chip larger than the USDC balance would become

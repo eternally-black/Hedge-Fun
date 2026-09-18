@@ -32,8 +32,10 @@ export const X_HANDLE = "@hedgeyourfun"; // tag this in X copy. NOT in Telegram 
 export const SHARE_BASE_URL =
   process.env.NEXT_PUBLIC_SHARE_BASE_URL ?? "https://app.hedgeyour.fun";
 
-export function refLink(referralCode: string): string {
-  return `${SHARE_BASE_URL}/r/${encodeURIComponent(referralCode)}`;
+// `base` exists for the native app: it imports this file verbatim (mobile @contract/share) and has
+// no NEXT_PUBLIC_* env at bundle time, so it passes its own EXPO_PUBLIC_SHARE_BASE_URL in.
+export function refLink(referralCode: string, base: string = SHARE_BASE_URL): string {
+  return `${base}/r/${encodeURIComponent(referralCode)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -110,8 +112,8 @@ export interface ShareIntent {
 
 // X: the whole post is one `text` blob — copy + @handle + link inline, as it reads on the
 // timeline. {ref} -> the full invite URL, {handle} -> @hedgeyourfun.
-export function composeXShare(set: readonly string[], referralCode: string): ShareIntent {
-  const url = refLink(referralCode);
+export function composeXShare(set: readonly string[], referralCode: string, base?: string): ShareIntent {
+  const url = refLink(referralCode, base);
   const text = pick(set).replace("{ref}", url).replace("{handle}", X_HANDLE);
   return {
     channel: "x",
@@ -126,8 +128,8 @@ export function composeXShare(set: readonly string[], referralCode: string): Sha
 
 // Telegram: split text and url so TG renders a real link preview. The copy has no {handle}
 // (handles don't resolve in TG) — we strip the " {ref}" tail and pass the URL as its own param.
-export function composeTgShare(set: readonly string[], referralCode: string): ShareIntent {
-  const url = refLink(referralCode);
+export function composeTgShare(set: readonly string[], referralCode: string, base?: string): ShareIntent {
+  const url = refLink(referralCode, base);
   const msg = pick(set).replace(/\s*\{ref\}/, "").trim(); // message only; TG appends the url
   return {
     channel: "telegram",

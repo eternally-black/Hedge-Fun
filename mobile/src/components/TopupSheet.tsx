@@ -3,7 +3,7 @@
 // owns every gate; the client only renders me.topup and POSTs /api/topup.
 import { useCallback, useState } from "react";
 import { Modal, Pressable, StyleSheet, Text, TouchableOpacity, View } from "react-native";
-import type { MeResponse } from "../../lib/api-types";
+import type { MeResponse } from "@contract/api-types";
 import { statusOf, type Api } from "../api";
 import { colors } from "../theme";
 import { usd } from "../format";

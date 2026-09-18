@@ -6,17 +6,21 @@
 import { useState } from "react";
 import { ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
 import * as Clipboard from "expo-clipboard";
-import type { CaptureRefResponse, MeResponse } from "../../lib/api-types";
+import type { CaptureRefResponse, MeResponse } from "@contract/api-types";
 import { type Api } from "../api";
 import { colors } from "../theme";
 import { num, usd } from "../format";
 import { clearRefCode, saveRefCode } from "../refCode";
-import { composeTgShare, composeXShare, INVITE_TG, INVITE_X, refLink } from "../../lib/share";
+import { composeTgShare, composeXShare, INVITE_TG, INVITE_X, refLink } from "@contract/share";
+import { SHARE_BASE_URL } from "../../lib/config";
 import { openShareNative } from "../openShareNative";
+import { RealModeSwitch } from "../components/RealModeSwitch";
+import { TradingWallet } from "../components/TradingWallet";
 
-export function ProfileScreen({ me, api, onLogout, onToast }: {
+export function ProfileScreen({ me, api, onRefreshMe, onLogout, onToast }: {
   me: MeResponse | null;
   api: Api;
+  onRefreshMe: () => Promise<void>;
   onLogout: () => void;
   onToast: (msg: string) => void;
 }) {
@@ -26,7 +30,7 @@ export function ProfileScreen({ me, api, onLogout, onToast }: {
   // Invite link — the user's REAL referralCode (P-11: 20% of a friend's points forever, once they
   // make their first 10 calls). refLink → the stealth /r/<code> path; display drops the scheme.
   const code = me?.user.referralCode ?? null;
-  const fullLink = code ? refLink(code) : null;
+  const fullLink = code ? refLink(code, SHARE_BASE_URL) : null;
   const link = fullLink ? fullLink.replace(/^https?:\/\//, "") : "…";
   const [copied, setCopied] = useState(false);
 
@@ -85,6 +89,11 @@ export function ProfileScreen({ me, api, onLogout, onToast }: {
         <Tile label="Artifacts" value={me ? String(me.artifacts) : "—"} color={colors.gold} />
       </View>
 
+      {/* Paper/Real switch + the trading wallet — both render nothing on a build without a wallet
+          port (the Play flavor), so this screen is the same file for both stores. */}
+      <RealModeSwitch me={me} api={api} onRefreshMe={onRefreshMe} onToast={onToast} />
+      <TradingWallet me={me} api={api} onRefreshMe={onRefreshMe} onToast={onToast} />
+
       {/* invite — stats from me.referrals, share via the native opener (deep-link → tab → sheet) */}
       <Text style={styles.sectionLabel}>Invite</Text>
       <View style={styles.panel}>
@@ -102,14 +111,14 @@ export function ProfileScreen({ me, api, onLogout, onToast }: {
           <TouchableOpacity
             style={[styles.shareBtn, !code && { opacity: 0.5 }]}
             disabled={!code}
-            onPress={() => code && void openShareNative(composeXShare(INVITE_X, code))}
+            onPress={() => code && void openShareNative(composeXShare(INVITE_X, code, SHARE_BASE_URL))}
           >
             <Text style={styles.shareBtnText}>𝕏 Share</Text>
           </TouchableOpacity>
           <TouchableOpacity
             style={[styles.shareBtn, !code && { opacity: 0.5 }]}
             disabled={!code}
-            onPress={() => code && void openShareNative(composeTgShare(INVITE_TG, code))}
+            onPress={() => code && void openShareNative(composeTgShare(INVITE_TG, code, SHARE_BASE_URL))}
           >
             <Text style={styles.shareBtnText}>✈ Telegram</Text>
           </TouchableOpacity>

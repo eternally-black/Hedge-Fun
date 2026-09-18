@@ -4,7 +4,7 @@
 // badge was already cleared locally via onSeen; a failed mark just re-syncs from the next /api/me).
 import { memo, useEffect, useState } from "react";
 import { ActivityIndicator, FlatList, StyleSheet, Text, TouchableOpacity, View } from "react-native";
-import type { HistoryResponse, HistoryRow, ResultsResponse, ResultRow } from "../../lib/api-types";
+import type { HistoryResponse, HistoryRow, ResultsResponse, ResultRow } from "@contract/api-types";
 import { type Api } from "../api";
 import { colors } from "../theme";
 import { catOf, cents, countdown, deltaStr, resultMeta, usd } from "../format";

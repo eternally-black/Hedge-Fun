@@ -2,7 +2,7 @@
 // Native port of src/app/screens/Hud.tsx. All numbers come from /api/me — rendered, never derived.
 import { memo } from "react";
 import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
-import type { MeResponse } from "../../lib/api-types";
+import type { MeResponse } from "@contract/api-types";
 import { colors } from "../theme";
 import { num, usd } from "../format";
 

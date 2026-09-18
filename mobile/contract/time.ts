@@ -1,4 +1,4 @@
-// COPIED from src/lib/time.ts — sync manually, do not diverge
+// GENERATED from src/lib/time.ts by scripts/sync-mobile-contract.ts — do not edit here.
 // UTC-day helpers. The daily reset is 00:00 UTC (P-6, anti-timezone-abuse).
 // A "day" is the 'YYYY-MM-DD' slice of the UTC ISO string — never a local date.
 

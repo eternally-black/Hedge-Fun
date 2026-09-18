@@ -4,6 +4,7 @@
 import { useCallback } from "react";
 import { usePrivy } from "@privy-io/expo";
 import { API_BASE } from "../lib/config";
+import { FLAVOR } from "./platform/flavor";
 
 // Carries the HTTP status so callers can branch on it (swipe 402/403/409 etc.), like the web's
 // `err.status` convention.
@@ -52,6 +53,9 @@ export function useApi(): Api {
           headers: {
             ...(init?.headers ?? {}),
             "content-type": "application/json",
+            // Names the build to the server: money routes accept "no Origin + this header" as the
+            // native client (src/lib/real.ts sameOrigin), and /api/me can shape surfaces per flavor.
+            "x-hf-client": FLAVOR,
             ...(token ? { authorization: `Bearer ${token}` } : {}),
           },
         });

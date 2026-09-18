@@ -1,0 +1,23 @@
+{
+  "cli": { "appVersionSource": "remote" },
+  "build": {
+    "dev-seeker": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "android": { "buildType": "apk" },
+      "env": { "APP_FLAVOR": "seeker" }
+    },
+    "seeker": {
+      "distribution": "internal",
+      "android": { "buildType": "apk" },
+      "env": { "APP_FLAVOR": "seeker" }
+    },
+    "play": {
+      "android": { "buildType": "app-bundle" },
+      "env": { "APP_FLAVOR": "play" }
+    }
+  },
+  "submit": {
+    "play": { "android": { "track": "internal" } }
+  }
+}
