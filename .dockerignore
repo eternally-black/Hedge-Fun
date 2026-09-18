@@ -40,5 +40,11 @@ hedgefun_ci.pub
 # ../mobile/src/format for the web/mobile drift check and next build type-checks scripts/.
 mobile/node_modules
 .claude
+.codex
 .scratch
 ops
+mobile/.expo
+mobile/.audit-dist-*
+docker-compose.override.yml
+.deployed_release
+.deployed_sha

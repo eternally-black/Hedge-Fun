@@ -1,0 +1,19 @@
+# Disposable Postgres used only by scripts/with-docker-db.sh.
+# The helper supplies a unique project name, Docker assigns the loopback port,
+# and the database data lives in container-scoped tmpfs.
+services:
+  db:
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    environment:
+      POSTGRES_USER: hedgefun_test
+      POSTGRES_PASSWORD: hedgefun_test
+      POSTGRES_DB: hedgefun_test
+    ports:
+      - "127.0.0.1::5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hedgefun_test -d hedgefun_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

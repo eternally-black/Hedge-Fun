@@ -11,6 +11,9 @@ import { SHARE_TICK_MICRO } from "./config";
 import { awardShard } from "./shards";
 import { centsFromMicro } from "./quote";
 import { lockBetRow } from "./orders";
+import { readSweepCursor, writeSweepCursor, type SweepCursorValue } from "./sweep-cursor";
+
+const REAL_SETTLE_CURSOR = "polymarket-real-settle-v1";
 
 // Close a resolved position's remainder and realize it. Winner: $1/share. CANCELED (this repo's
 // INVALID resolution): an invalid binary CTF market pays [1,1], so EVERY share of either side
@@ -78,7 +81,13 @@ export async function settleResolvedRealPositions(
   prisma: PrismaClient,
   tokenBalance: TokenBalanceProbe = (wallet, tokenId) => erc1155BalanceOf(CONDITIONAL_TOKENS, wallet, tokenId),
 ): Promise<{ lost: number; won: number; dust: number; winnersPending: number; inFlight: number; errors: number }> {
-  const bets = await prisma.bet.findMany({
+  let after: SweepCursorValue | null = null;
+  try {
+    after = await readSweepCursor(prisma, REAL_SETTLE_CURSOR);
+  } catch {
+    // Settlement remains safe without scheduling metadata; all booking paths are idempotent.
+  }
+  const findBatch = (cursor: SweepCursorValue | null) => prisma.bet.findMany({
     where: {
       mode: "REAL",
       // PENDING + a real fill, or the settled backlog starves the window: consumed positions are
@@ -87,9 +96,13 @@ export async function settleResolvedRealPositions(
       settlementStatus: "PENDING",
       filledSharesMicro: { gt: 0n },
       market: { status: { in: ["RESOLVED", "CANCELED"] } },
+      ...(cursor
+        ? { AND: [{ OR: [{ createdAt: { gt: cursor.createdAt } }, { createdAt: cursor.createdAt, id: { gt: cursor.id } }] }] }
+        : {}),
     },
     select: {
       id: true,
+      createdAt: true,
       side: true,
       filledSharesMicro: true,
       closedSharesMicro: true,
@@ -100,11 +113,28 @@ export async function settleResolvedRealPositions(
         select: { status: true, resolvedOutcome: true, negRisk: true, yesTokenId: true, noTokenId: true },
       },
     },
-    orderBy: { createdAt: "asc" },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     take: 200,
   });
+  let bets = await findBatch(after);
+  if (bets.length === 0 && after) {
+    after = null;
+    bets = await findBatch(null);
+  }
+
+  const checkpoint = async () => {
+    const last = bets[bets.length - 1];
+    try {
+      await writeSweepCursor(prisma, REAL_SETTLE_CURSOR, last ? { createdAt: last.createdAt, id: last.id } : null);
+    } catch {
+      // A cursor failure may cause an idempotent replay; it must not undo or mask settlement.
+    }
+  };
   const candidates = bets.filter((b) => (b.filledSharesMicro ?? 0n) - (b.closedSharesMicro ?? 0n) > 0n);
-  if (candidates.length === 0) return { lost: 0, won: 0, dust: 0, winnersPending: 0, inFlight: 0, errors: 0 };
+  if (candidates.length === 0) {
+    await checkpoint();
+    return { lost: 0, won: 0, dust: 0, winnersPending: 0, inFlight: 0, errors: 0 };
+  }
 
   // An EXIT that sold the token but is not yet booked makes the balance read 0 because the user
   // sold, not because the redeemer paid. Booking it here as a $1 redemption (or a zero-proceeds
@@ -121,7 +151,10 @@ export async function settleResolvedRealPositions(
   const inFlightKeys = new Set(live.map((a) => `${a.userId}:${a.marketId}`));
   const open = candidates.filter((b) => !inFlightKeys.has(`${b.userId}:${b.marketId}`));
   const inFlight = candidates.length - open.length;
-  if (open.length === 0) return { lost: 0, won: 0, dust: 0, winnersPending: 0, inFlight, errors: 0 };
+  if (open.length === 0) {
+    await checkpoint();
+    return { lost: 0, won: 0, dust: 0, winnersPending: 0, inFlight, errors: 0 };
+  }
 
   // One bad row (tx timeout, a constraint trip) must not unwind the pass and block every other
   // user's settlement — the paper path isolates per-market errors and this pass does the same.
@@ -183,6 +216,7 @@ export async function settleResolvedRealPositions(
     const canceled = c.market.status === "CANCELED";
     if (await consume(c.id, true, canceled)) won++;
   }
+  await checkpoint();
   return { lost, won, dust, winnersPending, inFlight, errors };
 }
 

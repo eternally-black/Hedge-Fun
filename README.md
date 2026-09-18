@@ -7,7 +7,9 @@ Stack: Next.js (App Router) · Prisma · Postgres · Privy auth. Money in intege
 ## Local dev (Windows + Postgres in Docker)
 
 Postgres 16 runs in a Docker container (`docker-compose.dev.yml`), published on a stable
-`127.0.0.1:5432`. Prereq: **Docker Desktop** (WSL2 backend) installed and running.
+`127.0.0.1:5432`. Prerequisites: **Node.js 24+** and **Docker Desktop** (WSL2 backend)
+installed and running. Install **Git for Windows (Git Bash)** for the isolated DB test helper.
+The Polymarket SDK requires Node 24, matching CI and the Docker image.
 
 ```bash
 npm install
@@ -26,9 +28,21 @@ Fill `.env.local` with your Privy keys (`NEXT_PUBLIC_PRIVY_APP_ID`, `PRIVY_APP_S
 
 ```bash
 npm test                  # pure-logic unit checks (points, streak/shards, P&L)
+npm run test:db            # disposable test Postgres; preserves the dev database
+npm run test:mobile        # mobile types and patched dependency compatibility
+npm run test:ops           # offline deployment, backup and test-DB contracts
 npm run verify:polymarket # hits live Polymarket, asserts field mapping
 npm run smoke             # full daily loop end-to-end on live DB + live API
 ```
+
+`test:db` uses a separate Compose project, a Docker-assigned loopback port and temporary
+database storage. It supplies its own `DATABASE_URL` and removes only its own test resources.
+`test:db:run` is the underlying integration suite: run it only against a disposable database.
+
+`npm run build` does not validate runtime credentials. Production startup also requires the
+variables documented in `.env.example`, including `APP_ORIGIN`, `REAL_ORDER_LOCUS=browser`,
+and the reconcile URL/secret. Keep that startup guard enabled. The offline boot regression
+test supplies dummy values in its own process; they are not deployment credentials.
 
 ## Tokenized stocks (Stocklana)
 

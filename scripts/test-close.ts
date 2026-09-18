@@ -31,6 +31,7 @@ const exitIntent = { tokenId: "tok-1", sharesMicro: 5_000_000n, minPriceBp: 4800
 const ctx = { depositWallet: DW, embeddedWallet: EW, builderCode: BUILDER };
 
 async function main() {
+  await prisma.sweepCursor.deleteMany({ where: { name: "polymarket-real-settle-v1" } });
   // ---- 1. Validation matrix: SELL-specific checks + shared checks still fire.
   assert.strictEqual(validateSignedSellOrder(goodSell(), exitIntent, ctx), null, "happy path");
   assert.strictEqual(validateSignedSellOrder(goodSell({ side: "BUY" }), exitIntent, ctx), "side_mismatch");
@@ -456,6 +457,7 @@ async function main() {
   } finally {
     await prisma.fill.deleteMany({ where: { attempt: { userId: user.id } } });
     await prisma.orderAttempt.deleteMany({ where: { userId: user.id } });
+    await prisma.sweepCursor.deleteMany({ where: { name: "polymarket-real-settle-v1" } });
     // Children before parents: ShardGrant FK → Bet (real wins now earn shards on settle).
     await prisma.shardGrant.deleteMany({ where: { userId: user.id } });
     await prisma.collectibleBalance.deleteMany({ where: { userId: user.id } });

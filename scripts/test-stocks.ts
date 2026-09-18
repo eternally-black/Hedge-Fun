@@ -426,7 +426,11 @@ async function sponsorChecks() {
       accounts: [{ address: USER, role: AccountRole.WRITABLE_SIGNER }, { address: FROM_LUT, role: AccountRole.WRITABLE }],
       data: new Uint8Array(data),
     });
-    const guard = (data: number[]): Instruction => ({ programAddress: address(LIGHTHOUSE_PROGRAM), accounts: [{ address: USER, role: AccountRole.READONLY }], data: new Uint8Array(data) });
+    const guard = (data: number[]): Instruction => ({
+      programAddress: address(LIGHTHOUSE_PROGRAM),
+      accounts: [{ address: USER, role: AccountRole.WRITABLE_SIGNER }],
+      data: new Uint8Array(data.length >= 3 ? data : [data[0], 0, 0]),
+    });
     const wire = (ixs: Instruction[], bh: Blockhash = BH) =>
       new Uint8Array(
         getTransactionEncoder().encode(
@@ -465,11 +469,17 @@ async function sponsorChecks() {
       accounts: [],
       data: new Uint8Array([opcode, v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff]),
     });
-    const budgeted = wire([cu(2, 72_261), cu(3, 170_669), ours([1])]);
-    assert.ok(sameMessageModuloGuards(budgeted, wire([cu(2, 75_613), cu(3, 170_669), ours([1]), guard([9])]), lookup), "unit limit raised a little, guards appended");
-    assert.ok(!sameMessageModuloGuards(budgeted, wire([cu(2, 72_261 + 100_001), cu(3, 170_669), ours([1])]), lookup), "unit limit raised past the bound");
-    assert.ok(!sameMessageModuloGuards(budgeted, wire([cu(2, 60_000), cu(3, 170_669), ours([1])]), lookup), "unit limit lowered");
-    assert.ok(!sameMessageModuloGuards(budgeted, wire([cu(2, 72_261), cu(3, 200_000), ours([1])]), lookup), "unit PRICE changed");
+    const cuPrice = (value: bigint): Instruction => {
+      const data = new Uint8Array(9);
+      data[0] = 3;
+      new DataView(data.buffer).setBigUint64(1, value, true);
+      return { programAddress: address(COMPUTE_BUDGET_PROGRAM), accounts: [], data };
+    };
+    const budgeted = wire([cu(2, 72_261), cuPrice(170_669n), ours([1])]);
+    assert.ok(sameMessageModuloGuards(budgeted, wire([cu(2, 75_613), cuPrice(170_669n), ours([1]), guard([9])]), lookup), "unit limit raised a little, guards appended");
+    assert.ok(!sameMessageModuloGuards(budgeted, wire([cu(2, 72_261 + 100_001), cuPrice(170_669n), ours([1])]), lookup), "unit limit raised past the bound");
+    assert.ok(!sameMessageModuloGuards(budgeted, wire([cu(2, 60_000), cuPrice(170_669n), ours([1])]), lookup), "unit limit lowered");
+    assert.ok(!sameMessageModuloGuards(budgeted, wire([cu(2, 72_261), cuPrice(200_000n), ours([1])]), lookup), "unit PRICE changed");
   }
 
   // decodeLookupTable: 56-byte header, then packed 32-byte addresses.

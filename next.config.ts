@@ -1,6 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // Keep build tracing inside this checkout, even when a parent folder has a lockfile.
+  outputFileTracingRoot: __dirname,
+  turbopack: { root: __dirname },
   // Ship a minimal traced server (.next/standalone) for the Docker image
   // instead of the whole node_modules. Run with `node server.js`.
   output: "standalone",

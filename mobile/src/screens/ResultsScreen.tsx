@@ -1,8 +1,8 @@
 // Results — bets + inbox. Native port of src/app/screens/NotificationsScreen.tsx (the settled
 // feed) plus the pending half of HistorySheet (open predictions with a live countdown). Opening
-// the screen marks every settled result seen — POST /api/results/seen is fire-and-forget (the
-// badge was already cleared locally via onSeen; a failed mark just re-syncs from the next /api/me).
-import { memo, useEffect, useState } from "react";
+// the screen acknowledges only the settled rows its successful load delivered; the badge decrements
+// by that count and /api/me is refreshed after the ACK.
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, FlatList, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import type { HistoryResponse, HistoryRow, ResultsResponse, ResultRow } from "@contract/api-types";
 import { type Api } from "../api";
@@ -24,32 +24,81 @@ function useNowMs(active: boolean): number {
   return nowMs;
 }
 
-export function ResultsScreen({ api, onSeen }: { api: Api; onSeen: () => void }) {
+export function ResultsScreen({ api, onSeen, onAckFailed }: { api: Api; onSeen: (count: number) => void; onAckFailed: () => void }) {
   const [data, setData] = useState<{ pending: HistoryRow[]; settled: ResultRow[] } | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [nonce, setNonce] = useState(0);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [ackQueue, setAckQueue] = useState<{ key: string; mode: "PAPER" | "REAL"; betIds: string[] }[]>([]);
+  const startedAckKeys = useRef(new Set<string>());
+  const stagedAckKeys = useRef(new Set<string>());
+  const loadingMore = useRef(false);
+  const aliveRef = useRef(false);
+  const stageAck = useCallback((mode: "PAPER" | "REAL", betIds: string[]) => {
+    if (betIds.length === 0) return;
+    const key = `${mode}:${betIds.join(",")}`;
+    if (stagedAckKeys.current.has(key)) return;
+    stagedAckKeys.current.add(key);
+    setAckQueue((queue) => [...queue, { key, mode, betIds }]);
+  }, []);
   // F12: the 1Hz clock only runs when there are pending rows (the sole countdown consumers).
   const hasPending = (data?.pending.length ?? 0) > 0;
   const nowMs = useNowMs(hasPending);
 
-  // Load open + settled, then mark seen. Pending comes from /api/history (PENDING-first rows),
+  // Load open + settled, then stage the delivered unseen ids for the post-commit ACK effect. Pending comes from /api/history (PENDING-first rows),
   // settled from /api/results (the inbox feed — seen/shards/verified live there, not in history).
   useEffect(() => {
     let alive = true;
+    aliveRef.current = true;
     Promise.all([api("/api/history"), api("/api/results")])
       .then(([h, r]) => {
         if (!alive) return;
+        const results = r as ResultsResponse;
         setData({
           pending: (h as HistoryResponse).rows.filter((row) => row.status === "PENDING"),
-          settled: (r as ResultsResponse).rows,
+          settled: results.rows,
         });
+        setNextCursor(results.nextCursor);
         setLoadFailed(false);
+        const betIds = results.rows.filter((row) => !row.seen).map((row) => row.id);
+        stageAck(results.mode, betIds);
       })
       .catch((e) => { if (alive) { console.error(e); setLoadFailed(true); } });
-    onSeen();
-    api("/api/results/seen", { method: "POST" }).catch(() => { /* badge re-syncs from /api/me */ });
-    return () => { alive = false; };
-  }, [api, onSeen, nonce]);
+    return () => { alive = false; aliveRef.current = false; };
+  }, [api, nonce, stageAck]);
+
+  // `data` has committed before this effect runs. A failed or abandoned load therefore never ACKs
+  // rows the user did not receive.
+  useEffect(() => {
+    const ack = ackQueue[0];
+    if (!ack || startedAckKeys.current.has(ack.key)) return;
+    startedAckKeys.current.add(ack.key);
+    onSeen(ack.betIds.length);
+    api("/api/results/seen", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ scope: "bets", mode: ack.mode, betIds: ack.betIds }),
+    }).catch(console.error).finally(() => {
+      onAckFailed();
+      if (aliveRef.current) setAckQueue((queue) => queue.filter((item) => item.key !== ack.key));
+    });
+  }, [ackQueue, api, onSeen, onAckFailed]);
+
+  const loadMore = useCallback(async () => {
+    if (loadingMore.current || nextCursor === null) return;
+    loadingMore.current = true;
+    try {
+      const results = (await api(`/api/results?cursor=${encodeURIComponent(nextCursor)}`)) as ResultsResponse;
+      if (!aliveRef.current) return;
+      setData((current) => current ? { ...current, settled: [...current.settled, ...results.rows] } : current);
+      setNextCursor(results.nextCursor);
+      stageAck(results.mode, results.rows.filter((row) => !row.seen).map((row) => row.id));
+    } catch (e) {
+      if (aliveRef.current) console.error(e);
+    } finally {
+      loadingMore.current = false;
+    }
+  }, [api, nextCursor, stageAck]);
 
   // F12: the settled history is the potentially-huge list, so it's the FlatList's windowed data; the
   // title, load/empty states, and the (small, bounded) pending section ride in the header. SettledRow
@@ -103,6 +152,8 @@ export function ResultsScreen({ api, onSeen }: { api: Api; onSeen: () => void })
       windowSize={11}
       removeClippedSubviews
       ItemSeparatorComponent={SettledSeparator}
+      onEndReached={() => void loadMore()}
+      onEndReachedThreshold={0.4}
     />
   );
 }

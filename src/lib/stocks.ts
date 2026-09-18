@@ -205,12 +205,16 @@ export interface RpcTokenBalance {
 }
 
 export interface RpcParsedTx {
+  slot?: number;
   meta: {
     err: unknown;
     preTokenBalances?: RpcTokenBalance[] | null;
     postTokenBalances?: RpcTokenBalance[] | null;
   } | null;
-  transaction: { message: { accountKeys: { pubkey: string; signer?: boolean; writable?: boolean }[] } };
+  transaction: {
+    signatures?: string[];
+    message: { accountKeys: { pubkey: string; signer?: boolean; writable?: boolean }[] };
+  };
 }
 
 export interface SwapDelta {

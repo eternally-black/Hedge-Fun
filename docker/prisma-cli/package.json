@@ -5,7 +5,7 @@
   "dependencies": {
     "effect": "3.21.0",
     "c12": "3.1.0",
-    "deepmerge-ts": "7.1.5",
+    "deepmerge-ts": "8.0.2",
     "empathic": "2.0.0"
   }
 }

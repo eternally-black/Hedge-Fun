@@ -253,6 +253,7 @@ export function useBuyReal(p: {
           const status = errStatus(e);
           const code = errCode(e);
           if (status === 409 && code === "tx_mismatch") onToast("Something changed — try again");
+          else if (status === 409 && code === "legacy_manual_review") onToast("This older trade needs review before we update your portfolio");
           else if (status === 409 && code === "attempt_expired") onToast("That quote expired — try again");
           else if (status === 409 && code === "lot_closed") onToast("This lot was already sold");
           else if (status === 429) onToast("Daily limit of sponsored trades reached — try again tomorrow");
@@ -321,6 +322,7 @@ export function useBuyReal(p: {
             return null; // nothing moved — the card may come back
           }
           if (errStatus(e) === 409 && code === "not_this_buy") onToast("That transaction didn't match");
+          else if (errStatus(e) === 409 && code === "legacy_manual_review") onToast("This older trade needs review before we update your portfolio");
           else if (errStatus(e) === 409 && code === "attempt_expired") onToast("That quote expired — try again");
           else if (errStatus(e) === 502) onToast("Solana RPC is busy — it will be picked up automatically");
           else onToast("Couldn't confirm — it will be picked up automatically");

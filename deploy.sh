@@ -1,177 +1,274 @@
 #!/usr/bin/env bash
-# Invoked by GitHub Actions over SSH (and runnable by hand). Idempotent.
-# Lives at /opt/hedgefun/deploy.sh on the VPS.
-#
-# Pull-model: the image is built + pushed to GHCR by the runner. The VPS only
-# logs in, pulls the fresh :latest, and recreates services. No build here.
+# Deploy one tested release tuple: exact git commit + immutable GHCR digest.
 set -euo pipefail
 
-cd /opt/hedgefun
+# Manual rollback/deploy may reset the tracked file that bash is still reading. Run a stable copy
+# before any repository mutation; CI already supplies an exact temporary copy and sets this flag.
+if [ -z "${HF_DEPLOY_BOOTSTRAP:-}" ]; then
+  bootstrap_copy=$(mktemp "${TMPDIR:-/tmp}/hedgefun-deploy.XXXXXX")
+  cp "${BASH_SOURCE[0]}" "$bootstrap_copy"
+  set +e
+  HF_DEPLOY_BOOTSTRAP=1 bash "$bootstrap_copy" "$@"
+  bootstrap_code=$?
+  set -e
+  rm -f "$bootstrap_copy"
+  exit "$bootstrap_code"
+fi
 
-# Telegram notify + failure trap. STEP tracks where we are so a red deploy names its step.
-# The deploy-in-progress marker tells the watchdog (hedgefun-watchdog.sh) to stand down
-# while services are deliberately being recreated; removed on any exit.
-STEP="init"
-MARKER=/var/lib/hedgefun/deploy-in-progress
+ROOT="${HF_DEPLOY_ROOT:-/opt/hedgefun}"
+STATE_DIR="${HF_STATE_DIR:-/var/lib/hedgefun}"
+MARKER="$STATE_DIR/deploy-in-progress"
+OVERRIDE="$ROOT/docker-compose.override.yml"
+RELEASE_FILE="$ROOT/.deployed_release"
+SHA_FILE="$ROOT/.deployed_sha"
+RELEASE_TMP="$RELEASE_FILE.tmp.$$"
+SHA_TMP="$SHA_FILE.tmp.$$"
+STEP=init
+ACTIVATION_STARTED=0
+RECOVERING=0
+PREV_SHA=
+PREV_IMAGE_REF=
+PREV_RELEASE_EXISTS=0
+PREV_RELEASE_COPY=
+PREV_SHA_EXISTS=0
+PREV_SHA_COPY=
+MIGRATE_ERR="${TMPDIR:-/tmp}/hf_migrate.$$"
+
+cd "$ROOT"
+
 notify() { bash ops/notify.sh "$1" "$2" 2>/dev/null || true; }
+valid_sha() { [[ "${1:-}" =~ ^[0-9a-f]{40}$ ]]; }
+valid_release_image() {
+  [[ "${1:-}" =~ ^ghcr\.io/eternally-black/hedge-fun@sha256:[0-9a-f]{64}$ ]]
+}
+valid_runtime_image() {
+  valid_release_image "${1:-}" || [[ "${1:-}" =~ ^sha256:[0-9a-f]{64}$ ]]
+}
+
+write_override() {
+  local ref="$1" tmp="$OVERRIDE.tmp.$$"
+  valid_runtime_image "$ref" || { echo "invalid runtime image ref" >&2; return 1; }
+  umask 022
+  printf 'services:\n  app:\n    image: "%s"\n  migrate:\n    image: "%s"\n  poller:\n    image: "%s"\n' \
+    "$ref" "$ref" "$ref" > "$tmp"
+  mv -f "$tmp" "$OVERRIDE"
+}
+
+read_previous_release() {
+  local release_sha release_image cid
+  PREV_SHA=$(git rev-parse HEAD 2>/dev/null || true)
+  valid_sha "$PREV_SHA" || PREV_SHA=
+
+  if [ -f "$RELEASE_FILE" ]; then
+    PREV_RELEASE_COPY=$(mktemp "${TMPDIR:-/tmp}/hf-release-marker.XXXXXX")
+    cp "$RELEASE_FILE" "$PREV_RELEASE_COPY"
+    PREV_RELEASE_EXISTS=1
+    release_sha=$(sed -n 's/^GIT_SHA=//p' "$RELEASE_FILE" | head -1)
+    release_image=$(sed -n 's/^IMAGE_REF=//p' "$RELEASE_FILE" | head -1)
+    if valid_sha "$release_sha" && valid_release_image "$release_image"; then
+      PREV_SHA="$release_sha"
+      PREV_IMAGE_REF="$release_image"
+    fi
+  fi
+  if [ -f "$SHA_FILE" ]; then
+    PREV_SHA_COPY=$(mktemp "${TMPDIR:-/tmp}/hf-sha-marker.XXXXXX")
+    cp "$SHA_FILE" "$PREV_SHA_COPY"
+    PREV_SHA_EXISTS=1
+  fi
+
+  # Controlled first adoption from the legacy :latest deployment: preserve the exact local
+  # image ID. We do not claim or invent a registry digest for an image that predates release tuples.
+  if [ -z "$PREV_IMAGE_REF" ]; then
+    cid=$(docker compose ps -q app 2>/dev/null || true)
+    if [ -n "$cid" ]; then
+      PREV_IMAGE_REF=$(docker inspect --format '{{.Image}}' "$cid" 2>/dev/null || true)
+      valid_runtime_image "$PREV_IMAGE_REF" || PREV_IMAGE_REF=
+    fi
+  fi
+}
+
+restore_marker() {
+  local path="$1" existed="$2" copy="$3" tmp
+  tmp="$path.restore.$$"
+  if [ "$existed" -eq 1 ]; then
+    cp "$copy" "$tmp" || return 1
+    mv -f "$tmp" "$path" || return 1
+  else
+    rm -f "$path" || return 1
+  fi
+}
+
+recover_previous() {
+  [ "$ACTIVATION_STARTED" -eq 1 ] || return 0
+  valid_sha "$PREV_SHA" || { notify CRIT "deploy recovery unavailable: previous git commit is unknown"; return 1; }
+  valid_runtime_image "$PREV_IMAGE_REF" || { notify CRIT "deploy recovery unavailable: previous image identity is unknown"; return 1; }
+
+  RECOVERING=1
+  echo "[deploy] recovering previous config $PREV_SHA and image $PREV_IMAGE_REF" >&2
+  git reset --hard "$PREV_SHA" >/dev/null || return 1
+  # Regenerate the dedicated override from the confirmed release tuple. Copying a stale or
+  # manually-edited override could restore previous git config with a different image.
+  write_override "$PREV_IMAGE_REF" || return 1
+  docker compose config --quiet || return 1
+  docker compose run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile || return 1
+  docker compose up -d --remove-orphans --wait --wait-timeout 180 --pull never || return 1
+  if ! docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile; then
+    docker compose up -d --force-recreate --pull never caddy || return 1
+  fi
+  docker compose up -d --wait --wait-timeout 60 --pull never caddy || return 1
+  restore_marker "$RELEASE_FILE" "$PREV_RELEASE_EXISTS" "$PREV_RELEASE_COPY" || return 1
+  restore_marker "$SHA_FILE" "$PREV_SHA_EXISTS" "$PREV_SHA_COPY" || return 1
+  notify WARN "deploy failed; recovered previous release $PREV_SHA ($PREV_IMAGE_REF), database migrations were not downgraded"
+  return 0
+}
+
 on_exit() {
-  code=$?
+  local code=$?
+  trap - EXIT
+  rm -f "$MIGRATE_ERR" "$RELEASE_TMP" "$SHA_TMP"
+  if [ "$code" -ne 0 ] && [ "$RECOVERING" -eq 0 ]; then
+    if [ "$ACTIVATION_STARTED" -eq 1 ]; then
+      set +e
+      recover_previous
+      local recovery_code=$?
+      if [ "$recovery_code" -ne 0 ]; then
+        notify CRIT "deploy FAILED at step: $STEP (exit $code); automatic recovery also failed"
+      else
+        notify CRIT "deploy FAILED at step: $STEP (exit $code); previous release restored"
+      fi
+    else
+      notify CRIT "deploy FAILED at step: $STEP (exit $code); live release was not changed"
+    fi
+  fi
+  [ -n "$PREV_RELEASE_COPY" ] && rm -f "$PREV_RELEASE_COPY"
+  [ -n "$PREV_SHA_COPY" ] && rm -f "$PREV_SHA_COPY"
   rm -f "$MARKER"
-  if [ "$code" -ne 0 ]; then notify CRIT "deploy FAILED at step: $STEP (exit $code)"; fi
+  exit "$code"
 }
 trap on_exit EXIT
-mkdir -p /var/lib/hedgefun && touch "$MARKER"
+mkdir -p "$STATE_DIR"
+touch "$MARKER"
 
-# Scripted rollback: `bash deploy.sh rollback <sha-short>` repins :latest to a prior immutable
-# image (CI pushes :sha-<short> for every build) and re-ups — no rebuild, deterministic. Find SHAs
-# in the repo's GHCR Packages tab; the currently-live one is recorded in .deployed_sha each deploy.
-if [ "${1:-}" = "rollback" ]; then
-  STEP="rollback"
-  TARGET="${2:?usage: bash deploy.sh rollback <sha-short>}"
-  IMG="ghcr.io/eternally-black/hedge-fun"
-  set -a; . ./.env; set +a
-  notify WARN "rollback to $TARGET started"
-  echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
-  echo "[rollback] pulling $IMG:$TARGET and republishing as :latest"
-  docker pull "$IMG:$TARGET"
-  docker tag "$IMG:$TARGET" "$IMG:latest"
-  docker compose up -d --remove-orphans --wait --wait-timeout 180
-  # Record what is live NOW. The normal path writes this at the end, but rollback exits before it,
-  # so the file kept naming the build we just rolled AWAY from — read during an incident, per the
-  # contract at the top of this file, that points the next on-call straight back at the bad sha.
-  # The tag format is :sha-<git-short>, which is what the normal path writes, so the two compare.
-  echo "${TARGET#sha-}" > .deployed_sha
-  echo "[rollback] done — live: $TARGET"
-  notify OK "rollback done — live: $TARGET"
-  docker compose ps
-  exit 0
+MODE="${1:-}"
+TARGET_SHA="${2:-}"
+TARGET_IMAGE="${3:-}"
+case "$MODE" in
+  deploy|rollback) ;;
+  *) echo "usage: bash deploy.sh {deploy|rollback} <full-git-sha> <ghcr-image@sha256:digest>" >&2; exit 64 ;;
+esac
+valid_sha "$TARGET_SHA" || { echo "target must be a lowercase 40-character git SHA" >&2; exit 64; }
+valid_release_image "$TARGET_IMAGE" || { echo "target image must be the HedgeFun GHCR repository at a sha256 digest" >&2; exit 64; }
+
+# The workflow bootstraps the exact script through `git show`. Manual rollback intentionally uses
+# the currently installed script, but still fetches and validates the requested release tuple.
+STEP="release fetch"
+git cat-file -e "$TARGET_SHA^{commit}" 2>/dev/null || git fetch --no-tags origin "$TARGET_SHA"
+[ "$(git rev-parse "$TARGET_SHA^{commit}")" = "$TARGET_SHA" ] || { echo "git target did not resolve exactly" >&2; exit 1; }
+if git cat-file -e "$TARGET_SHA:docker-compose.override.yml" 2>/dev/null; then
+  echo "docker-compose.override.yml must remain untracked runtime release state" >&2
+  exit 1
 fi
 
-STEP="git sync"
-echo "[deploy] syncing repo (compose/Caddyfile/this script track main)"
-git fetch --prune origin
-git reset --hard origin/main     # mirror main; NOT used to build — only to keep infra files in sync
+set -a
+. ./.env
+set +a
 
-# Re-exec from the file we just synced. bash reads a script LAZILY, by byte offset: the reset above
-# can rewrite deploy.sh underneath the running shell, and any change in its length makes execution
-# resume mid-line in the new file — arbitrary command fragments running as the deploy user, halfway
-# through a production deploy. The flag makes this happen exactly once.
-if [ -z "${HF_DEPLOY_REEXEC:-}" ]; then
-  export HF_DEPLOY_REEXEC=1
-  echo "[deploy] re-exec from synced deploy.sh"
-  exec bash "$0" "$@"
-fi
-
-# Load .env so GHCR_USER / GHCR_TOKEN (read:packages PAT) are available for the login.
-set -a; . ./.env; set +a
-notify INFO "deploy started → $(git rev-parse --short HEAD)"
-
-# Warn (not fail) on .env drift: a new key in .env.example that prod .env lacks means some
-# feature (alerts, error tracking, dead-man pings) is silently off.
+# Keep production configuration drift visible without exposing values.
 if [ -f .env.example ]; then
-  missing=$(grep -oE '^[A-Z0-9_]+=' .env.example | cut -d= -f1 | while read -r k; do
-    grep -qE "^$k=" .env || echo "$k"
+  missing=$(grep -oE '^[A-Z0-9_]+=' .env.example | cut -d= -f1 | while read -r key; do
+    grep -qE "^${key}=" .env || echo "$key"
   done | paste -sd, -)
-  if [ -n "$missing" ]; then
-    notify WARN "deploy: /opt/hedgefun/.env lacks keys from .env.example: $missing"
-  fi
+  [ -z "$missing" ] || notify WARN "deploy: $ROOT/.env lacks keys from .env.example: $missing"
 fi
 
 STEP="ghcr login"
-echo "[deploy] logging in to GHCR"
 echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
 
-STEP="image pull"
-echo "[deploy] pulling image"
-docker compose pull              # pulls ghcr.io/eternally-black/hedge-fun:latest for app/migrate/poller
+STEP="image verification"
+docker pull "$TARGET_IMAGE"
+image_revision=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$TARGET_IMAGE")
+[ "$image_revision" = "$TARGET_SHA" ] || {
+  echo "image revision mismatch: expected $TARGET_SHA, got ${image_revision:-<missing>}" >&2
+  exit 1
+}
 
-# A bad Caddyfile would take down the sole ingress for app + GlitchTip on recreate.
-# Validate with the already-pulled caddy image and abort the deploy instead.
+read_previous_release
+ACTIVATION_STARTED=1
+action=deploy
+[ "$MODE" = rollback ] && action=rollback
+notify INFO "$action started: $TARGET_SHA ($TARGET_IMAGE)"
+
+STEP="config activation"
+git reset --hard "$TARGET_SHA"
+write_override "$TARGET_IMAGE"
+docker compose config --quiet
+
 STEP="caddyfile validation"
-echo "[deploy] validating Caddyfile"
-docker run --rm -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2-alpine \
-  caddy validate --config /etc/caddy/Caddyfile
+docker compose run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile
 
 STEP="install-ops"
-# Host hardening is a PROVISIONING step, not a per-deploy one: it writes sysctls, /etc/docker,
-# systemd units and /var/log, all of which need root. CI deploys as the unprivileged `deploy` user
-# (that is the point — a deploy key that can restart containers should not be able to rewrite the
-# host), so running it here failed the whole pipeline on `Permission denied` the moment ops/ landed
-# on the box. It is idempotent and changes rarely, so it runs when we actually have the rights and
-# is otherwise announced and skipped rather than taking the deploy down with it.
-if [ "$(id -u)" -eq 0 ]; then
-  echo "[deploy] applying host hardening + ops units (idempotent)"
+if [ "${HF_SKIP_HOST_OPS:-0}" = 1 ]; then
+  :
+elif [ "$(id -u)" -eq 0 ]; then
   bash ops/vps/install-ops.sh
 elif sudo -n true 2>/dev/null; then
-  echo "[deploy] applying host hardening + ops units via sudo (idempotent)"
   sudo -n bash ops/vps/install-ops.sh
 else
-  echo "[deploy] SKIPPED host hardening — not root and no passwordless sudo."
-  echo "[deploy] run once as root after changing ops/: bash /opt/hedgefun/ops/vps/install-ops.sh"
+  echo "[deploy] host hardening unchanged (no root or passwordless sudo)"
 fi
 
 STEP="db up"
-echo "[deploy] ensuring database is up"
 docker compose up -d --wait db
 
-# Verified snapshot BEFORE migrations touch a real-money schema. Skipped on the very first
-# deploy of a fresh host (no .deployed_sha yet -> empty DB, dump would trip the size floor).
 STEP="predeploy backup"
-if [ -f .deployed_sha ]; then
-  echo "[deploy] pre-migration backup"
+if [ "${HF_SKIP_BACKUP:-0}" != 1 ] && { [ -f "$RELEASE_FILE" ] || [ -f "$SHA_FILE" ]; }; then
   bash ops/vps/backup.sh predeploy
 fi
-STEP="migrate"
 
-# Apply migrations, baseline-aware. A legacy db-push database has the tables but no
-# _prisma_migrations history, so `migrate deploy` would try to re-create existing tables and fail
-# with Prisma error P3005. Detect P3005 on the deploy output, baseline 0_init once (the live tables
-# already match it), then re-deploy. No-op on every subsequent deploy and on a fresh database (where
-# the first `migrate deploy` simply creates everything). Running it here (not only in the migrate
-# service) lets us recover from the P3005 first-adoption case before app/poller start.
-echo "[deploy] applying migrations (baseline-aware)"
-if ! docker compose run --rm migrate npx prisma migrate deploy 2>/tmp/hf_migrate.err; then
-  if grep -q 'P3005' /tmp/hf_migrate.err; then
-    echo "[deploy] adopting Prisma Migrate: baselining 0_init on the existing db-push database"
+# Do not let old money workers operate against a schema while the new release migrates it.
+STEP="old workers stop"
+docker compose stop app poller
+
+STEP="migrate"
+if ! docker compose run --rm migrate npx prisma migrate deploy 2>"$MIGRATE_ERR"; then
+  if grep -q 'P3005' "$MIGRATE_ERR"; then
     docker compose run --rm migrate npx prisma migrate resolve --applied 0_init
     docker compose run --rm migrate npx prisma migrate deploy
   else
-    echo "[deploy] migrate deploy failed:"; cat /tmp/hf_migrate.err; rm -f /tmp/hf_migrate.err; exit 1
+    cat "$MIGRATE_ERR" >&2
+    exit 1
   fi
 fi
-rm -f /tmp/hf_migrate.err
+rm -f "$MIGRATE_ERR"
 
 STEP="services up"
-echo "[deploy] (re)creating services (migrate service re-runs deploy as a no-op gate, then app/poller)"
-# --wait: success means READY (healthchecks green), not merely started. A service that
-# never turns healthy fails the deploy loudly instead of leaving a zombie prod.
 docker compose up -d --remove-orphans --wait --wait-timeout 180
 
+STEP="running image verification"
+expected_id=$(docker image inspect --format '{{.Id}}' "$TARGET_IMAGE")
+for svc in app poller; do
+  cid=$(docker compose ps -q "$svc")
+  [ -n "$cid" ] || { echo "$svc has no running container" >&2; exit 1; }
+  actual_id=$(docker inspect --format '{{.Image}}' "$cid")
+  [ "$actual_id" = "$expected_id" ] || { echo "$svc is not running the expected image" >&2; exit 1; }
+done
+
 STEP="caddy reload"
-# The validation above proved the Caddyfile is good; nothing was making it LIVE. The file is a bind
-# mount (./Caddyfile:/etc/caddy/Caddyfile), and `docker compose up -d` recreates a container when its
-# CONFIG changes — a mount's contents changing is not that — so every Caddyfile edit since this
-# script was written was validated and then silently ignored by the running ingress. Reload it
-# explicitly; fall back to a recreate if the admin API is not answering.
-echo "[deploy] reloading Caddy config"
 docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile \
   || docker compose up -d --force-recreate caddy
+docker compose up -d --wait --wait-timeout 60 caddy
 
-STEP="prune"
-echo "[deploy] pruning dangling images"
-docker image prune -f
+# Commit release identity only after every service and ingress health gate passed.
+STEP="release marker"
+printf 'GIT_SHA=%s\nIMAGE_REF=%s\n' "$TARGET_SHA" "$TARGET_IMAGE" > "$RELEASE_TMP"
+printf '%s\n' "$TARGET_SHA" > "$SHA_TMP"
+# `.deployed_release` is authoritative and moves last. A crash between renames can only leave the
+# compatibility SHA ahead; it cannot claim the new release tuple before both marker files exist.
+mv -f "$SHA_TMP" "$SHA_FILE"
+mv -f "$RELEASE_TMP" "$RELEASE_FILE"
+ACTIVATION_STARTED=0
 
-echo "[deploy] done — live image sha-$(git rev-parse --short HEAD)"
-git rev-parse --short HEAD > .deployed_sha 2>/dev/null || true
-notify OK "deploy done — live: sha-$(git rev-parse --short HEAD)"
-docker compose ps
-
-# ---------------------------------------------------------------------------
-# ROLLBACK is now scripted:  bash deploy.sh rollback <sha-short>
-#   -> pulls the immutable :sha-<short>, repins :latest, re-ups (no rebuild, deterministic).
-# The currently-live SHA is recorded in .deployed_sha on each deploy; older SHA tags live in the
-# repo's GHCR Packages tab. Manual equivalent, if ever needed:
-#   docker pull ghcr.io/eternally-black/hedge-fun:sha-<short>
-#   docker tag  ghcr.io/eternally-black/hedge-fun:sha-<short> ghcr.io/eternally-black/hedge-fun:latest
-#   docker compose up -d
-# ---------------------------------------------------------------------------
+docker image prune -f >/dev/null 2>&1 || true
+notify OK "$action done: $TARGET_SHA ($TARGET_IMAGE)"
+echo "[deploy] done — $TARGET_SHA $TARGET_IMAGE"
+docker compose ps || true

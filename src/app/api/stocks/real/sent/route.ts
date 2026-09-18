@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { authUser } from "@/lib/privy";
 import { rateLimit } from "@/lib/ratelimit";
-import { markSent, AttemptNotFoundError, TxRejectedError } from "@/lib/stocks-real";
+import { markSent, AttemptNotFoundError, TxNotFoundError, TxRejectedError } from "@/lib/stocks-real";
 import type { StockRealSentRequest, StockRealSentResponse } from "@/lib/api-types";
 
 // Stamp the signature on a SELF-PAID attempt as soon as the wallet has sent it, so the poller can
@@ -26,6 +26,9 @@ export async function POST(req: Request) {
     if (e instanceof RangeError) return NextResponse.json({ error: "bad_sig" }, { status: 400 });
     if (e instanceof AttemptNotFoundError) {
       return NextResponse.json({ error: "attempt_not_found" }, { status: 404 });
+    }
+    if (e instanceof TxNotFoundError) {
+      return NextResponse.json({ error: "sent_route_requires_landed_receipt" }, { status: 409 });
     }
     if (e instanceof TxRejectedError) {
       return NextResponse.json({ error: e.message }, { status: 409 });

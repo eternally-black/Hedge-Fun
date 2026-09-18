@@ -15,6 +15,7 @@
 
 import type { TokenBalance } from "./hedge/exposure";
 import type { RpcParsedTx } from "./stocks";
+import { isAddress } from "@solana/kit";
 import { deadlineLeftMs, boundedTimeoutMs } from "./deadline";
 
 const RPC_BASE = process.env.HELIUS_RPC_BASE || "https://mainnet.helius-rpc.com";
@@ -108,7 +109,51 @@ export async function getTransaction(sig: string): Promise<RpcParsedTx | null> {
     sig,
     { encoding: "jsonParsed", commitment: "confirmed", maxSupportedTransactionVersion: 0 },
   ]);
-  return (r as RpcParsedTx | null) ?? null;
+  if (r == null) return null;
+  if (!r || typeof r !== "object") throw new HeliusUnavailableError("rpc getTransaction(jsonParsed): bad result");
+  const parsed = r as Partial<RpcParsedTx>;
+  if (
+    typeof parsed.slot !== "number" ||
+    !Number.isFinite(parsed.slot) ||
+    !parsed.meta ||
+    typeof parsed.meta !== "object" ||
+    !Object.prototype.hasOwnProperty.call(parsed.meta, "err") ||
+    !parsed.transaction ||
+    !parsed.transaction.message ||
+    !Array.isArray(parsed.transaction.message.accountKeys)
+  ) {
+    throw new HeliusUnavailableError("rpc getTransaction(jsonParsed): bad result");
+  }
+  return parsed as RpcParsedTx;
+}
+
+export interface RawTransactionReceipt {
+  wire: string;
+  slot: number;
+  err: unknown;
+}
+
+// The exact landed wire. Parsed balances alone are insufficient provenance: an unrelated old swap
+// can have identical owner deltas. Confirmation validates these bytes against the server-built wire
+// before it interprets success or failure.
+export async function getRawTransaction(sig: string): Promise<RawTransactionReceipt | null> {
+  const r = (await rpc("getTransaction", [
+    sig,
+    { encoding: "base64", commitment: "confirmed", maxSupportedTransactionVersion: 0 },
+  ])) as { slot?: unknown; meta?: { err?: unknown } | null; transaction?: unknown } | null;
+  if (!r) return null;
+  const wire = Array.isArray(r.transaction) ? r.transaction[0] : null;
+  if (
+    typeof wire !== "string" ||
+    typeof r.slot !== "number" ||
+    !Number.isFinite(r.slot) ||
+    !r.meta ||
+    typeof r.meta !== "object" ||
+    !Object.prototype.hasOwnProperty.call(r.meta, "err")
+  ) {
+    throw new HeliusUnavailableError("rpc getTransaction(base64): bad result");
+  }
+  return { wire, slot: Math.trunc(r.slot), err: r.meta.err };
 }
 
 export async function getSignaturesForAddress(
@@ -146,6 +191,66 @@ export async function getWalletTokensRaw(owner: string): Promise<Map<string, big
     out.set(mint, (out.get(mint) ?? 0n) + BigInt(amount));
   }
   return out;
+}
+
+export interface WalletTokenSnapshot {
+  tokens: Map<string, bigint>;
+  slot: number;
+}
+
+// A coherent two-program snapshot. minContextSlot prevents an RPC replica that has not observed a
+// confirmed trade from resurrecting or deleting a lot. If the parallel reads land at different
+// slots, re-read the older half at the newer slot before accepting the union. This advances one
+// shared floor without allowing either token program to regress on the next refresh.
+export async function getWalletTokensSnapshot(owner: string, minContextSlot: bigint): Promise<WalletTokenSnapshot> {
+  const read = async (programId: string, floor: bigint) =>
+    (await rpc("getTokenAccountsByOwner", [
+      owner,
+      { programId },
+      {
+        encoding: "jsonParsed",
+        commitment: "confirmed",
+        withContext: true,
+        minContextSlot: Number(floor),
+      },
+    ])) as
+      | {
+          context?: { slot?: unknown };
+          value?: { account?: { data?: { parsed?: { info?: { mint?: unknown; tokenAmount?: { amount?: unknown } } } } } }[];
+        }
+      | null;
+  const checkedSlot = (response: { context?: { slot?: unknown } } | null, floor: bigint): number => {
+    const slot = response?.context?.slot;
+    if (typeof slot !== "number" || !Number.isSafeInteger(slot) || slot < 0 || BigInt(slot) < floor) {
+      throw new HeliusUnavailableError("rpc wallet snapshot: stale context slot");
+    }
+    return slot;
+  };
+
+  let [spl, token2022] = await Promise.all([read(TOKEN_PROGRAM, minContextSlot), read(TOKEN_2022_PROGRAM, minContextSlot)]);
+  let splSlot = checkedSlot(spl, minContextSlot);
+  let token2022Slot = checkedSlot(token2022, minContextSlot);
+  if (splSlot < token2022Slot) {
+    spl = await read(TOKEN_PROGRAM, BigInt(token2022Slot));
+    splSlot = checkedSlot(spl, BigInt(token2022Slot));
+  } else if (token2022Slot < splSlot) {
+    token2022 = await read(TOKEN_2022_PROGRAM, BigInt(splSlot));
+    token2022Slot = checkedSlot(token2022, BigInt(splSlot));
+  }
+  if (!Array.isArray(spl?.value) || !Array.isArray(token2022?.value)) {
+    throw new HeliusUnavailableError("rpc wallet snapshot: missing token-account list");
+  }
+  const tokens = new Map<string, bigint>();
+  for (const value of [...spl.value, ...token2022.value]) {
+    const info = value?.account?.data?.parsed?.info;
+    const mint = info?.mint;
+    const amount = info?.tokenAmount?.amount;
+    if (typeof mint !== "string" || !isAddress(mint) || typeof amount !== "string" || !/^\d+$/.test(amount)) {
+      throw new HeliusUnavailableError("rpc wallet snapshot: malformed token account");
+    }
+    tokens.set(mint, (tokens.get(mint) ?? 0n) + BigInt(amount));
+  }
+  return { tokens, slot: Math.min(splSlot, token2022Slot) };
 }
 
 // The owner's token accounts for one mint, with their RAW amounts (a wallet can hold several ATAs).

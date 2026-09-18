@@ -11,6 +11,7 @@ import {
   STOCK_ALERT_FIRE_MAX_PER_TICK,
   STOCK_WALLET_RECONCILE_MAX_AGE_MS,
 } from "./config";
+import { readSweepCursor, writeSweepCursor } from "./sweep-cursor";
 
 export interface AlertInput {
   pnlCents: number;
@@ -71,12 +72,27 @@ export async function evalStockAlerts(
   pnl: PnlFn,
   now = new Date(),
 ): Promise<AlertSweep> {
-  const positions = await prisma.stockPosition.findMany({
-    where: { closedAt: null },
-    include: { asset: true },
-    orderBy: { createdAt: "asc" },
-    take: STOCK_ALERT_SCAN_MAX,
-  });
+  const cursorName = "stock-alerts";
+  let cursor = await readSweepCursor(prisma, cursorName);
+  const read = (after: typeof cursor) =>
+    prisma.stockPosition.findMany({
+      where: {
+        closedAt: null,
+        ...(after
+          ? { OR: [{ createdAt: { gt: after.createdAt } }, { createdAt: after.createdAt, id: { gt: after.id } }] }
+          : {}),
+      },
+      include: { asset: true },
+      orderBy: [{ createdAt: "asc" as const }, { id: "asc" as const }],
+      take: STOCK_ALERT_SCAN_MAX,
+    });
+  let positions = await read(cursor);
+  if (positions.length === 0 && cursor) {
+    await writeSweepCursor(prisma, cursorName, null);
+    cursor = null;
+    positions = await read(null);
+  }
+  if (positions.length === 0) return { scanned: 0, fired: 0, skipped: 0, errors: 0 };
   let scanned = 0;
   let fired = 0;
   let skipped = 0;
@@ -111,5 +127,7 @@ export async function evalStockAlerts(
       console.warn("[stock-alerts] lot failed:", (e as Error).message);
     }
   }
+  const last = positions[positions.length - 1];
+  await writeSweepCursor(prisma, cursorName, { createdAt: last.createdAt, id: last.id });
   return { scanned, fired, skipped, errors };
 }

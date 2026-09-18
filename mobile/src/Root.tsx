@@ -92,7 +92,7 @@ export default function Root() {
           .then((r) => { if ((r as CaptureRefResponse).captured) void clearRefCode(); })
           .catch(() => { /* idempotent; the GM tap also captures */ });
 
-        const [m, r] = await Promise.all([api("/api/me"), api("/api/results")]);
+        const [m, r] = await Promise.all([api("/api/me"), api("/api/results?unseen=1")]);
         const meData = m as MeResponse;
         setMe(meData);
         const unseen = (r as ResultsResponse).rows.filter((row) => !row.seen);
@@ -108,10 +108,9 @@ export default function Root() {
     })();
   }, [isReady, user, api]);
 
-  // Opening the inbox clears the badge optimistically; ResultsScreen POSTs /api/results/seen and
-  // the next /api/me confirms unreadResults=0.
-  const markResultsSeen = useCallback(() => {
-    setMe((m) => (m && m.unreadResults ? { ...m, unreadResults: 0 } : m));
+  // Decrement only the unseen rows the results screen actually loaded.
+  const markResultsSeen = useCallback((count: number) => {
+    setMe((m) => (m ? { ...m, unreadResults: Math.max(0, m.unreadResults - count) } : m));
   }, []);
 
   const openTopup = useCallback(() => setTopupOpen(true), []);
@@ -160,7 +159,7 @@ export default function Root() {
         )}
         {screen === "stocks" && <PortfolioScreen me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onNeedWallet={goProfile} />}
         {screen === "hedge" && <HedgeScreen me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openTopup} />}
-        {screen === "results" && <ResultsScreen api={api} onSeen={markResultsSeen} />}
+        {screen === "results" && <ResultsScreen api={api} onSeen={markResultsSeen} onAckFailed={refreshMe} />}
         {screen === "profile" && <ProfileScreen me={me} api={api} onRefreshMe={refreshMe} onLogout={doLogout} onToast={flashToast} />}
       </View>
       <BottomNav screen={screen} onNav={setScreen} />

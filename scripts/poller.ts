@@ -12,7 +12,12 @@ import { fetchResolution } from "../src/lib/polymarket";
 import { withDeadline } from "../src/lib/deadline";
 import { conditionResolution, type ChainOutcome } from "../src/lib/polygon";
 import { DECK_FETCH_HORIZON_HOURS } from "../src/lib/deck-mix";
-import { DECK_MIN_SERVABLE, STOCK_SPONSOR_MIN_LAMPORTS, STOCK_SPONSOR_LOW_ALERT_EVERY_MS } from "../src/lib/config";
+import {
+  DECK_MIN_SERVABLE,
+  STOCK_SPONSOR_MIN_LAMPORTS,
+  STOCK_SPONSOR_LOW_ALERT_EVERY_MS,
+  STOCK_WALLET_REFRESH_BUDGET_MS,
+} from "../src/lib/config";
 import { captureToGlitchTip, sendOpsTelegram } from "../src/lib/glitchtip";
 import { settleMarket, type Resolution } from "./settle";
 import { watchFunding, rpcChain } from "../src/lib/funding";
@@ -26,6 +31,7 @@ import { refreshStockCatalog, refreshStockPrices } from "./refresh-stocks";
 import { fillMissingBlurbs } from "../src/lib/stock-blurbs";
 import { sweepAttempts } from "../src/lib/stocks-real";
 import { evalStockAlerts } from "../src/lib/stock-alerts";
+import { refreshStaleStockWallets } from "../src/lib/stock-wallet-sweep";
 import { sponsorConfigured, sponsorAddress } from "../src/lib/sponsor";
 import { getBalanceLamports } from "../src/lib/helius";
 import { livePnlCents } from "../src/lib/stocks";
@@ -343,6 +349,22 @@ async function tick() {
     subsystemFailed("stock-attempts", e);
   }
   mark("stock-attempts", t);
+
+  // Refresh inactive wallets before alerts. A persistent keyset cursor and per-wallet lease keep
+  // this bounded and fair across multiple pollers; each accepted snapshot is slot/generation fenced.
+  t = Date.now();
+  try {
+    const wallets = await withDeadline(STOCK_WALLET_REFRESH_BUDGET_MS, () => refreshStaleStockWallets(prisma));
+    if (wallets.scanned + wallets.errors > 0) {
+      console.log(`[stock-wallets] scanned ${wallets.scanned}, refreshed ${wallets.refreshed}, errors ${wallets.errors}`);
+    }
+    if (wallets.errors > 0) subsystemFailed("stock-wallets", new Error(`${wallets.errors} wallet refresh(es) failed`));
+    else subsystemOk("stock-wallets");
+  } catch (e) {
+    console.warn("[stock-wallets] error:", (e as Error).message);
+    subsystemFailed("stock-wallets", e);
+  }
+  mark("stock-wallets", t);
 
   // Stock profit alerts: DB-only, reads the prices the stocks block just wrote. No withDeadline —
   // nothing upstream is read; the pass is bounded by STOCK_ALERT_SCAN_MAX / FIRE_MAX. A tier fires

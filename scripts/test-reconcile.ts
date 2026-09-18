@@ -219,7 +219,8 @@ async function main() {
     // ---- 7. Sweep selection: attempts that carry an exchange order id and are worth asking about —
     // POSTED (verdict still unknown) plus FILLED/PARTIAL (booked, but their fee is still the
     // ESTIMATE until the charged one replaces it). A SUBMITTING attempt has nothing to ask about, a
-    // POSTED one without an id likewise, and anything older than 48h is settled history.
+    // POSTED one without an id likewise. Age has no upper bound: unresolved money state must not
+    // disappear merely because it has been ambiguous for more than 48 hours.
     const m7a = await mkMarket("c7a");
     await mkAttempt(m7a.id, { externalOrderId: `${tag}-o7a` });
     const m7b = await mkMarket("c7b");
@@ -230,12 +231,21 @@ async function main() {
     const a7d = await mkAttempt(m7d.id, { state: "FILLED", externalOrderId: `${tag}-o7d` });
     const m7e = await mkMarket("c7e");
     const a7e = await mkAttempt(m7e.id, { state: "FILLED", externalOrderId: `${tag}-o7e` });
-    // Nudged past the floor: a fee trued up two days ago must not be rescanned every pass.
+    // Forty-nine hours old is still unresolved and therefore still eligible.
     await prisma.orderAttempt.update({
       where: { id: a7e.id },
       data: { updatedAt: new Date(Date.now() - 49 * 60 * 60_000) },
     });
-    const window = { lt: new Date(), gt: new Date(Date.now() - 48 * 60 * 60_000) };
+    const m7old = await mkMarket("c7old");
+    const a7old = await mkAttempt(m7old.id, {
+      externalOrderId: `${tag}-o7old`,
+      approvedParams: { betSide: "YES", sharesMicro: "1000000", feeRateBp: FEE_RATE_BP, feeExpMilli: FEE_EXP_MILLI },
+    });
+    await prisma.orderAttempt.update({
+      where: { id: a7old.id },
+      data: { updatedAt: new Date(Date.now() - 49 * 24 * 60 * 60_000) },
+    });
+    const window = { lt: new Date() };
     // Mirrors the sweep's own predicate: a booked attempt stays eligible only until its terminal
     // trade records were booked (reconciledAt).
     const eligible = await prisma.orderAttempt.count({
@@ -245,16 +255,23 @@ async function main() {
         updatedAt: window,
       },
     });
-    const swept = await reconcileStuckAttempts(prisma, async () => null, { minAgeMs: 0, limit: 50 });
-    assert.strictEqual(swept.scanned, eligible, "scanned exactly the id-carrying attempts inside the window");
+    await prisma.sweepCursor.deleteMany({ where: { name: "polymarket-order-reconcile-v1" } });
+    const swept = await reconcileStuckAttempts(prisma, async (attempt) => attempt.id === a7old.id ? {
+      terminal: true,
+      matchedSharesMicro: 1_000_000n,
+      trades: [{ id: `${tag}-t7old`, priceBp: 5000, sizeMicro: 1_000_000n, feeRateBp: FEE_RATE_BP, ts: new Date() }],
+    } : null, { minAgeMs: 0, limit: 50 });
+    assert.strictEqual(swept.scanned, eligible, "scanned every old id-carrying unresolved attempt");
     assert.ok(
       await prisma.orderAttempt
         .findMany({ where: { id: { in: [a7d.id, a7e.id] } }, select: { id: true, updatedAt: true } })
         .then((rows) => rows.length === 2),
-      "both FILLED fixtures still exist — one inside the window, one past the floor",
+      "both FILLED fixtures still exist and remain eligible regardless of age",
     );
     assert.ok(swept.scanned >= 1);
-    assert.strictEqual(swept.unknown, swept.scanned, "a null probe leaves everything unknown");
+    assert.strictEqual(swept.booked, 1, "a 49-day POSTED attempt is still scanned and booked");
+    assert.strictEqual(await prisma.fill.count({ where: { attemptId: a7old.id } }), 1, "the old fill is durable");
+    assert.strictEqual(swept.unknown, swept.scanned - 1, "other null probes remain unknown");
 
     // ---- 7b. The PLATFORM fee comes from the INTENT's rate, not from the trade record. Live on
     // 2026-08-17: the exchange's trade carried feeRateBps 0 while the chain showed $0.012490
@@ -405,7 +422,7 @@ async function main() {
     console.log("OK: unknown probe / matched-without-trades / terminal + live zero-match verdicts");
     console.log("OK: trade records replace the receipt estimate — delta booked, fee trued up");
     console.log("OK: EXIT true-up moves realized PnL by the charged close fee");
-    console.log("OK: the sweep selects id-carrying POSTED/FILLED/PARTIAL attempts inside the 48h window");
+    console.log("OK: the sweep selects id-carrying POSTED/FILLED/PARTIAL attempts with no upper age bound");
     console.log("OK: orphan discovery — unknown is inert, a definitive absence kills and frees the slot");
     console.log("OK: orphan adoption books from the exchange and refuses an already-bound order id");
     console.log("OK: platform fee comes from the intent's rate; the label is judged against the SIGNED size");
@@ -414,6 +431,7 @@ async function main() {
     await prisma.pointsLedger.deleteMany({ where: { userId: user.id } });
     await prisma.fill.deleteMany({ where: { attempt: { userId: user.id } } });
     await prisma.orderAttempt.deleteMany({ where: { userId: user.id } });
+    await prisma.sweepCursor.deleteMany({ where: { name: "polymarket-order-reconcile-v1" } });
     await prisma.bet.deleteMany({ where: { userId: user.id } });
     await prisma.dailyCounter.deleteMany({ where: { userId: user.id } });
     await prisma.market.deleteMany({ where: { polymarketId: { startsWith: tag } } });

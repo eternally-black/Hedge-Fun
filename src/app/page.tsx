@@ -118,6 +118,7 @@ function App() {
   // the deck (it's a re-watch, not the open sequence).
   const [reveal, setReveal] = useState<ResultRow[] | null>(null);
   const revealMode = useRef<"ritual" | "replay">("ritual");
+  const revealDelivery = useRef<{ mode: "PAPER" | "REAL"; betIds: string[]; unreadCount: number } | null>(null);
   // Latest `me` mirrored into a ref so event handlers (e.g. exitReveal) can read the CURRENT value
   // without depending on `me` — that keeps those callbacks stable across the frequent me refreshes.
   // Written in an effect (after commit), not during render, so it's safe under concurrent rendering.
@@ -298,13 +299,18 @@ function App() {
     //   • unseen results      → play the reveal (it chains forward to GM on finish/skip).
     //   • else not GM'd today → open GM (the once-a-day check-in is the open ritual).
     //   • else (checked in)   → deck.
-    Promise.all([api("/api/me"), api("/api/results")])
+    Promise.all([api("/api/me"), api("/api/results?unseen=1")])
       .then(([m, r]) => {
         const me = m as Me;
         setMe(me);
         if (me.isNewUser) return; // new user: deck (default screen), no reveal, no GM
-        const unseen = (r as ResultsResponse).rows.filter((row) => !row.seen);
-        if (unseen.length) { revealMode.current = "ritual"; setReveal(unseen); }
+        const results = r as ResultsResponse;
+        const unseen = results.rows.filter((row) => !row.seen);
+        if (unseen.length) {
+          revealMode.current = "ritual";
+          revealDelivery.current = { mode: results.mode, betIds: unseen.map((row) => row.id), unreadCount: unseen.length };
+          setReveal(unseen);
+        }
         else if (!me.loginMarkedToday) setScreen("gm");
       })
       .catch(console.error)
@@ -629,10 +635,13 @@ function App() {
     await logout().catch(console.error);
   }, [logout]);
 
-  // Opening the inbox clears the unread badge optimistically; the NotificationsScreen POSTs
-  // /api/results/seen, and the next /api/me confirms unreadResults=0.
-  const markResultsSeen = useCallback(() => {
-    setMe((m) => (m && (m.unreadResults || m.unreadStockAlerts) ? { ...m, unreadResults: 0, unreadStockAlerts: 0 } : m));
+  // Decrement only the rows this page delivered. Results that settle concurrently stay badged.
+  const markResultsSeen = useCallback((betCount: number, stockCount: number) => {
+    setMe((m) => m ? {
+      ...m,
+      unreadResults: Math.max(0, m.unreadResults - betCount),
+      unreadStockAlerts: Math.max(0, (m.unreadStockAlerts ?? 0) - stockCount),
+    } : m);
   }, []);
 
   // Where a closed reveal leads. A daily-ritual reveal chains forward to GM, but ONLY if the user
@@ -649,20 +658,39 @@ function App() {
   // (unwatched results stay badged in the bell), only closes the overlay. Both refresh /api/me so
   // balance/shards/unread reflect the server. Replay (from inbox) re-opens all rows as a re-watch.
   const finishReveal = useCallback(() => {
+    const delivered = revealDelivery.current;
+    revealDelivery.current = null;
     setReveal(null);
-    markResultsSeen();
-    api("/api/results/seen", { method: "POST" }).catch(() => { /* badge re-syncs from /api/me */ });
+    if (delivered && delivered.betIds.length > 0) {
+      markResultsSeen(delivered.unreadCount, 0);
+      api("/api/results/seen", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ scope: "bets", mode: delivered.mode, betIds: delivered.betIds }),
+      }).catch(console.error).finally(() => { void refreshMe(); });
+    } else {
+      void refreshMe();
+    }
     exitReveal();
-    void refreshMe();
   }, [api, markResultsSeen, refreshMe, exitReveal]);
   const skipReveal = useCallback(() => {
+    revealDelivery.current = null;
     setReveal(null);
     exitReveal();
     void refreshMe(); // badge persists — unwatched results stay unread (the safety net)
   }, [refreshMe, exitReveal]);
   const replayReveal = useCallback(() => {
     api("/api/results")
-      .then((r) => { revealMode.current = "replay"; setReveal((r as ResultsResponse).rows); })
+      .then((r) => {
+        const results = r as ResultsResponse;
+        revealMode.current = "replay";
+        revealDelivery.current = {
+          mode: results.mode,
+          betIds: results.rows.map((row) => row.id),
+          unreadCount: results.rows.filter((row) => !row.seen).length,
+        };
+        setReveal(results.rows);
+      })
       .catch(console.error);
   }, [api]);
 
@@ -787,7 +815,7 @@ function App() {
         {effectiveScreen === "vault" && <VaultScreen me={me} api={api} onRefresh={refresh} previewCard={top ?? next} />}
         {effectiveScreen === "invite" && <InviteScreen me={me} />}
         {effectiveScreen === "you" && <ProfileScreen me={me} api={api} onRefresh={refresh} onLogout={doLogout} onToast={flashToast} pusdMicro={realPusdMicro} onNav={navTo} />}
-        {effectiveScreen === "notifications" && <NotificationsScreen api={api} onSeen={markResultsSeen} onReplay={replayReveal} onOpenStock={() => setScreen("portfolio")} />}
+        {effectiveScreen === "notifications" && <NotificationsScreen api={api} onSeen={markResultsSeen} onAckFailed={refreshMe} onReplay={replayReveal} onOpenStock={() => setScreen("portfolio")} />}
         {effectiveScreen === "portfolio" && <PortfolioScreen api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} stocksUsdCents={stocksUsdCents} onOpenWallet={openBalance} />}
       </div>
 

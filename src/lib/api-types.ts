@@ -258,6 +258,7 @@ export interface ResultRow {
 }
 export interface ResultsResponse {
   rows: ResultRow[];
+  mode: "PAPER" | "REAL"; // mode these rows were read from; echo it when acknowledging this page
   unreadCount: number;
   nextCursor: string | null; // opaque; pass back as ?cursor= for the next page; null = no more
   stockAlerts?: StockAlertRow[]; // stock profit alerts (optional: older servers omit, older clients ignore)
@@ -269,14 +270,14 @@ export interface ResultsResponse {
 // (stored asset price); tierBp is what fired. Both modes are returned (stock alerts do not follow the
 // Polymarket real-mode switch); `mode` labels each row.
 export interface StockAlertRow { positionId: string; symbol: string; name: string; logoUrl: string | null; mode: "PAPER" | "REAL"; tierBp: number; pnlCents: number; pnlBp: number; costCents: number; alertedAt: string; seen: boolean }
-// POST /api/results/seen body (optional). NO body = bets only (what the shipped mobile client sends).
+// POST /api/results/seen body (optional). A missing/empty betIds list is a legacy-safe bet no-op.
 // `stockAlerts` acknowledges exactly the (positionId, tierBp) pairs the client displayed — a tier that
 // fired after the client loaded is left unread.
-export interface SeenRequest { scope?: "bets" | "stocks" | "both"; stockAlerts?: { positionId: string; tierBp: number }[] }
+export interface SeenRequest { scope?: "bets" | "stocks" | "both"; mode?: "PAPER" | "REAL"; betIds?: string[]; stockAlerts?: { positionId: string; tierBp: number }[] }
 
 // ─── POST /api/results/seen ──────────────────────────────────────────────────────────────────────
-// Auth: Bearer. No body. Marks ALL of the user's unseen settled results as seen (idempotent —
-// only seenAt IS NULL rows are touched). Called when the reveal is dismissed or the inbox is opened.
+// Auth: Bearer. Marks only the named settled results in the explicitly named delivery mode. The
+// user/mode/status/seen guards make it idempotent and prevent stale pages from clearing new results.
 export interface SeenResponse {
   markedSeen: number; // bets marked seen (unchanged meaning)
   markedStockAlertsSeen: number; // stock alert pairs acknowledged (0 unless the body listed them)

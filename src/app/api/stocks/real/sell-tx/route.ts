@@ -10,6 +10,7 @@ import {
   StockConsentRequiredError,
   WalletNotVerifiedError,
   SponsorLimitError,
+  WalletIdentityUnavailableError,
 } from "@/lib/stocks-real";
 import type { StockRealSellTxRequest, StockRealSellTxResponse } from "@/lib/api-types";
 
@@ -45,6 +46,9 @@ export async function POST(req: Request) {
     }
     if (e instanceof SponsorLimitError) {
       return NextResponse.json({ error: "sponsor_limit" }, { status: 429 });
+    }
+    if (e instanceof WalletIdentityUnavailableError) {
+      return NextResponse.json({ error: "wallet_identity_unavailable" }, { status: 502 });
     }
     if (e instanceof StockUnavailableError) {
       const status = e.message === "position_not_found" ? 404 : 409;

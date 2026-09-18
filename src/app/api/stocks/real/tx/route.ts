@@ -4,7 +4,13 @@ import { rateLimit } from "@/lib/ratelimit";
 import { JupiterUnavailableError } from "@/lib/prices";
 import { StockUnavailableError } from "@/lib/stocks-db";
 import { HeliusUnavailableError } from "@/lib/helius";
-import { buildAttempt, StockConsentRequiredError, WalletNotVerifiedError, SponsorLimitError } from "@/lib/stocks-real";
+import {
+  buildAttempt,
+  StockConsentRequiredError,
+  WalletNotVerifiedError,
+  SponsorLimitError,
+  WalletIdentityUnavailableError,
+} from "@/lib/stocks-real";
 import { STOCK_MIN_STAKE_CENTS, STOCK_MAX_STAKE_CENTS } from "@/lib/config";
 import type { StockRealTxRequest, StockRealTxResponse } from "@/lib/api-types";
 
@@ -56,6 +62,9 @@ export async function POST(req: Request) {
     }
     if (e instanceof SponsorLimitError) {
       return NextResponse.json({ error: "sponsor_limit" }, { status: 429 });
+    }
+    if (e instanceof WalletIdentityUnavailableError) {
+      return NextResponse.json({ error: "wallet_identity_unavailable" }, { status: 502 });
     }
     if (e instanceof StockUnavailableError) {
       const status = e.message === "asset_not_found" ? 404 : 409;

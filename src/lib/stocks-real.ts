@@ -38,29 +38,42 @@ import {
 import { quoteSwapPreferDirect, buildSwapTx, type JupIx } from "./jupiter-swap";
 import {
   getTransaction,
+  getRawTransaction,
   getSignaturesForAddress,
   getBlockHeight,
   getTokenBalanceRaw,
   getTokenAccounts,
-  getWalletTokensRaw,
+  getWalletTokensSnapshot,
   getAccountInfoBase64,
   sendRawTransaction,
+  HeliusUnavailableError,
 } from "./helius";
 import {
   sponsorConfigured,
   sponsorAddress,
   buildSponsoredSwapTx,
   coSign,
+  messageHashOf,
+  legacyUnsignedHashMatches,
+  transactionFeePayerOf,
+  transactionSignatureOf,
+  validateSignedTransaction,
   closeAccountIx,
   SponsorUnavailableError,
   TxMismatchError,
 } from "./sponsor";
+import {
+  bumpWalletGeneration,
+  captureWalletSnapshotFence,
+  ensureWalletState,
+  lockWalletPayer,
+} from "./wallet-sync";
+import { readSweepCursor, writeSweepCursor } from "./sweep-cursor";
 import { verifiedWallets, hasStockConsent, StockUnavailableError } from "./stocks-db";
 import {
   STOCK_SWAP_SLIPPAGE_BPS,
   STOCK_MAX_PRICE_IMPACT_BP,
   STOCK_CONFIRM_POLLS,
-  STOCK_CONFIRM_SLEEP_MS,
   STOCK_ATTEMPT_SWEEP_AFTER_MS,
   STOCK_TERMS_VERSION,
   STOCK_SPONSOR_MAX_PER_USER_PER_DAY,
@@ -108,6 +121,12 @@ export class SponsorLimitError extends Error {
     this.name = "SponsorLimitError";
   }
 }
+export class WalletIdentityUnavailableError extends Error {
+  constructor() {
+    super("wallet_identity_unavailable");
+    this.name = "WalletIdentityUnavailableError";
+  }
+}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -139,34 +158,33 @@ export async function recordStockConsent(userId: string, version: number): Promi
 async function createAttempt(
   data: Prisma.StockBuyAttemptUncheckedCreateInput,
   reserve?: (tx: Prisma.TransactionClient) => Promise<StockBuyAttempt | null>,
+  funded: { account: string; mint: string }[] = [],
 ): Promise<{ attempt: StockBuyAttempt; reserved: boolean }> {
   return prisma.$transaction(async (tx) => {
     if (data.sponsored || reserve) {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${data.userId}))`;
     }
+    await lockWalletPayer(tx, data.payer);
     if (reserve) {
       const existing = await reserve(tx);
       if (existing) return { attempt: existing, reserved: true };
     }
     if (data.sponsored) {
-      // What counts is what the sponsor paid for or may still pay for: an attempt that was SENT (its
-      // signature stamped) or one still LIVE (PENDING — it can still be signed and sent, so it holds
-      // its slot until the sweep expires it). A build the wallet never signed and that has since
-      // expired or failed — a quote that timed out, a scanner that blocked the prompt — cost nothing
-      // and must not eat the day's allowance (live 2026-09-18: a dozen expired Phantom attempts
-      // locked the user out of a sale with 7 real trades made). Counting live ones keeps the cap a
-      // cap: two concurrent builds at the last slot still resolve to one.
       const used = await tx.stockBuyAttempt.count({
         where: {
           userId: data.userId,
           sponsored: true,
+          kind: data.kind ?? "BUY",
           createdAt: { gte: new Date(Date.now() - 24 * 3_600_000) },
           OR: [{ sig: { not: null } }, { status: "PENDING" }],
         },
       });
       if (used >= STOCK_SPONSOR_MAX_PER_USER_PER_DAY) throw new SponsorLimitError();
     }
-    return { attempt: await tx.stockBuyAttempt.create({ data }), reserved: false };
+    await bumpWalletGeneration(tx, data.userId, data.payer);
+    const attempt = await tx.stockBuyAttempt.create({ data });
+    await recordSponsorFunding(tx, attempt, funded);
+    return { attempt, reserved: false };
   });
 }
 
@@ -174,11 +192,12 @@ async function createAttempt(
 // the ACCOUNT, not to the lot that lands in it). Written at BUILD time — the only moment we know the
 // account did not exist — and retired again if the attempt never lands.
 async function recordSponsorFunding(
+  db: Prisma.TransactionClient,
   attempt: { id: string; userId: string; payer: string },
   funded: { account: string; mint: string }[],
 ): Promise<void> {
   for (const f of funded) {
-    await prisma.sponsorFundedAccount.upsert({
+    await db.sponsorFundedAccount.upsert({
       where: { account: f.account },
       create: { account: f.account, userId: attempt.userId, payer: attempt.payer, mint: f.mint, attemptId: attempt.id },
       // A row can only be here for an account the chain no longer has (it was closed, or its funding
@@ -201,16 +220,67 @@ async function dropUnconfirmedFunding(attemptId: string, db: Prisma.TransactionC
   await db.sponsorFundedAccount.deleteMany({ where: { attemptId, confirmedAt: null } });
 }
 
-// Whose SOL fronts the token-account rent of a sponsored transaction: the sponsor's for the embedded
-// wallet (it has none), the wallet's own for a connected external one — its scanner blocks rent
-// returning to anyone else, and it has SOL. Privy unreachable → the sponsor fronts it (today's
-// behaviour), never a refusal; a caller without a privyId (tests, tools) gets the same.
+function reservedBuy(attempt: StockBuyAttempt): StockRealTxResponse {
+  if (!attempt.unsignedTx) throw new StockUnavailableError("buy_in_flight");
+  const feePayer = attempt.sponsored ? sponsorAddress() : null;
+  if (attempt.sponsored && !feePayer) throw new SponsorUnavailableError();
+  return {
+    attemptId: attempt.id,
+    swapTransaction: attempt.unsignedTx,
+    lastValidBlockHeight: Number(attempt.lastValidBlockHeight),
+    payer: attempt.payer,
+    feePayer,
+    quote: {
+      inAmountMicro: String(attempt.inAmountMicro),
+      outAmountBase: String(attempt.minOutBase),
+      minOutBase: String(attempt.minOutBase),
+      priceImpactBp: 0,
+    },
+  };
+}
+
+async function reservePendingBuy(
+  db: Prisma.TransactionClient,
+  p: { userId: string; assetId: string; payer: string; hedgeSuggestionId: string | null },
+  blockHeight: number,
+): Promise<StockBuyAttempt | null> {
+  const existing = await db.stockBuyAttempt.findFirst({
+    where: { userId: p.userId, assetId: p.assetId, payer: p.payer, kind: "BUY", status: "PENDING" },
+    orderBy: { createdAt: "desc" },
+  });
+  if (!existing) return null;
+
+  const sameRequest = existing.hedgeSuggestionId === p.hedgeSuggestionId;
+  if (existing.sig || BigInt(blockHeight) <= existing.lastValidBlockHeight) {
+    if (!sameRequest || !existing.unsignedTx) throw new StockUnavailableError("buy_in_flight");
+    return existing;
+  }
+
+  // An unsigned build past its blockheight cannot land. Retire it under the same user lock before
+  // creating a replacement; a signed build is never retired by blockheight alone.
+  const retired = await db.stockBuyAttempt.updateMany({
+    where: { id: existing.id, status: "PENDING", sig: null },
+    data: { status: "EXPIRED", resolvedAt: new Date() },
+  });
+  if (retired.count !== 1) {
+    const current = await db.stockBuyAttempt.findUnique({ where: { id: existing.id } });
+    if (current?.status === "PENDING" && current.sig && sameRequest && current.unsignedTx) return current;
+    throw new StockUnavailableError("buy_in_flight");
+  }
+  await db.sponsorFundedAccount.deleteMany({ where: { attemptId: existing.id, confirmedAt: null } });
+  return null;
+}
+
+// Embedded wallets have no SOL, so the sponsor fronts account rent. Connected external wallets
+// front their own rent because their scanners reject cleanup that returns it to another address.
+// If identity is unavailable, refuse the build: guessing "embedded" creates a transaction shape
+// that external wallet scanners reject, while guessing "external" can strand an embedded wallet.
 async function rentOnSponsor(user: { privyId?: string }, payer: string): Promise<boolean> {
   if (!user.privyId) return true;
   try {
     return embeddedSolanaWallet(await getPrivyUser(user.privyId)) === payer;
   } catch {
-    return true;
+    throw new WalletIdentityUnavailableError();
   }
 }
 
@@ -243,33 +313,19 @@ export async function buildAttempt(
     if (accepted) throw new StockUnavailableError("hedge_already_accepted");
   }
 
-  // A sponsored buy we already SENT (the signature is stamped before the send) may be landing right
-  // now. Building a second one for the same asset is how a user buys twice off one tap — wait for
-  // the first to resolve (confirm, or the sweep past its block height).
-  const inFlight = await prisma.stockBuyAttempt.findFirst({
-    where: { userId: user.id, assetId: asset.id, kind: "BUY", status: "PENDING", sponsored: true, sig: { not: null } },
-    orderBy: { createdAt: "desc" },
+  const reserveParams = {
+    userId: user.id,
+    assetId: asset.id,
+    payer: p.payer,
+    hedgeSuggestionId: p.hedgeSuggestionId ?? null,
+  };
+  const initialHeight = await getBlockHeight();
+  const existing = await prisma.$transaction(async (db) => {
+    await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${user.id}))`;
+    await lockWalletPayer(db, p.payer);
+    return reservePendingBuy(db, reserveParams, initialHeight);
   });
-  if (inFlight?.sig) {
-    if ((await getBlockHeight()) <= Number(inFlight.lastValidBlockHeight)) {
-      throw new StockUnavailableError("buy_in_flight");
-    }
-    // Past its block height it either LANDED (and the device's confirm was lost) or it never will —
-    // and one `getTransaction → null` cannot tell the two apart (RPC receipt lag: "not found" also
-    // means "not yet visible"). So: try to confirm it right here (a landed receipt books the lot now),
-    // then let the ROW decide. Still PENDING → keep refusing; the sweep resolves it against the payer's
-    // signature history within minutes and EXPIREs or FAILs it. CONFIRMED → refuse with buy_landed.
-    // FAILED/EXPIRED → a fresh buy is allowed. A retry inside the ambiguous window is how one tap
-    // becomes two lots, so ambiguity errs on the side of waiting.
-    try {
-      await confirmAttempt(user.id, inFlight.id, inFlight.sig, { polls: 1, sleepMs: 0 });
-    } catch (e) {
-      if (!(e instanceof TxNotFoundError) && !(e instanceof TxRejectedError)) throw e;
-    }
-    const after = await prisma.stockBuyAttempt.findUnique({ where: { id: inFlight.id }, select: { status: true } });
-    if (after?.status === "CONFIRMED") throw new StockUnavailableError("buy_landed");
-    if (after?.status === "PENDING") throw new StockUnavailableError("buy_in_flight");
-  }
+  if (existing) return reservedBuy(existing);
 
   // Size the buy to what the wallet actually holds: a chip larger than the USDC balance would become
   // a swap that fails at simulation (and, sponsored, a fee paid for nothing). Below the minimum stake
@@ -295,39 +351,40 @@ export async function buildAttempt(
   const sponsored = sponsorConfigured();
   // WHO pays the token account's rent, recorded at the only moment we can know it: the setup
   // instruction creates the account (on us) only when the wallet holds none for this mint. A wallet
-  // that already has one — or that pays for its own — keeps that rent when the lot is sold.
+  // that already has one keeps that rent when the lot is sold.
   const sponsorRent = sponsored && (await rentOnSponsor(user, p.payer));
   const rentFromSponsor = sponsorRent && (await getTokenAccounts(p.payer, asset.mint)).length === 0;
-  // Self-paid: the client sends back the very bytes we handed it, so hashing the base64 is enough.
-  // Sponsored: the hash is over the compiled MESSAGE, because signing changes the bytes (the
-  // signature slots) but never the message.
+  // The hash is always over serialized MESSAGE bytes. Signatures alter the wire envelope but never
+  // the message; hashing a base64 string made old self-paid attempts impossible to prove.
   const tx = sponsored
     ? await buildSponsoredSwapTx({ quoteResponse: quote.raw, userPublicKey: p.payer, sponsorRent })
     : await buildSwapTx(quote.raw, p.payer).then((t) => ({
         ...t,
-        messageHash: createHash("sha256").update(t.swapTransaction).digest("hex"),
+        messageHash: messageHashOf(new Uint8Array(Buffer.from(t.swapTransaction, "base64"))),
         fundedAccounts: [] as { account: string; mint: string }[], // self-paid: the wallet fronts its own rent
       }));
 
-  const { attempt } = await createAttempt({
-    userId: user.id,
-    assetId: asset.id,
-    payer: p.payer,
-    kind: "BUY",
-    sponsored,
-    rentFromSponsor,
-    stakeCents,
-    inAmountMicro: quote.inAmount,
-    minOutBase: quote.minOutBase,
-    msgHash: tx.messageHash,
-    lastValidBlockHeight: BigInt(tx.lastValidBlockHeight),
-    hedgeSuggestionId: p.hedgeSuggestionId ?? null,
-    // The built bytes: what submit compares a wallet-rewritten message against (Phantom appends its
-    // guards). Sells stored them from day one for the retry; a BUY without them refused every
-    // Phantom buy as tx_mismatch (live 2026-09-18).
-    unsignedTx: sponsored ? tx.swapTransaction : null,
-  });
-  await recordSponsorFunding(attempt, tx.fundedAccounts);
+  const reserveHeight = await getBlockHeight();
+  const { attempt, reserved } = await createAttempt(
+    {
+      userId: user.id,
+      assetId: asset.id,
+      payer: p.payer,
+      kind: "BUY",
+      sponsored,
+      rentFromSponsor,
+      stakeCents,
+      inAmountMicro: quote.inAmount,
+      minOutBase: quote.minOutBase,
+      msgHash: tx.messageHash,
+      unsignedTx: tx.swapTransaction,
+      lastValidBlockHeight: BigInt(tx.lastValidBlockHeight),
+      hedgeSuggestionId: p.hedgeSuggestionId ?? null,
+    },
+    (db) => reservePendingBuy(db, reserveParams, reserveHeight),
+    tx.fundedAccounts,
+  );
+  if (reserved) return reservedBuy(attempt);
 
   return {
     attemptId: attempt.id,
@@ -420,7 +477,8 @@ export async function buildSellAttempt(
       if (e instanceof TxNotFoundError) {
         // Not on chain. Past its block height it never will be -> retire it; otherwise it may still
         // land, and re-serving keeps the user on the ONE transaction that can.
-        if (height > Number(stamped.lastValidBlockHeight)) terminalId = stamped.id;
+        // A stamped send is ambiguous even past blockheight. submitSigned may retry only its exact
+        // durable wire after checking for a receipt; never free the lot for a second sale here.
       } else if (e instanceof TxRejectedError) {
         // tx_failed (confirmSell already marked it FAILED) or not_this_buy: the signature is spent
         // either way, so this attempt can never settle the lot and a fresh sale is allowed.
@@ -436,8 +494,13 @@ export async function buildSellAttempt(
   // bytes carry the same signature, so a retry is idempotent on chain. This read is the cheap path
   // (it skips a quote and a build); the decision that counts is the locked one below.
   const pending = await pendingSell(prisma, user.id, lot.id);
-  if (pending && pending.id !== terminalId && pending.unsignedTx && height <= Number(pending.lastValidBlockHeight)) {
-    return reservedSell(pending, payer);
+  if (pending && pending.id !== terminalId) {
+    if (pending.manualReviewReason || !pending.unsignedTx) {
+      throw new StockUnavailableError("sell_manual_review");
+    }
+    if ((pending.sig && pending.signedTx) || height <= Number(pending.lastValidBlockHeight)) {
+      return reservedSell(pending, payer);
+    }
   }
 
   // The wallet must still hold the lot. If it does not, the user moved or sold it elsewhere: close
@@ -486,7 +549,12 @@ export async function buildSellAttempt(
     }
   }
 
-  const tx = await buildSponsoredSwapTx({ quoteResponse: quote.raw, userPublicKey: payer, extraInstructions, sponsorRent: await rentOnSponsor(user, payer) });
+  const tx = await buildSponsoredSwapTx({
+    quoteResponse: quote.raw,
+    userPublicKey: payer,
+    extraInstructions,
+    sponsorRent: await rentOnSponsor(user, payer),
+  });
 
   const { attempt, reserved } = await createAttempt(
     {
@@ -508,11 +576,23 @@ export async function buildSellAttempt(
     // a concurrent build may have inserted its own sell in the meantime. Re-serve it rather than add
     // a second live sale of one lot.
     async (db) => {
+      const freshLot = await db.stockPosition.findUnique({ where: { id: lot.id } });
+      if (
+        !freshLot ||
+        freshLot.userId !== user.id ||
+        freshLot.payer !== payer ||
+        freshLot.closedAt !== null ||
+        freshLot.qtyBase !== lot.qtyBase
+      ) {
+        throw new StockUnavailableError("lot_closed");
+      }
       const live = await pendingSell(db, user.id, lot.id);
       if (!live) return null;
-      if (live.id !== terminalId && live.unsignedTx && height <= Number(live.lastValidBlockHeight)) return live;
-      // Past its block height, resolved as terminal above, or a legacy row with no bytes to
-      // re-serve: it can never settle this lot. Conditional — a confirm may have won the race.
+      if (live.manualReviewReason || !live.unsignedTx) throw new StockUnavailableError("sell_manual_review");
+      if (live.id !== terminalId && ((live.sig && live.signedTx) || height <= Number(live.lastValidBlockHeight))) return live;
+      // Only an unstamped modern build can expire here. A stamped/legacy ambiguous send never frees
+      // the lot for another transaction.
+      if (live.sig || live.signedTx) throw new StockUnavailableError("sell_in_flight");
       await db.stockBuyAttempt.updateMany({
         where: { id: live.id, status: "PENDING" },
         data: { status: "EXPIRED", resolvedAt: new Date() },
@@ -520,9 +600,9 @@ export async function buildSellAttempt(
       await dropUnconfirmedFunding(live.id, db);
       return null;
     },
+    tx.fundedAccounts,
   );
   if (reserved) return reservedSell(attempt, payer);
-  await recordSponsorFunding(attempt, tx.fundedAccounts);
 
   return {
     attemptId: attempt.id,
@@ -546,13 +626,21 @@ export async function buildSellAttempt(
 export async function submitSigned(userId: string, attemptId: string, signedTransactionB64: string): Promise<string> {
   const attempt = await prisma.stockBuyAttempt.findUnique({ where: { id: attemptId } });
   if (!attempt || attempt.userId !== userId) throw new AttemptNotFoundError();
+  if (attempt.status === "CONFIRMED" && attempt.sig) return attempt.sig;
   if (attempt.status !== "PENDING") throw new TxRejectedError("attempt_not_pending");
-  // A self-paid attempt was never ours to sign (and its msgHash is over different bytes entirely).
-  if (!attempt.sponsored) throw new TxRejectedError("tx_mismatch");
+  if (!attempt.unsignedTx) throw new TxRejectedError("legacy_manual_review");
 
-  // Past its blockhash the tx can never land; sending it would just burn a sponsor fee on a retry.
-  const height = await getBlockHeight();
-  if (height > Number(attempt.lastValidBlockHeight)) throw new TxRejectedError("attempt_expired");
+  const expectedFeePayer = transactionFeePayerOf(attempt.unsignedTx);
+  const checked = await validateSignedTransaction({
+    signedTransactionB64,
+    builtTransactionB64: attempt.unsignedTx,
+    expectedMessageHash: attempt.msgHash,
+    expectedFeePayer,
+    ...(attempt.sponsored ? { allowMissingSignature: expectedFeePayer } : {}),
+  });
+  if (!attempt.signedTx && (await getBlockHeight()) > Number(attempt.lastValidBlockHeight)) {
+    throw new TxRejectedError("attempt_expired");
+  }
 
   // SELL: the lot must still be ours to sell. An older attempt for a lot that a newer one already
   // closed would sell the wallet's OTHER tokens of the same mint and could never be booked, so it
@@ -568,26 +656,39 @@ export async function submitSigned(userId: string, attemptId: string, signedTran
     });
   }
 
-  let wire: string, sig: string;
-  try {
+  let wire: string;
+  let sig: string;
+  if (attempt.signedTx && attempt.sig) {
+    // A prior call crossed the durable pre-broadcast fence. The incoming user signature was checked
+    // above; only the exact already-stamped wire may be retried, including after blockheight expiry.
+    wire = attempt.signedTx;
+    sig = attempt.sig;
+  } else if (attempt.sponsored) {
     ({ wire, sig } = await coSign({
       signedTransactionB64,
       expectedMessageHash: attempt.msgHash,
       userAddress: attempt.payer,
-      builtTransactionB64: attempt.unsignedTx ?? undefined, // ours + Lighthouse guards (Phantom) is still ours
+      builtTransactionB64: attempt.unsignedTx,
     }));
-  } catch (e) {
-    // The message the wallet signed is neither the one we built nor ours plus Lighthouse guards. The
-    // bytes are logged so the difference can be read off the server (without the sponsor signature
-    // they cannot be broadcast).
-    if (e instanceof TxMismatchError) console.warn(`[stock-submit] tx_mismatch attempt=${attemptId} user=${userId} tx=${signedTransactionB64}`);
-    throw e;
+  } else {
+    if (!checked.sig) throw new TxMismatchError();
+    wire = checked.wire;
+    sig = checked.sig;
   }
-  // Stamp BEFORE the send. The signature is already decided (it is the fee payer's), and a send that
-  // times out after the broadcast would otherwise leave a swap on chain that no row points at: the
-  // client would retry and buy twice. A stamped PENDING attempt is exactly what the sweep recovers.
-  await stampSig(userId, attemptId, sig);
-  await sendRawTransaction(wire);
+
+  const stamped = await stampSignedWire(userId, attemptId, sig, wire);
+  wire = stamped.wire;
+  sig = stamped.sig;
+
+  // A retry first asks whether the exact stamped transaction already landed. This avoids turning a
+  // lost HTTP acknowledgement into a second send while preserving an ambiguous send as recoverable.
+  const receipt = await getRawTransaction(sig);
+  if (receipt) {
+    await validateReceiptWire(attempt, sig, receipt.wire);
+    return sig;
+  }
+  const sentSig = await sendRawTransaction(wire);
+  if (sentSig !== sig) throw new TxRejectedError("rpc_sig_mismatch");
   return sig;
 }
 
@@ -596,15 +697,43 @@ export async function submitSigned(userId: string, attemptId: string, signedTran
 // INTERNAL: bind a signature to an attempt. The only caller that may do this for a SPONSORED attempt
 // is submitSigned, because there the signature is the server's OWN (the fee payer's, computed from
 // the bytes it is about to send) — never a value that came from a client.
-async function stampSig(userId: string, attemptId: string, sig: string): Promise<void> {
-  const attempt = await prisma.stockBuyAttempt.findUnique({ where: { id: attemptId } });
-  if (!attempt || attempt.userId !== userId) throw new AttemptNotFoundError();
+async function stampSignedWire(
+  userId: string,
+  attemptId: string,
+  sig: string,
+  wire: string,
+): Promise<{ sig: string; wire: string }> {
   if (!sigBytesValid(sig)) throw new RangeError("bad_sig");
-  if (attempt.sig === null) {
-    await prisma.stockBuyAttempt.update({ where: { id: attemptId }, data: { sig } });
-  } else if (attempt.sig !== sig) {
-    throw new TxRejectedError("not_this_buy");
-  }
+  const fingerprint = createHash("sha256").update(Buffer.from(wire, "base64")).digest("hex");
+  return prisma.$transaction(async (db) => {
+    const attempt = await db.stockBuyAttempt.findUnique({ where: { id: attemptId } });
+    if (!attempt || attempt.userId !== userId) throw new AttemptNotFoundError();
+    await lockWalletPayer(db, attempt.payer);
+    const fresh = await db.stockBuyAttempt.findUniqueOrThrow({ where: { id: attemptId } });
+    if (fresh.status !== "PENDING") {
+      if (fresh.status === "CONFIRMED" && fresh.sig === sig && fresh.signedTx) return { sig, wire: fresh.signedTx };
+      throw new TxRejectedError("attempt_not_pending");
+    }
+    if (fresh.sig || fresh.signedTx || fresh.signedTxHash) {
+      if (fresh.sig === sig && fresh.signedTx === wire && fresh.signedTxHash === fingerprint) return { sig, wire };
+      throw new TxRejectedError("not_this_buy");
+    }
+    if (fresh.kind === "SELL") {
+      const lot = fresh.positionId ? await db.stockPosition.findUnique({ where: { id: fresh.positionId } }) : null;
+      const settled = fresh.positionId
+        ? await db.stockBuyAttempt.count({
+            where: { positionId: fresh.positionId, kind: "SELL", status: "CONFIRMED", id: { not: fresh.id } },
+          })
+        : 1;
+      if (!lot || lot.userId !== userId || lot.closedAt !== null || settled > 0) throw new TxRejectedError("lot_closed");
+    }
+    await db.stockBuyAttempt.update({
+      where: { id: attemptId },
+      data: { sig, signedTx: wire, signedTxHash: fingerprint },
+    });
+    await bumpWalletGeneration(db, userId, attempt.payer);
+    return { sig, wire };
+  });
 }
 
 // PUBLIC (POST /api/stocks/real/sent): the wallet SENT a self-paid transaction itself and reports
@@ -618,7 +747,10 @@ export async function markSent(userId: string, attemptId: string, sig: string): 
   if (!attempt || attempt.userId !== userId) throw new AttemptNotFoundError();
   if (!sigBytesValid(sig)) throw new RangeError("bad_sig");
   if (attempt.sponsored) throw new TxRejectedError("not_self_paid");
-  await stampSig(userId, attemptId, sig);
+  const receipt = await getRawTransaction(sig);
+  if (!receipt) throw new TxNotFoundError();
+  await validateReceiptWire(attempt, sig, receipt.wire);
+  await stampSignedWire(userId, attemptId, sig, receipt.wire);
 }
 
 // ─── confirm ────────────────────────────────────────────────────────────────────────────────────────
@@ -630,13 +762,76 @@ export interface ConfirmOpts {
 
 // Poll for the landed transaction. Shared by BUY and SELL: neither books anything off a tx it has
 // not actually read.
-async function landedTx(sig: string, polls: number, sleepMs: number): Promise<RpcParsedTx> {
+async function landedTx(
+  sig: string,
+  polls: number,
+  sleepMs: number,
+): Promise<{ parsed: RpcParsedTx; raw: { wire: string; slot: number; err: unknown } }> {
   for (let i = 0; i < polls; i++) {
-    const tx = await getTransaction(sig);
-    if (tx) return tx;
+    const [parsed, raw] = await Promise.all([getTransaction(sig), getRawTransaction(sig)]);
+    if (parsed && raw) {
+      const parsedSig = parsed.transaction.signatures?.[0];
+      const errorsAgree = JSON.stringify(parsed.meta?.err) === JSON.stringify(raw.err);
+      if (parsed.slot !== raw.slot || !errorsAgree || (parsedSig !== undefined && parsedSig !== sig)) {
+        throw new HeliusUnavailableError("rpc getTransaction encodings disagree");
+      }
+      return { parsed, raw };
+    }
     if (i < polls - 1) await sleep(sleepMs);
   }
   throw new TxNotFoundError();
+}
+
+async function validateReceiptWire(attempt: StockBuyAttempt, sig: string, landedWire: string): Promise<void> {
+  try {
+    if (transactionSignatureOf(landedWire) !== sig) throw new TxMismatchError();
+    if (attempt.signedTx) {
+      const expected = Buffer.from(attempt.signedTx, "base64");
+      const landed = Buffer.from(landedWire, "base64");
+      if (expected.length !== landed.length || !expected.equals(landed)) throw new TxMismatchError();
+    }
+    if (attempt.unsignedTx) {
+      const checked = await validateSignedTransaction({
+        signedTransactionB64: landedWire,
+        builtTransactionB64: attempt.unsignedTx,
+        expectedMessageHash: attempt.msgHash,
+        expectedFeePayer: transactionFeePayerOf(attempt.unsignedTx),
+      });
+      if (checked.sig !== sig) throw new TxMismatchError();
+      return;
+    }
+
+    // Legacy strict sponsored rows can still prove a byte-identical message from the stored message
+    // hash. Legacy self-paid rows used a hash of base64(unsigned-wire); reconstruct that envelope.
+    const landedMessageHash = messageHashOf(new Uint8Array(Buffer.from(landedWire, "base64")));
+    const legacyProven = attempt.sponsored
+      ? landedMessageHash === attempt.msgHash
+      : legacyUnsignedHashMatches(landedWire, attempt.msgHash);
+    if (!legacyProven) throw new TxMismatchError();
+    const checked = await validateSignedTransaction({
+      signedTransactionB64: landedWire,
+      builtTransactionB64: landedWire,
+      expectedMessageHash: landedMessageHash,
+      expectedFeePayer: transactionFeePayerOf(landedWire),
+    });
+    if (checked.sig !== sig) throw new TxMismatchError();
+  } catch (error) {
+    if (error instanceof TxMismatchError) {
+      // A modern attempt has its original wire, so an unrelated candidate is simply rejected and
+      // the sweep may continue searching. Only a legacy row with missing evidence is quarantined:
+      // it may have executed, so claiming FAILED/EXPIRED would be false.
+      if (!attempt.unsignedTx) {
+        await prisma.stockBuyAttempt.updateMany({
+          where: { id: attempt.id, status: "PENDING" },
+          data: { manualReviewReason: "legacy_landed_wire_provenance_unverified" },
+        });
+        throw new TxRejectedError("legacy_manual_review");
+      }
+      throw new TxRejectedError("not_this_buy");
+    }
+    // Lookup-table/RPC failures are transient. They leave no manual-review marker and retry later.
+    throw error;
+  }
 }
 
 export async function confirmAttempt(
@@ -646,7 +841,7 @@ export async function confirmAttempt(
   opts: ConfirmOpts = {},
 ): Promise<StockRealConfirmResponse> {
   const polls = opts.polls ?? STOCK_CONFIRM_POLLS;
-  const sleepMs = opts.sleepMs ?? STOCK_CONFIRM_SLEEP_MS;
+  const sleepMs = opts.sleepMs ?? 1_500;
 
   const attempt = await prisma.stockBuyAttempt.findUnique({ where: { id: attemptId }, include: { asset: true } });
   if (!attempt || attempt.userId !== userId) throw new AttemptNotFoundError();
@@ -656,7 +851,7 @@ export async function confirmAttempt(
   // signature itself before sending (submitSigned), so ANY other signature is a different
   // transaction — refuse it BEFORE the kind dispatch, or a SELL could be confirmed (or marked
   // FAILED) off any transaction its payer happens to have signed.
-  if (attempt.sponsored && attempt.sig !== sig) throw new TxRejectedError("not_this_buy");
+  if (attempt.sig && attempt.sig !== sig) throw new TxRejectedError("not_this_buy");
 
   if (attempt.kind === "SELL") return confirmSell(attempt, sig, polls, sleepMs);
 
@@ -680,16 +875,21 @@ export async function confirmAttempt(
     throw new TxRejectedError("not_this_buy");
   }
 
-  const tx = await landedTx(sig, polls, sleepMs);
+  const receipt = await landedTx(sig, polls, sleepMs);
+  await validateReceiptWire(attempt, sig, receipt.raw.wire);
+  const tx = receipt.parsed;
 
   // A failed tx books nothing and marks the attempt FAILED.
   if (tx.meta?.err != null) {
     // Self-paid: nothing has bound this signature to the attempt yet. A failed transaction our payer
     // did not even sign says nothing about this buy — and the real one may still be in flight.
     if (!attempt.sponsored && !signedBy(tx, attempt.payer)) throw new TxRejectedError("not_this_buy");
-    await prisma.stockBuyAttempt.update({
-      where: { id: attemptId },
-      data: { status: "FAILED", sig, resolvedAt: new Date() },
+    await prisma.$transaction(async (db) => {
+      await bumpWalletGeneration(db, userId, attempt.payer, BigInt(receipt.raw.slot));
+      await db.stockBuyAttempt.update({
+        where: { id: attemptId },
+        data: { status: "FAILED", sig, confirmedSlot: BigInt(receipt.raw.slot), manualReviewReason: null, resolvedAt: new Date() },
+      });
     });
     await dropUnconfirmedFunding(attemptId); // a failed swap created no token account
     void captureToGlitchTip(new Error("stock buy attempt FAILED on chain"), { subsystem: "stocks", attemptId, userId, sig });
@@ -712,6 +912,7 @@ export async function confirmAttempt(
 
   const book = (hedgeSuggestionId: string | null): Promise<StockRealConfirmResponse> =>
     prisma.$transaction(async (db) => {
+      await bumpWalletGeneration(db, userId, attempt.payer, BigInt(receipt.raw.slot));
       const fresh = await db.stockBuyAttempt.findUnique({ where: { id: attemptId } });
       if (!fresh) throw new AttemptNotFoundError();
       if (fresh.status !== "PENDING") {
@@ -740,7 +941,7 @@ export async function confirmAttempt(
       });
       await db.stockBuyAttempt.update({
         where: { id: attemptId },
-        data: { status: "CONFIRMED", sig, resolvedAt: now },
+        data: { status: "CONFIRMED", sig, confirmedSlot: BigInt(receipt.raw.slot), manualReviewReason: null, resolvedAt: now },
       });
       // The swap landed, so the accounts this attempt funded really exist and the sponsor really
       // paid their rent: from here the sell that empties one owes the refund to the sponsor.
@@ -811,7 +1012,7 @@ async function confirmSell(
 
   // The receipt binding again, before ANY mutation: a sponsored sell can only ever be the signature
   // the server sent. confirmAttempt checks this too — this is the guard for any future caller.
-  if (attempt.sponsored && attempt.sig !== sig) throw new TxRejectedError("not_this_buy");
+  if (attempt.sig && attempt.sig !== sig) throw new TxRejectedError("not_this_buy");
 
   // Idempotent by signature: the lot carries the sell that closed it.
   const prior = await prisma.stockPosition.findUnique({ where: { sellTxSig: sig } });
@@ -823,15 +1024,20 @@ async function confirmSell(
   if (attempt.status === "EXPIRED") throw new TxRejectedError("attempt_expired");
   if (attempt.status === "FAILED") throw new TxRejectedError("attempt_failed");
 
-  const tx = await landedTx(sig, polls, sleepMs);
+  const receipt = await landedTx(sig, polls, sleepMs);
+  await validateReceiptWire(attempt, sig, receipt.raw.wire);
+  const tx = receipt.parsed;
 
   if (tx.meta?.err != null) {
     // A failed transaction our payer did not sign is not this sell failing — marking the attempt
     // FAILED off it would strand a sale that is still in flight.
     if (!signedBy(tx, attempt.payer)) throw new TxRejectedError("not_this_buy");
-    await prisma.stockBuyAttempt.update({
-      where: { id: attempt.id },
-      data: { status: "FAILED", sig, resolvedAt: new Date() },
+    await prisma.$transaction(async (db) => {
+      await bumpWalletGeneration(db, userId, attempt.payer, BigInt(receipt.raw.slot));
+      await db.stockBuyAttempt.update({
+        where: { id: attempt.id },
+        data: { status: "FAILED", sig, confirmedSlot: BigInt(receipt.raw.slot), manualReviewReason: null, resolvedAt: new Date() },
+      });
     });
     await dropUnconfirmedFunding(attempt.id);
     void captureToGlitchTip(new Error("stock sell attempt FAILED on chain"), {
@@ -860,10 +1066,7 @@ async function confirmSell(
 
   try {
     return await prisma.$transaction(async (db) => {
-      // The same per-user lock the reconciler takes: closing this lot and deciding which lots the
-      // wallet still backs are ONE decision. Without it the reconciler can read balances, this
-      // confirm can close lot A, and the reconciler then closes lot B off a set that no longer holds.
-      await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${userId}))`;
+      await bumpWalletGeneration(db, userId, attempt.payer, BigInt(receipt.raw.slot));
       const lot = await db.stockPosition.findUnique({ where: { id: positionId } });
       if (!lot || lot.userId !== userId) throw new TxRejectedError("not_this_buy");
       const pnlCents = proceedsCents - lot.costCents;
@@ -886,7 +1089,7 @@ async function confirmSell(
           if (!fresh || fresh.sellTxSig !== sig) throw new TxRejectedError("not_this_buy");
           await db.stockBuyAttempt.updateMany({
             where: { id: attempt.id, status: "PENDING" },
-            data: { status: "CONFIRMED", sig, resolvedAt: now },
+            data: { status: "CONFIRMED", sig, confirmedSlot: BigInt(receipt.raw.slot), manualReviewReason: null, resolvedAt: now },
           });
           return sellResponse(fresh, delta.qtyBase, true);
         }
@@ -902,7 +1105,7 @@ async function confirmSell(
       }
       await db.stockBuyAttempt.update({
         where: { id: attempt.id },
-        data: { status: "CONFIRMED", sig, resolvedAt: now },
+        data: { status: "CONFIRMED", sig, confirmedSlot: BigInt(receipt.raw.slot), manualReviewReason: null, resolvedAt: now },
       });
       return sellResponse({ ...lot, proceedsCents, pnlCents }, delta.qtyBase, false);
     });
@@ -938,9 +1141,17 @@ export async function sweepAttempts(
   now = new Date(),
 ): Promise<{ scanned: number; confirmed: number; expired: number; failed: number }> {
   const cutoff = new Date(now.getTime() - STOCK_ATTEMPT_SWEEP_AFTER_MS);
+  const cursorName = "stock-attempts";
+  const cursor = await readSweepCursor(prisma, cursorName);
   const attempts = await prisma.stockBuyAttempt.findMany({
-    where: { status: "PENDING", createdAt: { lt: cutoff } },
-    orderBy: { createdAt: "asc" },
+    where: {
+      status: "PENDING",
+      createdAt: { lt: cutoff },
+      ...(cursor
+        ? { OR: [{ createdAt: { gt: cursor.createdAt, lt: cutoff } }, { createdAt: cursor.createdAt, id: { gt: cursor.id } }] }
+        : {}),
+    },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     take: 50,
     include: { asset: true },
   });
@@ -948,7 +1159,10 @@ export async function sweepAttempts(
   let confirmed = 0;
   let expired = 0;
   let failed = 0;
-  if (attempts.length === 0) return { scanned: 0, confirmed, expired, failed };
+  if (attempts.length === 0) {
+    if (cursor) await writeSweepCursor(prisma, cursorName, null);
+    return { scanned: 0, confirmed, expired, failed };
+  }
 
   // One block-height read for the whole sweep. A Helius outage aborts the sweep (throw).
   const height = await getBlockHeight();
@@ -956,31 +1170,15 @@ export async function sweepAttempts(
   // EXPIRE only a row that is still PENDING: this sweep's snapshot is minutes old by now, and a
   // confirm that landed in between must not be overwritten with EXPIRED.
   const expire = async (id: string): Promise<void> => {
-    const res = await prisma.stockBuyAttempt.updateMany({
-      where: { id, status: "PENDING" },
-      data: { status: "EXPIRED", resolvedAt: now },
+    const row = attempts.find((attempt) => attempt.id === id)!;
+    const res = await prisma.$transaction(async (db) => {
+      await bumpWalletGeneration(db, row.userId, row.payer);
+      return db.stockBuyAttempt.updateMany({
+        where: { id, status: "PENDING", manualReviewReason: null },
+        data: { status: "EXPIRED", resolvedAt: now },
+      });
     });
     if (res.count === 1) expired++;
-    await dropUnconfirmedFunding(id);
-  };
-
-  // A STAMPED attempt whose receipt can never be booked (it is not this attempt's transaction, or it
-  // landed with an error) is finished: leaving it PENDING keeps it in the oldest-50 window for ever
-  // and starves every later attempt of a slot. Conditional, and loud — a signed transaction that
-  // resolved to nothing is a real user's real USDC.
-  const fail = async (id: string, code: string): Promise<void> => {
-    const res = await prisma.stockBuyAttempt.updateMany({
-      where: { id, status: "PENDING" },
-      data: { status: "FAILED", resolvedAt: now },
-    });
-    if (res.count === 1) {
-      failed++;
-      void captureToGlitchTip(new Error(`stock attempt stuck on ${code} — FAILED by the sweep`), {
-        subsystem: "stocks",
-        attemptId: id,
-        code,
-      });
-    }
     await dropUnconfirmedFunding(id);
   };
 
@@ -992,6 +1190,13 @@ export async function sweepAttempts(
         continue;
       }
       if (height > Number(attempt.lastValidBlockHeight)) {
+        if (!attempt.unsignedTx) {
+          await prisma.stockBuyAttempt.updateMany({
+            where: { id: attempt.id, status: "PENDING" },
+            data: { manualReviewReason: "legacy_attempt_missing_unsigned_wire" },
+          });
+          continue;
+        }
         // Past the block height with no sig: search the payer's recent signatures for a match.
         const sigs = await getSignaturesForAddress(attempt.payer, 25);
         const floor = attempt.createdAt.getTime() - 60_000;
@@ -1020,16 +1225,22 @@ export async function sweepAttempts(
       // else: not yet past the block height, no sig — skip (a later sweep may still match).
     } catch (e) {
       if (e instanceof TxNotFoundError) {
-        if (height > Number(attempt.lastValidBlockHeight)) await expire(attempt.id);
+        // Once a verified signed wire was stamped before broadcast, a missing receipt is ambiguous:
+        // the RPC may be lagging or the send may have timed out after landing. Its exact bytes remain
+        // retryable even past blockheight, and the attempt must keep reserving its BUY/SELL capacity.
+        // Expiring it would let a SELL build a second transaction for the same lot.
+        if (!attempt.sig && height > Number(attempt.lastValidBlockHeight)) await expire(attempt.id);
         continue;
       }
       if (e instanceof TxRejectedError) {
         if (e.message === "tx_failed") {
           failed++; // confirmAttempt already marked the row FAILED off the landed error
           await dropUnconfirmedFunding(attempt.id);
-        } else if (attempt.sig && e.message === "not_this_buy") {
-          // The stamped signature landed as something else: this attempt is spent (see fail()).
-          await fail(attempt.id, e.message);
+        } else if (attempt.sig && (e.message === "not_this_buy" || e.message === "legacy_manual_review")) {
+          await prisma.stockBuyAttempt.updateMany({
+            where: { id: attempt.id, status: "PENDING" },
+            data: { manualReviewReason: e.message },
+          });
         }
         // anything else -> skip (keep PENDING; a later sweep may still match)
         continue;
@@ -1037,6 +1248,9 @@ export async function sweepAttempts(
       console.warn(`sweepAttempts: attempt ${attempt.id} failed: ${(e as Error).message}`);
     }
   }
+
+  const last = attempts[attempts.length - 1];
+  await writeSweepCursor(prisma, cursorName, { createdAt: last.createdAt, id: last.id });
 
   return { scanned: attempts.length, confirmed, expired, failed };
 }
@@ -1052,136 +1266,161 @@ export async function sweepAttempts(
 // Skipped per mint while a buy or sell is in flight (the tokens can be there before the lot is, or
 // gone before it closes) and while the asset has no fresh price (a lot needs a number). Idempotent:
 // the excess is computed under the user's lock from the open set, so a second read adopts nothing.
-export async function adoptWalletHoldings(userId: string, payer: string, now = new Date()): Promise<{ adopted: number }> {
-  const held = await getWalletTokensRaw(payer); // RPC, outside any lock
-  if (held.size === 0) return { adopted: 0 };
-  const assets = await prisma.stockAsset.findMany({ where: { mint: { in: [...held.keys()] } } });
-  const freshAfter = now.getTime() - STOCK_PRICE_MAX_STALE_MS;
-  let adopted = 0;
-  for (const asset of assets) {
-    const raw = held.get(asset.mint) ?? 0n;
-    if (raw <= 0n) continue;
-    if (asset.halted || asset.priceCents == null || asset.priceCents <= 0 || asset.pricedAt == null || asset.pricedAt.getTime() < freshAfter) continue;
-    const price = asset.priceCents;
-    adopted += await prisma.$transaction(async (db) => {
-      await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${userId}))`;
-      const inFlight = await db.stockBuyAttempt.count({
-        where: { payer, assetId: asset.id, status: "PENDING", createdAt: { gte: new Date(now.getTime() - 2 * 3_600_000) } },
-      });
-      if (inFlight > 0) return 0;
-      const open = await db.stockPosition.findMany({
-        where: { userId, payer, assetId: asset.id, mode: "REAL", closedAt: null },
-        select: { qtyBase: true },
-      });
-      let booked = 0n;
-      for (const l of open) booked += l.qtyBase;
-      const excess = raw - booked;
-      if (excess <= 0n) return 0;
-      const costCents = valueCents(excess, price, asset.decimals);
-      if (costCents <= 0) return 0; // dust — a row that reads $0 helps nobody
-      await db.stockPosition.create({
-        data: { userId, assetId: asset.id, mode: "REAL", source: "WALLET", qtyBase: excess, costCents, entryPriceCents: price, payer, walletCheckedAt: now },
-      });
-      return 1;
-    });
-  }
-  return { adopted };
+export interface WalletRefreshResult {
+  adopted: number;
+  closed: number;
+  accepted: boolean;
 }
 
-export async function reconcileRealLots(
+export async function refreshWalletHoldings(
   userId: string,
   payer: string,
   now = new Date(),
-): Promise<{ closed: number }> {
-  const lots = await prisma.stockPosition.findMany({
-    where: { userId, payer, mode: "REAL", closedAt: null },
-    include: { asset: true },
-    orderBy: { createdAt: "desc" },
-  });
-  if (lots.length === 0) return { closed: 0 };
+): Promise<WalletRefreshResult> {
+  // A writer may race either side of the RPC. Two bounded attempts are enough to turn that race into
+  // a clean retry without keeping an HTTP request or poller tick alive indefinitely.
+  for (let attemptNo = 0; attemptNo < 2; attemptNo++) {
+    const fence = await captureWalletSnapshotFence(prisma, userId, payer);
+    const snapshot = await getWalletTokensSnapshot(payer, fence.requiredSlot);
+    const result = await prisma.$transaction(async (db): Promise<WalletRefreshResult | null> => {
+      await lockWalletPayer(db, payer);
+      await ensureWalletState(db, userId, payer);
+      const state = await db.stockWalletState.findUniqueOrThrow({ where: { userId_payer: { userId, payer } } });
+      const currentRequiredSlot = [state.lastAcceptedSlot, state.latestConfirmedReceiptSlot]
+        .filter((slot): slot is bigint => slot !== null)
+        .reduce((max, slot) => (slot > max ? slot : max), 0n);
+      if (
+        state.generation !== fence.generation ||
+        BigInt(snapshot.slot) < fence.requiredSlot ||
+        BigInt(snapshot.slot) < currentRequiredSlot ||
+        (state.lastAcceptedSlot !== null && BigInt(snapshot.slot) < state.lastAcceptedSlot)
+      ) {
+        return null;
+      }
 
-  // Group by mint (one mint = one asset: StockAsset.mint is unique).
-  const byMint = new Map<string, typeof lots>();
-  for (const lot of lots) {
-    const arr = byMint.get(lot.asset.mint) ?? [];
-    arr.push(lot);
-    byMint.set(lot.asset.mint, arr);
-  }
+      // Any unresolved build can already have changed the wallet. No age cutoff: a live transaction
+      // does not become safe because two hours elapsed. Legacy manual-review rows rotate in their own
+      // sweep and do not permanently freeze an otherwise observable wallet.
+      const inFlight = await db.stockBuyAttempt.count({
+        where: { payer, status: "PENDING", manualReviewReason: null },
+      });
+      if (inFlight > 0) return null;
+      const manualAssetIds = new Set(
+        (
+          await db.stockBuyAttempt.findMany({
+            // Payer-wide: a shared wallet's unresolved receipt makes this mint ambiguous for every
+            // linked owner, not only the account that originally built it.
+            where: { payer, status: "PENDING", manualReviewReason: { not: null } },
+            select: { assetId: true },
+          })
+        ).map((attempt) => attempt.assetId),
+      );
 
-  let closed = 0;
-  for (const [mint, group] of byMint) {
-    const assetId = group[0].assetId;
-    // The balance read is RPC and stays OUTSIDE the transaction — holding this user's lock across a
-    // network call would block their own confirms.
-    const bal = await getTokenBalanceRaw(payer, mint);
-    closed += await prisma.$transaction(async (db) => {
-      // Everything a confirmSell also takes, so the two cannot interleave: a sale landing between
-      // the balance read and this decision closes lot A, and closing "the rest" off the stale set
-      // would then close lot B — a lot the wallet still backs.
-      await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${userId}))`;
+      const lots = await db.stockPosition.findMany({
+        where: { userId, payer, mode: "REAL", closedAt: null },
+        include: { asset: true },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      });
+      const knownMints = new Set([...snapshot.tokens.keys(), ...lots.map((lot) => lot.asset.mint)]);
+      const assets = knownMints.size
+        ? await db.stockAsset.findMany({ where: { mint: { in: [...knownMints] } } })
+        : [];
+      const lotsByAsset = new Map<string, typeof lots>();
+      for (const lot of lots) {
+        const group = lotsByAsset.get(lot.assetId) ?? [];
+        group.push(lot);
+        lotsByAsset.set(lot.assetId, group);
+      }
 
-      // A sell in flight makes the balance a moving target: the tokens can already be gone while the
-      // lot they belong to is still open (its confirm is seconds away). Every mint with a live sell
-      // is left entirely alone, walletCheckedAt included, until the sale resolves.
-      const selling = await db.stockBuyAttempt.count({
-        where: {
-          payer,
-          assetId,
-          kind: "SELL",
-          status: "PENDING",
-          createdAt: { gte: new Date(now.getTime() - 2 * 3_600_000) },
+      let closed = 0;
+      let adopted = 0;
+      const freshAfter = now.getTime() - STOCK_PRICE_MAX_STALE_MS;
+      for (const asset of assets) {
+        // A legacy attempt may already have moved this mint even though its old evidence cannot prove
+        // it yet. Importing/closing now could create a WALLET lot and later a second DECK lot when a
+        // human resolves the receipt, so leave this asset and its lot freshness untouched.
+        if (manualAssetIds.has(asset.id)) continue;
+        const balance = snapshot.tokens.get(asset.mint) ?? 0n;
+        const current = lotsByAsset.get(asset.id) ?? [];
+        let booked = current.reduce((sum, lot) => sum + lot.qtyBase, 0n);
+        const toClose: string[] = [];
+        if (booked > balance) {
+          const ordered = [...current].sort((a, b) => {
+            const source = Number(b.source === "WALLET") - Number(a.source === "WALLET");
+            return source || b.createdAt.getTime() - a.createdAt.getTime() || b.id.localeCompare(a.id);
+          });
+          for (const lot of ordered) {
+            if (booked <= balance) break;
+            toClose.push(lot.id);
+            booked -= lot.qtyBase;
+          }
+          if (toClose.length > 0) {
+            const updated = await db.stockPosition.updateMany({
+              where: { id: { in: toClose }, closedAt: null },
+              data: { closedAt: now, closeReason: "wallet" },
+            });
+            closed += updated.count;
+          }
+        }
+
+        const survivorIds = current.filter((lot) => !toClose.includes(lot.id)).map((lot) => lot.id);
+        if (survivorIds.length > 0) {
+          await db.stockPosition.updateMany({
+            where: { id: { in: survivorIds }, closedAt: null },
+            data: { walletCheckedAt: now },
+          });
+        }
+
+        const excess = balance - booked;
+        if (
+          excess > 0n &&
+          !asset.halted &&
+          asset.priceCents !== null &&
+          asset.priceCents > 0 &&
+          asset.pricedAt !== null &&
+          asset.pricedAt.getTime() >= freshAfter
+        ) {
+          const costCents = valueCents(excess, asset.priceCents, asset.decimals);
+          if (costCents > 0) {
+            await db.stockPosition.create({
+              data: {
+                userId,
+                assetId: asset.id,
+                mode: "REAL",
+                source: "WALLET",
+                qtyBase: excess,
+                costCents,
+                entryPriceCents: asset.priceCents,
+                payer,
+                walletCheckedAt: now,
+              },
+            });
+            adopted++;
+          }
+        }
+      }
+
+      await db.stockWalletState.update({
+        where: { userId_payer: { userId, payer } },
+        data: {
+          generation: { increment: 1n },
+          lastAcceptedSlot: BigInt(snapshot.slot),
+          lastCheckedAt: now,
         },
       });
-      if (selling > 0) return 0;
-
-      // Re-read under the lock. If the open set moved since the balance was read, the balance no
-      // longer describes it — skip this mint and let the next pass decide on a consistent pair.
-      const fresh = await db.stockPosition.findMany({
-        where: { userId, payer, assetId, mode: "REAL", closedAt: null },
-        orderBy: { createdAt: "desc" },
-      });
-      const same = fresh.length === group.length && fresh.every((f) => group.some((g) => g.id === f.id));
-      if (!same) return 0;
-
-      let need = 0n;
-      for (const lot of fresh) need += lot.qtyBase;
-      if (bal >= need) {
-        // All backed — stamp walletCheckedAt on the survivors.
-        await db.stockPosition.updateMany({
-          where: { id: { in: fresh.map((l) => l.id) }, closedAt: null },
-          data: { walletCheckedAt: now },
-        });
-        return 0;
-      }
-      // Close until the remaining sum fits under the live balance: adopted (WALLET) lots first —
-      // they carry no provenance, a booked lot has a landed transaction behind it — then newest-first.
-      let remaining = need;
-      const toClose: string[] = [];
-      const order = [...fresh].sort((a, b) => Number(b.source === "WALLET") - Number(a.source === "WALLET"));
-      for (const lot of order) {
-        if (remaining <= bal) break;
-        toClose.push(lot.id);
-        remaining -= lot.qtyBase;
-      }
-      let count = 0;
-      if (toClose.length > 0) {
-        const res = await db.stockPosition.updateMany({
-          where: { id: { in: toClose }, closedAt: null },
-          data: { closedAt: now, closeReason: "wallet" },
-        });
-        count = res.count;
-      }
-      // Stamp the survivors.
-      const survivors = fresh.filter((l) => !toClose.includes(l.id)).map((l) => l.id);
-      if (survivors.length > 0) {
-        await db.stockPosition.updateMany({
-          where: { id: { in: survivors }, closedAt: null },
-          data: { walletCheckedAt: now },
-        });
-      }
-      return count;
+      return { adopted, closed, accepted: true };
     });
+    if (result) return result;
   }
+  return { adopted: 0, closed: 0, accepted: false };
+}
 
-  return { closed };
+export async function adoptWalletHoldings(userId: string, payer: string, now = new Date()): Promise<{ adopted: number }> {
+  const result = await refreshWalletHoldings(userId, payer, now);
+  return { adopted: result.adopted };
+}
+
+export async function reconcileRealLots(userId: string, payer: string, now = new Date()): Promise<{ closed: number }> {
+  const result = await refreshWalletHoldings(userId, payer, now);
+  return { closed: result.closed };
 }

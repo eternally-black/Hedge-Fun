@@ -202,7 +202,8 @@ async function main() {
 
   // results: empty top-level contract first (no settled bets yet).
   const resEmpty = await (await results.GET(authed("http://x/api/results"))).json();
-  assert.deepStrictEqual(keysOf(resEmpty), ["nextCursor","rows","stockAlerts","unreadCount"], "/results top-level keys");
+  assert.deepStrictEqual(keysOf(resEmpty), ["mode","nextCursor","rows","stockAlerts","unreadCount"], "/results top-level keys");
+  assert.strictEqual(resEmpty.mode, "PAPER", "/results names the delivery mode");
   assert.strictEqual(resEmpty.nextCursor, null, "/results empty -> nextCursor null");
   assert.strictEqual(resEmpty.rows.length, 0, "/results no settled bets yet -> empty");
 
@@ -225,11 +226,20 @@ async function main() {
   const meUnread = await (await me.GET(authed("http://x/api/me"))).json();
   assert.strictEqual(meUnread.unreadResults, 1, "/me unreadResults = 1 before seen");
 
-  // results/seen: marks all unseen, idempotent.
-  const seen1 = await (await resultsSeen.POST(authed("http://x/api/results/seen", { method: "POST" }))).json();
+  // A legacy empty ACK is safe: it cannot clear a page the client never named.
+  const legacySeen = await (await resultsSeen.POST(authed("http://x/api/results/seen", { method: "POST" }))).json();
+  assert.strictEqual(legacySeen.markedSeen, 0, "/results/seen empty legacy POST is a no-op");
+
+  // results/seen: acknowledges this exact delivery page and is idempotent.
+  const ackInit = {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ mode: resBody.mode, betIds: [resBody.rows[0].id] }),
+  } satisfies RequestInit;
+  const seen1 = await (await resultsSeen.POST(authed("http://x/api/results/seen", ackInit))).json();
   assert.deepStrictEqual(keysOf(seen1), ["markedSeen","markedStockAlertsSeen"], "/results/seen top-level keys");
-  assert.strictEqual(seen1.markedSeen, 1, "/results/seen marks the 1 unseen row");
-  const seen2 = await (await resultsSeen.POST(authed("http://x/api/results/seen", { method: "POST" }))).json();
+  assert.strictEqual(seen1.markedSeen, 1, "/results/seen marks the named unseen row");
+  const seen2 = await (await resultsSeen.POST(authed("http://x/api/results/seen", ackInit))).json();
   assert.strictEqual(seen2.markedSeen, 0, "/results/seen idempotent -> 0 on second call");
 
   const resAfter = await (await results.GET(authed("http://x/api/results"))).json();

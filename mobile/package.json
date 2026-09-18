@@ -4,10 +4,10 @@
   "main": "index.ts",
   "dependencies": {
     "@ethersproject/shims": "^5.8.0",
-    "@privy-io/expo": "^0.70.3",
+    "@privy-io/expo": "^0.74.2",
     "@privy-io/expo-native-extensions": "^0.0.12",
     "@solana-mobile/mobile-wallet-adapter-protocol": "^2.3.0",
-    "expo": "~57.0.7",
+    "expo": "~57.0.24",
     "expo-apple-authentication": "~57.0.1",
     "expo-application": "~57.0.2",
     "expo-clipboard": "~57.0.1",
@@ -19,10 +19,11 @@
     "expo-web-browser": "~57.0.1",
     "fast-text-encoding": "^1.0.6",
     "react": "19.2.3",
-    "react-native": "0.86.0",
-    "react-native-get-random-values": "^2.0.0",
+    "react-native": "0.86.3",
+    "react-native-get-random-values": "~1.11.0",
     "react-native-passkeys": "^0.4.1",
-    "react-native-webview": "13.16.1"
+    "react-native-webview": "13.16.1",
+    "viem": "2.56.0"
   },
   "devDependencies": {
     "@types/react": "~19.2.2",
@@ -34,5 +35,10 @@
     "ios": "expo run:ios",
     "web": "expo start --web"
   },
-  "private": true
+  "private": true,
+  "overrides": {
+    "xcode": {
+      "uuid": "11.1.1"
+    }
+  }
 }

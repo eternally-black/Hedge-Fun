@@ -27,7 +27,9 @@ export async function GET(req: Request) {
   // an empty screen: a market resolved, the collateral landed in the wallet, and the app told the
   // user nothing at all while still showing the position as awaiting a result.
   const mode = effectiveRealMode(user);
-  const cursor = new URL(req.url).searchParams.get("cursor");
+  const params = new URL(req.url).searchParams;
+  const cursor = params.get("cursor");
+  const unreadOnly = params.get("unseen") === "1";
   const after = cursor ? decodeKeysetCursor(cursor) : null;
   // Keyset on (settledAt desc, id desc) — a stable total order across pages. Over-fetch by one so
   // we can tell whether another page exists (51 rows = yes, drop the last and emit a cursor).
@@ -37,6 +39,7 @@ export async function GET(req: Request) {
         userId: user.id,
         mode,
         settlementStatus: { in: ["SETTLED", "VOID"] },
+        ...(unreadOnly ? { seenAt: null } : {}),
         ...(after
           ? { OR: [{ settledAt: { lt: after.at } }, { settledAt: after.at, id: { lt: after.id } }] }
           : {}),
@@ -71,6 +74,6 @@ export async function GET(req: Request) {
 
   const rows = bets.map(toResultRow);
   const stockAlerts = alertLots.map((p) => toStockAlertRow(p, livePnlCents));
-  const body: ResultsResponse = { rows, unreadCount, nextCursor, stockAlerts };
+  const body: ResultsResponse = { rows, mode, unreadCount, nextCursor, stockAlerts };
   return NextResponse.json(body);
 }

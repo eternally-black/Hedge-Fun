@@ -68,4 +68,57 @@ assert.strictEqual(
   "REAL with walletCheckedAt 1h old and +5% -> 500",
 );
 
-console.log("test-stock-alerts: OK");
+async function fairnessChecks() {
+  const { evalStockAlerts } = await import("../src/lib/stock-alerts");
+  const createdAt = new Date("2026-09-14T00:00:00Z");
+  const rows = Array.from({ length: 2_201 }, (_, index) => ({
+    id: `lot-${String(index).padStart(4, "0")}`,
+    createdAt,
+    closedAt: null,
+    qtyBase: 1n,
+    costCents: 100,
+    alertTierBp: 0,
+    walletCheckedAt: null,
+    mode: "PAPER" as const,
+    asset: { priceCents: 200, decimals: 0, pricedAt: NOW, halted: false },
+  }));
+  let cursor: { afterCreatedAt: Date | null; afterId: string | null } | null = null;
+  const fake = {
+    sweepCursor: {
+      findUnique: async () => cursor,
+      upsert: async ({ create, update }: { create: typeof cursor; update: typeof cursor }) => {
+        cursor = cursor ? update : create;
+        return cursor;
+      },
+    },
+    stockPosition: {
+      findMany: async ({ where, take }: { where: { OR?: [{ createdAt: { gt: Date } }, { createdAt: Date; id: { gt: string } }] }; take: number }) => {
+        const after = where.OR ? { createdAt: where.OR[0].createdAt.gt, id: where.OR[1].id.gt } : null;
+        return rows
+          .filter((row) => !after || row.createdAt > after.createdAt || (+row.createdAt === +after.createdAt && row.id > after.id))
+          .slice(0, take);
+      },
+      updateMany: async ({ where, data }: { where: { id: string; alertTierBp: { lt: number } }; data: { alertTierBp: number } }) => {
+        const row = rows.find((value) => value.id === where.id);
+        if (!row || row.alertTierBp >= where.alertTierBp.lt) return { count: 0 };
+        row.alertTierBp = data.alertTierBp;
+        return { count: 1 };
+      },
+    },
+  } as unknown as import("@prisma/client").PrismaClient;
+
+  const pnl = () => 100;
+  assert.strictEqual((await evalStockAlerts(fake, pnl, NOW)).fired, 200, "first alert tick honors fire cap");
+  assert.strictEqual((await evalStockAlerts(fake, pnl, NOW)).fired, 200, "later-than-2000 rows are reached next");
+  assert.strictEqual(rows[2_200]!.alertTierBp, 0, "the 201st eligible row waits instead of exceeding the cap");
+  await evalStockAlerts(fake, pnl, NOW); // wraps through the first segment
+  await evalStockAlerts(fake, pnl, NOW); // returns to the tail
+  assert.strictEqual(rows[2_200]!.alertTierBp, 1_000, "fire-capped tail row is eventually revisited after wrap");
+}
+
+fairnessChecks()
+  .then(() => console.log("test-stock-alerts: OK"))
+  .catch((error) => {
+    console.error("FAIL:", error);
+    process.exitCode = 1;
+  });

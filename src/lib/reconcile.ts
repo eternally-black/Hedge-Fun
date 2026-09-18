@@ -7,6 +7,9 @@ import type { PrismaClient, OrderAttempt } from "@prisma/client";
 import { bookEntryFills, bookExitFills, receiptFillKey, trueUpAttemptFee } from "./orders";
 import { feePerShareMicro } from "./quote";
 import { REAL_FEE_FALLBACK_RATE_BP } from "./config";
+import { readSweepCursor, writeSweepCursor, type SweepCursorValue } from "./sweep-cursor";
+
+const RECONCILE_CURSOR = "polymarket-order-reconcile-v1";
 
 export interface TradeRecord {
   id: string; // exchange trade id
@@ -191,8 +194,8 @@ export async function resolveOrphanAttempt(
 // Sweep the orphans. The age floor is load-bearing: a browser that posted seconds ago may simply
 // not have reported yet, and the exchange's trade records lag a match a little, so concluding
 // "nothing exists" too early would KILL an attempt whose money was spent. Deliberately NO upper
-// bound (unlike the 48h window below): each of these rows wedges a market slot until it resolves,
-// so an old one must keep being retried rather than aging out of sight.
+// bound: each of these rows wedges a market slot until it resolves, so an old one must keep being
+// retried rather than aging out of sight.
 export async function discoverOrphanAttempts(
   prisma: PrismaClient,
   discover: OrphanDiscover,
@@ -233,23 +236,61 @@ export async function reconcileStuckAttempts(
   opts: { now?: Date; minAgeMs?: number; limit?: number; feeExpMilli?: number } = {},
 ): Promise<Record<ReconcileOutcome, number> & { scanned: number }> {
   const now = opts.now ?? new Date();
-  const cutoff = new Date(now.getTime() - (opts.minAgeMs ?? 10 * 60_000));
-  const attempts = await prisma.orderAttempt.findMany({
+  const minAgeMs = opts.minAgeMs ?? 10 * 60_000;
+  const cutoff = new Date(now.getTime() - minAgeMs);
+
+  // The cursor row doubles as the durable job clock. This enforces a minimum retry interval without
+  // touching OrderAttempt.updatedAt: ops deliberately uses that field to measure how long an
+  // ambiguous POSTED attempt has been stuck, so refreshing it here would hide the incident.
+  let after: SweepCursorValue | null = null;
+  try {
+    const [cursor, clock] = await Promise.all([
+      readSweepCursor(prisma, RECONCILE_CURSOR),
+      prisma.sweepCursor.findUnique({ where: { name: RECONCILE_CURSOR }, select: { updatedAt: true } }),
+    ]);
+    after = cursor;
+    // A null cursor is the between-cycles cooldown marker. Non-null means a cycle is in progress,
+    // so keep draining later batches immediately instead of reducing throughput to 20 rows/10m.
+    if (!cursor && clock && clock.updatedAt.getTime() > now.getTime() - minAgeMs) {
+      return { unknown: 0, pending: 0, killed: 0, booked: 0, scanned: 0 };
+    }
+  } catch {
+    // Cursor storage is operational bookkeeping, not permission to stop money reconciliation.
+    after = null;
+  }
+
+  const findBatch = (cursor: SweepCursorValue | null) => prisma.orderAttempt.findMany({
     // POSTED = the ambiguous case still awaiting a verdict. FILLED/PARTIAL are already booked and
     // are revisited for ONE reason: their fee is the formula ESTIMATE until the exchange's own
     // trade records replace it (the booking is order-cumulative, so a re-run books a zero delta,
     // and the true-up is idempotent once the ledger carries the charged amount). A SUBMITTING
     // attempt has no order id to ask about. A booked attempt is revisited only until the exchange's
-    // terminal records replaced the estimate (reconciledAt), and the 48-hour floor stops settled
-    // history from being rescanned forever.
+    // terminal records replaced the estimate (reconciledAt). There is deliberately no upper age
+    // bound: an unresolved order remains money state even when it is 49 days old.
     where: {
       OR: [{ state: "POSTED" }, { state: { in: ["FILLED", "PARTIAL"] }, reconciledAt: null }],
       externalOrderId: { not: null },
-      updatedAt: { lt: cutoff, gt: new Date(now.getTime() - 48 * 60 * 60_000) },
+      updatedAt: { lt: cutoff },
+      ...(cursor
+        ? { AND: [{ OR: [{ createdAt: { gt: cursor.createdAt } }, { createdAt: cursor.createdAt, id: { gt: cursor.id } }] }] }
+        : {}),
     },
-    orderBy: { updatedAt: "asc" },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     take: opts.limit ?? 20,
   });
+
+  const attempts = await findBatch(after);
+  if (attempts.length === 0 && after) {
+    // End of the keyspace: persist a null wrap marker and start the retry cooldown. The next cycle
+    // begins at the head after minAgeMs. This paces retries per completed traversal without slowing
+    // a large backlog to one batch per cooldown.
+    try {
+      await writeSweepCursor(prisma, RECONCILE_CURSOR, null);
+    } catch {
+      // best-effort scheduling metadata
+    }
+    return { unknown: 0, pending: 0, killed: 0, booked: 0, scanned: 0 };
+  }
 
   const counts: Record<ReconcileOutcome, number> = { unknown: 0, pending: 0, killed: 0, booked: 0 };
   for (const attempt of attempts) {
@@ -264,6 +305,15 @@ export async function reconcileStuckAttempts(
     } catch {
       counts.unknown++;
     }
+  }
+  // Advance past every inspected row, including pending, unknown and thrown probes. A poisoned old
+  // row therefore cannot pin the head and starve a later fill. Failure to checkpoint is safe: the
+  // cumulative bookers and fill keys make replay idempotent, so do not fail completed business work.
+  const last = attempts[attempts.length - 1];
+  try {
+    await writeSweepCursor(prisma, RECONCILE_CURSOR, last ? { createdAt: last.createdAt, id: last.id } : null);
+  } catch {
+    // best-effort scheduling metadata
   }
   return { ...counts, scanned: attempts.length };
 }

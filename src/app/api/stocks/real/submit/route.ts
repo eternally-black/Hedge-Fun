@@ -6,9 +6,8 @@ import { TxMismatchError, SponsorUnavailableError } from "@/lib/sponsor";
 import { submitSigned, AttemptNotFoundError, TxRejectedError, SponsorLimitError } from "@/lib/stocks-real";
 import type { StockRealSubmitRequest, StockRealSubmitResponse } from "@/lib/api-types";
 
-// The user-signed, fee-sponsored transaction. The server recomputes the message hash (it co-signs
-// nothing it did not build), adds the sponsor signature, sends it and stamps the signature on the
-// attempt. Same rate as /real/tx: one submit per build.
+// The user-signed transaction. The server verifies it against the built wire, durably stamps the
+// exact signed bytes before broadcast, and adds its fee-payer signature only for sponsored attempts.
 export async function POST(req: Request) {
   const user = await authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });

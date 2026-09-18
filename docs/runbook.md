@@ -7,8 +7,9 @@ team memory.
 
 ## Architecture at a glance
 
-One image (`ghcr.io/eternally-black/hedge-fun:latest`) runs in **three modes**; five
-compose services (`docker-compose.yml`):
+One release image, pinned as `ghcr.io/eternally-black/hedge-fun@sha256:<digest>` in the
+runtime Compose override, runs in **three modes**; five compose services
+(`docker-compose.yml`):
 
 - **app** — `node server.js` (Next.js standalone). No host port; Caddy proxies to
   `app:3000` over the internal net. Healthcheck: `/api/me` returns 401/200 = alive.
@@ -28,34 +29,37 @@ Push to `main` → `.github/workflows/deploy.yml`:
 
 1. **test gate** — `npm run lint` + `npm test` (DB-free units) + `npm run test:db:run`
    (DB-backed money/economy). Build `needs: test`, so a logic regression can't ship.
-2. **build** — build image on the runner, push to GHCR as `:sha-<short>` (the rollback
-   handle) plus `:latest` **only when the ref is `main`** — `latest` is the tag `deploy.sh`
-   pulls, so a feature-branch build must never move it. `linux/amd64`, `provenance: false`
-   (avoids a multi-arch index plain `docker pull`/compose chokes on).
-3. **deploy** — gated to `main`; SSHes the VPS and runs `bash deploy.sh`.
+2. **build** — build the exact workflow commit as `linux/amd64`, push a full-SHA discovery
+   tag, and export the registry digest. Production identity is the digest; tags are not used
+   for activation. `provenance: false` keeps this a single-platform image.
+3. **deploy** — gated to `main`; SSHes the VPS and passes the exact 40-character Git SHA and
+   exact GHCR digest to `deploy.sh`.
 
 What `deploy.sh` does (idempotent):
 
-- `git fetch` + `git reset --hard origin/main` — syncs infra files only (compose /
-  Caddyfile / this script); **not** used to build.
-- GHCR login (`GHCR_USER` / `GHCR_TOKEN` from `.env`) → `docker compose pull`.
+- Fetches and validates the requested commit, then verifies the pulled image's
+  `org.opencontainers.image.revision` label equals that commit.
+- GHCR login (`GHCR_USER` / `GHCR_TOKEN` from `.env`) → pull the exact digest.
+- Activates the exact commit plus a generated, untracked Compose override pinned to that digest.
 - Brings up `db`, then **baseline-aware `migrate deploy`** (see Schema changes).
-- `docker compose up -d --remove-orphans` → `docker image prune -f`.
-- Records the live SHA in `.deployed_sha`.
+- Runs the pre-deploy backup, migrations, application health checks, and Caddy reload; on a
+  failure after activation starts, restores the previous commit and image identity.
+- Records the live tuple in `.deployed_release` and the compatibility SHA in `.deployed_sha`.
 
-A feature-branch / manual `workflow_dispatch` run only builds + pushes `:sha-<short>` — the
-deploy job is hard-gated to `main`, and `latest` (the tag prod pulls) is published from
-`main` alone, so such a run cannot reach prod even on the next unrelated deploy.
+A feature-branch / manual `workflow_dispatch` run tests and builds the image, but the deploy
+job is hard-gated to `main`, so such a run cannot reach production.
 
 ## Rollback
 
+Identify the previous `GIT_SHA` and `IMAGE_REF` in `/opt/hedgefun/.deployed_release` or the
+deployment log, then run:
+
 ```bash
-bash deploy.sh rollback <sha-short>
+bash deploy.sh rollback <full-40-character-git-sha> ghcr.io/eternally-black/hedge-fun@sha256:<digest>
 ```
 
-Pulls the immutable `:sha-<short>`, repins it as `:latest`, and re-ups — no rebuild,
-deterministic. The currently-live SHA is in `/opt/hedgefun/.deployed_sha`; older SHA tags
-are in the repo's GHCR **Packages** tab.
+The script verifies that the image revision label matches the requested commit before it
+changes the live release. Database migrations are forward-only and are not downgraded.
 
 ## Schema changes
 
@@ -286,9 +290,7 @@ Notes:
 - `pg_isready` only proves the server answers, not that the data is intact — a failed
   `pg_dump` is the real corruption detector (hence the `pg_restore --list` verify, and the
   Sunday restore drill for the DATA section that `--list` never reads).
-- Rollback arg is `sha-<short>` exactly as CI tags it: `bash deploy.sh rollback <sha-short>`.
-- `docker compose pull` also refreshes mutable base tags (postgres/caddy) — pin by digest
-  only if that ever bites.
+- A rollback always requires the complete release tuple: full Git SHA plus GHCR digest.
 
 ## Required env (`/opt/hedgefun/.env`)
 
@@ -298,6 +300,8 @@ Notes:
   Soft: unset → those guards become no-ops and `src/instrumentation.ts` warns at boot.
 - `GHCR_USER`, `GHCR_TOKEN` — GHCR login for `docker compose pull` (token = read:packages PAT).
 - `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` — Postgres container init.
+- `BACKUP_ENC_PASSPHRASE` — encrypts database backups; the offsite backup acceptance gate
+  rejects plaintext archives.
 
 `NEXT_PUBLIC_PRIVY_APP_ID` is also a GH secret (baked into the image at build time).
 

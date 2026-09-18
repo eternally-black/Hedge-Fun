@@ -10,13 +10,12 @@ const eslintConfig = defineConfig([
   ...nextVitals,
   ...nextTs,
   // "app design/" is the static design handoff (HTML mockups + an old support.js), not app code;
-  // dist/ is the compiled poller. Neither is linted. scripts/stubs/ holds CommonJS test doubles
-  // (the Polymarket SDK stand-in) — the react-hooks rules below apply to every file but the plugin
-  // is only registered for the Next file globs, so a .cjs there fails the run ("could not find
-  // plugin react-hooks"); .scratch/ is the gitignored packet workspace, same story locally.
-  globalIgnores([".next/**", "out/**", "build/**", "dist/**", "next-env.d.ts", "app design/**", "scripts/stubs/**", ".scratch/**"]),
+  // dist/ is the compiled poller. Neither is linted. scripts/stubs/ holds SDK test doubles;
+  // .scratch/ and local worktrees are tooling workspaces, not this application's source.
+  globalIgnores([".next/**", "out/**", "build/**", "dist/**", "next-env.d.ts", "app design/**", "scripts/stubs/**", ".scratch/**", ".claude/**", ".codex/**"]),
   // Allow intentionally-unused names when prefixed with _ (e.g. kept-for-signature params).
   {
+    files: ["**/*.{js,jsx,mjs,ts,tsx,mts,cts}"],
     rules: {
       "@typescript-eslint/no-unused-vars": [
         "warn",
@@ -36,6 +35,10 @@ const eslintConfig = defineConfig([
       "react-hooks/set-state-in-effect": "warn",
       "react-hooks/purity": "warn",
     },
+  },
+  {
+    files: ["scripts/**/*.cjs"],
+    rules: { "@typescript-eslint/no-require-imports": "off" },
   },
   // Standalone tsx test/seed scripts: they mock SDK internals via `as any` and aren't shipped.
   {

@@ -24,3 +24,9 @@ hedgefun_ci.pub
 
 # Expo local dev artifacts
 mobile/.expo/
+mobile/.audit-dist-*/
+
+# Host-local release identity written by deploy.sh
+/docker-compose.override.yml
+/.deployed_release
+/.deployed_sha

@@ -26,7 +26,7 @@
 //  - SPL-Token / Token-2022 CloseAccount: data = [9], accounts = [account(w), destination(w),
 //    owner(signer)] — confirmed live in Jupiter's own cleanupInstruction (see jupiter-swap.ts).
 
-import { createHash } from "node:crypto";
+import { createHash, createPublicKey, verify as verifyEd25519 } from "node:crypto";
 import {
   AccountRole,
   address,
@@ -177,98 +177,301 @@ export function messageHashOf(wireTxBytes: Uint8Array): string {
   return createHash("sha256").update(Buffer.from(tx.messageBytes)).digest("hex");
 }
 
-// Phantom's Lighthouse program — the ONE program a wallet may add to a message we built.
+export function transactionFeePayerOf(base64: string): string {
+  try {
+    const wire = new Uint8Array(Buffer.from(base64, "base64"));
+    const tx = getTransactionDecoder().decode(wire);
+    return getCompiledTransactionMessageDecoder().decode(tx.messageBytes).staticAccounts[0];
+  } catch {
+    throw new TxMismatchError();
+  }
+}
+
+export function transactionSignatureOf(base64: string): string {
+  try {
+    return getSignatureFromTransaction(getTransactionDecoder().decode(new Uint8Array(Buffer.from(base64, "base64"))));
+  } catch {
+    throw new TxMismatchError();
+  }
+}
+
+// Pre-audit self-paid attempts stored sha256(base64(unsigned-wire)) and omitted the wire itself.
+// A landed transaction can reconstruct that exact unsigned envelope only when the wallet changed no
+// message bytes. This is a narrow compatibility proof; failure stays PENDING for manual review.
+export function legacyUnsignedHashMatches(signedBase64: string, expectedHash: string): boolean {
+  try {
+    const tx = getTransactionDecoder().decode(new Uint8Array(Buffer.from(signedBase64, "base64")));
+    const signatures = Object.fromEntries(Object.keys(tx.signatures).map((signer) => [signer, null]));
+    const unsigned = { ...tx, signatures } as typeof tx;
+    const wire = new Uint8Array(getTransactionEncoder().encode(unsigned));
+    const base64 = Buffer.from(wire).toString("base64");
+    return createHash("sha256").update(base64).digest("hex") === expectedHash;
+  } catch {
+    return false;
+  }
+}
+
 export const LIGHTHOUSE_PROGRAM = "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95";
 export const COMPUTE_BUDGET_PROGRAM = "ComputeBudget111111111111111111111111111111";
-// The ONE edit a wallet may make to an instruction of ours: raise SetComputeUnitLimit (opcode 2,
-// u32 LE) so its guards fit in the budget — seen live as 72,261 → 75,613 CU. Bounded, because the
-// raise is paid by the SPONSOR (cuPrice × the raise): at our price cap, 100k CU is a few thousand
-// lamports at most.
 const CU_LIMIT_RAISE_MAX = 100_000;
 
-// The decompiled instruction, whatever the message version: program, accounts with roles, data.
-type AnyIx = { programAddress: Address; accounts?: readonly { address: Address; role: AccountRole }[]; data?: ReadonlyUint8Array };
+type AnyIx = {
+  programAddress: Address;
+  accounts?: readonly { address: Address; role: AccountRole }[];
+  data?: ReadonlyUint8Array;
+};
 
 function cuLimitOf(ix: AnyIx): number | null {
   const d = ix.data;
   if (ix.programAddress !== COMPUTE_BUDGET_PROGRAM || !d || d.length !== 5 || d[0] !== 2) return null;
   return (d[1] | (d[2] << 8) | (d[3] << 16) | (d[4] << 24)) >>> 0;
 }
+
 function raisedCuLimit(ours: AnyIx, theirs: AnyIx): boolean {
-  const x = cuLimitOf(ours), y = cuLimitOf(theirs);
-  return x !== null && y !== null && y >= x && y - x <= CU_LIMIT_RAISE_MAX;
+  const before = cuLimitOf(ours);
+  const after = cuLimitOf(theirs);
+  return before !== null && after !== null && after >= before && after - before <= CU_LIMIT_RAISE_MAX;
 }
 
-// The contents of every address table these messages load from — what decompiling them needs.
-async function lookupTablesFor(wires: Uint8Array[]): Promise<Record<Address, Address[]>> {
-  const dec = getCompiledTransactionMessageDecoder();
-  const luts = new Set<string>();
-  for (const w of wires) {
-    let m: ReturnType<typeof dec.decode>;
-    try {
-      m = dec.decode(getTransactionDecoder().decode(w).messageBytes);
-    } catch {
-      continue;
+function u64Le(bytes: ReadonlyUint8Array, offset: number): bigint {
+  let value = 0n;
+  for (let i = 7; i >= 0; i--) value = (value << 8n) | BigInt(bytes[offset + i] ?? 0);
+  return value;
+}
+
+function priorityFeeWithinCap(instructions: readonly AnyIx[]): boolean {
+  let limit: number | null = null;
+  let priceMicroLamports: bigint | null = null;
+  for (const instruction of instructions) {
+    if (instruction.programAddress !== COMPUTE_BUDGET_PROGRAM || !instruction.data) continue;
+    const data = instruction.data;
+    if (data[0] === 2) {
+      if (data.length !== 5 || limit !== null) return false;
+      limit = cuLimitOf(instruction);
+    } else if (data[0] === 3) {
+      if (data.length !== 9 || priceMicroLamports !== null) return false;
+      priceMicroLamports = u64Le(data, 1);
     }
-    if ("addressTableLookups" in m) for (const l of m.addressTableLookups ?? []) luts.add(l.lookupTableAddress);
   }
-  const out: Record<Address, Address[]> = {};
-  for (const lut of luts) {
-    const acc = await getAccountInfoBase64(lut);
-    if (!acc) throw new HeliusUnavailableError(`lookup table ${lut} not found`);
-    out[address(lut)] = decodeLookupTable(acc.data).map((a) => address(a));
-  }
-  return out;
+  if (priceMicroLamports === null || priceMicroLamports === 0n) return true;
+  // No explicit limit means the runtime can assign up to its per-transaction maximum. Use that
+  // ceiling instead of understating the sponsor's possible fee.
+  const chargedUnits = BigInt(limit ?? 1_400_000);
+  const lamports = (chargedUnits * priceMicroLamports + 999_999n) / 1_000_000n;
+  return lamports <= BigInt(STOCK_SPONSOR_MAX_PRIORITY_LAMPORTS);
 }
 
-// Is `signedWire` OUR message plus nothing but Lighthouse guards? An external wallet (Phantom)
-// rewrites an unsigned transaction on its way to the user: it appends assertions that make the
-// transaction fail if the outcome is not what the user saw in the simulation, reorders the account
-// table, and raises the compute-unit limit so the assertions fit. Assertions cannot move funds. So a
-// message that is exactly ours — same fee payer, same signers, same blockhash, every one of our
-// instructions in order with the same program, accounts, roles and data (the unit limit may only be
-// raised, within CU_LIMIT_RAISE_MAX) — with Lighthouse instructions added anywhere is still a
-// message we built, and the sponsor may sign it. Anything else (one more instruction of any other
-// program, one byte of ours changed, one of ours missing, ours reordered, an account demoted, a table
-// we cannot read) is not. Pure given the table contents; `lookup` must hold every table either
-// message loads from.
-export function sameMessageModuloGuards(builtWire: Uint8Array, signedWire: Uint8Array, lookup: Record<Address, Address[]>): boolean {
-  const dec = getCompiledTransactionMessageDecoder();
-  let a: ReturnType<typeof dec.decode>, b: ReturnType<typeof dec.decode>;
+function compiledAccountRoles(
+  message: ReturnType<ReturnType<typeof getCompiledTransactionMessageDecoder>["decode"]>,
+  lookup: Record<Address, Address[]>,
+): Map<string, AccountRole> {
+  const roles = new Map<string, AccountRole>();
+  const signerCount = message.header.numSignerAccounts;
+  const writableSignerCount = signerCount - message.header.numReadonlySignerAccounts;
+  const writableUnsignedEnd = message.staticAccounts.length - message.header.numReadonlyNonSignerAccounts;
+  message.staticAccounts.forEach((account, index) => {
+    const role =
+      index < signerCount
+        ? index < writableSignerCount
+          ? AccountRole.WRITABLE_SIGNER
+          : AccountRole.READONLY_SIGNER
+        : index < writableUnsignedEnd
+          ? AccountRole.WRITABLE
+          : AccountRole.READONLY;
+    roles.set(account, role);
+  });
+  if ("addressTableLookups" in message) {
+    for (const table of message.addressTableLookups ?? []) {
+      const addresses = lookup[table.lookupTableAddress];
+      if (!addresses) continue;
+      for (const index of table.writableIndexes) {
+        const account = addresses[index];
+        if (account) roles.set(account, AccountRole.WRITABLE);
+      }
+      for (const index of table.readonlyIndexes) {
+        const account = addresses[index];
+        if (account) roles.set(account, AccountRole.READONLY);
+      }
+    }
+  }
+  return roles;
+}
+
+const LIGHTHOUSE_ACCOUNT_COUNTS = new Map<number, number>([
+  [2, 1],
+  [3, 1],
+  [4, 2],
+  [5, 1],
+  [6, 1],
+  [7, 1],
+  [8, 1],
+  [9, 1],
+  [10, 1],
+  [11, 1],
+  [12, 1],
+  [13, 1],
+  [14, 1],
+  [15, 0],
+  [16, 3],
+  [17, 1],
+]);
+
+function validLighthouseAssertion(instruction: AnyIx, builtRoles: ReadonlyMap<string, AccountRole>): boolean {
+  const data = instruction.data;
+  if (!data || data.length < 3) return false;
+  const requiredAccounts = LIGHTHOUSE_ACCOUNT_COUNTS.get(data[0]);
+  // Discriminators 0/1 are MemoryWrite/MemoryClose: they can spend sponsor lamports on a PDA and
+  // are never a wallet assertion. Every supported assertion begins with a bounded LogLevel enum.
+  if (requiredAccounts === undefined || data[1] > 6) return false;
+  const accounts = instruction.accounts ?? [];
+  if (accounts.length !== requiredAccounts) return false;
+  for (const account of accounts) {
+    const builtRole = builtRoles.get(account.address);
+    if (builtRole !== undefined) {
+      // Compiled roles are global. A legitimate assertion over the swap's writable ATA therefore
+      // decompiles as writable too; require the original global role rather than false-rejecting it.
+      if (account.role !== builtRole) return false;
+    } else if (account.role !== AccountRole.READONLY) {
+      // A guard may introduce a new read-only observation account, never a signer/writable account.
+      return false;
+    }
+  }
+  return true;
+}
+
+async function lookupTablesFor(wires: Uint8Array[]): Promise<Record<Address, Address[]>> {
+  const decoder = getCompiledTransactionMessageDecoder();
+  const tableIds = new Set<string>();
+  for (const wire of wires) {
+    try {
+      const message = decoder.decode(getTransactionDecoder().decode(wire).messageBytes);
+      if ("addressTableLookups" in message) {
+        for (const table of message.addressTableLookups ?? []) tableIds.add(table.lookupTableAddress);
+      }
+    } catch {
+      throw new TxMismatchError();
+    }
+  }
+  const lookup: Record<Address, Address[]> = {};
+  for (const tableId of tableIds) {
+    const account = await getAccountInfoBase64(tableId);
+    if (!account) throw new HeliusUnavailableError(`lookup table ${tableId} not found`);
+    lookup[address(tableId)] = decodeLookupTable(account.data).map((value) => address(value));
+  }
+  return lookup;
+}
+
+// Phantom may add only Lighthouse assertions and a bounded SetComputeUnitLimit increase. The
+// original fee payer, blockhash, signer set, and every original instruction (program/accounts/
+// roles/data/order) must survive exactly. Address-table index reordering is harmless after decompile.
+export function sameMessageModuloGuards(
+  builtWire: Uint8Array,
+  signedWire: Uint8Array,
+  lookup: Record<Address, Address[]>,
+): boolean {
+  const decoder = getCompiledTransactionMessageDecoder();
+  let built: ReturnType<typeof decoder.decode>;
+  let signed: ReturnType<typeof decoder.decode>;
   try {
-    a = dec.decode(getTransactionDecoder().decode(builtWire).messageBytes);
-    b = dec.decode(getTransactionDecoder().decode(signedWire).messageBytes);
+    built = decoder.decode(getTransactionDecoder().decode(builtWire).messageBytes);
+    signed = decoder.decode(getTransactionDecoder().decode(signedWire).messageBytes);
   } catch {
     return false;
   }
-  if (a.lifetimeToken !== b.lifetimeToken) return false;
-  if (a.header.numSignerAccounts !== b.header.numSignerAccounts) return false;
-  if (a.header.numReadonlySignerAccounts !== b.header.numReadonlySignerAccounts) return false;
-  if (a.staticAccounts[0] !== b.staticAccounts[0]) return false; // the fee payer
-  const signersA = [...a.staticAccounts.slice(0, a.header.numSignerAccounts)].sort().join(",");
-  const signersB = [...b.staticAccounts.slice(0, b.header.numSignerAccounts)].sort().join(",");
-  if (signersA !== signersB) return false;
+  if (built.lifetimeToken !== signed.lifetimeToken) return false;
+  if (built.header.numSignerAccounts !== signed.header.numSignerAccounts) return false;
+  if (built.header.numReadonlySignerAccounts !== signed.header.numReadonlySignerAccounts) return false;
+  if (built.staticAccounts[0] !== signed.staticAccounts[0]) return false;
+  const builtSigners = [...built.staticAccounts.slice(0, built.header.numSignerAccounts)].sort().join(",");
+  const signedSigners = [...signed.staticAccounts.slice(0, signed.header.numSignerAccounts)].sort().join(",");
+  if (builtSigners !== signedSigners) return false;
 
-  let ma: ReturnType<typeof decompileTransactionMessage>, mb: ReturnType<typeof decompileTransactionMessage>;
+  let builtMessage: ReturnType<typeof decompileTransactionMessage>;
+  let signedMessage: ReturnType<typeof decompileTransactionMessage>;
   try {
-    ma = decompileTransactionMessage(a, { addressesByLookupTableAddress: lookup });
-    mb = decompileTransactionMessage(b, { addressesByLookupTableAddress: lookup });
+    builtMessage = decompileTransactionMessage(built, { addressesByLookupTableAddress: lookup });
+    signedMessage = decompileTransactionMessage(signed, { addressesByLookupTableAddress: lookup });
   } catch {
     return false;
   }
   const key = (ix: AnyIx) =>
-    [ix.programAddress, ...(ix.accounts ?? []).map((acc) => `${acc.address}:${acc.role}`), Buffer.from(ix.data ?? new Uint8Array()).toString("base64")].join("|");
-  const oursIx = ma.instructions as unknown as readonly AnyIx[];
-  const ours = oursIx.map(key);
-  let i = 0;
-  for (const ix of mb.instructions as unknown as readonly AnyIx[]) {
-    if (i < ours.length && (key(ix) === ours[i] || raisedCuLimit(oursIx[i], ix))) {
-      i++;
+    [
+      ix.programAddress,
+      ...(ix.accounts ?? []).map((account) => `${account.address}:${account.role}`),
+      Buffer.from(ix.data ?? new Uint8Array()).toString("base64"),
+    ].join("|");
+  const originals = builtMessage.instructions as unknown as readonly AnyIx[];
+  const originalKeys = originals.map(key);
+  const builtRoles = compiledAccountRoles(built, lookup);
+  const signedInstructions = signedMessage.instructions as unknown as readonly AnyIx[];
+  if (!priorityFeeWithinCap(signedInstructions)) return false;
+  let originalIndex = 0;
+  for (const instruction of signedInstructions) {
+    if (
+      originalIndex < originals.length &&
+      (key(instruction) === originalKeys[originalIndex] || raisedCuLimit(originals[originalIndex], instruction))
+    ) {
+      originalIndex++;
       continue;
     }
-    if (ix.programAddress !== LIGHTHOUSE_PROGRAM) return false;
+    if (instruction.programAddress !== LIGHTHOUSE_PROGRAM) return false;
+    if (!validLighthouseAssertion(instruction, builtRoles)) return false;
   }
-  return i === ours.length;
+  return originalIndex === originals.length;
+}
+
+function hasValidSignature(addressString: string, message: ReadonlyUint8Array, signature: Uint8Array | null): boolean {
+  if (!signature || signature.length !== 64) return false;
+  const raw = decodeBase58(addressString);
+  if (!raw || raw.length !== 32) return false;
+  try {
+    const spki = Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), Buffer.from(raw)]);
+    return verifyEd25519(
+      null,
+      Buffer.from(Uint8Array.from(message)),
+      createPublicKey({ key: spki, format: "der", type: "spki" }),
+      signature,
+    );
+  } catch {
+    return false;
+  }
+}
+
+export async function validateSignedTransaction(p: {
+  signedTransactionB64: string;
+  builtTransactionB64: string;
+  expectedMessageHash: string;
+  expectedFeePayer: string;
+  allowMissingSignature?: string;
+}): Promise<{ wire: string; sig: string | null }> {
+  const signedWire = new Uint8Array(Buffer.from(p.signedTransactionB64, "base64"));
+  const builtWire = new Uint8Array(Buffer.from(p.builtTransactionB64, "base64"));
+  let tx: ReturnType<ReturnType<typeof getTransactionDecoder>["decode"]>;
+  let message: ReturnType<ReturnType<typeof getCompiledTransactionMessageDecoder>["decode"]>;
+  try {
+    tx = getTransactionDecoder().decode(signedWire);
+    message = getCompiledTransactionMessageDecoder().decode(tx.messageBytes);
+  } catch {
+    throw new TxMismatchError();
+  }
+  if (message.staticAccounts[0] !== p.expectedFeePayer) throw new TxMismatchError();
+  const hash = createHash("sha256").update(Buffer.from(tx.messageBytes)).digest("hex");
+  if (hash !== p.expectedMessageHash) {
+    const lookup = await lookupTablesFor([builtWire, signedWire]);
+    if (!sameMessageModuloGuards(builtWire, signedWire, lookup)) throw new TxMismatchError();
+  }
+  const signatures = tx.signatures as Record<string, Uint8Array | null>;
+  for (const signer of message.staticAccounts.slice(0, message.header.numSignerAccounts)) {
+    if (signer === p.allowMissingSignature && signatures[signer] === null) continue;
+    if (!hasValidSignature(signer, tx.messageBytes, signatures[signer] ?? null)) throw new TxMismatchError();
+  }
+  let sig: string | null = null;
+  try {
+    sig = getSignatureFromTransaction(tx);
+  } catch {
+    if (p.allowMissingSignature !== p.expectedFeePayer) throw new TxMismatchError();
+  }
+  return { wire: Buffer.from(signedWire).toString("base64"), sig };
 }
 
 function toKitIx(ix: JupIx): Instruction {
@@ -299,11 +502,8 @@ export async function buildSponsoredSwapTx(p: {
   quoteResponse: unknown;
   userPublicKey: string;
   extraInstructions?: JupIx[];
-  // Whose SOL fronts the token-account rent. Default (the embedded wallet, which has none): the
-  // sponsor pays it and takes it back when the account closes. false (a connected external wallet):
-  // the wallet's own — its scanner BLOCKS a transaction that closes the user's account with the
-  // lamports going to a stranger (Phantom, live 2026-09-18), and it has SOL of its own anyway. The
-  // network fee is the sponsor's either way.
+  // External wallets front their own token-account rent because wallet scanners reject cleanup
+  // that returns their lamports to a different address. Embedded wallets use the sponsor.
   sponsorRent?: boolean;
 }): Promise<{
   swapTransaction: string;
@@ -322,7 +522,9 @@ export async function buildSponsoredSwapTx(p: {
 
   const sponsorRent = p.sponsorRent !== false;
   const funded = sponsorRent ? await sponsorFundedAtas(ix.setupInstructions, p.userPublicKey) : [];
-  const cleanup = sponsorRent ? patchCleanupDestination(ix.cleanupInstruction, new Set(funded.map((f) => f.account)), sponsor) : ix.cleanupInstruction;
+  const cleanup = sponsorRent
+    ? patchCleanupDestination(ix.cleanupInstruction, new Set(funded.map((f) => f.account)), sponsor)
+    : ix.cleanupInstruction;
   const ordered: JupIx[] = [
     ...ix.computeBudgetInstructions,
     ...(sponsorRent ? patchAtaPayer(ix.setupInstructions, sponsor) : ix.setupInstructions),
@@ -385,31 +587,18 @@ export async function coSign(p: {
   signedTransactionB64: string;
   expectedMessageHash: string;
   userAddress: string;
-  // The bytes the attempt was built from. With them, a message that does not hash to the expected
-  // value is still accepted when it is ours plus nothing but Lighthouse guards (sameMessageModuloGuards).
-  builtTransactionB64?: string;
+  builtTransactionB64: string;
 }): Promise<{ wire: string; sig: string }> {
   const signer = await sponsorSigner();
 
-  const signedWire = new Uint8Array(Buffer.from(p.signedTransactionB64, "base64"));
-  let tx: ReturnType<ReturnType<typeof getTransactionDecoder>["decode"]>;
-  try {
-    tx = getTransactionDecoder().decode(signedWire);
-  } catch {
-    throw new TxMismatchError(); // not even a transaction
-  }
-
-  const hash = createHash("sha256").update(Buffer.from(tx.messageBytes)).digest("hex");
-  if (hash !== p.expectedMessageHash) {
-    if (!p.builtTransactionB64) throw new TxMismatchError();
-    const builtWire = new Uint8Array(Buffer.from(p.builtTransactionB64, "base64"));
-    const lookup = await lookupTablesFor([builtWire, signedWire]);
-    if (!sameMessageModuloGuards(builtWire, signedWire, lookup)) throw new TxMismatchError();
-  }
-
-  // The user must actually have signed. Their slot exists because they are a signer of the swap.
-  const userSig = (tx.signatures as Record<string, Uint8Array | null>)[p.userAddress];
-  if (!userSig || userSig.length !== 64) throw new TxMismatchError();
+  const checked = await validateSignedTransaction({
+    signedTransactionB64: p.signedTransactionB64,
+    builtTransactionB64: p.builtTransactionB64,
+    expectedMessageHash: p.expectedMessageHash,
+    expectedFeePayer: signer.address,
+    allowMissingSignature: signer.address,
+  });
+  const tx = getTransactionDecoder().decode(new Uint8Array(Buffer.from(checked.wire, "base64")));
 
   const signed = await partiallySignTransaction([signer.keyPair], tx);
   return { wire: getBase64EncodedWireTransaction(signed), sig: getSignatureFromTransaction(signed) };

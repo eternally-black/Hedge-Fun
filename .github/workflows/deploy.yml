@@ -3,9 +3,7 @@ on:
   push:
     branches: [main]
   # Build (not deploy) is reachable from a feature branch for PoC measurement.
-  # Two gates keep such a run away from prod: the deploy job is hard-gated to main
-  # via `if:` below, AND only main publishes the mutable `:latest` tag that deploy.sh
-  # pulls — a feature build pushes `:sha-<short>` only, so it cannot be picked up.
+  # The deploy job is hard-gated to main and receives that run's exact digest.
   workflow_dispatch:
 
 # Never let two deploys overlap; don't cancel an in-flight one mid-build.
@@ -51,7 +49,12 @@ jobs:
         with:
           node-version: 24
           cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            mobile/package-lock.json
+            docker/prisma-cli/package-lock.json
       - run: npm ci                 # strict install from lockfile (postinstall = prisma generate)
+      - run: npm ci --prefix mobile --ignore-scripts
       - run: npm run lint
       - run: npm run contract:check   # mobile/contract/* must equal src/lib/* (scripts/sync-mobile-contract.ts)
       - run: npm ci                   # the Expo app has its own lockfile and its own deps
@@ -59,7 +62,15 @@ jobs:
       - run: npx tsc --noEmit         # mobile type-check (no Android SDK needed)
         working-directory: mobile
       - run: npm test               # DB-free units (no DATABASE_URL needed)
+      - run: npm run test:mobile
       - run: npm run test:db:run    # DB-backed: cash gate, settle, referral, streak recovery
+      - name: Operations contract tests
+        run: npm run test:ops
+      - name: Production dependency audits
+        run: |
+          npm audit --omit=dev --audit-level=high
+          npm audit --prefix mobile --omit=dev --audit-level=high
+          npm audit --prefix docker/prisma-cli --omit=dev --audit-level=high
 
   # ---------------------------------------------------------------------------
   # Build the image on the runner and push to GHCR. The heavy lifting that used
@@ -68,6 +79,9 @@ jobs:
   build:
     needs: test
     runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      revision: ${{ github.sha }}
     permissions:
       contents: read
       packages: write          # push to GHCR using the built-in GITHUB_TOKEN
@@ -88,13 +102,12 @@ jobs:
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ghcr.io/eternally-black/hedge-fun
-          # `latest` is the mutable tag deploy.sh pulls, i.e. production itself. Only main
-          # may move it — otherwise a manual feature-branch build repoints prod's next pull.
+          # Human/package-browser handle only. Production deploys by the build output digest.
           tags: |
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-            type=sha,format=short     # :sha-<short> — rollback handle, built on every branch
+            type=sha,format=long,prefix=sha-
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
@@ -104,6 +117,9 @@ jobs:
                                        # image index that plain `docker pull`/compose on the VPS
                                        # can choke on. Off for single-arch.
           tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            org.opencontainers.image.revision=${{ github.sha }}
           build-args: |
             NEXT_PUBLIC_PRIVY_APP_ID=${{ secrets.NEXT_PUBLIC_PRIVY_APP_ID }}
             NEXT_PUBLIC_POLYMARKET_BUILDER_CODE=${{ secrets.NEXT_PUBLIC_POLYMARKET_BUILDER_CODE }}
@@ -124,6 +140,9 @@ jobs:
     steps:
       - name: SSH and run deploy script
         uses: appleboy/ssh-action@7eaf76671a0d7eec5d98ee897acda4f968735a17 # v1.2.0
+        env:
+          DEPLOY_GIT_SHA: ${{ needs.build.outputs.revision }}
+          DEPLOY_IMAGE_REF: ghcr.io/eternally-black/hedge-fun@${{ needs.build.outputs.digest }}
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
@@ -134,13 +153,21 @@ jobs:
           fingerprint: ${{ secrets.SSH_HOST_FINGERPRINT }}
           # Pull + up only now (no build on the box) — 10m is plenty.
           command_timeout: 10m
-          # Sync the repo BEFORE opening deploy.sh, not from inside it. bash reads a script lazily,
-          # by byte offset, so a deploy whose commit changes deploy.sh had the file rewritten under
-          # the running shell — and any change in length made execution resume mid-line in the new
-          # file. deploy.sh now re-execs itself for the same reason; doing it here too means the
-          # very first deploy that carries that change is already safe. The reset inside deploy.sh
-          # becomes a no-op.
-          script: cd /opt/hedgefun && git fetch --prune origin && git reset --hard origin/main && bash deploy.sh
+          envs: DEPLOY_GIT_SHA,DEPLOY_IMAGE_REF
+          # Fetch and execute deploy.sh from the exact tested commit. The temporary copy remains
+          # stable while that script switches the working tree, so bash never continues in a file
+          # rewritten by git reset and a newer main push cannot change this release.
+          script: |
+            set -eu
+            case "$DEPLOY_GIT_SHA" in *[!0-9a-f]*|'') exit 64 ;; esac
+            case "$DEPLOY_IMAGE_REF" in ghcr.io/eternally-black/hedge-fun@sha256:*) ;; *) exit 64 ;; esac
+            [ "${#DEPLOY_GIT_SHA}" -eq 40 ] || exit 64
+            cd /opt/hedgefun
+            git fetch --no-tags origin "$DEPLOY_GIT_SHA"
+            deploy_bootstrap=$(mktemp /tmp/hedgefun-deploy.XXXXXX)
+            trap 'rm -f "$deploy_bootstrap"' EXIT
+            git show "$DEPLOY_GIT_SHA:deploy.sh" > "$deploy_bootstrap"
+            HF_DEPLOY_BOOTSTRAP=1 bash "$deploy_bootstrap" deploy "$DEPLOY_GIT_SHA" "$DEPLOY_IMAGE_REF"
 
   # ---------------------------------------------------------------------------
   # Failure alert. A failed upstream job SKIPS dependent jobs, so an in-job failure

@@ -262,6 +262,7 @@ model User {
   stockPositions        StockPosition[]
   stockPasses           StockPass[]
   stockAttempts         StockBuyAttempt[]
+  stockWalletStates     StockWalletState[]
   lifeSituations        LifeSituation[]
 
   @@index([createdAt])
@@ -1043,11 +1044,15 @@ model StockBuyAttempt {
   // xStock amount sold (ExactIn) and minOutBase holds the MINIMUM USDC micro-amount out.
   inAmountMicro        BigInt
   minOutBase           BigInt
-  msgHash              String // sha256 of the serialized swapTransaction bytes
-  // The unsigned wire tx (base64) of a sponsored SELL. A retried sell RE-SERVES these bytes instead
-  // of building a second transaction for the same lot: two live sells of one lot cannot both be
-  // booked, and the second would quietly sell the wallet's OTHER tokens. Null on every other kind.
+  msgHash              String // sha256 of the serialized transaction MESSAGE bytes
+  // The original unsigned wire (base64) for every build. It is the provenance anchor for validating
+  // the user's signed wire; a retried SELL also re-serves these same bytes so two live sells cannot
+  // spend tokens from the same mint.
   unsignedTx           String?
+  // The exact signed wire accepted by the server is stamped BEFORE broadcast. This is the durable
+  // crash fence for an ambiguous send: retries re-send these exact bytes and never replace them.
+  signedTx             String?
+  signedTxHash         String?
   // BUY: the sponsor paid the rent of the token account this swap created (the wallet held none for
   // the mint). Only then does the SELL that empties it send the rent back to the sponsor — a user
   // who funded their own account keeps it. Provenance per ACCOUNT lives in SponsorFundedAccount;
@@ -1059,13 +1064,48 @@ model StockBuyAttempt {
   lastValidBlockHeight BigInt
   hedgeSuggestionId    String?
   status               StockAttemptStatus @default(PENDING)
-  sig                  String? // stamped by /real/sent as soon as the client has it
+  sig                  String? // derived from the verified signed wire and stamped before broadcast
+  confirmedSlot        BigInt? // landed receipt slot; feeds the wallet snapshot minContextSlot fence
+  manualReviewReason   String? // legacy provenance that cannot be proved remains PENDING for review
   createdAt            DateTime           @default(now())
   resolvedAt           DateTime?
 
   @@index([status, createdAt])
   @@index([userId, createdAt])
   @@map("stock_buy_attempts")
+}
+
+// One coherent wallet snapshot clock per user and verified payer. All attempt/lot writers bump the
+// generation under a payer-scoped advisory lock; RPC happens outside the transaction and is accepted
+// only if the generation is unchanged and both token programs observed a sufficiently recent slot.
+model StockWalletState {
+  userId                     String
+  user                       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  payer                      String
+  generation                 BigInt    @default(0)
+  lastAcceptedSlot           BigInt?
+  latestConfirmedReceiptSlot BigInt?
+  lastCheckedAt              DateTime?
+  leaseUntil                 DateTime?
+  createdAt                  DateTime  @default(now())
+  updatedAt                  DateTime  @updatedAt
+
+  @@id([userId, payer])
+  @@index([lastCheckedAt])
+  @@index([leaseUntil])
+  @@index([payer])
+  @@map("stock_wallet_states")
+}
+
+// Durable keyset cursor shared by bounded background sweeps. A null value means start at the head;
+// writers advance past every inspected row, including failures and non-actionable rows.
+model SweepCursor {
+  name           String    @id
+  afterCreatedAt DateTime?
+  afterId        String?
+  updatedAt      DateTime  @updatedAt
+
+  @@map("sweep_cursors")
 }
 
 // WHO fronted a token ACCOUNT's rent — the question StockPosition.rentFromSponsor cannot answer,

@@ -45,7 +45,9 @@ services:
   # The existing db-push database is baselined to 0_init once by deploy.sh (P3005 detection) so
   # this never tries to re-create the live tables.
   migrate:
-    image: ghcr.io/eternally-black/hedge-fun:latest
+    # Production deploys write docker-compose.override.yml with the immutable digest.
+    # This fail-closed placeholder prevents a missing release pin from silently pulling :latest.
+    image: ${HF_IMAGE_REF:-ghcr.io/eternally-black/hedge-fun:release-pin-required}
     command: ["npx", "prisma", "migrate", "deploy"]
     env_file: .env
     depends_on:
@@ -57,13 +59,7 @@ services:
     restart: "no"
 
   app:
-    image: ghcr.io/eternally-black/hedge-fun:latest
-    # build: kept for local-dev / manual fallback only — prod pulls from GHCR (CI builds it).
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        NEXT_PUBLIC_PRIVY_APP_ID: ${NEXT_PUBLIC_PRIVY_APP_ID}
+    image: ${HF_IMAGE_REF:-ghcr.io/eternally-black/hedge-fun:release-pin-required}
     command: ["node", "server.js"]
     restart: unless-stopped
     env_file: .env
@@ -93,7 +89,7 @@ services:
           memory: 768m
 
   poller:
-    image: ghcr.io/eternally-black/hedge-fun:latest
+    image: ${HF_IMAGE_REF:-ghcr.io/eternally-black/hedge-fun:release-pin-required}
     command: ["node", "dist/poller.cjs"]
     restart: unless-stopped
     env_file: .env

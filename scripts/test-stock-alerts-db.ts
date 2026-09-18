@@ -47,6 +47,13 @@ async function main() {
   // Mutable P&L the test drives between steps. The evaluator takes it as an argument.
   let pnlNow = 0;
   const pnl = () => pnlNow;
+  // Tier assertions exercise a complete traversal: adding a newer lot can put it after
+  // the durable cursor while older lots are revisited on the following wrap.
+  const sweepCycle = async () => {
+    const first = await evalStockAlerts(prisma, pnl);
+    const second = await evalStockAlerts(prisma, pnl);
+    return { fired: first.fired + second.fired };
+  };
 
   try {
     assert.strictEqual((await me.GET(get("http://x/api/me"))).status, 200, "me provisions user");
@@ -77,13 +84,13 @@ async function main() {
 
     // (1) +1% -> nothing fires, nothing unread.
     pnlNow = 100;
-    let sweep = await evalStockAlerts(prisma, pnl);
+    let sweep = await sweepCycle();
     assert.strictEqual(sweep.fired, 0, "(1) +1% fires nothing");
     assert.strictEqual(await meUnread(), 0, "(1) unreadStockAlerts 0");
 
     // (2) +2.5% -> tier 200 fires once.
     pnlNow = 250;
-    sweep = await evalStockAlerts(prisma, pnl);
+    sweep = await sweepCycle();
     assert.strictEqual(sweep.fired, 1, "(2) +2.5% fires one tier");
     const lotAfter = await prisma.stockPosition.findUniqueOrThrow({ where: { id: lot.id } });
     assert.strictEqual(lotAfter.alertTierBp, 200, "(2) alertTierBp 200");
@@ -100,7 +107,7 @@ async function main() {
     assert.strictEqual(resBody.stockAlerts[0]!.seen, false, "(2) row unseen");
 
     // (3) rerun -> the conditional update is the idempotency.
-    sweep = await evalStockAlerts(prisma, pnl);
+    sweep = await sweepCycle();
     assert.strictEqual(sweep.fired, 0, "(3) rerun fires nothing");
 
     // (4) acknowledgement semantics.
@@ -115,20 +122,20 @@ async function main() {
 
     // (5) +6% -> tier 500 fires, unread again.
     pnlNow = 600;
-    sweep = await evalStockAlerts(prisma, pnl);
+    sweep = await sweepCycle();
     assert.strictEqual(sweep.fired, 1, "(5) +6% fires tier 500");
     assert.strictEqual((await prisma.stockPosition.findUniqueOrThrow({ where: { id: lot.id } })).alertTierBp, 500, "(5) alertTierBp 500");
     assert.strictEqual(await meUnread(), 1, "(5) unread 1 again");
 
     // (6) +4% -> monotonic, nothing fires.
     pnlNow = 400;
-    sweep = await evalStockAlerts(prisma, pnl);
+    sweep = await sweepCycle();
     assert.strictEqual(sweep.fired, 0, "(6) +4% after 500 -> 0");
 
     // (7) stale price -> nothing fires.
     await prisma.stockAsset.update({ where: { id: asset.id }, data: { pricedAt: new Date(Date.now() - 10 * 60_000) } });
     pnlNow = 1_200;
-    sweep = await evalStockAlerts(prisma, pnl);
+    sweep = await sweepCycle();
     assert.strictEqual(sweep.fired, 0, "(7) stale price -> 0");
     await prisma.stockAsset.update({ where: { id: asset.id }, data: { pricedAt: new Date() } });
 
@@ -138,12 +145,12 @@ async function main() {
       select: { id: true },
     });
     pnlNow = 1_200;
-    sweep = await evalStockAlerts(prisma, pnl);
+    sweep = await sweepCycle();
     // The PAPER lot (tier 500) legitimately moves to 1000 here; the REAL lot must stay at 0.
     assert.strictEqual(sweep.fired, 1, "(8) only the paper lot fires; REAL with no wallet check stays silent");
     assert.strictEqual((await prisma.stockPosition.findUniqueOrThrow({ where: { id: realLot.id } })).alertTierBp, 0, "(8) REAL tier stays 0 without a wallet check");
     await prisma.stockPosition.update({ where: { id: realLot.id }, data: { walletCheckedAt: new Date() } });
-    sweep = await evalStockAlerts(prisma, pnl);
+    sweep = await sweepCycle();
     assert.strictEqual(sweep.fired, 1, "(8) REAL with fresh wallet check -> fires");
     assert.strictEqual((await prisma.stockPosition.findUniqueOrThrow({ where: { id: realLot.id } })).alertTierBp, 1_000, "(8) REAL tier 1000");
     assert.strictEqual(await meUnread(), 2, "(8) both modes count (REAL alert counted for a PAPER-mode user)");
@@ -151,7 +158,7 @@ async function main() {
     // (9) a closed lot is not touched and no longer listed.
     await prisma.stockPosition.update({ where: { id: lot.id }, data: { closedAt: new Date() } });
     pnlNow = 2_000;
-    sweep = await evalStockAlerts(prisma, pnl);
+    sweep = await sweepCycle();
     assert.strictEqual(sweep.fired, 0, "(9) closed lot not touched");
     const resAfter = await resultsRes();
     assert.ok(!resAfter.stockAlerts.some((r) => r.positionId === lot.id), "(9) closed lot not listed");

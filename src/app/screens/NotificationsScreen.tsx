@@ -1,29 +1,44 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ResultsResponse, ResultRow, StockAlertRow as StockAlertRowData } from "@/lib/api-types";
 import { PredictionRow, type PredictionRowData } from "./PredictionRow";
 import { StockAlertRow } from "./StockAlertRow";
 
 type Api = (path: string, init?: RequestInit) => Promise<unknown>;
+type PendingAck = {
+  key: string;
+  body: { scope: "bets" | "both"; mode: "PAPER" | "REAL"; betIds: string[]; stockAlerts?: { positionId: string; tierBp: number }[] };
+  betCount: number;
+  stockCount: number;
+};
 
 // The notifications inbox: a calm, scannable feed of every settled call, newest first, plus the
 // "In profit" strip of tokenized-stock lots that crossed a profit tier. Opening it marks everything
 // seen (clears the HUD bell) — stock alerts are acknowledged by the exact (position, tier) pairs the
 // screen received, so a tier that fires while the list is open stays unread. "Replay" re-runs the
 // dopamine reveal. Lean-back counterpart to the reveal overlay — both read /api/results.
-export function NotificationsScreen({ api, onSeen, onReplay, onOpenStock }: { api: Api; onSeen: () => void; onReplay: () => void; onOpenStock?: () => void }) {
+export function NotificationsScreen({ api, onSeen, onReplay, onOpenStock, onAckFailed }: { api: Api; onSeen: (betCount: number, stockCount: number) => void; onReplay: () => void; onOpenStock?: () => void; onAckFailed: () => void }) {
   const [rows, setRows] = useState<ResultRow[] | null>(null);
   const [stockAlerts, setStockAlerts] = useState<StockAlertRowData[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [ackQueue, setAckQueue] = useState<PendingAck[]>([]);
   // Guards loadMore against concurrent calls — a double-tap on the button must not append the same
   // page twice (the cursor would advance past it and the rows would duplicate).
   const loadingMore = useRef(false);
+  const aliveRef = useRef(false);
+  const stagedAckKeys = useRef(new Set<string>());
+  const startedAckKeys = useRef(new Set<string>());
+  const stageAck = useCallback((ack: PendingAck) => {
+    if (stagedAckKeys.current.has(ack.key)) return;
+    stagedAckKeys.current.add(ack.key);
+    setAckQueue((queue) => [...queue, ack]);
+  }, []);
 
-  // Load the feed, then mark seen. Marking is fire-and-forget (the badge already cleared locally
-  // via onSeen); a failed mark just means the badge reappears on next /api/me — acceptable.
+  // Load the feed, commit it, then acknowledge exactly the unseen rows delivered in that response.
   useEffect(() => {
     let alive = true;
+    aliveRef.current = true;
     api("/api/results")
       .then((r) => {
         if (!alive) return;
@@ -32,18 +47,37 @@ export function NotificationsScreen({ api, onSeen, onReplay, onOpenStock }: { ap
         setRows(res.rows);
         setStockAlerts(alerts);
         setNextCursor(res.nextCursor);
-        // Acknowledge what was DELIVERED: bets (all unseen) + exactly the stock alert pairs shown.
-        const body = {
-          scope: "both",
-          stockAlerts: alerts.filter((a) => !a.seen).map((a) => ({ positionId: a.positionId, tierBp: a.tierBp })),
-        };
-        api("/api/results/seen", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
-          .catch(() => { /* badge re-syncs from /api/me */ });
+        const betIds = res.rows.filter((row) => !row.seen).map((row) => row.id);
+        const unseenAlerts = alerts.filter((a) => !a.seen);
+        if (betIds.length === 0 && unseenAlerts.length === 0) return;
+        const stockAlerts = unseenAlerts.map((a) => ({ positionId: a.positionId, tierBp: a.tierBp }));
+        stageAck({
+          key: `initial:${res.mode}:${betIds.join(",")}:${stockAlerts.map((a) => `${a.positionId}/${a.tierBp}`).join(",")}`,
+          body: { scope: "both", mode: res.mode, betIds, stockAlerts },
+          betCount: betIds.length,
+          stockCount: stockAlerts.length,
+        });
       })
       .catch(console.error);
-    onSeen();
-    return () => { alive = false; };
-  }, [api, onSeen]);
+    return () => { alive = false; aliveRef.current = false; };
+  }, [api, stageAck]);
+
+  // ACK only after the rows above have committed. The started-key fence makes the optimistic badge
+  // decrement and POST single-shot under React Strict Mode's effect replay.
+  useEffect(() => {
+    const ack = ackQueue[0];
+    if (!ack || startedAckKeys.current.has(ack.key)) return;
+    startedAckKeys.current.add(ack.key);
+    onSeen(ack.betCount, ack.stockCount);
+    api("/api/results/seen", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(ack.body),
+    }).catch(console.error).finally(() => {
+      onAckFailed();
+      if (aliveRef.current) setAckQueue((queue) => queue.filter((item) => item.key !== ack.key));
+    });
+  }, [ackQueue, api, onSeen, onAckFailed]);
 
   // Fetches the next page and appends it. The cursor lives in state so the next call knows where
   // to continue; a null cursor means the server has no more rows.
@@ -52,10 +86,20 @@ export function NotificationsScreen({ api, onSeen, onReplay, onOpenStock }: { ap
     loadingMore.current = true;
     try {
       const r = (await api(`/api/results?cursor=${encodeURIComponent(nextCursor)}`)) as ResultsResponse;
+      if (!aliveRef.current) return;
       setRows((cur) => [...(cur ?? []), ...r.rows]);
       setNextCursor(r.nextCursor);
+      const betIds = r.rows.filter((row) => !row.seen).map((row) => row.id);
+      if (betIds.length > 0) {
+        stageAck({
+          key: `page:${r.mode}:${betIds.join(",")}`,
+          body: { scope: "bets", mode: r.mode, betIds },
+          betCount: betIds.length,
+          stockCount: 0,
+        });
+      }
     } catch (e) {
-      console.error(e);
+      if (aliveRef.current) console.error(e);
     } finally {
       loadingMore.current = false;
     }

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { authUser } from "@/lib/privy";
 import { rateLimit } from "@/lib/ratelimit";
 import { portfolioFor, verifiedWallets } from "@/lib/stocks-db";
-import { adoptWalletHoldings, reconcileRealLots } from "@/lib/stocks-real";
+import { refreshWalletHoldings } from "@/lib/stocks-real";
 import { HeliusUnavailableError } from "@/lib/helius";
 import { prisma } from "@/lib/prisma";
 import { STOCK_WALLET_RECONCILE_MAX_AGE_MS } from "@/lib/config";
@@ -13,13 +13,8 @@ import { STOCK_WALLET_RECONCILE_MAX_AGE_MS } from "@/lib/config";
 // STOCK_WALLET_RECONCILE_MAX_AGE_MS — a lot sold or moved in Phantom must not read as a holding. A
 // Helius outage skips the reconciliation (the rows keep their last verdict) rather than failing the
 // whole portfolio read.
-// Every verified wallet is read for xStocks we never booked (adoptWalletHoldings) — what a user who
-// connects a wallet full of them expects to see. At most once a minute per wallet: the Portfolio
-// polls every few seconds while visible, and two RPC reads per poll would pay for a number that only
-// moves when the user trades elsewhere. ponytail: in-memory, per process; a column if a second app
-// instance ever appears.
-const ADOPT_EVERY_MS = 60_000;
-const adoptedAt = new Map<string, number>();
+// Adoption and reconciliation share one generation/slot-fenced wallet snapshot. Freshness is durable
+// in StockWalletState, so multiple app instances do not fan out duplicate RPC reads.
 
 export async function GET(req: Request) {
   const user = await authUser(req);
@@ -28,34 +23,16 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "rate_limited" }, { status: 429 });
   }
 
+  const now = new Date();
+  const staleBefore = new Date(now.getTime() - STOCK_WALLET_RECONCILE_MAX_AGE_MS);
   for (const payer of await verifiedWallets(user.id)) {
-    const key = `${user.id}:${payer}`;
-    if (Date.now() - (adoptedAt.get(key) ?? 0) < ADOPT_EVERY_MS) continue;
-    adoptedAt.set(key, Date.now());
+    const state = await prisma.stockWalletState.findUnique({
+      where: { userId_payer: { userId: user.id, payer } },
+      select: { lastCheckedAt: true },
+    });
+    if (state?.lastCheckedAt && state.lastCheckedAt >= staleBefore) continue;
     try {
-      await adoptWalletHoldings(user.id, payer);
-    } catch (e) {
-      adoptedAt.delete(key); // a failed read is retried on the next poll
-      if (!(e instanceof HeliusUnavailableError)) throw e;
-    }
-  }
-
-  const staleBefore = new Date(Date.now() - STOCK_WALLET_RECONCILE_MAX_AGE_MS);
-  const stale = await prisma.stockPosition.findMany({
-    where: {
-      userId: user.id,
-      mode: "REAL",
-      closedAt: null,
-      payer: { not: null },
-      OR: [{ walletCheckedAt: null }, { walletCheckedAt: { lt: staleBefore } }],
-    },
-    distinct: ["payer"],
-    select: { payer: true },
-  });
-  for (const { payer } of stale) {
-    if (!payer) continue;
-    try {
-      await reconcileRealLots(user.id, payer);
+      await refreshWalletHoldings(user.id, payer, now);
     } catch (e) {
       if (!(e instanceof HeliusUnavailableError)) throw e;
     }
