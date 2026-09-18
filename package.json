@@ -36,19 +36,19 @@
     "backfill-streak-x2": "tsx scripts/backfill-streak-x2.ts"
   },
   "dependencies": {
-    "@polymarket/bindings": "^0.6.0",
-    "@polymarket/client": "^0.6.0",
+    "@polymarket/bindings": "^0.10.0",
+    "@polymarket/client": "^0.10.0",
     "@prisma/client": "^6.19.3",
-    "@privy-io/react-auth": "^3.32.2",
+    "@privy-io/react-auth": "^3.42.0",
     "@privy-io/server-auth": "^1.32.5",
-    "@solana-program/memo": "0.9.0",
-    "@solana-program/system": "0.10.0",
-    "@solana-program/token": "0.9.0",
+    "@solana-program/memo": "0.13.1",
+    "@solana-program/system": "0.14.1",
+    "@solana-program/token": "0.16.1",
     "@solana/kit": "5.5.1",
-    "next": "^16.2.9",
+    "next": "^16.3.5",
     "prisma": "^6.19.3",
-    "react": "^19.2.7",
-    "react-dom": "^19.2.7"
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
   },
   "overrides": {
     "@solana-program/memo": {
@@ -56,14 +56,14 @@
     }
   },
   "devDependencies": {
-    "@eslint/eslintrc": "^3.3.5",
-    "@types/node": "^26.0.0",
-    "@types/react": "^19.2.17",
-    "@types/react-dom": "^19.2.3",
-    "esbuild": "^0.25.0",
+    "@eslint/eslintrc": "^3.3.7",
+    "@types/node": "^26.5.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "esbuild": "^0.28.2",
     "eslint": "^9.39.4",
-    "eslint-config-next": "^16.2.9",
-    "tsx": "^4.22.4",
+    "eslint-config-next": "^16.3.5",
+    "tsx": "^4.23.13",
     "typescript": "^5.9.3"
   }
 }
