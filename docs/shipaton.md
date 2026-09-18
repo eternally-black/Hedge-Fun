@@ -263,6 +263,18 @@ the proof and matched against the whole `accounts` set, the Play flavor is paper
 **a supervised $2 USDC Seeker smoke test is reasonable** — one freshly linked account, funded sponsor, submit once,
 inspect the attempt before any retry. Not a production sign-off: retry safety still rests on the sweep cadence.
 
+**2026-09-18 03:00 — `origin/main` merged in, APK rebuilt.** Main's 14 xStocks live-fix commits (Phantom's
+Lighthouse rewrite accepted at submit via the stored `unsignedTx`, an external wallet fronts its own token-account
+rent, direct Jupiter route first, the sponsor cap counts only SENT/LIVE attempts at 100/day, confirm polls
+8×0.7 s, the web deck's `BuyOutcome`) merged without conflicts (ce4bd26); none of it touched `mobile/` or the
+contract sources. The native hook then took the web's outcome model (ec8c905): `buyReal` resolves to
+`confirmed | pending | failed`, the deck removes the card on `pending` (a send that was attempted must not invite a
+second buy), confirm polls 10×0.8 s, a sell refused by the sponsor cap says so (429). Verified on the merged tree:
+root + mobile `tsc`, eslint, `npm test`, `test-stocks-real-db.ts` on `hedgefun_t2`, `contract:check`. APK rebuilt
+from `C:\hf2` at ec8c905 → `C:\Users\valera\Desktop\HedgeFun-seeker-arm64.apk` (31.4 MB, gradle 3m07s).
+**The phone talks to production** (`EXPO_PUBLIC_API_BASE=https://app.hedgeyour.fun`), and production is `main`:
+without this branch's server side (`/api/link/mwa`, the `sameOrigin` native clause, `buy_landed`) the wallet
+link fails on the device. Landing this branch on main and deploying is a prerequisite of the device test.
 
 **Next, in order:**
 1. ~~a way to build an APK~~ — done, see the toolchain block above.
