@@ -22,7 +22,7 @@
     "react-native": "0.86.3",
     "react-native-get-random-values": "~1.11.0",
     "react-native-passkeys": "^0.4.1",
-    "react-native-webview": "13.16.1",
+    "react-native-webview": "14.0.1",
     "viem": "2.56.0"
   },
   "devDependencies": {
