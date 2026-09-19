@@ -44,6 +44,14 @@ variables documented in `.env.example`, including `APP_ORIGIN`, `REAL_ORDER_LOCU
 and the reconcile URL/secret. Keep that startup guard enabled. The offline boot regression
 test supplies dummy values in its own process; they are not deployment credentials.
 
+## Audit and improvement roadmap
+
+The September 2026 production audit, its evidence and the prioritized follow-up backlog are in:
+
+- [audit remediation report](docs/audit-remediation-2026-09-19.md);
+- [post-audit improvement roadmap](docs/post-audit-improvement-roadmap-2026-09-19.md);
+- [production operations runbook](docs/runbook.md).
+
 ## Tokenized stocks (Stocklana)
 
 The deck also deals **xStocks** (tokenized US equities on Solana): swipe right = buy, left = pass,
