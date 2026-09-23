@@ -10,7 +10,7 @@
 # Base images are pinned by the multi-arch INDEX digest (dependabot's docker ecosystem bumps it):
 # a moving tag lets whoever controls the registry entry change what production runs. The tag stays
 # for readability only. Refresh by hand: docker buildx imagetools inspect node:24-bookworm-slim
-FROM node:24-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e AS deps
+FROM node:25-bookworm-slim@sha256:81db02c4b671288a03915da9534dbd54f96d0e7c24d80ccc54f5b36b2e684370 AS deps
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -22,7 +22,7 @@ RUN npm ci
 ############################
 # 2. build — compile Next standalone
 ############################
-FROM node:24-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e AS build
+FROM node:25-bookworm-slim@sha256:81db02c4b671288a03915da9534dbd54f96d0e7c24d80ccc54f5b36b2e684370 AS build
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends openssl \
     && rm -rf /var/lib/apt/lists/*
@@ -52,7 +52,7 @@ RUN npm run build:backfill-streak-x2
 # We only add what's not traced: the bundled poller + @prisma/client/.prisma (engine + client)
 # + the prisma CLI for the migrate service's `prisma db push`.
 ############################
-FROM node:24-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e AS runtime
+FROM node:25-bookworm-slim@sha256:81db02c4b671288a03915da9534dbd54f96d0e7c24d80ccc54f5b36b2e684370 AS runtime
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends openssl curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
