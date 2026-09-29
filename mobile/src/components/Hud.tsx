@@ -6,11 +6,13 @@ import type { MeResponse } from "@contract/api-types";
 import { colors } from "../theme";
 import { num, usd } from "../format";
 
-export const Hud = memo(function Hud({ me, onGM, onBalance, onBell }: {
+export const Hud = memo(function Hud({ me, onGM, onBalance, onBell, realPusdMicro, realMode }: {
   me: MeResponse | null;
   onGM: () => void;
   onBalance: () => void;
   onBell: () => void;
+  realPusdMicro?: string | null;
+  realMode?: boolean;
 }) {
   const shards = me?.shards ?? 0;
   const per = me?.shardsPerArtifact ?? 20; // fallback only before the first /api/me lands
@@ -42,11 +44,22 @@ export const Hud = memo(function Hud({ me, onGM, onBalance, onBell }: {
 
         <View style={styles.spacer} />
 
-        {/* Cash → top-up sheet */}
-        <TouchableOpacity style={styles.chip} onPress={onBalance} accessibilityLabel="Cash balance — open wallet">
+        {/* Cash → top-up sheet. Real mode shows the pUSD balance instead: paper cash and locked say
+            nothing about real money. */}
+        <TouchableOpacity
+          style={styles.chip}
+          onPress={onBalance}
+          accessibilityLabel={realMode ? "Real balance — open wallet" : "Cash balance — open wallet"}
+        >
           <View style={styles.cashCol}>
-            <Text style={styles.cashValue}>{me ? usd(me.cashCents) : "—"}</Text>
-            <Text style={styles.chipLabel}>{me && me.lockedCents > 0 ? `+ ${usd(me.lockedCents)} locked ›` : "Cash ›"}</Text>
+            <Text style={styles.cashValue}>
+              {realMode
+                ? realPusdMicro != null ? usd(Math.floor(Number(realPusdMicro) / 1e4)) : "—"
+                : me ? usd(me.cashCents) : "—"}
+            </Text>
+            <Text style={styles.chipLabel}>
+              {realMode ? "Real ›" : me && me.lockedCents > 0 ? `+ ${usd(me.lockedCents)} locked ›` : "Cash ›"}
+            </Text>
           </View>
         </TouchableOpacity>
 

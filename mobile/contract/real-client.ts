@@ -1,3 +1,4 @@
+// GENERATED from src/lib/real-client.ts by scripts/sync-mobile-contract.ts — do not edit here.
 "use client";
 
 // Browser-side orchestrator for the real-money paths: it owns the Polymarket SecureClient, the

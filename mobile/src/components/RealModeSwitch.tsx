@@ -1,8 +1,8 @@
 // RealModeSwitch (native) — the account's ONE Paper/Real switch, with the consent notice in front of it.
 // The phone's counterpart of the web's RealModeCard, reduced to what the phone can do: the switch flips
 // me.real.mode (which decides whose money a stock swipe spends) and records consent to the current terms.
-// The Polymarket deposit-wallet provisioning the web card carries is NOT here — predictions stay paper on
-// the phone. The row is hidden entirely on a build with no wallet (the Play flavor).
+// The Polymarket setup steps the web card carries live in RealPredictionsSetup, rendered right under
+// this switch. The row is hidden entirely on a build with no wallet (the Play flavor).
 import { useState } from "react";
 import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import type { MeResponse } from "@contract/api-types";
@@ -169,7 +169,7 @@ export function RealModeSwitch({ me, api, onRefreshMe, onToast }: {
       </View>
       <Text style={styles.hint}>
         {canGoReal
-          ? "Real money buys tokenized stocks with USDC from your connected wallet. Predictions stay play money on the phone."
+          ? "Real money trades predictions with USDC in your Hedge Fun trading wallet, and tokenized stocks with USDC from your connected Solana wallet."
           : "Real money isn't available in this app. Switch back to play money here; manage real trades on the web."}
       </Text>
 
