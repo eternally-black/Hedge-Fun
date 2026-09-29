@@ -30,13 +30,13 @@ Each phase ends with: mobile `tsc` green → x86_64 APK on the emulator → scre
 - [x] 3.6 Phase 3 verified on the emulator
 
 ## Phase 4 — deck extras and copy
-- [ ] 4.1 `FeedScreen` post-cap feed (`MarketCard`) + Deck tab label "fresh deck in …" once the cap is spent
-- [ ] 4.2 Login copy = web `Onboarding` (identical; a Seeker-specific line would diverge from the web — owner decision for both)
-- [ ] 4.3 Boot screen: branded + slow-network line (deliberate phone-only addition; the web shows a bare spinner)
-- [ ] 4.4 Phase 4 verified on the emulator
+- [x] 4.1 `FeedScreen` post-cap feed (`MarketCard`) + Deck tab label "fresh deck in …" once the cap is spent
+- [x] 4.2 Login copy = web `Onboarding` (identical; a Seeker-specific line would diverge from the web — owner decision for both)
+- [x] 4.3 Boot screen: branded + slow-network line (deliberate phone-only addition; the web shows a bare spinner)
+- [x] 4.4 Phase 4 verified on the emulator
 
 ## Final
-- [ ] F.1 Root + mobile `tsc`, `contract:check`, `npm test` green
+- [x] F.1 Root + mobile `tsc`, `contract:check`, `npm test` green
 - [ ] F.2 arm64 + x86_64 APKs rebuilt on the Desktop
 - [ ] F.3 Every box above ticked
 
