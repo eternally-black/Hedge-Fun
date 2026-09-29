@@ -1,11 +1,14 @@
 // WalletSheet (native) — port of the wallet half of src/app/screens/BalanceSheet.tsx: the ONE money
 // sheet, opened from the HUD balance chip on every screen. One pocket per kind of money, named by
 // purpose (Paper, the play balance; Real · Stocks, the connected Solana wallet; Real · Predictions,
-// the Polymarket balance). The history tabs arrive in a later change; the Results screen covers them.
-import { useCallback, useState } from "react";
+// the Polymarket balance), then the History tabs (Calls / Stocks / Hedges) like the web sheet.
+import { useCallback, useEffect, useState } from "react";
 import { Modal, Pressable, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import * as Clipboard from "expo-clipboard";
-import type { MeResponse } from "@contract/api-types";
+import type { MeResponse, StockPortfolioResponse, StockPositionRow } from "@contract/api-types";
+import { toPredictionRow, useClosePosition, useExitQuotes, usePredictionHistory } from "../usePredictionHistory";
+import { PredictionRow } from "./PredictionRow";
+import { StockHistoryRow } from "../screens/PortfolioScreen";
 import { statusOf, type Api } from "../api";
 import { usd } from "../format";
 import { colors } from "../theme";
@@ -73,10 +76,126 @@ export function WalletSheet({ visible, me, api, realPusdMicro, stock, onClose, o
                 {wallet.available ? <StockPocket stock={stock} onToast={onToast} /> : null}
               </>
             )}
+
+            {/* Mounted only while the sheet is open: the history is re-read on every opening and
+                the 1s exit-quote poll never runs for a closed sheet. */}
+            {visible ? <History me={me} api={api} onToast={onToast} onClose={onClose} /> : null}
           </ScrollView>
         </Pressable>
       </Pressable>
     </Modal>
+  );
+}
+
+// The lower half of the web BalanceSheet: three tabs — Calls (prediction bets, /api/history), Stocks
+// (tokenized-stock lots, /api/stocks/portfolio), Hedges (the accepted hedge legs of both kinds).
+type Tab = "calls" | "stocks" | "hedges";
+const TABS: { key: Tab; label: string }[] = [
+  { key: "calls", label: "Calls" },
+  { key: "stocks", label: "Stocks" },
+  { key: "hedges", label: "Hedges" },
+];
+
+// Stock lots, fetched the first time a tab that shows them opens. Open lots first, then closed.
+function useStockHistory(api: Api, wanted: boolean) {
+  const [rows, setRows] = useState<StockPositionRow[] | null>(null);
+  useEffect(() => {
+    if (!wanted || rows) return;
+    let alive = true;
+    void (async () => {
+      try {
+        const r = (await api("/api/stocks/portfolio")) as StockPortfolioResponse;
+        if (alive) setRows([...r.open, ...r.closed]);
+      } catch {
+        if (alive) setRows([]);
+      }
+    })();
+    return () => { alive = false; };
+  }, [api, wanted, rows]);
+  return rows;
+}
+
+function History({ me, api, onToast, onClose }: { me: MeResponse | null; api: Api; onToast: (m: string) => void; onClose: () => void }) {
+  const [tab, setTab] = useState<Tab>("calls");
+  const { rows, pending, nowMs, refresh, hasMore, loadMore, error } = usePredictionHistory(api);
+  const { close, closing } = useClosePosition(api, me, onToast, refresh);
+  // The Stocks tab shows no prediction rows, so the exit-quote poll has nothing to price there.
+  const callsVisible = tab === "calls" || tab === "hedges";
+  const exitQuotes = useExitQuotes(api, rows, callsVisible);
+  const stocks = useStockHistory(api, tab !== "calls");
+
+  // ponytail: Hedges filters the pages loaded so far (50 per page) — a hedge older than the loaded
+  // window shows up after "Load more"; a server-side ?source= filter if that ever bites.
+  const callRows = tab === "hedges" ? rows?.filter((r) => r.source === "HEDGE") ?? null : tab === "calls" ? rows : null;
+  const stockRows = tab === "hedges" ? stocks?.filter((r) => r.source === "HEDGE") ?? null : tab === "stocks" ? stocks : null;
+  const loading = (tab !== "stocks" && !rows) || (tab !== "calls" && !stocks);
+  const empty = !loading && (callRows?.length ?? 0) + (stockRows?.length ?? 0) === 0;
+  // A failed history read is not "no calls yet" — telling someone with open positions they have
+  // none is the worst thing this sheet can say.
+  const failed = error && callsVisible;
+  const emptyCopy =
+    tab === "calls" ? "No predictions yet. Swipe a card to make your first call."
+    : tab === "stocks" ? "No stocks yet. Swipe right on the Stocks deck to buy one."
+    : "No hedges yet. The Hedge tab turns a life cost or a wallet into one.";
+  // Selling is a real-money action — only a build that can sign offers it.
+  const canClose = wallet.available;
+
+  return (
+    <View>
+      <View style={styles.historyHead}>
+        <Text style={styles.historyTitle}>History</Text>
+        {tab === "calls" && pending > 0 ? <Text style={styles.openCount}>{pending} open</Text> : null}
+        <TouchableOpacity onPress={onClose} style={[styles.closeBtn, { marginLeft: "auto" }]} accessibilityLabel="Close">
+          <Text style={styles.closeBtnText}>✕</Text>
+        </TouchableOpacity>
+      </View>
+
+      <View style={styles.tabs} accessibilityRole="tablist">
+        {TABS.map((t) => {
+          const on = t.key === tab;
+          return (
+            <TouchableOpacity
+              key={t.key}
+              onPress={() => setTab(t.key)}
+              style={[styles.tab, on && styles.tabOn]}
+              accessibilityRole="tab"
+              accessibilityState={{ selected: on }}
+            >
+              <Text style={[styles.tabText, on && styles.tabTextOn]}>{t.label}</Text>
+            </TouchableOpacity>
+          );
+        })}
+      </View>
+
+      {loading ? (
+        <Text style={styles.historyNote}>Loading…</Text>
+      ) : (
+        <View style={styles.historyList}>
+          {failed ? (
+            <TouchableOpacity onPress={() => void refresh()} style={styles.retry}>
+              <Text style={styles.retryText}>Couldn&apos;t load — tap to retry</Text>
+            </TouchableOpacity>
+          ) : null}
+          {empty && !failed ? <Text style={styles.historyNote}>{emptyCopy}</Text> : null}
+          {stockRows?.map((r) => <StockHistoryRow key={r.id} row={r} />)}
+          {callRows?.map((r) => (
+            <PredictionRow
+              key={r.id}
+              row={toPredictionRow(r)}
+              nowMs={nowMs}
+              onClosePosition={canClose ? () => close(r) : undefined}
+              closing={closing === r.id}
+              exitQuote={exitQuotes[r.id]}
+            />
+          ))}
+          {tab !== "stocks" && hasMore ? (
+            <TouchableOpacity onPress={() => void loadMore()} style={styles.loadMore}>
+              <Text style={styles.loadMoreText}>Load more</Text>
+            </TouchableOpacity>
+          ) : null}
+        </View>
+      )}
+    </View>
   );
 }
 
@@ -184,4 +303,24 @@ const styles = StyleSheet.create({
   },
   closeBtnText: { color: colors.muted, fontSize: 15 },
   address: { marginTop: 10, fontFamily: "monospace", fontSize: 11, color: colors.text, lineHeight: 16 },
+  historyHead: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 14 },
+  historyTitle: { color: colors.text, fontSize: 26, fontWeight: "900" },
+  openCount: { fontSize: 11, color: colors.skip, fontWeight: "700" },
+  tabs: {
+    flexDirection: "row", gap: 6, marginBottom: 12, backgroundColor: colors.panel, borderWidth: 1,
+    borderColor: colors.line, borderRadius: 999, padding: 3,
+  },
+  tab: { flex: 1, paddingVertical: 7, borderRadius: 999, alignItems: "center" },
+  tabOn: { backgroundColor: colors.energy },
+  tabText: { fontSize: 12, fontWeight: "700", letterSpacing: 0.5, color: colors.muted },
+  tabTextOn: { color: "#fff" },
+  historyList: { gap: 8 },
+  historyNote: { textAlign: "center", color: colors.muted, padding: 24, fontSize: 13 },
+  retry: { padding: 24, borderRadius: 14, backgroundColor: colors.panel, borderWidth: 1, borderColor: colors.line, alignItems: "center" },
+  retryText: { color: colors.muted, fontSize: 13 },
+  loadMore: {
+    marginTop: 4, paddingVertical: 10, paddingHorizontal: 14, borderRadius: 12, backgroundColor: colors.panel2,
+    borderWidth: 1, borderColor: colors.line, alignItems: "center",
+  },
+  loadMoreText: { color: colors.muted, fontSize: 13, fontWeight: "700" },
 });

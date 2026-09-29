@@ -382,6 +382,36 @@ function ClosedRow({ row }: { row: StockPositionRow }) {
   );
 }
 
+// Read-only row for the Wallet sheet's history (port of the web StockHistoryRow): open or closed,
+// paper or on-chain, deck or hedge. No actions — selling and buying stay on the Portfolio screen.
+export function StockHistoryRow({ row }: { row: StockPositionRow }) {
+  const pnl = row.pnlCents;
+  const pnlColor = pnl == null ? colors.muted : pnl >= 0 ? colors.yes : colors.no;
+  const closed = row.closedAt != null;
+  const sub = closed
+    ? `${row.closeReason === "wallet" ? "moved in wallet" : "sold"}${row.proceedsCents != null ? ` · ${usd(row.proceedsCents)}` : ""}`
+    : `${fmtQty(row)} · ${usd(row.entryPriceCents)}${row.priceCents != null ? ` → ${usd(row.priceCents)}` : ""}`;
+  return (
+    <View style={[styles.closedRow, closed && { opacity: 0.8 }]}>
+      <Logo url={row.logoUrl} symbol={row.symbol} />
+      <View style={styles.rowMiddle}>
+        <View style={styles.rowTitleLine}>
+          <Text style={styles.rowSymbol}>{row.symbol}</Text>
+          <View style={[styles.pill, row.mode === "REAL" && styles.pillReal]}>
+            <Text style={[styles.pillText, row.mode === "REAL" && { color: colors.gold }]}>
+              {row.mode === "REAL" ? "◎ on-chain" : "PAPER"}
+            </Text>
+          </View>
+          {row.source === "HEDGE" ? <View style={styles.pill}><Text style={styles.pillText}>🛡 hedge</Text></View> : null}
+          {row.source === "WALLET" ? <View style={styles.pill}><Text style={styles.pillText}>imported</Text></View> : null}
+        </View>
+        <Text style={styles.rowMeta} numberOfLines={1}>{sub}</Text>
+      </View>
+      {pnl != null ? <Text style={[styles.closedPnl, { color: pnlColor, fontFamily: "monospace" }]}>{signed(pnl)}</Text> : null}
+    </View>
+  );
+}
+
 // 36px round logo with an initials fallback — the same shape every row in the app uses.
 function Logo({ url, symbol }: { url: string | null; symbol: string }) {
   const [broken, setBroken] = useState(false);

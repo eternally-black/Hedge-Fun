@@ -1,147 +1,103 @@
-// Results — bets + inbox. Native port of src/app/screens/NotificationsScreen.tsx (the settled
-// feed) plus the pending half of HistorySheet (open predictions with a live countdown). Opening
-// the screen acknowledges only the settled rows its successful load delivered; the badge decrements
-// by that count and /api/me is refreshed after the ACK.
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+// Results — native port of src/app/screens/NotificationsScreen.tsx. The settled feed of every call,
+// newest first, plus the "In profit" strip of tokenized-stock lots that crossed a profit tier.
+// Opening it marks what it received as seen (clears the HUD bell) — stock alerts by the exact
+// (position, tier) pairs delivered, so a tier that fires while the list is open stays unread.
+// "Replay" re-runs the reveal. Open calls live in the Wallet sheet's History, as on the web.
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, FlatList, StyleSheet, Text, TouchableOpacity, View } from "react-native";
-import type { HistoryResponse, HistoryRow, MeResponse, ResultsResponse, ResultRow } from "@contract/api-types";
-import { placeRealOrder } from "@contract/real-client";
+import type { ResultsResponse, ResultRow, StockAlertRow as StockAlertRowData } from "@contract/api-types";
 import { type Api } from "../api";
-import { colors } from "../theme";
-import { catOf, cents, countdown, deltaStr, resultMeta, usd } from "../format";
-import { useRealCtx } from "../useRealCtx";
-import * as wallet from "../platform/wallet.flavor";
+import { colors, withAlpha } from "../theme";
+import { PredictionRow, type PredictionRowData } from "../components/PredictionRow";
+import { StockAlertRow } from "../components/StockAlertRow";
 
-// Per-screen 1s clock — drives the live ⏱ countdown on PENDING rows (web: the history sheet's nowMs
-// prop). F12: ticks ONLY while there are pending rows to count down; a settled-only inbox (which needs
-// no countdown) never re-renders every second. When it stops, nowMs simply freezes — settled rows
-// don't read it, so nothing stales.
-function useNowMs(active: boolean): number {
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  useEffect(() => {
-    if (!active) return;
-    setNowMs(Date.now());
-    const id = setInterval(() => setNowMs(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, [active]);
-  return nowMs;
-}
+type PendingAck = {
+  key: string;
+  body: { scope: "bets" | "both"; mode: "PAPER" | "REAL"; betIds: string[]; stockAlerts?: { positionId: string; tierBp: number }[] };
+  betCount: number;
+  stockCount: number;
+};
 
-export function ResultsScreen({ api, me, onSeen, onAckFailed, onToast }: { api: Api; me: MeResponse | null; onSeen: (count: number) => void; onAckFailed: () => void; onToast: (msg: string) => void }) {
-  const [data, setData] = useState<{ pending: HistoryRow[]; settled: ResultRow[] } | null>(null);
+export function ResultsScreen({ api, onSeen, onReplay, onOpenStock, onAckFailed }: {
+  api: Api;
+  onSeen: (betCount: number, stockCount: number) => void;
+  onReplay: () => void;
+  onOpenStock?: () => void;
+  onAckFailed: () => void;
+}) {
+  const [rows, setRows] = useState<ResultRow[] | null>(null);
+  const [stockAlerts, setStockAlerts] = useState<StockAlertRowData[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [nonce, setNonce] = useState(0);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
-  const [ackQueue, setAckQueue] = useState<{ key: string; mode: "PAPER" | "REAL"; betIds: string[] }[]>([]);
-  const startedAckKeys = useRef(new Set<string>());
-  const stagedAckKeys = useRef(new Set<string>());
+  const [ackQueue, setAckQueue] = useState<PendingAck[]>([]);
+  // A double tap on "Load more" must not append the same page twice.
   const loadingMore = useRef(false);
   const aliveRef = useRef(false);
-  // Real mode = the build can sign (Seeker flavor) AND the account is in REAL. The Play build has
-  // no wallet port, so it stays paper-only no matter what the account says.
-  const realMode = wallet.available && me?.real.mode === "REAL";
-  const { ctx } = useRealCtx(me);
-  const [closing, setClosing] = useState<string | null>(null);
-  // Closing a REAL position from the phone. The sell is the same two-phase order protocol a swipe
-  // uses, in the other direction — the server derives the params from the position and the device
-  // signs them; nothing here decides a price.
-  const close = useCallback(
-    async (row: HistoryRow) => {
-      // The signer is built from the logged-in wallet; without it there is nothing to sign with.
-      if (!ctx) return onToast("Wallet not ready yet — try again in a moment");
-      // One close at a time: a second tap while the first is in flight would sign a second sell.
-      if (closing) return;
-      setClosing(row.id);
-      try {
-        const r = (await placeRealOrder(api, ctx, { marketId: row.marketId, side: row.side, dir: "EXIT" })) as {
-          status: string;
-        };
-        // "posted" means the exchange took it but its trade records are not queryable yet — the
-        // reconciler books it within minutes, so it is progress, not failure.
-        onToast(
-          r.status === "filled" || r.status === "partial"
-            ? "Position closed"
-            : r.status === "killed"
-              ? "No buyers at that price — position kept"
-              : r.status === "submitting"
-                ? "Sent — checking the outcome"
-                : "Sent — settling",
-        );
-      } catch (e) {
-        const body = (e as { body?: { error?: string } }).body;
-        onToast(
-          body?.error === "no_position"
-            ? "Nothing left to close"
-            : body?.error === "attempt_in_flight"
-              ? "A close is already in progress — checking"
-              : "Couldn't close — try again",
-        );
-      } finally {
-        setClosing(null);
-        setNonce((n) => n + 1);
-      }
-    },
-    [api, ctx, closing, onToast],
-  );
-  const stageAck = useCallback((mode: "PAPER" | "REAL", betIds: string[]) => {
-    if (betIds.length === 0) return;
-    const key = `${mode}:${betIds.join(",")}`;
-    if (stagedAckKeys.current.has(key)) return;
-    stagedAckKeys.current.add(key);
-    setAckQueue((queue) => [...queue, { key, mode, betIds }]);
+  const stagedAckKeys = useRef(new Set<string>());
+  const startedAckKeys = useRef(new Set<string>());
+  // Nothing in this feed counts down — every row is decided — so one clock read is enough.
+  const nowMs = useRef(Date.now()).current;
+  const stageAck = useCallback((ack: PendingAck) => {
+    if (stagedAckKeys.current.has(ack.key)) return;
+    stagedAckKeys.current.add(ack.key);
+    setAckQueue((queue) => [...queue, ack]);
   }, []);
-  // F12: the 1Hz clock only runs when there are pending rows (the sole countdown consumers).
-  const hasPending = (data?.pending.length ?? 0) > 0;
-  const nowMs = useNowMs(hasPending);
 
-  // Load open + settled, then stage the delivered unseen ids for the post-commit ACK effect. Pending comes from /api/history (PENDING-first rows),
-  // settled from /api/results (the inbox feed — seen/shards/verified live there, not in history).
+  // Load the feed, commit it, then acknowledge exactly the unseen rows delivered in that response.
   useEffect(() => {
     let alive = true;
     aliveRef.current = true;
-    Promise.all([api("/api/history"), api("/api/results")])
-      .then(([h, r]) => {
+    api("/api/results")
+      .then((r) => {
         if (!alive) return;
-        const results = r as ResultsResponse;
-        setData({
-          pending: (h as HistoryResponse).rows.filter((row) => row.status === "PENDING"),
-          settled: results.rows,
-        });
-        setNextCursor(results.nextCursor);
+        const res = r as ResultsResponse;
+        const alerts = res.stockAlerts ?? [];
+        setRows(res.rows);
+        setStockAlerts(alerts);
+        setNextCursor(res.nextCursor);
         setLoadFailed(false);
-        const betIds = results.rows.filter((row) => !row.seen).map((row) => row.id);
-        stageAck(results.mode, betIds);
+        const betIds = res.rows.filter((row) => !row.seen).map((row) => row.id);
+        const unseen = alerts.filter((a) => !a.seen).map((a) => ({ positionId: a.positionId, tierBp: a.tierBp }));
+        if (betIds.length === 0 && unseen.length === 0) return;
+        stageAck({
+          key: `initial:${res.mode}:${betIds.join(",")}:${unseen.map((a) => `${a.positionId}/${a.tierBp}`).join(",")}`,
+          body: { scope: "both", mode: res.mode, betIds, stockAlerts: unseen },
+          betCount: betIds.length,
+          stockCount: unseen.length,
+        });
       })
       .catch((e) => { if (alive) { console.error(e); setLoadFailed(true); } });
     return () => { alive = false; aliveRef.current = false; };
   }, [api, nonce, stageAck]);
 
-  // `data` has committed before this effect runs. A failed or abandoned load therefore never ACKs
-  // rows the user did not receive.
+  // ACK only after the rows above have committed; the started-key fence keeps the optimistic badge
+  // decrement and the POST single-shot.
   useEffect(() => {
     const ack = ackQueue[0];
     if (!ack || startedAckKeys.current.has(ack.key)) return;
     startedAckKeys.current.add(ack.key);
-    onSeen(ack.betIds.length);
-    api("/api/results/seen", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ scope: "bets", mode: ack.mode, betIds: ack.betIds }),
-    }).catch(console.error).finally(() => {
-      onAckFailed();
-      if (aliveRef.current) setAckQueue((queue) => queue.filter((item) => item.key !== ack.key));
-    });
+    onSeen(ack.betCount, ack.stockCount);
+    api("/api/results/seen", { method: "POST", body: JSON.stringify(ack.body) })
+      .catch(console.error)
+      .finally(() => {
+        onAckFailed();
+        if (aliveRef.current) setAckQueue((queue) => queue.filter((item) => item.key !== ack.key));
+      });
   }, [ackQueue, api, onSeen, onAckFailed]);
 
   const loadMore = useCallback(async () => {
     if (loadingMore.current || nextCursor === null) return;
     loadingMore.current = true;
     try {
-      const results = (await api(`/api/results?cursor=${encodeURIComponent(nextCursor)}`)) as ResultsResponse;
+      const r = (await api(`/api/results?cursor=${encodeURIComponent(nextCursor)}`)) as ResultsResponse;
       if (!aliveRef.current) return;
-      setData((current) => current ? { ...current, settled: [...current.settled, ...results.rows] } : current);
-      setNextCursor(results.nextCursor);
-      stageAck(results.mode, results.rows.filter((row) => !row.seen).map((row) => row.id));
+      setRows((cur) => [...(cur ?? []), ...r.rows]);
+      setNextCursor(r.nextCursor);
+      const betIds = r.rows.filter((row) => !row.seen).map((row) => row.id);
+      if (betIds.length > 0) {
+        stageAck({ key: `page:${r.mode}:${betIds.join(",")}`, body: { scope: "bets", mode: r.mode, betIds }, betCount: betIds.length, stockCount: 0 });
+      }
     } catch (e) {
       if (aliveRef.current) console.error(e);
     } finally {
@@ -149,51 +105,51 @@ export function ResultsScreen({ api, me, onSeen, onAckFailed, onToast }: { api: 
     }
   }, [api, nextCursor, stageAck]);
 
-  // F12: the settled history is the potentially-huge list, so it's the FlatList's windowed data; the
-  // title, load/empty states, and the (small, bounded) pending section ride in the header. SettledRow
-  // is memoized and never reads nowMs, so the 1Hz pending clock doesn't re-render settled rows.
+  // The settled history is the potentially huge list, so it is the FlatList's windowed data; the
+  // title, the In-profit strip, the replay control and the load/empty states ride in the header.
   const header = (
     <View>
       <View style={styles.headerRow}>
-        <Text style={styles.title}>Results</Text>
-        <Text style={styles.subtitle}>Every call you&apos;ve made — open and settled.</Text>
+        <View style={{ flexShrink: 1 }}>
+          <Text style={styles.title}>Results</Text>
+          <Text style={styles.subtitle}>Every call you&apos;ve made, settled.</Text>
+        </View>
+        {rows !== null && rows.length > 0 ? (
+          <TouchableOpacity style={styles.replayBtn} onPress={onReplay} accessibilityRole="button" accessibilityLabel="Replay results reveal">
+            <Text style={styles.replayText}>▸ Replay</Text>
+          </TouchableOpacity>
+        ) : null}
       </View>
 
-      {data === null && !loadFailed && <ActivityIndicator color={colors.energy} style={{ marginTop: 60 }} />}
+      {stockAlerts.length > 0 ? (
+        <View style={styles.stockSection}>
+          <View style={styles.stockHeader}>
+            <Text style={styles.stockTitle}>In profit</Text>
+            <Text style={styles.stockCount}>· {stockAlerts.length}</Text>
+          </View>
+          <View style={styles.stockList}>
+            {stockAlerts.map((a) => <StockAlertRow key={`${a.positionId}:${a.tierBp}`} row={a} onOpen={onOpenStock} />)}
+          </View>
+        </View>
+      ) : null}
 
-      {loadFailed && (
-        <View style={{ alignItems: "center", marginTop: 60 }}>
+      {rows === null && !loadFailed ? <ActivityIndicator color={colors.energy} style={{ marginTop: 60 }} /> : null}
+
+      {loadFailed ? (
+        <View style={styles.failBox}>
           <Text style={styles.empty}>Couldn&apos;t load your results.</Text>
           <TouchableOpacity style={styles.retryBtn} onPress={() => setNonce((n) => n + 1)}>
             <Text style={styles.retryText}>↻ Retry</Text>
           </TouchableOpacity>
         </View>
-      )}
+      ) : null}
 
-      {data && data.pending.length === 0 && data.settled.length === 0 && (
+      {rows !== null && rows.length === 0 && stockAlerts.length === 0 ? (
         <Text style={[styles.empty, { marginTop: 80 }]}>
-          No calls yet. Swipe some cards — results land here once markets resolve.
+          Nothing settled yet. Swipe some cards — results land here once markets resolve.
         </Text>
-      )}
-
-      {data && data.pending.length > 0 && (
-        <View style={styles.section}>
-          <Text style={styles.sectionLabel}>Open · {data.pending.length}</Text>
-          {data.pending.map((row) => (
-            <PendingRow
-              key={row.id}
-              row={row}
-              nowMs={nowMs}
-              onClose={realMode && row.closable ? () => void close(row) : undefined}
-              closing={closing === row.id}
-            />
-          ))}
-        </View>
-      )}
-
-      {data && data.settled.length > 0 && (
-        <Text style={[styles.sectionLabel, styles.settledLabel]}>Settled</Text>
-      )}
+      ) : null}
+      {rows !== null && rows.length > 0 ? <View style={{ height: 14 }} /> : null}
     </View>
   );
 
@@ -201,120 +157,79 @@ export function ResultsScreen({ api, me, onSeen, onAckFailed, onToast }: { api: 
     <FlatList
       style={styles.scroll}
       contentContainerStyle={styles.content}
-      data={data?.settled ?? []}
+      data={rows ?? []}
       keyExtractor={(row) => row.id}
-      renderItem={({ item }) => <SettledRow row={item} />}
+      renderItem={({ item }) => <PredictionRow row={toPredictionRow(item)} nowMs={nowMs} />}
       ListHeaderComponent={header}
       initialNumToRender={12}
       windowSize={11}
       removeClippedSubviews
       ItemSeparatorComponent={SettledSeparator}
+      ListFooterComponent={
+        nextCursor !== null ? (
+          <TouchableOpacity style={styles.loadMoreBtn} onPress={() => void loadMore()} accessibilityRole="button">
+            <Text style={styles.loadMoreText}>Load more</Text>
+          </TouchableOpacity>
+        ) : null
+      }
       onEndReached={() => void loadMore()}
       onEndReachedThreshold={0.4}
     />
   );
 }
 
-// 8px gap between settled rows (the old ScrollView section used `gap: 8`).
 function SettledSeparator() {
   return <View style={styles.settledGap} />;
 }
 
-// One open prediction (native port of HistoryRow.tsx, PENDING branch): side chip, question,
-// locked price + stake, and a live countdown — or "Awaiting result" once the deadline passes
-// (the market sits in the resolution window; a frozen 0m 00s would look stuck).
-function PendingRow({ row, nowMs, onClose, closing }: { row: HistoryRow; nowMs: number; onClose?: () => void; closing?: boolean }) {
-  const sideColor = row.side === "YES" ? colors.yes : colors.no;
-  const deadlinePassed = new Date(row.resolutionDeadline).getTime() <= nowMs;
-  const statusText = deadlinePassed ? "AWAITING" : "PENDING";
-  const statusColor = deadlinePassed ? colors.skip : colors.muted;
-  const delta = deadlinePassed ? "⏳ result soon" : `⏱ ${countdown(row.resolutionDeadline, nowMs).text}`;
-
-  return (
-    <View style={styles.row}>
-      <View style={[styles.sideChip, { backgroundColor: `${sideColor}2e` }]}>
-        <Text style={[styles.sideChipText, { color: sideColor }]} numberOfLines={1}>
-          {row.sideLabel.length > 8 ? `${row.sideLabel.slice(0, 7)}…` : row.sideLabel}
-        </Text>
-      </View>
-      <View style={styles.rowMiddle}>
-        <Text style={styles.rowQuestion} numberOfLines={1}>{row.question}</Text>
-        <Text style={styles.rowMeta}>{cents(row.lockedPriceBp)} · {usd(row.stakeCents)} stake</Text>
-      </View>
-      <View style={styles.rowRight}>
-        <Text style={[styles.rowStatus, { color: statusColor }]}>{statusText}</Text>
-        <Text style={[styles.rowDelta, { color: statusColor }]}>{delta}</Text>
-        {onClose && (
-          <TouchableOpacity style={styles.closeBtn} onPress={onClose} disabled={closing} accessibilityRole="button">
-            <Text style={styles.closeBtnText}>{closing ? "Closing…" : "Close"}</Text>
-          </TouchableOpacity>
-        )}
-      </View>
-    </View>
-  );
+// A settled result in the shape every list of the user's own calls renders. The inbox has no
+// deadline to show — the market is decided, and `outcome` says how.
+function toPredictionRow(r: ResultRow): PredictionRowData {
+  return {
+    id: r.id,
+    question: r.question,
+    side: r.side,
+    sideLabel: r.sideLabel,
+    status: r.status,
+    league: r.league,
+    category: r.category,
+    stakeCents: r.stakeCents,
+    lockedPriceBp: r.lockedPriceBp,
+    pnlCents: r.deltaCents,
+    createdAt: r.createdAt,
+    settledAt: r.settledAt,
+    outcome: r.outcome,
+    shards: r.shards,
+  };
 }
-
-// One settled result (native port of the web InboxRow): category icon, question, your call vs the
-// resolved outcome, payout delta + WIN/LOSS/VOID tag, shard drop, and the Solana-anchored badge.
-// F12: memoized (its `row` is stable and it never reads the 1Hz clock) so the pending countdown can't
-// re-render hundreds of settled rows every second — combined with FlatList windowing above.
-const SettledRow = memo(function SettledRow({ row }: { row: ResultRow }) {
-  const cat = catOf(row);
-  const m = resultMeta(row.status);
-  const sideColor = row.side === "YES" ? colors.yes : colors.no;
-
-  return (
-    <View style={styles.row}>
-      <View style={[styles.catIcon, { backgroundColor: `${m.accent}33` }]}>
-        <Text style={{ fontSize: 16 }}>{cat.icon}</Text>
-      </View>
-      <View style={styles.rowMiddle}>
-        <Text style={styles.rowQuestionMulti}>{row.question}</Text>
-        <Text style={styles.rowMeta}>
-          Your call <Text style={{ color: sideColor, fontWeight: "700" }}>{row.side}</Text> · {row.outcome}
-        </Text>
-      </View>
-      <View style={styles.rowRight}>
-        <Text style={[styles.rowPayout, { color: m.accent }]}>{deltaStr(row.status, row.deltaCents)}</Text>
-        <Text style={[styles.rowStatus, { color: m.accent }]}>{m.tag}</Text>
-        {row.shards > 0 && <Text style={styles.shardDrop}>+{row.shards} ◆</Text>}
-      </View>
-    </View>
-  );
-});
 
 const styles = StyleSheet.create({
   scroll: { flex: 1 },
   content: { paddingHorizontal: 16, paddingTop: 6, paddingBottom: 20 },
   headerRow: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: 4 },
   title: { color: colors.text, fontSize: 26, fontWeight: "900" },
-  subtitle: { color: colors.muted, fontSize: 11, marginTop: 6, flexShrink: 1 },
+  subtitle: { color: colors.muted, fontSize: 11, marginTop: 2 },
+  replayBtn: {
+    marginLeft: "auto", backgroundColor: withAlpha(colors.energy, "29"), borderWidth: 1, borderColor: withAlpha(colors.energy, "66"),
+    paddingVertical: 8, paddingHorizontal: 12, borderRadius: 12,
+  },
+  replayText: { color: colors.text, fontSize: 12, fontWeight: "700" },
+  stockSection: { marginTop: 16 },
+  stockHeader: { flexDirection: "row", alignItems: "baseline", gap: 8, marginBottom: 8 },
+  stockTitle: { color: colors.text, fontSize: 18, fontWeight: "900" },
+  stockCount: { color: colors.muted, fontSize: 11 },
+  stockList: { gap: 8 },
   empty: { color: colors.muted, fontSize: 13, textAlign: "center", lineHeight: 19, paddingHorizontal: 24 },
+  failBox: { alignItems: "center", marginTop: 60 },
   retryBtn: {
     marginTop: 16, backgroundColor: colors.panel2, borderWidth: 1, borderColor: colors.line,
     borderRadius: 14, paddingVertical: 11, paddingHorizontal: 22,
   },
   retryText: { color: colors.energy, fontWeight: "700", fontSize: 14 },
-  section: { marginTop: 16, gap: 8 },
-  sectionLabel: { color: colors.muted, fontSize: 10, letterSpacing: 1.4, textTransform: "uppercase", fontWeight: "700" },
-  settledLabel: { marginTop: 16, marginBottom: 8 }, // the "Settled" header above the windowed FlatList rows
-  settledGap: { height: 8 }, // ItemSeparator between settled rows (matches the old section gap)
-  row: {
-    flexDirection: "row", gap: 11, backgroundColor: colors.panel, borderWidth: 1,
-    borderColor: colors.line, borderRadius: 14, paddingVertical: 12, paddingHorizontal: 13,
+  settledGap: { height: 8 },
+  loadMoreBtn: {
+    marginTop: 12, paddingVertical: 10, paddingHorizontal: 14, borderRadius: 12,
+    backgroundColor: colors.panel2, borderWidth: 1, borderColor: colors.line, alignItems: "center",
   },
-  sideChip: { minWidth: 34, height: 34, paddingHorizontal: 6, borderRadius: 10, alignItems: "center", justifyContent: "center", maxWidth: 80 },
-  sideChipText: { fontSize: 12, fontWeight: "900" },
-  catIcon: { width: 36, height: 36, borderRadius: 10, alignItems: "center", justifyContent: "center" },
-  rowMiddle: { flex: 1, minWidth: 0 },
-  rowQuestion: { color: colors.text, fontSize: 13, fontWeight: "600", lineHeight: 16 },
-  rowQuestionMulti: { color: colors.text, fontSize: 13, fontWeight: "600", lineHeight: 16 },
-  rowMeta: { color: colors.muted, fontSize: 11, marginTop: 3 },
-  rowRight: { alignItems: "flex-end", flexShrink: 0 },
-  rowStatus: { fontSize: 10, letterSpacing: 0.6, textTransform: "uppercase", fontWeight: "700", marginTop: 2 },
-  rowDelta: { fontFamily: "monospace", fontSize: 12, marginTop: 2 },
-  closeBtn: { marginTop: 6, borderRadius: 10, borderWidth: 1, borderColor: colors.no, paddingVertical: 4, paddingHorizontal: 10 },
-  closeBtnText: { color: colors.no, fontSize: 11, fontWeight: "700" },
-  rowPayout: { fontFamily: "monospace", fontWeight: "700", fontSize: 14 },
-  shardDrop: { color: colors.gold, fontSize: 10, marginTop: 2 },
+  loadMoreText: { color: colors.muted, fontSize: 13, fontWeight: "700" },
 });
