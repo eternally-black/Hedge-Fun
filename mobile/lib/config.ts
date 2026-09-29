@@ -29,3 +29,7 @@ export const STOCK_MIN_STAKE_CENTS = 100; // $1
 export const STOCK_MAX_STAKE_CENTS = 50_000; // $500 fat-finger bound
 export const STOCK_TERMS_VERSION = 1; // bump with the xStocks consent text (the server refuses a stale one)
 export const REAL_BALANCE_POLL_MS = 15_000; // how often a visible real-money balance re-reads
+
+// Real-money stake presets offered on the STAKE chip's sheet (mirrors src/lib/config.ts
+// REAL_STAKE_PRESETS_CENTS). The server enforces min/max; these only size the UI.
+export const REAL_STAKE_PRESETS_CENTS = [100, 200, 500, 1_000] as const;

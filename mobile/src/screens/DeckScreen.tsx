@@ -13,6 +13,7 @@ import { placeRealOrder } from "@contract/real-client";
 import { realErrText, realResultText, RETRYABLE_REAL_ERRORS } from "@contract/real-copy";
 import { DECK_MIN_LEAD_MS, QUOTE_POLL_MS } from "../../lib/config";
 import { CardPreview, DeckCard, isFresh, type SwipeDir } from "../components/DeckCard";
+import { StakeSheet } from "../components/StakeSheet";
 
 const REFILL_AT = 8; // preload-ahead threshold (same as web) — refill well before the deck runs dry
 
@@ -27,6 +28,7 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, o
 }) {
   const [deck, setDeck] = useState<DeckCardT[] | null>(null); // null = still loading
   const [loadFailed, setLoadFailed] = useState(false);
+  const [stakeOpen, setStakeOpen] = useState(false); // the STAKE chip's sheet (real mode only)
   const [nonce, setNonce] = useState(0); // bump to retry a failed load
   const topping = useRef(false); // dedupe: one refill fetch in flight
   // Latest `me` mirrored into a ref so the stable act() reads CURRENT cash/stake without churning
@@ -282,6 +284,8 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, o
                 stakeCents={realMode ? (me?.real.stakeCents ?? 100) : (me?.stakeCents ?? 1000)}
                 enabled
                 onCommit={handleCommit}
+                // Paper stake is a game rule, not a setting — only the real one is editable (web too).
+                onEditStake={realMode ? () => setStakeOpen(true) : undefined}
               />
             ) : loadFailed ? (
               <View style={styles.panel}>
@@ -318,6 +322,17 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, o
           </Text>
         </>
       )}
+
+      <StakeSheet
+        visible={stakeOpen && !!me}
+        stakeCents={me?.real.stakeCents ?? 100}
+        minCents={me?.real.minStakeCents ?? 100}
+        maxCents={me?.real.maxStakeCents ?? 100}
+        api={api}
+        onClose={() => setStakeOpen(false)}
+        onSaved={onRefreshMe}
+        onToast={onToast}
+      />
     </View>
   );
 }
