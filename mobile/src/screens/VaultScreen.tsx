@@ -2,7 +2,7 @@
 // artifacts owned, and the Card Designs shop. The shop spends artifacts on cosmetic card skins via
 // /api/skins; tapping a tile opens a preview-before-spend overlay on the user's real next card.
 import { useCallback, useMemo, useState } from "react";
-import { Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { Modal, Platform, ScrollView, StatusBar, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import Svg, { Circle } from "react-native-svg";
 import type { DeckCard as DeckCardT, MeResponse } from "@contract/api-types";
 import { type Api } from "../api";
@@ -135,7 +135,7 @@ export function VaultScreen({ me, api, onRefreshMe, previewCard }: {
         </View>
       </ScrollView>
 
-      <Modal visible={!!previewSkin} transparent animationType="fade" onRequestClose={() => setPreviewSkin(null)}>
+      <Modal visible={!!previewSkin} transparent statusBarTranslucent animationType="fade" onRequestClose={() => setPreviewSkin(null)}>
         {previewSkin ? (
           <PreviewOverlay
             skinId={previewSkin}
@@ -248,7 +248,7 @@ const styles = StyleSheet.create({
   tileBlurb: { color: colors.muted, fontSize: 11, marginTop: 2, lineHeight: 14 },
 
   overlay: { flex: 1, backgroundColor: "rgba(4,4,8,0.9)" },
-  overlayHead: { flexDirection: "row", alignItems: "center", paddingTop: 18, paddingHorizontal: 18, paddingBottom: 4 },
+  overlayHead: { flexDirection: "row", alignItems: "center", paddingTop: 18 + (Platform.OS === "android" ? (StatusBar.currentHeight ?? 0) : 0), paddingHorizontal: 18, paddingBottom: 4 },
   overlayKicker: { fontSize: 10, letterSpacing: 2.2, textTransform: "uppercase", color: colors.muted, fontWeight: "700" },
   overlayClose: {
     marginLeft: "auto", width: 34, height: 34, borderRadius: 17, backgroundColor: colors.panel,

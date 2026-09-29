@@ -170,8 +170,8 @@ export const SkinBackground = memo(function SkinBackground({ skinId, categoryCol
   let bg;
   switch (skinId) {
     case "vapor": bg = <VaporBg />; break;
-    case "aurora": bg = <Image source={AURORA} style={[StyleSheet.absoluteFill, { backgroundColor: "#05060c" }]} resizeMode="cover" />; break;
-    case "midas": bg = <Image source={MIDAS} style={[StyleSheet.absoluteFill, { backgroundColor: "#070501" }]} resizeMode="cover" />; break;
+    case "aurora": bg = <Image source={AURORA} style={[StyleSheet.absoluteFill, { width: "100%", height: "100%", backgroundColor: "#05060c" }]} resizeMode="cover" />; break;
+    case "midas": bg = <Image source={MIDAS} style={[StyleSheet.absoluteFill, { width: "100%", height: "100%", backgroundColor: "#070501" }]} resizeMode="cover" />; break;
     default: bg = isFootball ? <FootballBg /> : <ClassicBg color={categoryColor} />;
   }
   return (
