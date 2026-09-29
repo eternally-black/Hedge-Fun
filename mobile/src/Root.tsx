@@ -1,6 +1,6 @@
 // Root — the native twin of src/app/page.tsx: auth gate, boot ritual, screen state machine,
 // persistent HUD + bottom nav, toast, and the wallet sheet. Server data is rendered as-is.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { type Ref, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { ActivityIndicator, AppState, Platform, StatusBar as RNStatusBar, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { usePrivy } from "@privy-io/expo";
@@ -49,7 +49,6 @@ export default function Root() {
   // the first content frame is already the right screen (mirrors the web boot).
   const [booted, setBooted] = useState(false);
   const ritualDone = useRef(false); // run the auth→boot sequence once per login
-  const [toast, setToast] = useState<string | null>(null);
   const [walletOpen, setWalletOpen] = useState(false);
   // The results reveal overlay (the web's `reveal`). "ritual" = the boot reveal (finishing may route
   // to Home for the GM check-in); "replay" = asked for from Results, so finishing lands on the deck.
@@ -61,15 +60,14 @@ export default function Root() {
   // Bumped on logout: a /api/real/wallet response that outlived its session must not paint the next
   // account's HUD with the previous account's balance.
   const balanceGen = useRef(0);
-  const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  // The toast lives in its own component: a toast is state, and state in Root re-renders every
+  // screen under it (the deck, the card face) for a two-second line of text.
+  const toastRef = useRef<ToastApi>(null);
   const meRef = useRef<MeResponse | null>(null);
   useEffect(() => { meRef.current = me; }, [me]);
-  useEffect(() => () => clearTimeout(toastTimer.current), []);
 
   const flashToast = useCallback((msg: string) => {
-    setToast(msg);
-    clearTimeout(toastTimer.current);
-    toastTimer.current = setTimeout(() => setToast(null), 2200);
+    toastRef.current?.show(msg);
   }, []);
 
   // Sign out: clear local account state so a re-login boots fresh, then end the Privy session.
@@ -303,11 +301,7 @@ export default function Root() {
         {screen === "vault" && <VaultScreen me={me} api={api} onRefreshMe={refreshMe} />}
       </View>
       <BottomNav screen={effectiveScreen} onNav={navTo} deckLocked={deckLocked && deckMode === "predictions"} />
-      {toast && (
-        <View style={styles.toast}>
-          <Text style={styles.toastText}>{toast}</Text>
-        </View>
-      )}
+      <ToastHost ref={toastRef} />
       <WalletSheet visible={walletOpen} me={me} api={api} realPusdMicro={realPusdMicro} stock={stock} onClose={closeWallet} onTopupDone={refreshMe} onToast={flashToast} />
       {/* The reveal covers the HUD and the nav — the last child of the shell, like the web. */}
       {reveal ? (
@@ -326,6 +320,28 @@ export default function Root() {
 // The boot screen. The web shows a bare spinner, but on a phone the wait (Privy's session restore,
 // then /api/me) can run long on a weak connection — so the brand stays on screen and, after 10 s,
 // the screen says what is going on instead of spinning silently.
+// Owns the toast's state, so showing one re-renders this line of text and nothing else. Root hands
+// out a stable flashToast that calls the setter registered here.
+type ToastApi = { show: (msg: string) => void };
+function ToastHost({ ref }: { ref: Ref<ToastApi> }) {
+  const [toast, setToast] = useState<string | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  useImperativeHandle(ref, () => ({
+    show: (msg: string) => {
+      setToast(msg);
+      clearTimeout(timer.current);
+      timer.current = setTimeout(() => setToast(null), 2200);
+    },
+  }), []);
+  if (!toast) return null;
+  return (
+    <View style={styles.toast} pointerEvents="none">
+      <Text style={styles.toastText}>{toast}</Text>
+    </View>
+  );
+}
+
 function Boot() {
   const [slow, setSlow] = useState(false);
   useEffect(() => {
