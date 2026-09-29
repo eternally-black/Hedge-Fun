@@ -4,20 +4,46 @@ import { memo } from "react";
 import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import type { MeResponse } from "@contract/api-types";
 import { colors } from "../theme";
-import { num, usd } from "../format";
+import { num, usd, usdFromMicro } from "../format";
+import * as wallet from "../platform/wallet.flavor";
 
-export const Hud = memo(function Hud({ me, onGM, onBalance, onBell, realPusdMicro, realMode }: {
+// The pocket the chip states — the screen's own pocket, never a token name (web Hud.tsx).
+export type Pocket = "stocks" | "predictions";
+
+export const Hud = memo(function Hud({ me, onGM, onBalance, onBell, pocket, realPusdMicro, stocksUsdCents }: {
   me: MeResponse | null;
   onGM: () => void;
   onBalance: () => void;
   onBell: () => void;
+  pocket: Pocket;
   realPusdMicro?: string | null;
-  realMode?: boolean;
+  stocksUsdCents: number | null;
 }) {
+  // The Play build has no wallet port, so it never shows a real pocket.
+  const isReal = wallet.available && me?.real.mode === "REAL";
+  // BOTH real pockets are gated on the app's one Paper/Real switch: in paper mode a stock swipe spends
+  // play money, so the chip states the play balance on stock screens too. In real mode the chip is
+  // ALWAYS a real pocket — a balance not read yet renders "—" under its own label rather than falling
+  // back to a play-money number real mode never spends.
+  const showStocks = pocket === "stocks" && isReal;
+  const showPredictions = pocket === "predictions" && isReal;
+  const real = showStocks || showPredictions;
+  const amount = showStocks
+    ? stocksUsdCents == null ? "—" : usd(stocksUsdCents)
+    : showPredictions
+      ? realPusdMicro == null ? "—" : usdFromMicro(realPusdMicro)
+      : me ? usd(me.cashCents) : "—";
+  const label = showStocks
+    ? "Real · Stocks ›"
+    : showPredictions
+      ? "Real · Predictions ›"
+      : me && me.lockedCents > 0
+        ? `Paper · +${usd(me.lockedCents)} in play ›`
+        : "Paper ›";
   const shards = me?.shards ?? 0;
   const per = me?.shardsPerArtifact ?? 20; // fallback only before the first /api/me lands
   const shardPct = Math.min(100, Math.round((shards / per) * 100));
-  const unread = me?.unreadResults ?? 0;
+  const unread = (me?.unreadResults ?? 0) + (me?.unreadStockAlerts ?? 0); // settled calls + stock profit alerts
 
   return (
     <View style={styles.wrap}>
@@ -44,22 +70,16 @@ export const Hud = memo(function Hud({ me, onGM, onBalance, onBell, realPusdMicr
 
         <View style={styles.spacer} />
 
-        {/* Cash → top-up sheet. Real mode shows the pUSD balance instead: paper cash and locked say
-            nothing about real money. */}
+        {/* Money → the wallet sheet. The chip states the pocket the screen spends: gold = real money
+            (either real pocket), green = play money. */}
         <TouchableOpacity
           style={styles.chip}
           onPress={onBalance}
-          accessibilityLabel={realMode ? "Real balance — open wallet" : "Cash balance — open wallet"}
+          accessibilityLabel={showStocks ? "Real stocks balance — open wallet" : showPredictions ? "Real predictions balance — open wallet" : "Cash balance — open wallet"}
         >
           <View style={styles.cashCol}>
-            <Text style={styles.cashValue}>
-              {realMode
-                ? realPusdMicro != null ? usd(Math.floor(Number(realPusdMicro) / 1e4)) : "—"
-                : me ? usd(me.cashCents) : "—"}
-            </Text>
-            <Text style={styles.chipLabel}>
-              {realMode ? "Real ›" : me && me.lockedCents > 0 ? `+ ${usd(me.lockedCents)} locked ›` : "Cash ›"}
-            </Text>
+            <Text style={[styles.cashValue, { color: real ? colors.gold : colors.yes }]}>{amount}</Text>
+            <Text style={styles.chipLabel}>{label}</Text>
           </View>
         </TouchableOpacity>
 
@@ -103,7 +123,7 @@ const styles = StyleSheet.create({
   chipValue: { color: colors.text, fontWeight: "700", fontSize: 14, fontFamily: "monospace" },
   chipLabel: { color: colors.muted, fontSize: 8, letterSpacing: 1.4, textTransform: "uppercase", marginTop: 1 },
   cashCol: { alignItems: "flex-end" },
-  cashValue: { color: colors.yes, fontWeight: "700", fontSize: 14, fontFamily: "monospace" },
+  cashValue: { fontWeight: "700", fontSize: 14, fontFamily: "monospace" },
   bell: {
     width: 38, height: 38, borderRadius: 19, backgroundColor: colors.panel, borderWidth: 1,
     borderColor: colors.line, alignItems: "center", justifyContent: "center",

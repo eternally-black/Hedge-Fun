@@ -1,5 +1,5 @@
 // Root — the native twin of src/app/page.tsx: auth gate, boot ritual, screen state machine,
-// persistent HUD + bottom nav, toast, and the top-up sheet. Server data is rendered as-is.
+// persistent HUD + bottom nav, toast, and the wallet sheet. Server data is rendered as-is.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, AppState, Platform, StatusBar as RNStatusBar, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
@@ -10,7 +10,8 @@ import { clearRefCode, readInstallReferrerCode, readRefCode, saveRefCode } from 
 import type { CaptureRefResponse, MeResponse, ResultsResponse } from "@contract/api-types";
 import { Hud } from "./components/Hud";
 import { BottomNav, type Screen } from "./components/BottomNav";
-import { TopupSheet } from "./components/TopupSheet";
+import { WalletSheet } from "./components/WalletSheet";
+import { useStockPocket } from "./useStockPocket";
 import { LoginScreen } from "./screens/LoginScreen";
 import { HomeScreen } from "./screens/HomeScreen";
 import { DeckScreen } from "./screens/DeckScreen";
@@ -36,7 +37,7 @@ export default function Root() {
   const [booted, setBooted] = useState(false);
   const ritualDone = useRef(false); // run the auth→boot sequence once per login
   const [toast, setToast] = useState<string | null>(null);
-  const [topupOpen, setTopupOpen] = useState(false);
+  const [walletOpen, setWalletOpen] = useState(false);
   const [realPusdMicro, setRealPusdMicro] = useState<string | null>(null);
   // Bumped on logout: a /api/real/wallet response that outlived its session must not paint the next
   // account's HUD with the previous account's balance.
@@ -104,6 +105,11 @@ export default function Root() {
     return () => { clearInterval(id); sub.remove(); balanceGen.current++; };
   }, [realMode, refreshRealBalance]);
 
+  // The chip states the pocket the screen spends — web page.tsx derives it the same way.
+  const hudPocket: "stocks" | "predictions" = screen === "stocks" || (screen === "deck" && deckMode === "stocks") ? "stocks" : "predictions";
+  // Read only when something shows it: the HUD chip or the wallet sheet.
+  const stock = useStockPocket(me, api, walletOpen || (realMode && hudPocket === "stocks"));
+
   // Boot: one coherent first-load sequence per auth (mirrors the web ritual):
   //   1. referral capture on open — /api/capture-ref, NEVER marks the GM day (idempotent);
   //   2. me + results decide the landing screen:
@@ -146,8 +152,8 @@ export default function Root() {
     setMe((m) => (m ? { ...m, unreadResults: Math.max(0, m.unreadResults - count) } : m));
   }, []);
 
-  const openTopup = useCallback(() => setTopupOpen(true), []);
-  const closeTopup = useCallback(() => setTopupOpen(false), []);
+  const openWallet = useCallback(() => setWalletOpen(true), []);
+  const closeWallet = useCallback(() => setWalletOpen(false), []);
   const goHome = useCallback(() => setScreen("home"), []);
   const goResults = useCallback(() => setScreen("results"), []);
   const goDeck = useCallback(() => setScreen("deck"), []);
@@ -164,9 +170,10 @@ export default function Root() {
       <Hud
         me={me}
         onGM={goHome}
-        onBalance={realMode ? goProfile : openTopup}
+        onBalance={openWallet}
         onBell={goResults}
-        realMode={realMode}
+        pocket={hudPocket}
+        stocksUsdCents={stock.usdCents}
         realPusdMicro={realPusdMicro}
       />
       <View style={styles.body}>
@@ -198,7 +205,7 @@ export default function Root() {
                 api={api}
                 onRefreshMe={refreshMe}
                 onToast={flashToast}
-                onTopup={openTopup}
+                onTopup={openWallet}
                 realMode={realMode}
                 onRealOrderDone={refreshRealBalance}
               />
@@ -206,7 +213,7 @@ export default function Root() {
           </View>
         )}
         {screen === "stocks" && <PortfolioScreen me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onNeedWallet={goProfile} />}
-        {screen === "hedge" && <HedgeScreen me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openTopup} />}
+        {screen === "hedge" && <HedgeScreen me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openWallet} />}
         {screen === "results" && <ResultsScreen api={api} me={me} onSeen={markResultsSeen} onAckFailed={refreshMe} onToast={flashToast} />}
         {screen === "profile" && <ProfileScreen me={me} api={api} onRefreshMe={refreshMe} onLogout={doLogout} onToast={flashToast} />}
       </View>
@@ -216,7 +223,7 @@ export default function Root() {
           <Text style={styles.toastText}>{toast}</Text>
         </View>
       )}
-      <TopupSheet visible={topupOpen} me={me} api={api} onClose={closeTopup} onTopupDone={refreshMe} onToast={flashToast} />
+      <WalletSheet visible={walletOpen} me={me} api={api} realPusdMicro={realPusdMicro} stock={stock} onClose={closeWallet} onTopupDone={refreshMe} onToast={flashToast} />
     </View>
   );
 }
