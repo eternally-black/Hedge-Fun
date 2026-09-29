@@ -83,7 +83,9 @@ export default function Root() {
   const realMode = wallet.available && me?.real.mode === "REAL";
   // An RPC hiccup shows "—", never a misleading $0.00.
   const refreshRealBalance = useCallback(async () => {
-    const gen = balanceGen.current;
+    // Every read takes a new generation, so only the LATEST one may paint: an older read that lands
+    // after a post-order refresh must not put the pre-order balance back.
+    const gen = ++balanceGen.current;
     try {
       const r = (await api("/api/real/wallet")) as { pusdMicro?: string | null };
       if (gen === balanceGen.current) setRealPusdMicro(r.pusdMicro ?? null);
@@ -99,7 +101,7 @@ export default function Root() {
       if (AppState.currentState === "active") void refreshRealBalance();
     }, 30_000);
     const sub = AppState.addEventListener("change", (s) => { if (s === "active") void refreshRealBalance(); });
-    return () => { clearInterval(id); sub.remove(); };
+    return () => { clearInterval(id); sub.remove(); balanceGen.current++; };
   }, [realMode, refreshRealBalance]);
 
   // Boot: one coherent first-load sequence per auth (mirrors the web ritual):
