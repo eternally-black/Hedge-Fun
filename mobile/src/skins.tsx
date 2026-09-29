@@ -21,8 +21,8 @@ export const SKINS: readonly Skin[] = [
 ] as const;
 export const skinById = (id: string): Skin | undefined => SKINS.find((s) => s.id === id);
 
-const AURORA = require("../assets/skins/skin-aurora.webp");
-const MIDAS = require("../assets/skins/skin-midas.webp");
+import AURORA from "../assets/skins/skin-aurora.webp";
+import MIDAS from "../assets/skins/skin-midas.webp";
 
 // The web's `isFootball`: a soccer card gets the free pitch look. The server derives `league` at
 // ingest, so the phone reads it directly. ponytail: the web also falls back to a question parser
