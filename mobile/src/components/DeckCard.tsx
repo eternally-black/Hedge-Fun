@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { Animated, PanResponder, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import type { DeckCard as DeckCardT } from "@contract/api-types";
 import { colors } from "../theme";
+import { isFootballCard, SkinBackground } from "../skins";
 import { catOf, cents, countdown, displayQuestion, isMatchClock, isUpDown, marketHint, sideLabels, usd, winPayout } from "../format";
 
 export type SwipeDir = "YES" | "NO" | "SKIP";
@@ -30,8 +31,9 @@ function useNowMs(): number {
   return nowMs;
 }
 
-export function DeckCard({ card, stakeCents, enabled, onCommit, onEditStake }: {
+export function DeckCard({ card, skinId, stakeCents, enabled, onCommit, onEditStake }: {
   card: DeckCardT;
+  skinId: string; // the equipped skin — owns the whole card background (me.skins.equipped)
   stakeCents: number;
   enabled: boolean; // false = ignore gestures (busy/flying)
   onCommit: (dir: SwipeDir) => void;
@@ -85,7 +87,7 @@ export function DeckCard({ card, stakeCents, enabled, onCommit, onEditStake }: {
       style={[styles.card, { transform: [...pan.getTranslateTransform(), { rotate }] }]}
       {...responder.panHandlers}
     >
-      <CardFace card={card} stakeCents={stakeCents} onEditStake={onEditStake} />
+      <CardFace card={card} skinId={skinId} stakeCents={stakeCents} onEditStake={onEditStake} />
       {/* direction stamps, driven by drag progress */}
       <Animated.View style={[styles.stamp, styles.stampLeft, { opacity: noOpacity, borderColor: colors.no }]}>
         <StampText card={card} dir="NO" />
@@ -101,10 +103,10 @@ export function DeckCard({ card, stakeCents, enabled, onCommit, onEditStake }: {
 }
 
 // The next card, fully rendered behind the top one (not a gray stub) — static, no gestures.
-export function CardPreview({ card }: { card: DeckCardT }) {
+export function CardPreview({ card, skinId }: { card: DeckCardT; skinId: string }) {
   return (
     <View style={[styles.card, styles.preview]} pointerEvents="none">
-      <CardFace card={card} stakeCents={null} dimmed />
+      <CardFace card={card} skinId={skinId} stakeCents={null} dimmed />
     </View>
   );
 }
@@ -149,8 +151,9 @@ function StampText({ card, dir }: { card: DeckCardT; dir: "YES" | "NO" }) {
 
 // The card face: category + ⏱ cutoff, question, hint, odds split (real side labels, cents), and
 // the stake/payout footer. stakeCents null hides the footer (preview).
-function CardFace({ card, stakeCents, dimmed = false, onEditStake }: {
+export function CardFace({ card, skinId, stakeCents, dimmed = false, onEditStake }: {
   card: DeckCardT;
+  skinId: string;
   stakeCents: number | null;
   dimmed?: boolean;
   onEditStake?: () => void;
@@ -163,6 +166,8 @@ function CardFace({ card, stakeCents, dimmed = false, onEditStake }: {
 
   return (
     <View style={[styles.face, dimmed && { opacity: 0.75 }]}>
+      {/* The equipped skin owns the background: bg → overlay → scrim, then the content below. */}
+      <SkinBackground skinId={skinId} categoryColor={cat.color} isFootball={isFootballCard(card)} />
       <View style={styles.topRow}>
         <View style={styles.badge}>
           <View style={[styles.badgeDot, { backgroundColor: cat.color }]} />

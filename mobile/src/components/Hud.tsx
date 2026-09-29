@@ -10,9 +10,10 @@ import * as wallet from "../platform/wallet.flavor";
 // The pocket the chip states — the screen's own pocket, never a token name (web Hud.tsx).
 export type Pocket = "stocks" | "predictions";
 
-export const Hud = memo(function Hud({ me, onGM, onBalance, onBell, pocket, realPusdMicro, stocksUsdCents }: {
+export const Hud = memo(function Hud({ me, onGM, onShards, onBalance, onBell, pocket, realPusdMicro, stocksUsdCents }: {
   me: MeResponse | null;
   onGM: () => void;
+  onShards: () => void; // the shard strip opens the Vault (web Hud)
   onBalance: () => void;
   onBell: () => void;
   pocket: Pocket;
@@ -94,14 +95,14 @@ export const Hud = memo(function Hud({ me, onGM, onBalance, onBell, pocket, real
         </TouchableOpacity>
       </View>
 
-      {/* Shards → artifact progress. Display-only in the slice (the Vault is a web screen). */}
-      <View style={styles.shardRow}>
+      {/* Shards → artifact progress; tapping it opens the Vault, as on the web. */}
+      <TouchableOpacity style={styles.shardRow} onPress={onShards} accessibilityLabel={`Shards ${shards} of ${per} — open Vault`}>
         <Text style={styles.shardText}>◆ {shards}/{per}</Text>
         <View style={styles.shardTrack}>
           <View style={[styles.shardFill, { width: `${shardPct}%` }]} />
         </View>
-        <Text style={styles.shardHint}>→ artifact ({me?.artifacts ?? 0})</Text>
-      </View>
+        <Text style={styles.shardHint}>→ artifact</Text>
+      </TouchableOpacity>
     </View>
   );
 });

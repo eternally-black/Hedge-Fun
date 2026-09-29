@@ -19,6 +19,8 @@ import { HedgeScreen } from "./screens/HedgeScreen";
 import { ResultsScreen } from "./screens/ResultsScreen";
 import { RevealOverlay } from "./components/RevealOverlay";
 import { ProfileScreen } from "./screens/ProfileScreen";
+import { InviteScreen } from "./screens/InviteScreen";
+import { VaultScreen } from "./screens/VaultScreen";
 import { DeckModePill, StockDeckScreen, type DeckMode } from "./screens/StockDeckScreen";
 import { PortfolioScreen } from "./screens/PortfolioScreen";
 import { loadTradingWalletChoice } from "./tradingWallet";
@@ -219,6 +221,7 @@ export default function Root() {
   const goProfile = useCallback(() => setScreen("profile"), []);
   const goStocksDeck = useCallback(() => setDeckMode("stocks"), []);
   const goStocks = useCallback(() => setScreen("stocks"), []);
+  const goVault = useCallback(() => setScreen("vault"), []);
 
   if (!isReady) return <Boot />;
   if (!user) return <LoginScreen />;
@@ -230,6 +233,7 @@ export default function Root() {
       <Hud
         me={me}
         onGM={goHome}
+        onShards={goVault}
         onBalance={openWallet}
         onBell={goResults}
         pocket={hudPocket}
@@ -275,7 +279,9 @@ export default function Root() {
         {screen === "stocks" && <PortfolioScreen me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onNeedWallet={goProfile} />}
         {screen === "hedge" && <HedgeScreen me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openWallet} />}
         {screen === "results" && <ResultsScreen api={api} onSeen={markResultsSeen} onAckFailed={refreshMe} onReplay={replayReveal} onOpenStock={goStocks} />}
-        {screen === "profile" && <ProfileScreen me={me} api={api} onRefreshMe={refreshMe} onLogout={doLogout} onToast={flashToast} />}
+        {screen === "profile" && <ProfileScreen me={me} api={api} onRefreshMe={refreshMe} onLogout={doLogout} onToast={flashToast} onNav={setScreen} onOpenHistory={openWallet} />}
+        {screen === "invite" && <InviteScreen me={me} api={api} onToast={flashToast} />}
+        {screen === "vault" && <VaultScreen me={me} api={api} onRefreshMe={refreshMe} />}
       </View>
       <BottomNav screen={screen} onNav={setScreen} />
       {toast && (

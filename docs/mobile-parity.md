@@ -24,7 +24,7 @@ Each phase ends with: mobile `tsc` green → x86_64 APK on the emulator → scre
 ## Phase 3 — account and progression
 - [ ] 3.1 Profile = web order: header, tiles (Points, Virtual $, Streak, Shards), menu (History, Vault, Invite), real-money card, wallet, account (signed in as, logout, 𝕏 link/unlink), support contacts
 - [ ] 3.2 Invite as its own screen from the menu (= web `InviteScreen`)
-- [ ] 3.3 `VaultScreen` (shard ring, artifacts, card-skin shop)
+- [ ] 3.3 Card skins on the deck (Classic category tint, soccer pitch, Vapor / Aurora / Midas) + `VaultScreen` (shard ring, artifacts, skin shop)
 - [ ] 3.4 HUD shard strip opens the Vault
 - [ ] 3.5 GM screen = web `GmScreen` (week grid, streak window, recover)
 - [ ] 3.6 Phase 3 verified on the emulator

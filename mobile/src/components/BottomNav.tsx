@@ -3,7 +3,7 @@
 import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { colors } from "../theme";
 
-export type Screen = "deck" | "hedge" | "stocks" | "home" | "results" | "profile";
+export type Screen = "deck" | "hedge" | "stocks" | "home" | "results" | "profile" | "vault" | "invite";
 
 const TABS: { key: Screen; glyph: string; label: string }[] = [
   { key: "deck", glyph: "⚡", label: "Deck" },
@@ -16,7 +16,8 @@ export function BottomNav({ screen, onNav }: { screen: Screen; onNav: (s: Screen
   return (
     <View style={styles.bar}>
       {TABS.map((t) => {
-        const active = screen === t.key;
+        // Vault and Invite are not tabs — they live under "You", so the You tab stays lit there.
+        const active = t.key === "profile" ? screen === "profile" || screen === "vault" || screen === "invite" : screen === t.key;
         return (
           <TouchableOpacity key={t.key} style={styles.tab} onPress={() => onNav(t.key)} accessibilityRole="button" accessibilityLabel={t.label}>
             <Text style={[styles.glyph, !active && styles.glyphOff]}>{t.glyph}</Text>

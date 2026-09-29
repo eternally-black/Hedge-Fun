@@ -258,6 +258,8 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, o
   const next = deck?.[1];
   // Hard daily cap: once a non-dev user hits the swipe cap, the deck hard-stops until 00:00 UTC.
   // Paper only — the point-swipe cap is the play economy's, and says nothing about real money.
+  // The equipped card design (Vault) — "classic" until /api/me lands.
+  const skinId = me?.skins.equipped ?? "classic";
   const capReached = !realMode && !!me && !me.dev && me.swipes.used >= me.swipes.cap;
 
   return (
@@ -273,11 +275,12 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, o
         ) : (
           <>
             {/* next card — FULLY rendered behind the top one (not a gray stub) */}
-            {next && <CardPreview key={next.id} card={next} />}
+            {next && <CardPreview key={next.id} card={next} skinId={skinId} />}
             {top ? (
               <DeckCard
                 key={top.id}
                 card={top}
+                skinId={skinId}
                 // Display fallback only before the first /api/me lands — the server charges the
                 // real stake regardless (POST /api/swipe carries no amount).
                 // A real swipe spends the account's own real stake, not the play economy's.
