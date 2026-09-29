@@ -11,7 +11,7 @@ import { scheduleOnRN } from "react-native-worklets";
 
 export type SwipeDir = "YES" | "NO" | "SKIP";
 export const COMMIT_PX = 130; // drag distance past which a release commits (design-locked, same as web)
-const FLY_MS = 380; // outgoing card animates off-screen for this long
+const FLY_MS = 260; // outgoing card animates off-screen for this long
 const MOVE_EPS = 5; // px of travel before a press counts as a drag
 const SPRING = { damping: 14, stiffness: 180 };
 
@@ -31,16 +31,19 @@ export function useSwipeCard({ enabled, onCommit, restoreAfterFling = false }: {
   const mounted = useRef(true);
   useEffect(() => () => { mounted.current = false; }, []);
 
-  // JS side of a commit: hand off mid-fling so the next card starts rising at the 50% point.
+  // JS side of a commit, called when the fling has FINISHED. Handing off mid-fling (as the old JS
+  // version did) unmounted the card while Reanimated was still animating it, and every remaining
+  // frame threw "Unable to find SurfaceMountingManager" with a stack trace on the UI thread — 132 per
+  // swipe on the emulator, which is what made every frame janky.
   const commitOnJs = (dir: SwipeDir) => {
-    setTimeout(() => onCommitRef.current(dir), Math.round(FLY_MS / 2));
+    onCommitRef.current(dir);
     if (restoreAfterFling) {
       setTimeout(() => {
         if (!mounted.current) return;
         committed.set(false);
         x.set(withSpring(0, SPRING));
         y.set(withSpring(0, SPRING));
-      }, FLY_MS + 150);
+      }, 150);
     }
   };
 
@@ -61,8 +64,9 @@ export function useSwipeCard({ enabled, onCommit, restoreAfterFling = false }: {
       if (progress >= 1) {
         committed.set(true);
         x.set(withTiming(dir === "YES" ? 520 : dir === "NO" ? -520 : 0, { duration: FLY_MS }));
-        y.set(withTiming(dir === "SKIP" ? -760 : -90, { duration: FLY_MS }));
-        scheduleOnRN(commitOnJs, dir);
+        y.set(withTiming(dir === "SKIP" ? -760 : -90, { duration: FLY_MS }, (finished) => {
+          if (finished) scheduleOnRN(commitOnJs, dir);
+        }));
       } else {
         x.set(withSpring(0, SPRING));
         y.set(withSpring(0, SPRING));
