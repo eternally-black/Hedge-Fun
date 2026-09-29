@@ -4,6 +4,8 @@
   "main": "index.ts",
   "dependencies": {
     "@ethersproject/shims": "^5.8.0",
+    "@noble/hashes": "1.8.0",
+    "@polymarket/client": "0.6.0",
     "@privy-io/expo": "^0.74.2",
     "@privy-io/expo-native-extensions": "^0.0.12",
     "@solana-mobile/mobile-wallet-adapter-protocol": "^2.3.0",

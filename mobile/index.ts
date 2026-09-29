@@ -2,6 +2,7 @@
 import "fast-text-encoding";
 import "react-native-get-random-values";
 import "@ethersproject/shims";
+import "./src/subtleHmac"; // SubtleCrypto HMAC for the Polymarket SDK (real-money predictions)
 
 import { registerRootComponent } from "expo";
 

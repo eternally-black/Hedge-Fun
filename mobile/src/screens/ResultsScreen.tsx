@@ -4,10 +4,13 @@
 // by that count and /api/me is refreshed after the ACK.
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, FlatList, StyleSheet, Text, TouchableOpacity, View } from "react-native";
-import type { HistoryResponse, HistoryRow, ResultsResponse, ResultRow } from "@contract/api-types";
+import type { HistoryResponse, HistoryRow, MeResponse, ResultsResponse, ResultRow } from "@contract/api-types";
+import { placeRealOrder } from "@contract/real-client";
 import { type Api } from "../api";
 import { colors } from "../theme";
 import { catOf, cents, countdown, deltaStr, resultMeta, usd } from "../format";
+import { useRealCtx } from "../useRealCtx";
+import * as wallet from "../platform/wallet.flavor";
 
 // Per-screen 1s clock — drives the live ⏱ countdown on PENDING rows (web: the history sheet's nowMs
 // prop). F12: ticks ONLY while there are pending rows to count down; a settled-only inbox (which needs
@@ -24,7 +27,7 @@ function useNowMs(active: boolean): number {
   return nowMs;
 }
 
-export function ResultsScreen({ api, onSeen, onAckFailed }: { api: Api; onSeen: (count: number) => void; onAckFailed: () => void }) {
+export function ResultsScreen({ api, me, onSeen, onAckFailed, onToast }: { api: Api; me: MeResponse | null; onSeen: (count: number) => void; onAckFailed: () => void; onToast: (msg: string) => void }) {
   const [data, setData] = useState<{ pending: HistoryRow[]; settled: ResultRow[] } | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [nonce, setNonce] = useState(0);
@@ -34,6 +37,44 @@ export function ResultsScreen({ api, onSeen, onAckFailed }: { api: Api; onSeen: 
   const stagedAckKeys = useRef(new Set<string>());
   const loadingMore = useRef(false);
   const aliveRef = useRef(false);
+  // Real mode = the build can sign (Seeker flavor) AND the account is in REAL. The Play build has
+  // no wallet port, so it stays paper-only no matter what the account says.
+  const realMode = wallet.available && me?.real.mode === "REAL";
+  const { ctx } = useRealCtx(me);
+  const [closing, setClosing] = useState<string | null>(null);
+  // Closing a REAL position from the phone. The sell is the same two-phase order protocol a swipe
+  // uses, in the other direction — the server derives the params from the position and the device
+  // signs them; nothing here decides a price.
+  const close = useCallback(
+    async (row: HistoryRow) => {
+      // The signer is built from the logged-in wallet; without it there is nothing to sign with.
+      if (!ctx) return onToast("Wallet not ready yet — try again in a moment");
+      // One close at a time: a second tap while the first is in flight would sign a second sell.
+      if (closing) return;
+      setClosing(row.id);
+      try {
+        const r = (await placeRealOrder(api, ctx, { marketId: row.marketId, side: row.side, dir: "EXIT" })) as {
+          status: string;
+        };
+        // "posted" means the exchange took it but its trade records are not queryable yet — the
+        // reconciler books it within minutes, so it is progress, not failure.
+        onToast(
+          r.status === "filled" || r.status === "partial"
+            ? "Position closed"
+            : r.status === "killed"
+              ? "No buyers at that price — position kept"
+              : "Sent — settling",
+        );
+      } catch (e) {
+        const body = (e as { body?: { error?: string } }).body;
+        onToast(body?.error === "no_position" ? "Nothing left to close" : "Couldn't close — try again");
+      } finally {
+        setClosing(null);
+        setNonce((n) => n + 1);
+      }
+    },
+    [api, ctx, closing, onToast],
+  );
   const stageAck = useCallback((mode: "PAPER" | "REAL", betIds: string[]) => {
     if (betIds.length === 0) return;
     const key = `${mode}:${betIds.join(",")}`;
@@ -130,7 +171,15 @@ export function ResultsScreen({ api, onSeen, onAckFailed }: { api: Api; onSeen: 
       {data && data.pending.length > 0 && (
         <View style={styles.section}>
           <Text style={styles.sectionLabel}>Open · {data.pending.length}</Text>
-          {data.pending.map((row) => <PendingRow key={row.id} row={row} nowMs={nowMs} />)}
+          {data.pending.map((row) => (
+            <PendingRow
+              key={row.id}
+              row={row}
+              nowMs={nowMs}
+              onClose={realMode && row.closable ? () => void close(row) : undefined}
+              closing={closing === row.id}
+            />
+          ))}
         </View>
       )}
 
@@ -166,7 +215,7 @@ function SettledSeparator() {
 // One open prediction (native port of HistoryRow.tsx, PENDING branch): side chip, question,
 // locked price + stake, and a live countdown — or "Awaiting result" once the deadline passes
 // (the market sits in the resolution window; a frozen 0m 00s would look stuck).
-function PendingRow({ row, nowMs }: { row: HistoryRow; nowMs: number }) {
+function PendingRow({ row, nowMs, onClose, closing }: { row: HistoryRow; nowMs: number; onClose?: () => void; closing?: boolean }) {
   const sideColor = row.side === "YES" ? colors.yes : colors.no;
   const deadlinePassed = new Date(row.resolutionDeadline).getTime() <= nowMs;
   const statusText = deadlinePassed ? "AWAITING" : "PENDING";
@@ -187,6 +236,11 @@ function PendingRow({ row, nowMs }: { row: HistoryRow; nowMs: number }) {
       <View style={styles.rowRight}>
         <Text style={[styles.rowStatus, { color: statusColor }]}>{statusText}</Text>
         <Text style={[styles.rowDelta, { color: statusColor }]}>{delta}</Text>
+        {onClose && (
+          <TouchableOpacity style={styles.closeBtn} onPress={onClose} disabled={closing} accessibilityRole="button">
+            <Text style={styles.closeBtnText}>{closing ? "Closing…" : "Close"}</Text>
+          </TouchableOpacity>
+        )}
       </View>
     </View>
   );
@@ -251,6 +305,8 @@ const styles = StyleSheet.create({
   rowRight: { alignItems: "flex-end", flexShrink: 0 },
   rowStatus: { fontSize: 10, letterSpacing: 0.6, textTransform: "uppercase", fontWeight: "700", marginTop: 2 },
   rowDelta: { fontFamily: "monospace", fontSize: 12, marginTop: 2 },
+  closeBtn: { marginTop: 6, borderRadius: 10, borderWidth: 1, borderColor: colors.no, paddingVertical: 4, paddingHorizontal: 10 },
+  closeBtnText: { color: colors.no, fontSize: 11, fontWeight: "700" },
   rowPayout: { fontFamily: "monospace", fontWeight: "700", fontSize: 14 },
   shardDrop: { color: colors.gold, fontSize: 10, marginTop: 2 },
 });

@@ -327,7 +327,13 @@ export async function POST(req: Request) {
         state: "ISSUED",
       },
     });
-    return NextResponse.json({ intentId: attempt.id, params: approvedParams });
+    // Public attribution tag, the same value /api/real/submit validates the signed order against, so
+    // every client signs what the server checks.
+    return NextResponse.json({
+      intentId: attempt.id,
+      params: approvedParams,
+      builderCode: process.env.POLYMARKET_BUILDER_CODE ?? null,
+    });
   } catch (e) {
     // order_attempts_one_inflight partial unique: an attempt is already active on this market.
     if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
@@ -364,7 +370,11 @@ export async function POST(req: Request) {
           (direction !== "ENTRY" ||
             (existing.approvedParams as { stakeCents?: number } | null)?.stakeCents === entryStakeCents);
         if (!sameOrder) return NextResponse.json({ error: "attempt_in_flight" }, { status: 409 });
-        return NextResponse.json({ intentId: existing.id, params: existing.approvedParams });
+        return NextResponse.json({
+          intentId: existing.id,
+          params: existing.approvedParams,
+          builderCode: process.env.POLYMARKET_BUILDER_CODE ?? null,
+        });
       }
       return NextResponse.json({ error: "attempt_in_flight" }, { status: 409 });
     }

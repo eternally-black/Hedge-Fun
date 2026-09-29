@@ -1,3 +1,4 @@
+// GENERATED from src/lib/deadline.ts by scripts/sync-mobile-contract.ts — do not edit here.
 // A wall-clock budget carried through AsyncLocalStorage, so upstream readers can honour it without
 // a signature change: withDeadline(ms, fn) sets it for everything awaited inside fn, and a reader
 // calls deadlineLeftMs() before each request — refusing once it is spent — and clamps its own

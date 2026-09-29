@@ -7,17 +7,23 @@ import { ActivityIndicator, AppState, StyleSheet, Text, TouchableOpacity, View }
 import type { DeckCard as DeckCardT, DeckResponse, MeResponse, QuotesResponse } from "@contract/api-types";
 import { priceMovedBp, statusOf, type Api } from "../api";
 import { colors } from "../theme";
+import { usd } from "../format";
+import { useRealCtx } from "../useRealCtx";
+import { placeRealOrder } from "@contract/real-client";
+import { realErrText, realResultText, RETRYABLE_REAL_ERRORS } from "@contract/real-copy";
 import { DECK_MIN_LEAD_MS, QUOTE_POLL_MS } from "../../lib/config";
 import { CardPreview, DeckCard, isFresh, type SwipeDir } from "../components/DeckCard";
 
 const REFILL_AT = 8; // preload-ahead threshold (same as web) — refill well before the deck runs dry
 
-export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup }: {
+export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, onRealOrderDone }: {
   me: MeResponse | null;
   api: Api;
   onRefreshMe: () => Promise<void>;
   onToast: (msg: string) => void;
   onTopup: () => void;
+  realMode: boolean;
+  onRealOrderDone: () => void;
 }) {
   const [deck, setDeck] = useState<DeckCardT[] | null>(null); // null = still loading
   const [loadFailed, setLoadFailed] = useState(false);
@@ -27,6 +33,12 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup }: {
   // identity on every /api/me refresh (same pattern as web page.tsx).
   const meRef = useRef<MeResponse | null>(null);
   useEffect(() => { meRef.current = me; }, [me]);
+  const { ctx: realCtx } = useRealCtx(me);
+  // Refs so act() keeps a stable identity across /api/me refreshes, same reason as meRef.
+  const realCtxRef = useRef(realCtx);
+  useEffect(() => { realCtxRef.current = realCtx; }, [realCtx]);
+  const realModeRef = useRef(realMode);
+  useEffect(() => { realModeRef.current = realMode; }, [realMode]);
 
   // Initial load (and retry). NOT re-run after swipes — /api/deck re-shuffles with a fresh seed
   // each call, so replacing the deck mid-session would snap a DIFFERENT card into the top slot.
@@ -89,7 +101,7 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup }: {
       // Cap spent -> the deck is hard-stopped and nothing is swipeable. Read from meRef so this
       // effect doesn't re-arm on every /api/me refresh and restart the cadence mid-deliberation.
       const m = meRef.current;
-      if (m && !m.dev && m.swipes.used >= m.swipes.cap) return;
+      if (!realModeRef.current && m && !m.dev && m.swipes.used >= m.swipes.cap) return;
       try {
         const r = (await api(`/api/quotes?ids=${encodeURIComponent(topId)}`)) as QuotesResponse;
         const q = r.quotes.find((x) => x.marketId === topId);
@@ -132,31 +144,73 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup }: {
       // Cash gate: a YES/NO bet needs >= one stake of free Cash. Block BEFORE the optimistic
       // advance so the card isn't lost — it stays so the user can top up and retry. The sheet
       // opens right away: this IS the 402 path (a raced server 402 lands in the catch below).
+      // Paper only: a real swipe spends the account's own real stake, not the play economy's cash.
       const m = meRef.current;
-      if (dir !== "SKIP" && m && m.cashCents < m.stakeCents) {
+      if (!realModeRef.current && dir !== "SKIP" && m && m.cashCents < m.stakeCents) {
         onToast("No free cash left");
         onTopup();
+        return;
+      }
+      // Real setup gate: without a deposit wallet there is nothing to sign an order with. The card
+      // stays — nothing happened, so there is nothing to undo.
+      if (realModeRef.current && dir !== "SKIP" && !realCtxRef.current?.depositWalletAddress) {
+        onToast("Finish real-money setup in Profile first");
         return;
       }
       advance();
       // Echo the price the user was LOOKING AT for the side they picked, so the server can refuse
       // rather than silently book a worse one if the live book moved against them (D10 Slice B).
+      // A YES/NO in real mode goes through the two-phase order protocol (intent → device signs →
+      // submit → the device posts) instead of the paper ledger — the web's own client, verbatim.
       const req = dir === "SKIP"
         ? api("/api/skip", { method: "POST" })
-        : api("/api/swipe", {
-            method: "POST",
-            body: JSON.stringify({
+        : realModeRef.current && realCtxRef.current
+          ? placeRealOrder(api, realCtxRef.current, {
               marketId: card.id,
               side: dir,
+              dir: "ENTRY",
               quotedPriceBp: dir === "YES" ? card.yesPriceBp : card.noPriceBp,
-            }),
-          });
+            }).then((r) => { onRealOrderDone(); return r as unknown; })
+          : api("/api/swipe", {
+              method: "POST",
+              body: JSON.stringify({
+                marketId: card.id,
+                side: dir,
+                quotedPriceBp: dir === "YES" ? card.yesPriceBp : card.noPriceBp,
+              }),
+            });
       req
-        .then(() => {
+        .then((r) => {
           void onRefreshMe(); // stats only (points/shards/balance/skip counter); never the deck
+          // A real order that did not fully fill says so — "posted"/"submitting" are not a fill.
+          if (dir !== "SKIP" && realModeRef.current) {
+            const res = r as { status: string; filledSharesMicro?: string };
+            if (res.status !== "filled") onToast(realResultText(res));
+          }
         })
         .catch((e) => {
           const status = statusOf(e);
+          const body = (e as { body?: { error?: string } }).body;
+          const restore = () =>
+            setDeck((d) => {
+              const cur = d ?? [];
+              return cur.some((c) => c.id === card.id) ? d : [card, ...cur]; // double-tap race
+            });
+          // Real refusals come before the paper chain below, which swallows every non-price_moved
+          // 409 — and approvals_required is exactly the 409 the user must be told about. Nothing was
+          // signed or spent, so the card comes back.
+          if (status === 409 && body?.error === "approvals_required") {
+            restore();
+            onToast("Activate trading in Profile first");
+          }
+          // price_moved keeps its own branch below in both economies (the card returns at the fresh
+          // price). Any other real failure: a retryable code restores the card; the rest are
+          // terminal for it. The toast always names the reason.
+          else if (realModeRef.current && dir !== "SKIP" && priceMovedBp(e) === undefined) {
+            if (body?.error && RETRYABLE_REAL_ERRORS.has(body.error)) restore();
+            onToast(realErrText(e));
+            void onRefreshMe();
+          }
           // 403 = daily swipe cap (raced the client gate). The bet wasn't stored; refreshMe pulls
           // used>=cap, which flips capReached below and shows the hard stop.
           if (status === 403) { onToast("Daily limit reached — back at 00:00 UTC"); void onRefreshMe(); }
@@ -184,7 +238,7 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup }: {
           else console.error(e);
         });
     },
-    [api, onRefreshMe, onToast, onTopup, topUpIfLow],
+    [api, onRefreshMe, onToast, onTopup, onRealOrderDone, topUpIfLow],
   );
 
   // Stable handler for the keyed DeckCard — reads the current top via a ref (kept in sync after
@@ -198,7 +252,8 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup }: {
   const top = deck?.[0];
   const next = deck?.[1];
   // Hard daily cap: once a non-dev user hits the swipe cap, the deck hard-stops until 00:00 UTC.
-  const capReached = !!me && !me.dev && me.swipes.used >= me.swipes.cap;
+  // Paper only — the point-swipe cap is the play economy's, and says nothing about real money.
+  const capReached = !realMode && !!me && !me.dev && me.swipes.used >= me.swipes.cap;
 
   return (
     <View style={styles.wrap}>
@@ -220,7 +275,8 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup }: {
                 card={top}
                 // Display fallback only before the first /api/me lands — the server charges the
                 // real stake regardless (POST /api/swipe carries no amount).
-                stakeCents={me?.stakeCents ?? 1000}
+                // A real swipe spends the account's own real stake, not the play economy's.
+                stakeCents={realMode ? (me?.real.stakeCents ?? 100) : (me?.stakeCents ?? 1000)}
                 enabled
                 onCommit={handleCommit}
               />
@@ -252,7 +308,11 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup }: {
             <CircleBtn glyph="↑" color={colors.skip} size={46} disabled={!top} onPress={() => top && act(top, "SKIP")} />
             <CircleBtn glyph="✓" color={colors.yes} size={56} disabled={!top} onPress={() => top && act(top, "YES")} />
           </View>
-          <Text style={styles.skipNote}>Skip free — save your swipes for the calls you want</Text>
+          <Text style={styles.skipNote}>
+            {realMode
+              ? `Real money · ${usd(me?.real.stakeCents ?? 0)} per call · skip is free`
+              : "Skip free — save your swipes for the calls you want"}
+          </Text>
         </>
       )}
     </View>

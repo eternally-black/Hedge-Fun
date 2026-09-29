@@ -1,7 +1,7 @@
 // Root — the native twin of src/app/page.tsx: auth gate, boot ritual, screen state machine,
 // persistent HUD + bottom nav, toast, and the top-up sheet. Server data is rendered as-is.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ActivityIndicator, Platform, StatusBar as RNStatusBar, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { ActivityIndicator, AppState, Platform, StatusBar as RNStatusBar, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { usePrivy } from "@privy-io/expo";
 import { useApi, statusOf } from "./api";
@@ -20,6 +20,7 @@ import { ProfileScreen } from "./screens/ProfileScreen";
 import { DeckModePill, StockDeckScreen, type DeckMode } from "./screens/StockDeckScreen";
 import { PortfolioScreen } from "./screens/PortfolioScreen";
 import { loadTradingWalletChoice } from "./tradingWallet";
+import * as wallet from "./platform/wallet.flavor";
 
 export default function Root() {
   const { isReady, user, logout } = usePrivy();
@@ -70,6 +71,30 @@ export default function Root() {
       flashToast("Couldn't refresh — showing last balance");
     }
   }, [api, doLogout, flashToast]);
+
+  // Real mode = the build can sign (Seeker flavor) AND the account is in REAL. The Play build has
+  // no wallet port, so it stays paper-only no matter what the account says.
+  const realMode = wallet.available && me?.real.mode === "REAL";
+  const [realPusdMicro, setRealPusdMicro] = useState<string | null>(null);
+  // An RPC hiccup shows "—", never a misleading $0.00.
+  const refreshRealBalance = useCallback(async () => {
+    try {
+      const r = (await api("/api/real/wallet")) as { pusdMicro?: string | null };
+      setRealPusdMicro(r.pusdMicro ?? null);
+    } catch {
+      setRealPusdMicro(null);
+    }
+  }, [api]);
+  // The HUD states this number on every screen, so it must become true on its own after a deposit.
+  useEffect(() => {
+    if (!realMode) { setRealPusdMicro(null); return; }
+    void refreshRealBalance();
+    const id = setInterval(() => {
+      if (AppState.currentState === "active") void refreshRealBalance();
+    }, 30_000);
+    const sub = AppState.addEventListener("change", (s) => { if (s === "active") void refreshRealBalance(); });
+    return () => { clearInterval(id); sub.remove(); };
+  }, [realMode, refreshRealBalance]);
 
   // Boot: one coherent first-load sequence per auth (mirrors the web ritual):
   //   1. referral capture on open — /api/capture-ref, NEVER marks the GM day (idempotent);
@@ -128,38 +153,53 @@ export default function Root() {
   return (
     <View style={styles.shell}>
       <StatusBar style="light" />
-      <Hud me={me} onGM={goHome} onBalance={openTopup} onBell={goResults} />
+      <Hud
+        me={me}
+        onGM={goHome}
+        onBalance={realMode ? goProfile : openTopup}
+        onBell={goResults}
+        realMode={realMode}
+        realPusdMicro={realPusdMicro}
+      />
       <View style={styles.body}>
         {screen === "home" && <HomeScreen me={me} api={api} onRefreshMe={refreshMe} onEnterDeck={goDeck} />}
         {/* The Deck tab holds two decks behind one pill. Stocks trade in whichever economy the account
             is in (real money = the connected wallet, via the Seeker flavor's wallet port). Predictions
-            are paper-only on the phone: a real-money account must not be handed the paper deck (the
-            server follows the account's mode for history/results, so swipes here would write PAPER
-            bets while /api/history reads REAL) — real predictions stay in the web app. */}
+            trade real money on the Seeker build through the shared web client (Privy embedded EVM
+            wallet — the same signer the web uses). The Play build has no wallet port, so a real-mode
+            account there gets the notice, never the paper deck (the server follows the account's mode
+            for history/results, so paper swipes would write PAPER bets while /api/history reads REAL). */}
         {screen === "deck" && (
           <View style={styles.body}>
             <DeckModePill mode={deckMode} onMode={setDeckMode} />
             {deckMode === "stocks" ? (
               <StockDeckScreen me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onNeedWallet={goProfile} />
-            ) : me?.real?.mode === "REAL" ? (
+            ) : me?.real?.mode === "REAL" && !wallet.available ? (
               <View style={styles.realNotice}>
                 <Text style={styles.realNoticeTitle}>Real-money mode is on</Text>
                 <Text style={styles.realNoticeBody}>
-                  On the phone, real money buys stocks — real-money predictions live in the web app.
-                  Open the Stocks deck, or switch back to play money in Profile.
+                  Real money isn&apos;t available in this app. Switch back to play money in Profile to keep swiping.
                 </Text>
                 <TouchableOpacity style={styles.realNoticeBtn} onPress={goStocksDeck} accessibilityRole="button">
                   <Text style={styles.realNoticeBtnText}>Open the Stocks deck</Text>
                 </TouchableOpacity>
               </View>
             ) : (
-              <DeckScreen me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openTopup} />
+              <DeckScreen
+                me={me}
+                api={api}
+                onRefreshMe={refreshMe}
+                onToast={flashToast}
+                onTopup={openTopup}
+                realMode={realMode}
+                onRealOrderDone={refreshRealBalance}
+              />
             )}
           </View>
         )}
         {screen === "stocks" && <PortfolioScreen me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onNeedWallet={goProfile} />}
         {screen === "hedge" && <HedgeScreen me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openTopup} />}
-        {screen === "results" && <ResultsScreen api={api} onSeen={markResultsSeen} onAckFailed={refreshMe} />}
+        {screen === "results" && <ResultsScreen api={api} me={me} onSeen={markResultsSeen} onAckFailed={refreshMe} onToast={flashToast} />}
         {screen === "profile" && <ProfileScreen me={me} api={api} onRefreshMe={refreshMe} onLogout={doLogout} onToast={flashToast} />}
       </View>
       <BottomNav screen={screen} onNav={setScreen} />

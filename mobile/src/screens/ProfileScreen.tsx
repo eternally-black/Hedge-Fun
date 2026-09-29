@@ -15,6 +15,7 @@ import { composeTgShare, composeXShare, INVITE_TG, INVITE_X, refLink } from "@co
 import { SHARE_BASE_URL } from "../../lib/config";
 import { openShareNative } from "../openShareNative";
 import { RealModeSwitch } from "../components/RealModeSwitch";
+import { RealPredictionsSetup } from "../components/RealPredictionsSetup";
 import { TradingWallet } from "../components/TradingWallet";
 
 export function ProfileScreen({ me, api, onRefreshMe, onLogout, onToast }: {
@@ -92,6 +93,7 @@ export function ProfileScreen({ me, api, onRefreshMe, onLogout, onToast }: {
       {/* Paper/Real switch + the trading wallet — both render nothing on a build without a wallet
           port (the Play flavor), so this screen is the same file for both stores. */}
       <RealModeSwitch me={me} api={api} onRefreshMe={onRefreshMe} onToast={onToast} />
+      <RealPredictionsSetup me={me} api={api} onRefreshMe={onRefreshMe} onToast={onToast} />
       <TradingWallet me={me} api={api} onRefreshMe={onRefreshMe} onToast={onToast} />
 
       {/* invite — stats from me.referrals, share via the native opener (deep-link → tab → sheet) */}
