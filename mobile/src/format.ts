@@ -23,6 +23,14 @@ export const usd = (cents: number) => {
   return `${neg ? "−" : ""}$${rest === 0 ? whole : `${whole}.${String(rest).padStart(2, "0")}`}`;
 };
 
+// Micro-USD (pUSD / USDC, 1e6 = $1) → the same display, floored to the cent like the web's
+// usdFromMicro (src/app/ui.ts): a balance must never read larger than it is.
+export const usdFromMicro = (micro: string | bigint) => {
+  const m = BigInt(micro);
+  const q = m / 10_000n;
+  return usd(Number(m < 0n && m % 10_000n !== 0n ? q - 1n : q));
+};
+
 // Payout in CENTS if this side wins: stake of `stakeCents` at price p (bp/10000) buys stake/p of
 // $1 shares. Mirrors settle.ts share math (payout = stake*10000/priceBp). stakeCents comes from
 // /api/me (me.stakeCents) — the client never hardcodes the stake.

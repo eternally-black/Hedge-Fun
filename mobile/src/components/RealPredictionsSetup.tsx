@@ -1,21 +1,18 @@
 // RealPredictionsSetup (native) — the phone's port of the web RealModeCard's setup steps: create the
-// signing key, provision the Polymarket deposit wallet, activate trading, then show the balance and
-// the deposit address. Orders sign with the Privy embedded EVM wallet through the shared client
-// (@contract/real-client), the same wallet the web uses. Funding stays on the web in this version.
+// signing key, provision the Polymarket deposit wallet, activate trading. Orders sign with the Privy
+// embedded EVM wallet through the shared client (@contract/real-client), the same wallet the web
+// uses. Funding (deposit, withdraw, convert) lives in the shared RealDepositPanel — the same pocket
+// the Wallet sheet shows.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Linking, StyleSheet, Text, TouchableOpacity, View } from "react-native";
-import * as Clipboard from "expo-clipboard";
+import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import type { MeResponse } from "@contract/api-types";
 import { type Api } from "../api";
 import { colors } from "../theme";
-import { usd } from "../format";
-import { API_BASE } from "../../lib/config";
 import * as wallet from "../platform/wallet.flavor";
 import { useRealCtx } from "../useRealCtx";
 import { provisionReal, runRealWorkflow } from "@contract/real-client";
 import { failText } from "@contract/client-report";
-
-const short = (address: string) => `${address.slice(0, 6)}…${address.slice(-4)}`;
+import { RealDepositPanel } from "./RealDepositPanel";
 
 export function RealPredictionsSetup({ me, api, onRefreshMe, onToast }: {
   me: MeResponse | null;
@@ -132,12 +129,16 @@ export function RealPredictionsSetup({ me, api, onRefreshMe, onToast }: {
     }
   };
 
-  const copy = async (value: string) => {
-    await Clipboard.setStringAsync(value);
-    onToast("Copied");
-  };
-
-  const pusd = info?.pusdMicro != null ? usd(Math.floor(Number(info.pusdMicro) / 1e4)) : "—";
+  // Setup complete: the money UI is the shared panel, not a second copy of it.
+  if (hasEvmWallet && depositWallet && info?.tradingReady !== false) {
+    return (
+      <View>
+        <Text style={styles.sectionLabel}>Predictions wallet</Text>
+        <RealDepositPanel me={me} api={api} pusdMicro={info?.pusdMicro ?? null} onToast={onToast} label="Real · Predictions" />
+        {error ? <Text style={styles.error}>{error}</Text> : null}
+      </View>
+    );
+  }
 
   return (
     <View>
@@ -178,33 +179,7 @@ export function RealPredictionsSetup({ me, api, onRefreshMe, onToast }: {
               </Text>
             </TouchableOpacity>
           </>
-        ) : (
-          <>
-            <View style={styles.balanceRow}>
-              <Text style={styles.balanceLabel}>Balance</Text>
-              <Text style={styles.balance}>{pusd}</Text>
-              <TouchableOpacity style={styles.refreshBtn} onPress={() => void readWallet(true)} disabled={!!busy}>
-                <Text style={styles.refreshText}>↻</Text>
-              </TouchableOpacity>
-            </View>
-            <View style={styles.addressRow}>
-              <Text style={styles.address} numberOfLines={1}>{short(depositWallet)}</Text>
-              <TouchableOpacity style={styles.copyBtn} onPress={() => void copy(depositWallet)}>
-                <Text style={styles.copyBtnText}>Copy</Text>
-              </TouchableOpacity>
-            </View>
-            <TouchableOpacity
-              style={styles.secondaryBtn}
-              onPress={() => void Linking.openURL(API_BASE)}
-              disabled={!!busy}
-            >
-              <Text style={styles.secondaryBtnText}>Add or withdraw funds</Text>
-            </TouchableOpacity>
-            <Text style={styles.hint}>
-              Deposits and withdrawals run in the web app for now — same account.
-            </Text>
-          </>
-        )}
+        ) : null}
 
         {error ? <Text style={styles.error}>{error}</Text> : null}
       </View>
@@ -228,30 +203,5 @@ const styles = StyleSheet.create({
   },
   primaryBtnText: { color: "#fff", fontWeight: "700", fontSize: 13 },
   btnOff: { opacity: 0.5 },
-  balanceRow: { flexDirection: "row", alignItems: "center", gap: 10 },
-  balanceLabel: { color: colors.muted, fontSize: 12 },
-  balance: { flex: 1, color: colors.text, fontFamily: "monospace", fontSize: 15, fontWeight: "700" },
-  refreshBtn: {
-    backgroundColor: colors.panel2, borderWidth: 1, borderColor: colors.line, borderRadius: 12,
-    paddingVertical: 6, paddingHorizontal: 12,
-  },
-  refreshText: { color: colors.energy, fontWeight: "700", fontSize: 13 },
-  addressRow: {
-    flexDirection: "row", alignItems: "center", gap: 10, marginTop: 10,
-    backgroundColor: colors.panel2, borderWidth: 1, borderColor: colors.line, borderRadius: 14,
-    paddingVertical: 6, paddingLeft: 14, paddingRight: 6,
-  },
-  address: { flex: 1, color: colors.text, fontFamily: "monospace", fontSize: 13 },
-  copyBtn: {
-    backgroundColor: colors.panel, borderWidth: 1, borderColor: colors.line, borderRadius: 12,
-    paddingVertical: 7, paddingHorizontal: 14,
-  },
-  copyBtnText: { color: colors.energy, fontWeight: "700", fontSize: 12 },
-  secondaryBtn: {
-    backgroundColor: colors.panel2, borderWidth: 1, borderColor: colors.line, borderRadius: 14,
-    paddingVertical: 13, alignItems: "center", marginTop: 10,
-  },
-  secondaryBtnText: { color: colors.text, fontWeight: "700", fontSize: 13 },
-  hint: { color: colors.muted, fontSize: 11, lineHeight: 16, marginTop: 8 },
   error: { color: colors.no, fontSize: 12, marginTop: 8 },
 });

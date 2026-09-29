@@ -4,7 +4,7 @@
 // "Discovery — not a hedge" and never framed as a hedge. S2 works WITHOUT a linked wallet — it is
 // never gated behind S1. Accepting creates a standard paper Bet server-side (the server re-derives
 // everything from the suggestionId — this client never sends market/side/stake); we render the
-// RETURNED stakeCents, which may be clamped to free Cash. 402 → the shared TopupSheet, exactly
+// RETURNED stakeCents, which may be clamped to free Cash. 402 → the shared WalletSheet, exactly
 // like the deck's 402 path. Telemetry: ONE impression per suggestionId per screen mount (deduped
 // here; the server is idempotent per (user, suggestion, event) anyway).
 import { useCallback, useEffect, useRef, useState, type MutableRefObject, type ReactNode } from "react";
@@ -43,7 +43,7 @@ export function HedgeScreen({ me, api, onRefreshMe, onToast, onTopup }: {
   api: Api;
   onRefreshMe: () => Promise<void>;
   onToast: (msg: string) => void;
-  onTopup: () => void; // open the shared TopupSheet when Cash can't cover a hedge stake
+  onTopup: () => void; // open the shared WalletSheet when Cash can't cover a hedge stake
 }) {
   // ── S1 (wallet hedge) ──
   const [suggestions, setSuggestions] = useState<HedgeSuggestion[] | null>(null); // null = loading

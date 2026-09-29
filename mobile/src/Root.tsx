@@ -1,5 +1,5 @@
 // Root — the native twin of src/app/page.tsx: auth gate, boot ritual, screen state machine,
-// persistent HUD + bottom nav, toast, and the top-up sheet. Server data is rendered as-is.
+// persistent HUD + bottom nav, toast, and the wallet sheet. Server data is rendered as-is.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, AppState, Platform, StatusBar as RNStatusBar, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
@@ -7,16 +7,21 @@ import { usePrivy } from "@privy-io/expo";
 import { useApi, statusOf } from "./api";
 import { colors } from "./theme";
 import { clearRefCode, readInstallReferrerCode, readRefCode, saveRefCode } from "./refCode";
-import type { CaptureRefResponse, MeResponse, ResultsResponse } from "@contract/api-types";
+import type { CaptureRefResponse, MeResponse, ResultRow, ResultsResponse } from "@contract/api-types";
 import { Hud } from "./components/Hud";
 import { BottomNav, type Screen } from "./components/BottomNav";
-import { TopupSheet } from "./components/TopupSheet";
+import { WalletSheet } from "./components/WalletSheet";
+import { useStockPocket } from "./useStockPocket";
 import { LoginScreen } from "./screens/LoginScreen";
 import { HomeScreen } from "./screens/HomeScreen";
 import { DeckScreen } from "./screens/DeckScreen";
+import { FeedScreen } from "./screens/FeedScreen";
 import { HedgeScreen } from "./screens/HedgeScreen";
 import { ResultsScreen } from "./screens/ResultsScreen";
+import { RevealOverlay } from "./components/RevealOverlay";
 import { ProfileScreen } from "./screens/ProfileScreen";
+import { InviteScreen } from "./screens/InviteScreen";
+import { VaultScreen } from "./screens/VaultScreen";
 import { DeckModePill, StockDeckScreen, type DeckMode } from "./screens/StockDeckScreen";
 import { PortfolioScreen } from "./screens/PortfolioScreen";
 import { loadTradingWalletChoice } from "./tradingWallet";
@@ -27,6 +32,9 @@ export default function Root() {
   const api = useApi();
   const [me, setMe] = useState<MeResponse | null>(null);
   const [screen, setScreen] = useState<Screen>("deck");
+  // One-shot hand-off after the last point swipe: the deck shows its cap panel once; any nav (or
+  // entering the feed) consumes it, and from then on the Deck tab renders the feed (web page.tsx).
+  const [justExhausted, setJustExhausted] = useState(false);
   // Which deck occupies the Deck tab — the same pill the web shows above the card slot.
   const [deckMode, setDeckMode] = useState<DeckMode>("predictions");
   // The remembered trading-wallet pick (Profile → Wallet → Use) is read once, before any real trade.
@@ -36,7 +44,13 @@ export default function Root() {
   const [booted, setBooted] = useState(false);
   const ritualDone = useRef(false); // run the auth→boot sequence once per login
   const [toast, setToast] = useState<string | null>(null);
-  const [topupOpen, setTopupOpen] = useState(false);
+  const [walletOpen, setWalletOpen] = useState(false);
+  // The results reveal overlay (the web's `reveal`). "ritual" = the boot reveal (finishing may route
+  // to Home for the GM check-in); "replay" = asked for from Results, so finishing lands on the deck.
+  const [reveal, setReveal] = useState<ResultRow[] | null>(null);
+  const revealMode = useRef<"ritual" | "replay">("ritual");
+  // What the overlay is delivering, so finishing acknowledges exactly those rows in that mode.
+  const revealDelivery = useRef<{ mode: "PAPER" | "REAL"; betIds: string[]; unreadCount: number } | null>(null);
   const [realPusdMicro, setRealPusdMicro] = useState<string | null>(null);
   // Bumped on logout: a /api/real/wallet response that outlived its session must not paint the next
   // account's HUD with the previous account's balance.
@@ -60,6 +74,7 @@ export default function Root() {
     ritualDone.current = false;
     balanceGen.current++;
     setRealPusdMicro(null);
+    setReveal(null);
     await logout().catch(console.error);
   }, [logout]);
 
@@ -104,11 +119,16 @@ export default function Root() {
     return () => { clearInterval(id); sub.remove(); balanceGen.current++; };
   }, [realMode, refreshRealBalance]);
 
+  // The chip states the pocket the screen spends — web page.tsx derives it the same way.
+  const hudPocket: "stocks" | "predictions" = screen === "stocks" || (screen === "deck" && deckMode === "stocks") ? "stocks" : "predictions";
+  // Read only when something shows it: the HUD chip or the wallet sheet.
+  const stock = useStockPocket(me, api, walletOpen || (realMode && hudPocket === "stocks"));
+
   // Boot: one coherent first-load sequence per auth (mirrors the web ritual):
   //   1. referral capture on open — /api/capture-ref, NEVER marks the GM day (idempotent);
   //   2. me + results decide the landing screen:
   //      • brand-new user → straight to the deck, zero popups;
-  //      • unseen results → the inbox (the slice's stand-in for the web's reveal overlay);
+  //      • unseen results → the reveal overlay (the web's ritual), then Home/deck on finish;
   //      • else not GM'd today → Home (the once-a-day check-in is the open ritual);
   //      • else → deck.
   useEffect(() => {
@@ -128,10 +148,15 @@ export default function Root() {
         const [m, r] = await Promise.all([api("/api/me"), api("/api/results?unseen=1")]);
         const meData = m as MeResponse;
         setMe(meData);
-        const unseen = (r as ResultsResponse).rows.filter((row) => !row.seen);
+        const res = r as ResultsResponse;
+        const unseen = res.rows.filter((row) => !row.seen);
         if (meData.isNewUser) setScreen("deck");
-        else if (unseen.length > 0) setScreen("results");
-        else if (!meData.loginMarkedToday) setScreen("home");
+        else if (unseen.length > 0) {
+          // The reveal ritual: play the unseen rows, then acknowledge exactly them on finish.
+          revealMode.current = "ritual";
+          revealDelivery.current = { mode: res.mode, betIds: unseen.map((row) => row.id), unreadCount: unseen.length };
+          setReveal(unseen);
+        } else if (!meData.loginMarkedToday) setScreen("home");
         else setScreen("deck");
       } catch (e) {
         console.error(e); // boot failure still lands on the deck, which shows its own retry
@@ -141,18 +166,72 @@ export default function Root() {
     })();
   }, [isReady, user, api]);
 
-  // Decrement only the unseen rows the results screen actually loaded.
-  const markResultsSeen = useCallback((count: number) => {
-    setMe((m) => (m ? { ...m, unreadResults: Math.max(0, m.unreadResults - count) } : m));
+  // Decrement only what was actually delivered — bets AND stock alerts (the bell counts both).
+  const markResultsSeen = useCallback((betCount: number, stockCount: number) => {
+    setMe((m) => (m ? {
+      ...m,
+      unreadResults: Math.max(0, m.unreadResults - betCount),
+      unreadStockAlerts: Math.max(0, (m.unreadStockAlerts ?? 0) - stockCount),
+    } : m));
   }, []);
 
-  const openTopup = useCallback(() => setTopupOpen(true), []);
-  const closeTopup = useCallback(() => setTopupOpen(false), []);
+  // Where a closed reveal leads: a ritual that hasn't checked in today still owes the GM tap (Home);
+  // everything else, and every replay, lands on the deck.
+  const exitReveal = useCallback(() => {
+    const m = meRef.current;
+    if (revealMode.current === "ritual" && m && !m.loginMarkedToday) setScreen("home");
+    else setScreen("deck");
+  }, []);
+
+  // Watching through to the summary clears unread (server-side ack of exactly the delivered rows);
+  // skip is the safety net and acknowledges nothing — unwatched results stay badged.
+  const finishReveal = useCallback(() => {
+    const delivered = revealDelivery.current;
+    revealDelivery.current = null;
+    setReveal(null);
+    if (delivered && delivered.betIds.length > 0) {
+      markResultsSeen(delivered.unreadCount, 0);
+      api("/api/results/seen", { method: "POST", body: JSON.stringify({ scope: "bets", mode: delivered.mode, betIds: delivered.betIds }) })
+        .catch(console.error)
+        .finally(() => { void refreshMe(); });
+    } else {
+      void refreshMe();
+    }
+    exitReveal();
+  }, [api, markResultsSeen, refreshMe, exitReveal]);
+  const skipReveal = useCallback(() => {
+    revealDelivery.current = null;
+    setReveal(null);
+    exitReveal();
+    void refreshMe();
+  }, [exitReveal, refreshMe]);
+  // Replay from Results re-opens the whole feed as a re-watch.
+  const replayReveal = useCallback(() => {
+    api("/api/results")
+      .then((r) => {
+        const results = r as ResultsResponse;
+        revealMode.current = "replay";
+        revealDelivery.current = { mode: results.mode, betIds: results.rows.map((row) => row.id), unreadCount: results.rows.filter((row) => !row.seen).length };
+        setReveal(results.rows);
+      })
+      .catch(console.error);
+  }, [api]);
+
+  const openWallet = useCallback(() => setWalletOpen(true), []);
+  const closeWallet = useCallback(() => setWalletOpen(false), []);
   const goHome = useCallback(() => setScreen("home"), []);
   const goResults = useCallback(() => setScreen("results"), []);
   const goDeck = useCallback(() => setScreen("deck"), []);
   const goProfile = useCallback(() => setScreen("profile"), []);
   const goStocksDeck = useCallback(() => setDeckMode("stocks"), []);
+  const goStocks = useCallback(() => setScreen("stocks"), []);
+  const goVault = useCallback(() => setScreen("vault"), []);
+  const navTo = useCallback((s: Screen) => { setJustExhausted(false); setScreen(s); }, []);
+  const enterFeedFromCap = useCallback(() => { setJustExhausted(false); setScreen("feed"); }, []);
+  const onCapHit = useCallback(() => setJustExhausted(true), []);
+  // The paper point-swipe cap — the same rule DeckScreen uses (real money has no such cap).
+  const deckLocked = !realMode && !!me && !me.dev && me.swipes.used >= me.swipes.cap;
+  const effectiveScreen: Screen = screen === "deck" && deckMode === "predictions" && deckLocked && !justExhausted ? "feed" : screen;
 
   if (!isReady) return <Boot />;
   if (!user) return <LoginScreen />;
@@ -164,9 +243,11 @@ export default function Root() {
       <Hud
         me={me}
         onGM={goHome}
-        onBalance={realMode ? goProfile : openTopup}
+        onShards={goVault}
+        onBalance={openWallet}
         onBell={goResults}
-        realMode={realMode}
+        pocket={hudPocket}
+        stocksUsdCents={stock.usdCents}
         realPusdMicro={realPusdMicro}
       />
       <View style={styles.body}>
@@ -177,7 +258,7 @@ export default function Root() {
             wallet — the same signer the web uses). The Play build has no wallet port, so a real-mode
             account there gets the notice, never the paper deck (the server follows the account's mode
             for history/results, so paper swipes would write PAPER bets while /api/history reads REAL). */}
-        {screen === "deck" && (
+        {effectiveScreen === "deck" && (
           <View style={styles.body}>
             <DeckModePill mode={deckMode} onMode={setDeckMode} />
             {deckMode === "stocks" ? (
@@ -198,34 +279,59 @@ export default function Root() {
                 api={api}
                 onRefreshMe={refreshMe}
                 onToast={flashToast}
-                onTopup={openTopup}
+                onTopup={openWallet}
                 realMode={realMode}
                 onRealOrderDone={refreshRealBalance}
+                onOpenFeed={enterFeedFromCap}
+                onCapHit={onCapHit}
               />
             )}
           </View>
         )}
+        {effectiveScreen === "feed" && <FeedScreen api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openWallet} />}
         {screen === "stocks" && <PortfolioScreen me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onNeedWallet={goProfile} />}
-        {screen === "hedge" && <HedgeScreen me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openTopup} />}
-        {screen === "results" && <ResultsScreen api={api} me={me} onSeen={markResultsSeen} onAckFailed={refreshMe} onToast={flashToast} />}
-        {screen === "profile" && <ProfileScreen me={me} api={api} onRefreshMe={refreshMe} onLogout={doLogout} onToast={flashToast} />}
+        {screen === "hedge" && <HedgeScreen me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openWallet} />}
+        {screen === "results" && <ResultsScreen api={api} onSeen={markResultsSeen} onAckFailed={refreshMe} onReplay={replayReveal} onOpenStock={goStocks} />}
+        {screen === "profile" && <ProfileScreen me={me} api={api} onRefreshMe={refreshMe} onLogout={doLogout} onToast={flashToast} onNav={setScreen} onOpenHistory={openWallet} />}
+        {screen === "invite" && <InviteScreen me={me} api={api} onToast={flashToast} />}
+        {screen === "vault" && <VaultScreen me={me} api={api} onRefreshMe={refreshMe} />}
       </View>
-      <BottomNav screen={screen} onNav={setScreen} />
+      <BottomNav screen={effectiveScreen} onNav={navTo} deckLocked={deckLocked && deckMode === "predictions"} />
       {toast && (
         <View style={styles.toast}>
           <Text style={styles.toastText}>{toast}</Text>
         </View>
       )}
-      <TopupSheet visible={topupOpen} me={me} api={api} onClose={closeTopup} onTopupDone={refreshMe} onToast={flashToast} />
+      <WalletSheet visible={walletOpen} me={me} api={api} realPusdMicro={realPusdMicro} stock={stock} onClose={closeWallet} onTopupDone={refreshMe} onToast={flashToast} />
+      {/* The reveal covers the HUD and the nav — the last child of the shell, like the web. */}
+      {reveal ? (
+        <RevealOverlay
+          rows={reveal}
+          shards={me?.shards ?? 0}
+          shardsPerArtifact={me?.shardsPerArtifact ?? 20}
+          onDone={finishReveal}
+          onSkip={skipReveal}
+        />
+      ) : null}
     </View>
   );
 }
 
+// The boot screen. The web shows a bare spinner, but on a phone the wait (Privy's session restore,
+// then /api/me) can run long on a weak connection — so the brand stays on screen and, after 10 s,
+// the screen says what is going on instead of spinning silently.
 function Boot() {
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setSlow(true), 10_000);
+    return () => clearTimeout(t);
+  }, []);
   return (
     <View style={styles.boot}>
       <StatusBar style="light" />
-      <ActivityIndicator size="large" color={colors.energy} />
+      <Text style={styles.bootBrand}>HEDGE FUN</Text>
+      <ActivityIndicator size="large" color={colors.energy} style={{ marginTop: 22 }} />
+      {slow ? <Text style={styles.bootSlow}>Still connecting — a slow network can take a moment.</Text> : null}
     </View>
   );
 }
@@ -235,7 +341,9 @@ const topPad = Platform.OS === "android" ? (RNStatusBar.currentHeight ?? 0) : 0;
 const styles = StyleSheet.create({
   shell: { flex: 1, backgroundColor: colors.bg, paddingTop: topPad },
   body: { flex: 1 },
-  boot: { flex: 1, backgroundColor: colors.bg, alignItems: "center", justifyContent: "center" },
+  boot: { flex: 1, backgroundColor: colors.bg, alignItems: "center", justifyContent: "center", padding: 32 },
+  bootBrand: { color: colors.energy, fontSize: 14, fontWeight: "800", letterSpacing: 5 },
+  bootSlow: { color: colors.muted, fontSize: 12, marginTop: 18, textAlign: "center", lineHeight: 17 },
   toast: {
     position: "absolute", left: 16, right: 16, bottom: 92,
     backgroundColor: "rgba(10,10,15,0.94)", borderWidth: 1, borderColor: colors.line,

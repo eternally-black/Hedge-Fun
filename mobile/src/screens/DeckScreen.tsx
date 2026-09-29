@@ -13,10 +13,11 @@ import { placeRealOrder } from "@contract/real-client";
 import { realErrText, realResultText, RETRYABLE_REAL_ERRORS } from "@contract/real-copy";
 import { DECK_MIN_LEAD_MS, QUOTE_POLL_MS } from "../../lib/config";
 import { CardPreview, DeckCard, isFresh, type SwipeDir } from "../components/DeckCard";
+import { StakeSheet } from "../components/StakeSheet";
 
 const REFILL_AT = 8; // preload-ahead threshold (same as web) — refill well before the deck runs dry
 
-export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, onRealOrderDone }: {
+export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, onRealOrderDone, onOpenFeed, onCapHit }: {
   me: MeResponse | null;
   api: Api;
   onRefreshMe: () => Promise<void>;
@@ -24,9 +25,12 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, o
   onTopup: () => void;
   realMode: boolean;
   onRealOrderDone: () => void;
+  onOpenFeed: () => void; // the cap panel's "Open the Feed →"
+  onCapHit: () => void; // the last point swipe of the day — hand off to the feed (web page.tsx)
 }) {
   const [deck, setDeck] = useState<DeckCardT[] | null>(null); // null = still loading
   const [loadFailed, setLoadFailed] = useState(false);
+  const [stakeOpen, setStakeOpen] = useState(false); // the STAKE chip's sheet (real mode only)
   const [nonce, setNonce] = useState(0); // bump to retry a failed load
   const topping = useRef(false); // dedupe: one refill fetch in flight
   // Latest `me` mirrored into a ref so the stable act() reads CURRENT cash/stake without churning
@@ -190,6 +194,13 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, o
             const res = r as { status: string; filledSharesMicro?: string };
             if (res.status !== "filled") onToast(realResultText(res));
           }
+          // Paper only: the swipe that spent the LAST point swipe of the day (count == cap, not over)
+          // arms the one-shot hand-off to the feed. The server's own count is authoritative.
+          if (dir !== "SKIP" && !realModeRef.current) {
+            const resp = r as { overCap?: boolean; swipeCountToday?: number };
+            const cap = meRef.current?.swipes.cap ?? 0;
+            if (!resp.overCap && cap > 0 && (resp.swipeCountToday ?? 0) >= cap) onCapHit();
+          }
         })
         .catch((e) => {
           const status = statusOf(e);
@@ -241,7 +252,7 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, o
           else console.error(e);
         });
     },
-    [api, onRefreshMe, onToast, onTopup, onRealOrderDone, topUpIfLow],
+    [api, onRefreshMe, onToast, onTopup, onRealOrderDone, onCapHit, topUpIfLow],
   );
 
   // Stable handler for the keyed DeckCard — reads the current top via a ref (kept in sync after
@@ -256,6 +267,8 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, o
   const next = deck?.[1];
   // Hard daily cap: once a non-dev user hits the swipe cap, the deck hard-stops until 00:00 UTC.
   // Paper only — the point-swipe cap is the play economy's, and says nothing about real money.
+  // The equipped card design (Vault) — "classic" until /api/me lands.
+  const skinId = me?.skins.equipped ?? "classic";
   const capReached = !realMode && !!me && !me.dev && me.swipes.used >= me.swipes.cap;
 
   return (
@@ -265,23 +278,30 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, o
           <View style={styles.panel}>
             <Text style={styles.panelTitle}>Deck&apos;s done.</Text>
             <Text style={styles.panelBody}>
-              You spent today&apos;s {me?.swipes.cap} point swipes. Fresh deck at 00:00 UTC — settled calls land in Results as markets resolve.
+              You spent today&apos;s {me?.swipes.cap} point swipes. Fresh deck at 00:00 UTC — meanwhile, the feed never sleeps.
             </Text>
+            <TouchableOpacity style={styles.feedBtn} onPress={onOpenFeed} accessibilityRole="button">
+              <Text style={styles.feedBtnText}>Open the Feed →</Text>
+            </TouchableOpacity>
+            <Text style={styles.panelFoot}>No points here — but shards still drop on every win.</Text>
           </View>
         ) : (
           <>
             {/* next card — FULLY rendered behind the top one (not a gray stub) */}
-            {next && <CardPreview key={next.id} card={next} />}
+            {next && <CardPreview key={next.id} card={next} skinId={skinId} />}
             {top ? (
               <DeckCard
                 key={top.id}
                 card={top}
+                skinId={skinId}
                 // Display fallback only before the first /api/me lands — the server charges the
                 // real stake regardless (POST /api/swipe carries no amount).
                 // A real swipe spends the account's own real stake, not the play economy's.
                 stakeCents={realMode ? (me?.real.stakeCents ?? 100) : (me?.stakeCents ?? 1000)}
                 enabled
                 onCommit={handleCommit}
+                // Paper stake is a game rule, not a setting — only the real one is editable (web too).
+                onEditStake={realMode ? () => setStakeOpen(true) : undefined}
               />
             ) : loadFailed ? (
               <View style={styles.panel}>
@@ -318,6 +338,17 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, o
           </Text>
         </>
       )}
+
+      <StakeSheet
+        visible={stakeOpen && !!me}
+        stakeCents={me?.real.stakeCents ?? 100}
+        minCents={me?.real.minStakeCents ?? 100}
+        maxCents={me?.real.maxStakeCents ?? 100}
+        api={api}
+        onClose={() => setStakeOpen(false)}
+        onSaved={onRefreshMe}
+        onToast={onToast}
+      />
     </View>
   );
 }
@@ -355,6 +386,9 @@ const styles = StyleSheet.create({
   },
   panelTitle: { color: colors.text, fontSize: 34, fontWeight: "900", marginBottom: 10 },
   panelBody: { color: colors.muted, fontSize: 14, lineHeight: 20, textAlign: "center" },
+  panelFoot: { color: colors.muted, fontSize: 11, lineHeight: 16, textAlign: "center", marginTop: 10 },
+  feedBtn: { marginTop: 16, paddingVertical: 12, paddingHorizontal: 22, borderRadius: 16, backgroundColor: colors.energy },
+  feedBtnText: { color: "#06070a", fontSize: 15, fontWeight: "800", letterSpacing: 0.3 },
   retryBtn: {
     marginTop: 16, backgroundColor: colors.panel2, borderWidth: 1, borderColor: colors.line,
     borderRadius: 14, paddingVertical: 11, paddingHorizontal: 22,

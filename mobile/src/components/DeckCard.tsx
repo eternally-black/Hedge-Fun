@@ -3,9 +3,10 @@
 // COMMIT_PX commits with a fling-off, else springs back. The parent is handed the commit mid-fling
 // so the next card rises in sync (same hand-off as web).
 import { useEffect, useRef, useState } from "react";
-import { Animated, PanResponder, StyleSheet, Text, View } from "react-native";
+import { Animated, PanResponder, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import type { DeckCard as DeckCardT } from "@contract/api-types";
 import { colors } from "../theme";
+import { isFootballCard, SkinBackground } from "../skins";
 import { catOf, cents, countdown, displayQuestion, isMatchClock, isUpDown, marketHint, sideLabels, usd, winPayout } from "../format";
 
 export type SwipeDir = "YES" | "NO" | "SKIP";
@@ -30,11 +31,15 @@ function useNowMs(): number {
   return nowMs;
 }
 
-export function DeckCard({ card, stakeCents, enabled, onCommit }: {
+export function DeckCard({ card, skinId, stakeCents, enabled, onCommit, onEditStake }: {
   card: DeckCardT;
+  skinId: string; // the equipped skin — owns the whole card background (me.skins.equipped)
   stakeCents: number;
   enabled: boolean; // false = ignore gestures (busy/flying)
   onCommit: (dir: SwipeDir) => void;
+  // Present only where the stake is editable (real mode, live top card). Absent → the chip stays
+  // inert text, which is what a preview card sitting behind the top one has to be.
+  onEditStake?: () => void;
 }) {
   const pan = useRef(new Animated.ValueXY()).current;
   const enabledRef = useRef(enabled);
@@ -82,7 +87,7 @@ export function DeckCard({ card, stakeCents, enabled, onCommit }: {
       style={[styles.card, { transform: [...pan.getTranslateTransform(), { rotate }] }]}
       {...responder.panHandlers}
     >
-      <CardFace card={card} stakeCents={stakeCents} />
+      <CardFace card={card} skinId={skinId} stakeCents={stakeCents} onEditStake={onEditStake} />
       {/* direction stamps, driven by drag progress */}
       <Animated.View style={[styles.stamp, styles.stampLeft, { opacity: noOpacity, borderColor: colors.no }]}>
         <StampText card={card} dir="NO" />
@@ -98,10 +103,38 @@ export function DeckCard({ card, stakeCents, enabled, onCommit }: {
 }
 
 // The next card, fully rendered behind the top one (not a gray stub) — static, no gestures.
-export function CardPreview({ card }: { card: DeckCardT }) {
+export function CardPreview({ card, skinId }: { card: DeckCardT; skinId: string }) {
   return (
     <View style={[styles.card, styles.preview]} pointerEvents="none">
-      <CardFace card={card} stakeCents={null} dimmed />
+      <CardFace card={card} skinId={skinId} stakeCents={null} dimmed />
+    </View>
+  );
+}
+
+// The stake chip. A TouchableOpacity where it is editable, plain text where it is not — a preview
+// card behind the top one must not be tappable at all.
+function StakeChip({ stakeCents, onEditStake }: { stakeCents: number; onEditStake?: () => void }) {
+  const body = (
+    <>
+      <Text style={styles.chipLabel}>Stake</Text>
+      <Text style={styles.chipValue}>{usd(stakeCents)}</Text>
+    </>
+  );
+  const box = [styles.chip, { borderColor: onEditStake ? colors.gold : colors.line }];
+  if (!onEditStake) return <View style={box}>{body}</View>;
+  return (
+    <TouchableOpacity onPress={onEditStake} style={box} accessibilityRole="button">
+      {body}
+    </TouchableOpacity>
+  );
+}
+
+// One side's payout at the current stake, tinted with the side's own colour (web PayBox).
+function PayBox({ label, val, color }: { label: string; val: string; color: string }) {
+  return (
+    <View style={[styles.payBox, { backgroundColor: `${color}24`, borderColor: `${color}59` }]}>
+      <Text style={[styles.payLabel, { color }]} numberOfLines={1}>{label}</Text>
+      <Text style={[styles.payValue, { color }]}>{val}</Text>
     </View>
   );
 }
@@ -118,7 +151,13 @@ function StampText({ card, dir }: { card: DeckCardT; dir: "YES" | "NO" }) {
 
 // The card face: category + ⏱ cutoff, question, hint, odds split (real side labels, cents), and
 // the stake/payout footer. stakeCents null hides the footer (preview).
-function CardFace({ card, stakeCents, dimmed = false }: { card: DeckCardT; stakeCents: number | null; dimmed?: boolean }) {
+export function CardFace({ card, skinId, stakeCents, dimmed = false, onEditStake }: {
+  card: DeckCardT;
+  skinId: string;
+  stakeCents: number | null;
+  dimmed?: boolean;
+  onEditStake?: () => void;
+}) {
   const nowMs = useNowMs();
   const cat = catOf(card);
   const labels = sideLabels(card);
@@ -127,6 +166,8 @@ function CardFace({ card, stakeCents, dimmed = false }: { card: DeckCardT; stake
 
   return (
     <View style={[styles.face, dimmed && { opacity: 0.75 }]}>
+      {/* The equipped skin owns the background: bg → overlay → scrim, then the content below. */}
+      <SkinBackground skinId={skinId} categoryColor={cat.color} isFootball={isFootballCard(card)} />
       <View style={styles.topRow}>
         <View style={styles.badge}>
           <View style={[styles.badgeDot, { backgroundColor: cat.color }]} />
@@ -165,13 +206,15 @@ function CardFace({ card, stakeCents, dimmed = false }: { card: DeckCardT; stake
           <View style={{ flex: 1, backgroundColor: colors.yes, height: "100%" }} />
         </View>
         {stakeCents !== null && (
-          <View style={styles.payoutRow}>
-            <Text style={styles.payoutText}>
-              {usd(stakeCents)} on <Text style={{ color: colors.yes, fontWeight: "700" }}>{labels.yes}</Text> → win {usd(winPayout(card.yesPriceBp, stakeCents))}
-            </Text>
-            <Text style={styles.payoutText}>
-              <Text style={{ color: colors.no, fontWeight: "700" }}>{labels.no}</Text> → win {usd(winPayout(card.noPriceBp, stakeCents))}
-            </Text>
+          <View style={styles.footerRow}>
+            {/* The chip IS the control. A stake is a per-swipe amount, so the place to change it is
+                the place it is stated — not a settings screen two taps away from the gesture it
+                governs. Inert text where the stake is not editable (a preview card). */}
+            <StakeChip stakeCents={stakeCents} onEditStake={onEditStake} />
+            <View style={styles.payRow}>
+              <PayBox label={labels.no} val={usd(winPayout(card.noPriceBp, stakeCents))} color={colors.no} />
+              <PayBox label={labels.yes} val={usd(winPayout(card.yesPriceBp, stakeCents))} color={colors.yes} />
+            </View>
           </View>
         )}
       </View>
@@ -205,8 +248,14 @@ const styles = StyleSheet.create({
   oddsCol: { flexShrink: 1, minWidth: 0 },
   oddsSide: { fontFamily: "monospace", fontWeight: "700", fontSize: 12, flexShrink: 1 },
   oddsBar: { flexDirection: "row", height: 10, borderRadius: 6, overflow: "hidden", backgroundColor: "rgba(0,0,0,0.4)" },
-  payoutRow: { flexDirection: "row", justifyContent: "space-between", marginTop: 10, gap: 8 },
-  payoutText: { color: "rgba(255,255,255,0.55)", fontSize: 10, flexShrink: 1 },
+  footerRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 10 },
+  chip: { backgroundColor: "rgba(0,0,0,0.4)", borderWidth: 1, borderRadius: 14, paddingVertical: 8, paddingHorizontal: 12 },
+  chipLabel: { fontSize: 8, letterSpacing: 1.2, color: colors.muted, textTransform: "uppercase" },
+  chipValue: { fontFamily: "monospace", fontWeight: "700", fontSize: 15, color: "#fff" },
+  payRow: { flex: 1, minWidth: 0, flexDirection: "row", gap: 6 },
+  payBox: { flex: 1, minWidth: 0, alignItems: "center", borderWidth: 1, borderRadius: 14, paddingVertical: 8, paddingHorizontal: 6 },
+  payLabel: { fontSize: 8, letterSpacing: 1, textTransform: "uppercase" },
+  payValue: { fontFamily: "monospace", fontWeight: "700", fontSize: 14 },
   stamp: {
     position: "absolute", paddingVertical: 6, paddingHorizontal: 14, borderRadius: 12,
     borderWidth: 3, backgroundColor: "rgba(10,10,15,0.75)", maxWidth: "80%",
