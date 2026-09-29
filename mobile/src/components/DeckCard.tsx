@@ -3,9 +3,8 @@
 // COMMIT_PX commits with a fling-off, else springs back. The parent is handed the commit mid-fling
 // so the next card rises in sync (same hand-off as web).
 import { memo, useEffect, useState } from "react";
-import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
-import { GestureDetector } from "react-native-gesture-handler";
-import Animated from "react-native-reanimated";
+import { Animated, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { PanGestureHandler } from "react-native-gesture-handler";
 import { useSwipeCard } from "../useSwipeCard";
 import type { DeckCard as DeckCardT } from "@contract/api-types";
 import { colors } from "../theme";
@@ -43,10 +42,10 @@ export function DeckCard({ card, skinId, stakeCents, enabled, onCommit, onEditSt
   // inert text, which is what a preview card sitting behind the top one has to be.
   onEditStake?: () => void;
 }) {
-  const { gesture, cardStyle, yesStyle, noStyle, skipStyle } = useSwipeCard({ enabled, onCommit });
+  const { handlerProps, cardStyle, yesStyle, noStyle, skipStyle } = useSwipeCard({ enabled, onCommit });
 
   return (
-    <GestureDetector gesture={gesture}>
+    <PanGestureHandler {...handlerProps}>
     <Animated.View style={[styles.card, cardStyle]}>
       <CardFace card={card} skinId={skinId} stakeCents={stakeCents} onEditStake={onEditStake} />
       {/* direction stamps, driven by drag progress */}
@@ -60,7 +59,7 @@ export function DeckCard({ card, skinId, stakeCents, enabled, onCommit, onEditSt
         <Text style={[styles.stampText, { color: colors.skip }]}>SKIP</Text>
       </Animated.View>
     </Animated.View>
-    </GestureDetector>
+    </PanGestureHandler>
   );
 }
 

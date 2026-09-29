@@ -2,9 +2,8 @@
 // src/app/StockCard.tsx; the gesture physics are DeckCard.tsx's, verbatim (the two decks must feel identical,
 // and DeckCard's stamps are bound to a prediction card's two sides — hence a copy, not a shared wrapper).
 import { memo, useEffect, useRef, useState } from "react";
-import { Image, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
-import { GestureDetector } from "react-native-gesture-handler";
-import Animated from "react-native-reanimated";
+import { Animated, Image, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { PanGestureHandler } from "react-native-gesture-handler";
 import { useSwipeCard } from "../useSwipeCard";
 import type { StockDeckCard as StockDeckCardT } from "@contract/api-types";
 import { usd } from "../format";
@@ -226,10 +225,10 @@ export function StockDeckCard({
 }) {
   // restoreAfterFling: a REAL buy keeps the card until /confirm books the lot, and a cancelled or
   // failed one keeps it for good — the card comes back and re-arms if nothing removed it.
-  const { gesture, cardStyle, yesStyle, noStyle, skipStyle } = useSwipeCard({ enabled: !busy, onCommit: onAction, restoreAfterFling: true });
+  const { handlerProps, cardStyle, yesStyle, noStyle, skipStyle } = useSwipeCard({ enabled: !busy, onCommit: onAction, restoreAfterFling: true });
 
   return (
-    <GestureDetector gesture={gesture}>
+    <PanGestureHandler {...handlerProps}>
     <Animated.View style={[styles.card, cardStyle]}>
       <StockCardFace card={card} stakeCents={stakeCents} onPickStake={onPickStake} realMode={realMode} disabled={busy} />
       {/* direction stamps, driven by drag progress */}
@@ -243,7 +242,7 @@ export function StockDeckCard({
         <Text style={[styles.stampText, { color: colors.skip }]}>SKIP</Text>
       </Animated.View>
     </Animated.View>
-    </GestureDetector>
+    </PanGestureHandler>
   );
 }
 
