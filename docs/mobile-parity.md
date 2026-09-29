@@ -15,11 +15,11 @@ Each phase ends with: mobile `tsc` green → x86_64 APK on the emulator → scre
 - [x] 1.8 Phase 1 verified on the emulator (wallet sheet, deposit list, stake sheet)
 
 ## Phase 2 — history and results
-- [ ] 2.1 One prediction row component = web `PredictionRow` (open + settled, side label, stake, P&L, Close with live exit quote)
-- [ ] 2.2 Wallet sheet History tabs Calls / Stocks / Hedges (= web BalanceSheet lower half, `Load more`, retry on failure)
-- [ ] 2.3 Results screen = web `NotificationsScreen`: settled feed + "In profit" stock-alert strip (`StockAlertRow`), acks both
-- [ ] 2.4 `RevealOverlay` on app open for unseen results (aggregate → featured → summary)
-- [ ] 2.5 Phase 2 verified on the emulator
+- [x] 2.1 One prediction row component = web `PredictionRow` (open + settled, side label, stake, P&L, Close with live exit quote)
+- [x] 2.2 Wallet sheet History tabs Calls / Stocks / Hedges (= web BalanceSheet lower half, `Load more`, retry on failure)
+- [x] 2.3 Results screen = web `NotificationsScreen`: settled feed + "In profit" stock-alert strip (`StockAlertRow`), acks both
+- [x] 2.4 `RevealOverlay` on app open for unseen results (aggregate → featured → summary)
+- [x] 2.5 Phase 2 verified on the emulator
 
 ## Phase 3 — account and progression
 - [ ] 3.1 Profile = web order: header, tiles (Points, Virtual $, Streak, Shards), menu (History, Vault, Invite), real-money card, wallet, account (signed in as, logout, 𝕏 link/unlink), support contacts

@@ -5,7 +5,7 @@
 // the ✕ exits at any point. Finishing vs skipping is the parent's job (onDone/onSkip) — only finishing
 // clears the unread badge. The web's CSS keyframes become small Animated fades/scales.
 import { memo, type ReactNode, useEffect, useMemo, useReducer, useRef } from "react";
-import { Animated, Easing, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Animated, Easing, Platform, Pressable, ScrollView, StatusBar, StyleSheet, Text, View } from "react-native";
 import type { ResultRow } from "@contract/api-types";
 import { catOf, resultMeta, usd } from "../format";
 import { colors, withAlpha } from "../theme";
@@ -15,6 +15,8 @@ const MAX_FEATURED = 5;
 const PREVIEW_SCALE = 0.94;
 const PREVIEW_Y = 14;
 const RISE_MS = 420;
+// Android draws the app under the status bar here, so every top-anchored control clears it.
+const TOP = Platform.OS === "android" ? (StatusBar.currentHeight ?? 0) : 0;
 
 type Phase = "aggregate" | "cards" | "summary";
 type State = { phase: Phase; i: number };
@@ -359,7 +361,7 @@ export function peakEndOrder(rows: ResultRow[], max: number): ResultRow[] {
 const styles = StyleSheet.create({
   overlay: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, zIndex: 88, backgroundColor: colors.bg },
   close: {
-    position: "absolute", top: 14, right: 16, zIndex: 8, width: 36, height: 36, borderRadius: 18,
+    position: "absolute", top: TOP + 12, right: 16, zIndex: 8, width: 36, height: 36, borderRadius: 18,
     alignItems: "center", justifyContent: "center", backgroundColor: "rgba(0,0,0,0.45)", borderWidth: 1, borderColor: colors.line,
   },
   closeGlyph: { color: colors.text, fontSize: 18, fontWeight: "800" },
@@ -376,14 +378,14 @@ const styles = StyleSheet.create({
   aggCtaText: { fontSize: 13, color: colors.text, fontWeight: "700" },
 
   cardsWrap: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0 },
-  progressRow: { flexDirection: "row", gap: 5, justifyContent: "center", paddingTop: 52, paddingHorizontal: 46 },
+  progressRow: { flexDirection: "row", gap: 5, justifyContent: "center", paddingTop: TOP + 60, paddingHorizontal: 46 },
   progressBar: { flex: 1, height: 3, borderRadius: 3 },
   stackArea: { flex: 1, alignItems: "center", justifyContent: "center", paddingVertical: 10 },
   stack: { width: 300, maxWidth: "100%", height: 420 },
   cardsHint: { textAlign: "center", paddingTop: 14, paddingBottom: 30, color: colors.muted, fontSize: 12 },
 
   summaryScroll: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0 },
-  summaryContent: { paddingTop: 64, paddingHorizontal: 22, paddingBottom: 26, flexGrow: 1 },
+  summaryContent: { paddingTop: TOP + 64, paddingHorizontal: 22, paddingBottom: 26, flexGrow: 1 },
   summaryHead: { alignItems: "center" },
   summaryEmoji: { fontSize: 44 },
   summaryTitle: { fontSize: 40, lineHeight: 44, marginTop: 6, color: colors.text, fontWeight: "900" },
