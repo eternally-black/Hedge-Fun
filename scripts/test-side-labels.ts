@@ -255,6 +255,21 @@ assert.strictEqual(marketHint(card("Panthers vs. Cardinals: O/U 32.5", "Over", "
     tags: [{ label: "Politics" }, { label: "Elections" }],
   });
   assert.strictEqual(politics!.outcomeYesLabel, "Yes", "the naming is gated on the SPORT classification");
+
+  // Kick-off is a sport fact. Gamma sets gameStartTime == endDate on crypto price markets as well,
+  // which made both clients print "Kick-off in … · resolves after the match" on an ETH threshold.
+  const kick = "2026-08-27 23:00:00+00";
+  const match = mapMarket({ ...base, question: "Will CA Platense win on 2026-08-27?", gameStartTime: kick });
+  assert.strictEqual(match!.startsAt, "2026-08-27T23:00:00.000Z", "a match keeps its kick-off");
+  const eth = mapMarket({
+    ...base,
+    question: "Ethereum above 2,690 on September 29, 1PM ET?",
+    category: "crypto",
+    events: [{ title: "Ethereum above ___ on September 29, 1PM ET?" }],
+    tags: [{ label: "Crypto" }, { label: "Ethereum" }],
+    gameStartTime: kick,
+  });
+  assert.strictEqual(eth!.startsAt, null, "a crypto price market has no kick-off");
 }
 
 console.log("test-side-labels: OK");

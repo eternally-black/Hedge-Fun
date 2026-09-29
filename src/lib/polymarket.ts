@@ -258,7 +258,9 @@ export function mapMarket(m: GammaMarket): MarketCache | null {
     league: gameOf({ question: m.question, outcomeYesLabel: yesLabel, outcomeNoLabel: noLabel, tags }, cat),
     // Kick-off ONLY. startDate is the listing date — months old on a long-dated market — and it used
     // to land here under the name "startsAt", which reads as a fact about the game and is not one.
-    startsAt: gameStart(m.gameStartTime),
+    // Gamma fills gameStartTime on crypto price markets too (= endDate), which every client reads as
+    // "kick-off … resolves after the match". Only a sport/esports market has a kick-off.
+    startsAt: cat === "sports" || cat === "esports" ? gameStart(m.gameStartTime) : null,
     resolutionDeadline: m.endDate,
     status,
     resolvedOutcome,
