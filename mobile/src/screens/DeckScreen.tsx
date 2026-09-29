@@ -17,7 +17,7 @@ import { StakeSheet } from "../components/StakeSheet";
 
 const REFILL_AT = 8; // preload-ahead threshold (same as web) — refill well before the deck runs dry
 
-export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, onRealOrderDone }: {
+export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, onRealOrderDone, onOpenFeed, onCapHit }: {
   me: MeResponse | null;
   api: Api;
   onRefreshMe: () => Promise<void>;
@@ -25,6 +25,8 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, o
   onTopup: () => void;
   realMode: boolean;
   onRealOrderDone: () => void;
+  onOpenFeed: () => void; // the cap panel's "Open the Feed →"
+  onCapHit: () => void; // the last point swipe of the day — hand off to the feed (web page.tsx)
 }) {
   const [deck, setDeck] = useState<DeckCardT[] | null>(null); // null = still loading
   const [loadFailed, setLoadFailed] = useState(false);
@@ -192,6 +194,13 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, o
             const res = r as { status: string; filledSharesMicro?: string };
             if (res.status !== "filled") onToast(realResultText(res));
           }
+          // Paper only: the swipe that spent the LAST point swipe of the day (count == cap, not over)
+          // arms the one-shot hand-off to the feed. The server's own count is authoritative.
+          if (dir !== "SKIP" && !realModeRef.current) {
+            const resp = r as { overCap?: boolean; swipeCountToday?: number };
+            const cap = meRef.current?.swipes.cap ?? 0;
+            if (!resp.overCap && cap > 0 && (resp.swipeCountToday ?? 0) >= cap) onCapHit();
+          }
         })
         .catch((e) => {
           const status = statusOf(e);
@@ -243,7 +252,7 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, o
           else console.error(e);
         });
     },
-    [api, onRefreshMe, onToast, onTopup, onRealOrderDone, topUpIfLow],
+    [api, onRefreshMe, onToast, onTopup, onRealOrderDone, onCapHit, topUpIfLow],
   );
 
   // Stable handler for the keyed DeckCard — reads the current top via a ref (kept in sync after
@@ -269,8 +278,12 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, o
           <View style={styles.panel}>
             <Text style={styles.panelTitle}>Deck&apos;s done.</Text>
             <Text style={styles.panelBody}>
-              You spent today&apos;s {me?.swipes.cap} point swipes. Fresh deck at 00:00 UTC — settled calls land in Results as markets resolve.
+              You spent today&apos;s {me?.swipes.cap} point swipes. Fresh deck at 00:00 UTC — meanwhile, the feed never sleeps.
             </Text>
+            <TouchableOpacity style={styles.feedBtn} onPress={onOpenFeed} accessibilityRole="button">
+              <Text style={styles.feedBtnText}>Open the Feed →</Text>
+            </TouchableOpacity>
+            <Text style={styles.panelFoot}>No points here — but shards still drop on every win.</Text>
           </View>
         ) : (
           <>
@@ -373,6 +386,9 @@ const styles = StyleSheet.create({
   },
   panelTitle: { color: colors.text, fontSize: 34, fontWeight: "900", marginBottom: 10 },
   panelBody: { color: colors.muted, fontSize: 14, lineHeight: 20, textAlign: "center" },
+  panelFoot: { color: colors.muted, fontSize: 11, lineHeight: 16, textAlign: "center", marginTop: 10 },
+  feedBtn: { marginTop: 16, paddingVertical: 12, paddingHorizontal: 22, borderRadius: 16, backgroundColor: colors.energy },
+  feedBtnText: { color: "#06070a", fontSize: 15, fontWeight: "800", letterSpacing: 0.3 },
   retryBtn: {
     marginTop: 16, backgroundColor: colors.panel2, borderWidth: 1, borderColor: colors.line,
     borderRadius: 14, paddingVertical: 11, paddingHorizontal: 22,

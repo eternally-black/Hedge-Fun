@@ -31,8 +31,8 @@ Each phase ends with: mobile `tsc` green → x86_64 APK on the emulator → scre
 
 ## Phase 4 — deck extras and copy
 - [ ] 4.1 `FeedScreen` post-cap feed (`MarketCard`) + Deck tab label "fresh deck in …" once the cap is spent
-- [ ] 4.2 Login copy flavor-aware (Seeker ≠ "No wallet. No risk.") = web `Onboarding`
-- [ ] 4.3 Boot screen: branded loading instead of a bare spinner
+- [ ] 4.2 Login copy = web `Onboarding` (identical; a Seeker-specific line would diverge from the web — owner decision for both)
+- [ ] 4.3 Boot screen: branded + slow-network line (deliberate phone-only addition; the web shows a bare spinner)
 - [ ] 4.4 Phase 4 verified on the emulator
 
 ## Final

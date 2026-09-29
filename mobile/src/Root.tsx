@@ -15,6 +15,7 @@ import { useStockPocket } from "./useStockPocket";
 import { LoginScreen } from "./screens/LoginScreen";
 import { HomeScreen } from "./screens/HomeScreen";
 import { DeckScreen } from "./screens/DeckScreen";
+import { FeedScreen } from "./screens/FeedScreen";
 import { HedgeScreen } from "./screens/HedgeScreen";
 import { ResultsScreen } from "./screens/ResultsScreen";
 import { RevealOverlay } from "./components/RevealOverlay";
@@ -31,6 +32,9 @@ export default function Root() {
   const api = useApi();
   const [me, setMe] = useState<MeResponse | null>(null);
   const [screen, setScreen] = useState<Screen>("deck");
+  // One-shot hand-off after the last point swipe: the deck shows its cap panel once; any nav (or
+  // entering the feed) consumes it, and from then on the Deck tab renders the feed (web page.tsx).
+  const [justExhausted, setJustExhausted] = useState(false);
   // Which deck occupies the Deck tab — the same pill the web shows above the card slot.
   const [deckMode, setDeckMode] = useState<DeckMode>("predictions");
   // The remembered trading-wallet pick (Profile → Wallet → Use) is read once, before any real trade.
@@ -222,6 +226,12 @@ export default function Root() {
   const goStocksDeck = useCallback(() => setDeckMode("stocks"), []);
   const goStocks = useCallback(() => setScreen("stocks"), []);
   const goVault = useCallback(() => setScreen("vault"), []);
+  const navTo = useCallback((s: Screen) => { setJustExhausted(false); setScreen(s); }, []);
+  const enterFeedFromCap = useCallback(() => { setJustExhausted(false); setScreen("feed"); }, []);
+  const onCapHit = useCallback(() => setJustExhausted(true), []);
+  // The paper point-swipe cap — the same rule DeckScreen uses (real money has no such cap).
+  const deckLocked = !realMode && !!me && !me.dev && me.swipes.used >= me.swipes.cap;
+  const effectiveScreen: Screen = screen === "deck" && deckMode === "predictions" && deckLocked && !justExhausted ? "feed" : screen;
 
   if (!isReady) return <Boot />;
   if (!user) return <LoginScreen />;
@@ -248,7 +258,7 @@ export default function Root() {
             wallet — the same signer the web uses). The Play build has no wallet port, so a real-mode
             account there gets the notice, never the paper deck (the server follows the account's mode
             for history/results, so paper swipes would write PAPER bets while /api/history reads REAL). */}
-        {screen === "deck" && (
+        {effectiveScreen === "deck" && (
           <View style={styles.body}>
             <DeckModePill mode={deckMode} onMode={setDeckMode} />
             {deckMode === "stocks" ? (
@@ -272,10 +282,13 @@ export default function Root() {
                 onTopup={openWallet}
                 realMode={realMode}
                 onRealOrderDone={refreshRealBalance}
+                onOpenFeed={enterFeedFromCap}
+                onCapHit={onCapHit}
               />
             )}
           </View>
         )}
+        {effectiveScreen === "feed" && <FeedScreen api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openWallet} />}
         {screen === "stocks" && <PortfolioScreen me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onNeedWallet={goProfile} />}
         {screen === "hedge" && <HedgeScreen me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openWallet} />}
         {screen === "results" && <ResultsScreen api={api} onSeen={markResultsSeen} onAckFailed={refreshMe} onReplay={replayReveal} onOpenStock={goStocks} />}
@@ -283,7 +296,7 @@ export default function Root() {
         {screen === "invite" && <InviteScreen me={me} api={api} onToast={flashToast} />}
         {screen === "vault" && <VaultScreen me={me} api={api} onRefreshMe={refreshMe} />}
       </View>
-      <BottomNav screen={screen} onNav={setScreen} />
+      <BottomNav screen={effectiveScreen} onNav={navTo} deckLocked={deckLocked && deckMode === "predictions"} />
       {toast && (
         <View style={styles.toast}>
           <Text style={styles.toastText}>{toast}</Text>
@@ -304,11 +317,21 @@ export default function Root() {
   );
 }
 
+// The boot screen. The web shows a bare spinner, but on a phone the wait (Privy's session restore,
+// then /api/me) can run long on a weak connection — so the brand stays on screen and, after 10 s,
+// the screen says what is going on instead of spinning silently.
 function Boot() {
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setSlow(true), 10_000);
+    return () => clearTimeout(t);
+  }, []);
   return (
     <View style={styles.boot}>
       <StatusBar style="light" />
-      <ActivityIndicator size="large" color={colors.energy} />
+      <Text style={styles.bootBrand}>HEDGE FUN</Text>
+      <ActivityIndicator size="large" color={colors.energy} style={{ marginTop: 22 }} />
+      {slow ? <Text style={styles.bootSlow}>Still connecting — a slow network can take a moment.</Text> : null}
     </View>
   );
 }
@@ -318,7 +341,9 @@ const topPad = Platform.OS === "android" ? (RNStatusBar.currentHeight ?? 0) : 0;
 const styles = StyleSheet.create({
   shell: { flex: 1, backgroundColor: colors.bg, paddingTop: topPad },
   body: { flex: 1 },
-  boot: { flex: 1, backgroundColor: colors.bg, alignItems: "center", justifyContent: "center" },
+  boot: { flex: 1, backgroundColor: colors.bg, alignItems: "center", justifyContent: "center", padding: 32 },
+  bootBrand: { color: colors.energy, fontSize: 14, fontWeight: "800", letterSpacing: 5 },
+  bootSlow: { color: colors.muted, fontSize: 12, marginTop: 18, textAlign: "center", lineHeight: 17 },
   toast: {
     position: "absolute", left: 16, right: 16, bottom: 92,
     backgroundColor: "rgba(10,10,15,0.94)", borderWidth: 1, borderColor: colors.line,
