@@ -1,4 +1,5 @@
 import { PrivyProvider } from "@privy-io/expo";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { StyleSheet, Text, View } from "react-native";
 import { PRIVY_APP_ID, PRIVY_CLIENT_ID } from "./lib/config";
 import { colors } from "./src/theme";
@@ -10,9 +11,12 @@ export default function App() {
   // ids, so a half-filled mobile/.env must hit the notice too, not an opaque Privy runtime error.
   if (!PRIVY_APP_ID || !PRIVY_CLIENT_ID) return <ConfigNotice />;
   return (
-    <PrivyProvider appId={PRIVY_APP_ID} clientId={PRIVY_CLIENT_ID}>
-      <Root />
-    </PrivyProvider>
+    // The swipe decks run their gestures on the UI thread (useSwipeCard), which needs this root.
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <PrivyProvider appId={PRIVY_APP_ID} clientId={PRIVY_CLIENT_ID}>
+        <Root />
+      </PrivyProvider>
+    </GestureHandlerRootView>
   );
 }
 

@@ -29,6 +29,12 @@ import * as wallet from "./platform/wallet.flavor";
 
 export default function Root() {
   const { isReady, user, logout } = usePrivy();
+  // Privy restores the session (user) seconds before it reports isReady — measured 2026-09-29 on the
+  // emulator: user at ~2-6 s, isReady at ~10-16 s (it is still bringing up the embedded wallet). The
+  // app boots on the restored user; only the real-money signer waits for isReady (useRealCtx). Until
+  // then a 401 may be the token not being issued yet, so it must not sign the user out.
+  const readyRef = useRef(isReady);
+  useEffect(() => { readyRef.current = isReady; }, [isReady]);
   const api = useApi();
   const [me, setMe] = useState<MeResponse | null>(null);
   const [screen, setScreen] = useState<Screen>("deck");
@@ -87,7 +93,7 @@ export default function Root() {
     try {
       setMe((await api("/api/me")) as MeResponse);
     } catch (e) {
-      if (statusOf(e) === 401) { await doLogout(); return; }
+      if (statusOf(e) === 401 && readyRef.current) { await doLogout(); return; }
       console.error(e);
       flashToast("Couldn't refresh — showing last balance");
     }
@@ -132,7 +138,7 @@ export default function Root() {
   //      • else not GM'd today → Home (the once-a-day check-in is the open ritual);
   //      • else → deck.
   useEffect(() => {
-    if (!isReady || !user || ritualDone.current) return;
+    if (!user || ritualDone.current) return;
     ritualDone.current = true;
     void (async () => {
       try {
@@ -233,7 +239,7 @@ export default function Root() {
   const deckLocked = !realMode && !!me && !me.dev && me.swipes.used >= me.swipes.cap;
   const effectiveScreen: Screen = screen === "deck" && deckMode === "predictions" && deckLocked && !justExhausted ? "feed" : screen;
 
-  if (!isReady) return <Boot />;
+  if (!isReady && !user) return <Boot />;
   if (!user) return <LoginScreen />;
   if (!booted) return <Boot />;
 

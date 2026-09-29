@@ -182,7 +182,9 @@ function History({ me, api, onToast, onClose }: { me: MeResponse | null; api: Ap
             <PredictionRow
               key={r.id}
               row={toPredictionRow(r)}
-              nowMs={nowMs}
+              // Only an open row reads the clock; a settled one gets a constant so the 1 s tick does
+              // not re-render every row of the list.
+              nowMs={r.status === "PENDING" ? nowMs : 0}
               onClosePosition={canClose ? () => close(r) : undefined}
               closing={closing === r.id}
               exitQuote={exitQuotes[r.id]}
