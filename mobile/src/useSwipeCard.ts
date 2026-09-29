@@ -14,6 +14,7 @@ export const COMMIT_PX = 130; // drag distance past which a release commits (des
 const FLY_MS = 260; // outgoing card animates off-screen for this long
 const MOVE_EPS = 5; // px of travel before a press counts as a drag
 const SPRING = { damping: 14, stiffness: 180 };
+const SETTLE_MS = 120;
 
 export function useSwipeCard({ enabled, onCommit, restoreAfterFling = false }: {
   enabled: boolean;
@@ -36,14 +37,16 @@ export function useSwipeCard({ enabled, onCommit, restoreAfterFling = false }: {
   // frame threw "Unable to find SurfaceMountingManager" with a stack trace on the UI thread — 132 per
   // swipe on the emulator, which is what made every frame janky.
   const commitOnJs = (dir: SwipeDir) => {
-    onCommitRef.current(dir);
+    // Reanimated re-commits a settled animation's final props through React on the next frames; a
+    // card unmounted before that lands leaves it retrying against a dead view. Let it land first.
+    setTimeout(() => onCommitRef.current(dir), SETTLE_MS);
     if (restoreAfterFling) {
       setTimeout(() => {
         if (!mounted.current) return;
         committed.set(false);
         x.set(withSpring(0, SPRING));
         y.set(withSpring(0, SPRING));
-      }, 150);
+      }, SETTLE_MS + 150);
     }
   };
 
