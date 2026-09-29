@@ -63,8 +63,9 @@ export function RealPredictionsSetup({ me, api, onRefreshMe, onToast }: {
   }, [api]);
 
   // One read whenever real mode turns on with a deposit wallet, and again when that wallet changes.
+  // The Play build must not touch money routes at all, and this effect runs above the early return.
   useEffect(() => {
-    if (!realOn || !depositWallet) return;
+    if (!wallet.available || !realOn || !depositWallet) return;
     void readWallet();
   }, [realOn, depositWallet, readWallet]);
 

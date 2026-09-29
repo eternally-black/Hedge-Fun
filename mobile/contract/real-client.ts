@@ -371,14 +371,17 @@ async function placeOrder(
   // back to the server is the order ID and nothing else — a receipt from this side would let a
   // tampered client book fills, points and counters the exchange never saw, so /api/real/posted
   // reads the order back from the exchange itself before booking.
-  // Cost of throwing below: the attempt stays SUBMITTING and holds this market's in-flight slot
-  // until the server's discovery sweep resolves it against the exchange (~15 min), because only a
-  // reading of the exchange — never a claim from here — may declare that no order exists.
-  const posted = (await postOrder(client)(next.value as never)) as {
-    ok?: boolean;
-    orderId?: string;
-    message?: string;
-  };
+  // A transport failure of the post itself is NOT a failed order: /api/real/submit already claimed
+  // the attempt, so the order may be live and the server's orphan sweep resolves it against the
+  // exchange (~15 min). Throwing here would read as a failure and invite a retry, so it is returned
+  // as "submitting" — the same honest "sent, outcome not yet confirmed" the report path below uses.
+  // Only a reading of the exchange — never a claim from here — may declare that no order exists.
+  let posted: { ok?: boolean; orderId?: string; message?: string };
+  try {
+    posted = (await postOrder(client)(next.value as never)) as typeof posted;
+  } catch {
+    return { status: "submitting" };
+  }
   // A refusal comes back as ok:false with a message rather than as a throw.
   if (posted.ok === false) throw new Error(`post_rejected: ${posted.message ?? ""}`);
   if (!posted.orderId) throw new Error("post_no_order_id");

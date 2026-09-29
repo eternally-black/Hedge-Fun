@@ -37,6 +37,10 @@ export default function Root() {
   const ritualDone = useRef(false); // run the auth→boot sequence once per login
   const [toast, setToast] = useState<string | null>(null);
   const [topupOpen, setTopupOpen] = useState(false);
+  const [realPusdMicro, setRealPusdMicro] = useState<string | null>(null);
+  // Bumped on logout: a /api/real/wallet response that outlived its session must not paint the next
+  // account's HUD with the previous account's balance.
+  const balanceGen = useRef(0);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const meRef = useRef<MeResponse | null>(null);
   useEffect(() => { meRef.current = me; }, [me]);
@@ -54,6 +58,8 @@ export default function Root() {
     setScreen("deck");
     setBooted(false);
     ritualDone.current = false;
+    balanceGen.current++;
+    setRealPusdMicro(null);
     await logout().catch(console.error);
   }, [logout]);
 
@@ -75,14 +81,14 @@ export default function Root() {
   // Real mode = the build can sign (Seeker flavor) AND the account is in REAL. The Play build has
   // no wallet port, so it stays paper-only no matter what the account says.
   const realMode = wallet.available && me?.real.mode === "REAL";
-  const [realPusdMicro, setRealPusdMicro] = useState<string | null>(null);
   // An RPC hiccup shows "—", never a misleading $0.00.
   const refreshRealBalance = useCallback(async () => {
+    const gen = balanceGen.current;
     try {
       const r = (await api("/api/real/wallet")) as { pusdMicro?: string | null };
-      setRealPusdMicro(r.pusdMicro ?? null);
+      if (gen === balanceGen.current) setRealPusdMicro(r.pusdMicro ?? null);
     } catch {
-      setRealPusdMicro(null);
+      if (gen === balanceGen.current) setRealPusdMicro(null);
     }
   }, [api]);
   // The HUD states this number on every screen, so it must become true on its own after a deposit.

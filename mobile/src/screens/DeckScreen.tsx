@@ -169,6 +169,9 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, o
               marketId: card.id,
               side: dir,
               dir: "ENTRY",
+              // The amount the card showed; the server only ever lowers it (min(explicit, stored)),
+              // so a stale number here can never spend more than the account's current stake.
+              stakeCents: meRef.current?.real.stakeCents,
               quotedPriceBp: dir === "YES" ? card.yesPriceBp : card.noPriceBp,
             }).then((r) => { onRealOrderDone(); return r as unknown; })
           : api("/api/swipe", {

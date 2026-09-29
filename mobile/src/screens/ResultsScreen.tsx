@@ -63,11 +63,19 @@ export function ResultsScreen({ api, me, onSeen, onAckFailed, onToast }: { api: 
             ? "Position closed"
             : r.status === "killed"
               ? "No buyers at that price — position kept"
-              : "Sent — settling",
+              : r.status === "submitting"
+                ? "Sent — checking the outcome"
+                : "Sent — settling",
         );
       } catch (e) {
         const body = (e as { body?: { error?: string } }).body;
-        onToast(body?.error === "no_position" ? "Nothing left to close" : "Couldn't close — try again");
+        onToast(
+          body?.error === "no_position"
+            ? "Nothing left to close"
+            : body?.error === "attempt_in_flight"
+              ? "A close is already in progress — checking"
+              : "Couldn't close — try again",
+        );
       } finally {
         setClosing(null);
         setNonce((n) => n + 1);
