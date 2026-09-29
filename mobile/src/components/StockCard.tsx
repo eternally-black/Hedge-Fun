@@ -2,21 +2,21 @@
 // src/app/StockCard.tsx; the gesture physics are DeckCard.tsx's, verbatim (the two decks must feel identical,
 // and DeckCard's stamps are bound to a prediction card's two sides — hence a copy, not a shared wrapper).
 import { memo, useEffect, useRef, useState } from "react";
-import { Animated, Image, PanResponder, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { Animated, Image, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { PanGestureHandler } from "react-native-gesture-handler";
+import { useSwipeCard } from "../useSwipeCard";
 import type { StockDeckCard as StockDeckCardT } from "@contract/api-types";
 import { usd } from "../format";
 import { colors, withAlpha } from "../theme";
 import { STOCK_STAKE_PRESETS_CENTS } from "../../lib/config";
 import { clampStakeCents } from "../useStockStake";
-import { COMMIT_PX, type SwipeDir } from "./DeckCard";
+import type { SwipeDir } from "./DeckCard";
 
 // The stock deck's accent. Deliberately NOT one of the category colors: a stock card is a different
 // species from a prediction card (it never resolves, it has no two sides), and it must not read as
 // one of the market categories it sits beside.
 export const STOCK_ACCENT = "#34d399";
 
-const FLY_MS = 380; // outgoing card animates off-screen for this long
-const MOVE_EPS = 5; // px of travel before a press counts as a drag
 
 // A stable no-op for the preview card: an inline `() => {}` is a new value every render, which is
 // exactly what memo() compares — the preview would re-render with the deck behind it for nothing.
@@ -223,75 +223,26 @@ export function StockDeckCard({
   onPickStake: (c: number) => void;
   realMode: boolean;
 }) {
-  const pan = useRef(new Animated.ValueXY()).current;
-  const enabledRef = useRef(!busy);
-  useEffect(() => { enabledRef.current = !busy; }, [busy]);
-  const committedRef = useRef(false);
-  const onCommitRef = useRef(onAction);
-  useEffect(() => { onCommitRef.current = onAction; }, [onAction]);
-  const mounted = useRef(true);
-  useEffect(() => () => { mounted.current = false; }, []);
-
-  const responder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => enabledRef.current && !committedRef.current,
-      onMoveShouldSetPanResponder: (_e, g) =>
-        enabledRef.current && !committedRef.current && (Math.abs(g.dx) > MOVE_EPS || Math.abs(g.dy) > MOVE_EPS),
-      onPanResponderMove: Animated.event([null, { dx: pan.x, dy: pan.y }], { useNativeDriver: false }),
-      onPanResponderTerminate: () => {
-        Animated.spring(pan, { toValue: { x: 0, y: 0 }, useNativeDriver: false }).start();
-      },
-      onPanResponderRelease: (_e, g) => {
-        const ax = Math.abs(g.dx), ay = Math.abs(g.dy);
-        // Up-bias matches the web deck: a clearly-vertical upward drag is SKIP; else horizontal YES/NO.
-        let dir: SwipeDir, progress: number;
-        if (ay > ax * 1.15 && g.dy < 0) { dir = "SKIP"; progress = Math.min(1, ay / COMMIT_PX); }
-        else { dir = g.dx > 0 ? "YES" : "NO"; progress = Math.min(1, ax / COMMIT_PX); }
-
-        if (progress >= 1) {
-          committedRef.current = true;
-          const toValue = dir === "YES" ? { x: 520, y: -90 } : dir === "NO" ? { x: -520, y: -90 } : { x: 0, y: -760 };
-          Animated.timing(pan, { toValue, duration: FLY_MS, useNativeDriver: false }).start();
-          // Hand off mid-fling so the next card starts rising at the 50% point (overlap).
-          setTimeout(() => onCommitRef.current(dir), Math.round(FLY_MS / 2));
-          // A paper buy, a pass and a skip remove this card at once (it unmounts). A REAL buy keeps it
-          // until /confirm books the lot — and a cancelled or failed one keeps it for good. If the card
-          // is still mounted once the fling is over, nothing removed it: bring it back and re-arm the
-          // gesture, so the deck the user sees is the deck the buttons act on.
-          setTimeout(() => {
-            if (!mounted.current) return;
-            committedRef.current = false;
-            Animated.spring(pan, { toValue: { x: 0, y: 0 }, useNativeDriver: false, bounciness: 14 }).start();
-          }, FLY_MS + 150);
-        } else {
-          Animated.spring(pan, { toValue: { x: 0, y: 0 }, useNativeDriver: false, bounciness: 14 }).start();
-        }
-      },
-    }),
-  ).current;
-
-  const rotate = pan.x.interpolate({ inputRange: [-160, 160], outputRange: ["-9deg", "9deg"], extrapolate: "clamp" });
-  const yesOpacity = pan.x.interpolate({ inputRange: [0, COMMIT_PX], outputRange: [0, 1], extrapolate: "clamp" });
-  const noOpacity = pan.x.interpolate({ inputRange: [-COMMIT_PX, 0], outputRange: [1, 0], extrapolate: "clamp" });
-  const skipOpacity = pan.y.interpolate({ inputRange: [-COMMIT_PX, 0], outputRange: [1, 0], extrapolate: "clamp" });
+  // restoreAfterFling: a REAL buy keeps the card until /confirm books the lot, and a cancelled or
+  // failed one keeps it for good — the card comes back and re-arms if nothing removed it.
+  const { handlerProps, cardStyle, yesStyle, noStyle, skipStyle } = useSwipeCard({ enabled: !busy, onCommit: onAction, restoreAfterFling: true });
 
   return (
-    <Animated.View
-      style={[styles.card, { transform: [...pan.getTranslateTransform(), { rotate }] }]}
-      {...responder.panHandlers}
-    >
+    <PanGestureHandler {...handlerProps}>
+    <Animated.View style={[styles.card, cardStyle]}>
       <StockCardFace card={card} stakeCents={stakeCents} onPickStake={onPickStake} realMode={realMode} disabled={busy} />
       {/* direction stamps, driven by drag progress */}
-      <Animated.View style={[styles.stamp, styles.stampLeft, { opacity: noOpacity, borderColor: colors.no }]} pointerEvents="none">
+      <Animated.View style={[styles.stamp, styles.stampLeft, { borderColor: colors.no }, noStyle]} pointerEvents="none">
         <Text style={[styles.stampText, { color: colors.no }]}>PASS</Text>
       </Animated.View>
-      <Animated.View style={[styles.stamp, styles.stampRight, { opacity: yesOpacity, borderColor: colors.yes }]} pointerEvents="none">
+      <Animated.View style={[styles.stamp, styles.stampRight, { borderColor: colors.yes }, yesStyle]} pointerEvents="none">
         <Text style={[styles.stampText, { color: colors.yes }]}>BUY</Text>
       </Animated.View>
-      <Animated.View style={[styles.stamp, styles.stampTop, { opacity: skipOpacity, borderColor: colors.skip }]} pointerEvents="none">
+      <Animated.View style={[styles.stamp, styles.stampTop, { borderColor: colors.skip }, skipStyle]} pointerEvents="none">
         <Text style={[styles.stampText, { color: colors.skip }]}>SKIP</Text>
       </Animated.View>
     </Animated.View>
+    </PanGestureHandler>
   );
 }
 

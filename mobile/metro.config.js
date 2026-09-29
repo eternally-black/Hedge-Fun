@@ -48,4 +48,12 @@ const resolveRequest = (context, moduleName, platform) => {
 
 config.resolver.resolveRequest = resolveRequest;
 
+// Startup (TTI): with inline requires a module body runs the first time it is USED, not when the app
+// boots. Measured on the emulator 2026-09-29: ~11 s from process start to "Running main" — module
+// initialisation of the eager imports (the Polymarket SDK's schemas, viem, Privy) before the first
+// frame. The real-money code is not needed to paint the login screen or the deck.
+config.transformer.getTransformOptions = async () => ({
+  transform: { experimentalImportSupport: false, inlineRequires: true },
+});
+
 module.exports = config;

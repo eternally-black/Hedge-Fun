@@ -2,18 +2,18 @@
 // face. Right = YES (side A), left = NO (side B), up = SKIP. Follow-the-finger drag → release past
 // COMMIT_PX commits with a fling-off, else springs back. The parent is handed the commit mid-fling
 // so the next card rises in sync (same hand-off as web).
-import { useEffect, useRef, useState } from "react";
-import { Animated, PanResponder, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { memo, useEffect, useState } from "react";
+import { Animated, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { PanGestureHandler } from "react-native-gesture-handler";
+import { useSwipeCard } from "../useSwipeCard";
 import type { DeckCard as DeckCardT } from "@contract/api-types";
 import { colors } from "../theme";
 import { isFootballCard, SkinBackground } from "../skins";
 import { catOf, cents, countdown, displayQuestion, isMatchClock, isUpDown, marketHint, sideLabels, usd, winPayout } from "../format";
 
-export type SwipeDir = "YES" | "NO" | "SKIP";
+export { COMMIT_PX, type SwipeDir } from "../useSwipeCard";
+import type { SwipeDir } from "../useSwipeCard";
 
-export const COMMIT_PX = 130; // drag distance past which a release commits (design-locked, same as web)
-const FLY_MS = 380; // outgoing card animates off-screen for this long
-const MOVE_EPS = 5; // px of travel before a press counts as a drag
 
 // A card is "fresh" while it has more than the lead buffer left before resolution. Stale cards are
 // pruned from the deck so a swipe never lands on a near-resolved (⏱ -> 0:00) market.
@@ -21,7 +21,8 @@ export function isFresh(c: DeckCardT, nowMs: number, minLeadMs: number): boolean
   return new Date(c.resolutionDeadline).getTime() - nowMs > minLeadMs;
 }
 
-// Per-card 1s clock (web: DeckCard.useCountdown) — each visible card ticks itself.
+// Per-card 1s clock (web: DeckCard.useCountdown). Only the tiny Live* texts below own it, so the tick
+// re-renders a line of text — never the whole card face (skin SVG, odds, footer) under a moving finger.
 function useNowMs(): number {
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
@@ -41,64 +42,24 @@ export function DeckCard({ card, skinId, stakeCents, enabled, onCommit, onEditSt
   // inert text, which is what a preview card sitting behind the top one has to be.
   onEditStake?: () => void;
 }) {
-  const pan = useRef(new Animated.ValueXY()).current;
-  const enabledRef = useRef(enabled);
-  useEffect(() => { enabledRef.current = enabled; }, [enabled]);
-  const committedRef = useRef(false);
-  const onCommitRef = useRef(onCommit);
-  useEffect(() => { onCommitRef.current = onCommit; }, [onCommit]);
-
-  const responder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => enabledRef.current && !committedRef.current,
-      onMoveShouldSetPanResponder: (_e, g) =>
-        enabledRef.current && !committedRef.current && (Math.abs(g.dx) > MOVE_EPS || Math.abs(g.dy) > MOVE_EPS),
-      onPanResponderMove: Animated.event([null, { dx: pan.x, dy: pan.y }], { useNativeDriver: false }),
-      onPanResponderTerminate: () => {
-        Animated.spring(pan, { toValue: { x: 0, y: 0 }, useNativeDriver: false }).start();
-      },
-      onPanResponderRelease: (_e, g) => {
-        const ax = Math.abs(g.dx), ay = Math.abs(g.dy);
-        // Up-bias matches the web deck: a clearly-vertical upward drag is SKIP; else horizontal YES/NO.
-        let dir: SwipeDir, progress: number;
-        if (ay > ax * 1.15 && g.dy < 0) { dir = "SKIP"; progress = Math.min(1, ay / COMMIT_PX); }
-        else { dir = g.dx > 0 ? "YES" : "NO"; progress = Math.min(1, ax / COMMIT_PX); }
-
-        if (progress >= 1) {
-          committedRef.current = true;
-          const toValue = dir === "YES" ? { x: 520, y: -90 } : dir === "NO" ? { x: -520, y: -90 } : { x: 0, y: -760 };
-          Animated.timing(pan, { toValue, duration: FLY_MS, useNativeDriver: false }).start();
-          // Hand off mid-fling so the next card starts rising at the 50% point (overlap).
-          setTimeout(() => onCommitRef.current(dir), Math.round(FLY_MS / 2));
-        } else {
-          Animated.spring(pan, { toValue: { x: 0, y: 0 }, useNativeDriver: false, bounciness: 14 }).start();
-        }
-      },
-    }),
-  ).current;
-
-  const rotate = pan.x.interpolate({ inputRange: [-160, 160], outputRange: ["-9deg", "9deg"], extrapolate: "clamp" });
-  const yesOpacity = pan.x.interpolate({ inputRange: [0, COMMIT_PX], outputRange: [0, 1], extrapolate: "clamp" });
-  const noOpacity = pan.x.interpolate({ inputRange: [-COMMIT_PX, 0], outputRange: [1, 0], extrapolate: "clamp" });
-  const skipOpacity = pan.y.interpolate({ inputRange: [-COMMIT_PX, 0], outputRange: [1, 0], extrapolate: "clamp" });
+  const { handlerProps, cardStyle, yesStyle, noStyle, skipStyle } = useSwipeCard({ enabled, onCommit });
 
   return (
-    <Animated.View
-      style={[styles.card, { transform: [...pan.getTranslateTransform(), { rotate }] }]}
-      {...responder.panHandlers}
-    >
+    <PanGestureHandler {...handlerProps}>
+    <Animated.View style={[styles.card, cardStyle]}>
       <CardFace card={card} skinId={skinId} stakeCents={stakeCents} onEditStake={onEditStake} />
       {/* direction stamps, driven by drag progress */}
-      <Animated.View style={[styles.stamp, styles.stampLeft, { opacity: noOpacity, borderColor: colors.no }]}>
+      <Animated.View style={[styles.stamp, styles.stampLeft, { borderColor: colors.no }, noStyle]}>
         <StampText card={card} dir="NO" />
       </Animated.View>
-      <Animated.View style={[styles.stamp, styles.stampRight, { opacity: yesOpacity, borderColor: colors.yes }]}>
+      <Animated.View style={[styles.stamp, styles.stampRight, { borderColor: colors.yes }, yesStyle]}>
         <StampText card={card} dir="YES" />
       </Animated.View>
-      <Animated.View style={[styles.stamp, styles.stampTop, { opacity: skipOpacity, borderColor: colors.skip }]}>
+      <Animated.View style={[styles.stamp, styles.stampTop, { borderColor: colors.skip }, skipStyle]}>
         <Text style={[styles.stampText, { color: colors.skip }]}>SKIP</Text>
       </Animated.View>
     </Animated.View>
+    </PanGestureHandler>
   );
 }
 
@@ -139,6 +100,20 @@ function PayBox({ label, val, color }: { label: string; val: string; color: stri
   );
 }
 
+const LiveBadge = memo(function LiveBadge({ deadline }: { deadline: string }) {
+  const cd = countdown(deadline, useNowMs());
+  return (
+    <View style={[styles.badge, cd.urgent && styles.badgeUrgent]}>
+      <Text style={styles.badgeText}>⏱ <Text style={cd.urgent ? styles.timerUrgent : styles.timer}>{cd.text}</Text></Text>
+    </View>
+  );
+});
+
+const LiveText = memo(function LiveText({ deadline, kind, style }: { deadline: string; kind: "rel" | "kickoff"; style: object }) {
+  const cd = countdown(deadline, useNowMs());
+  return <Text style={style}>{kind === "rel" ? cd.relText : `Kick-off in ${cd.text} · resolves after the match`}</Text>;
+});
+
 function StampText({ card, dir }: { card: DeckCardT; dir: "YES" | "NO" }) {
   const labels = sideLabels(card);
   const label = dir === "YES" ? labels.yes : labels.no;
@@ -158,11 +133,9 @@ export function CardFace({ card, skinId, stakeCents, dimmed = false, onEditStake
   dimmed?: boolean;
   onEditStake?: () => void;
 }) {
-  const nowMs = useNowMs();
   const cat = catOf(card);
   const labels = sideLabels(card);
   const hint = marketHint(card);
-  const cd = countdown(card.resolutionDeadline, nowMs);
 
   return (
     <View style={[styles.face, dimmed && { opacity: 0.75 }]}>
@@ -173,19 +146,17 @@ export function CardFace({ card, skinId, stakeCents, dimmed = false, onEditStake
           <View style={[styles.badgeDot, { backgroundColor: cat.color }]} />
           <Text style={styles.badgeText}>{cat.label}</Text>
         </View>
-        <View style={[styles.badge, cd.urgent && styles.badgeUrgent]}>
-          <Text style={styles.badgeText}>⏱ <Text style={cd.urgent ? styles.timerUrgent : styles.timer}>{cd.text}</Text></Text>
-        </View>
+        <LiveBadge deadline={card.resolutionDeadline} />
       </View>
 
       <View style={styles.middle}>
         <Text style={styles.question} numberOfLines={4}>{displayQuestion(card)}</Text>
         {isUpDown(card)
-          ? <Text style={styles.hint}>{cd.relText}</Text>
+          ? <LiveText deadline={card.resolutionDeadline} kind="rel" style={styles.hint} />
           : hint ? <Text style={styles.hint} numberOfLines={2}>{hint}</Text> : null}
         {/* What the ⏱ badge counts on a match: the kick-off, not a payout — see web CardFace. */}
         {isMatchClock(card) ? (
-          <Text style={styles.kickoff}>Kick-off in {cd.text} · resolves after the match</Text>
+          <LiveText deadline={card.resolutionDeadline} kind="kickoff" style={styles.kickoff} />
         ) : null}
       </View>
 
