@@ -37,8 +37,8 @@ Each phase ends with: mobile `tsc` green → x86_64 APK on the emulator → scre
 
 ## Final
 - [x] F.1 Root + mobile `tsc`, `contract:check`, `npm test` green
-- [ ] F.2 arm64 + x86_64 APKs rebuilt on the Desktop
-- [ ] F.3 Every box above ticked
+- [x] F.2 arm64 + x86_64 APKs rebuilt on the Desktop
+- [x] F.3 Every box above ticked
 
 ## Deliberate differences (keep)
 - Play flavor: no real-money surface at all (`wallet.available === false`).
