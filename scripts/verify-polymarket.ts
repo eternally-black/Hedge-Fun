@@ -157,12 +157,13 @@ async function main() {
   const kickoffIso = "2026-07-01T18:00:00.000Z";
   const withStart = mapMarket({
     conditionId: "0xstart",
-    question: "Match starts later?",
+    question: "Will CA Platense win on 2026-07-01?", // a match: only sports/esports keep a kick-off (3ccb6ff)
     startDate: "2026-06-20T00:00:00Z", // listing date — must be IGNORED
     gameStartTime: "2026-07-01 18:00:00+00", // Gamma's own wire format for kick-off
     endDate: new Date(Date.now() + 3_600_000).toISOString(),
-    outcomes: '["Team A","Team B"]',
+    outcomes: '["Yes","No"]',
     outcomePrices: '["0.5","0.5"]',
+    tags: [{ label: "Sports" }, { label: "Soccer" }],
   });
   assert.strictEqual(withStart?.startsAt, kickoffIso, "gameStartTime present -> startsAt = kick-off ISO");
   const noStart = mapMarket({
