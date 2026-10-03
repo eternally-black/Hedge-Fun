@@ -220,20 +220,11 @@ export async function POST(req: Request) {
       );
     }
 
-    // NO share-minimum gate on a BUY. Books advertise min_order_size 5 uniformly, but Polymarket's
-    // own ticket fills a $1 market buy on a 99.7c side (~1.003 shares), so that field does not bind
-    // a taker buy — enforcing it here would reject a $1 stake on most of a contested deck, which is
-    // the product. The dollar floor above is the gate; the exchange remains the authority on its own
-    // minimum, and a rejection there is loud and moves no money. Reported so we find out for certain
-    // from real traffic rather than from another reading of the field.
-    if (q.sharesMicro < BigInt(Math.round(book.minOrderSize * 1_000_000))) {
-      await captureToGlitchTip(new Error("buy below advertised min_order_size"), {
-        route: "real/intent",
-        minShares: String(book.minOrderSize),
-        sharesMicro: q.sharesMicro.toString(),
-        stakeCents: String(stake),
-      });
-    }
+    // NO share-minimum gate on a BUY. Books advertise min_order_size 5 uniformly, but it does not
+    // bind a taker buy: settled from real traffic 2026-10-03 — a $1 buy filled 2.173914 shares at
+    // 46c on a book advertising 5 (Polymarket's own ticket does the same on a 99.7c side). The dollar
+    // floor above is the gate; the exchange stays the authority on its own minimum. (The GlitchTip
+    // probe that was here fired on every such buy and has done its job.)
 
     // maxPrice = MARGINAL ask (never VWAP), tick-rounded UP for a BUY and then one tick CLEAR of it
     // — an order whose bound sits exactly on the level it means to take is not reliably fillable

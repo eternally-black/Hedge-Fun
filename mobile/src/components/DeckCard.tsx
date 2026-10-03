@@ -5,7 +5,7 @@
 import { memo, useEffect, useState } from "react";
 import { Animated, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { PanGestureHandler } from "react-native-gesture-handler";
-import { useSwipeCard } from "../useSwipeCard";
+import { previewPose, useSwipeCard } from "../useSwipeCard";
 import type { DeckCard as DeckCardT } from "@contract/api-types";
 import { colors } from "../theme";
 import { isFootballCard, SkinBackground } from "../skins";
@@ -67,7 +67,7 @@ export function DeckCard({ card, skinId, stakeCents, enabled, onCommit, onEditSt
 export function CardPreview({ card, skinId }: { card: DeckCardT; skinId: string }) {
   return (
     <View style={[styles.card, styles.preview]} pointerEvents="none">
-      <CardFace card={card} skinId={skinId} stakeCents={null} dimmed />
+      <CardFace card={card} skinId={skinId} stakeCents={null} />
     </View>
   );
 }
@@ -199,7 +199,7 @@ const styles = StyleSheet.create({
     borderRadius: 26, overflow: "hidden",
     backgroundColor: colors.panel2, borderWidth: 1, borderColor: colors.line,
   },
-  preview: { transform: [{ scale: 0.95 }, { translateY: -10 }], opacity: 0.9 },
+  preview: previewPose, // the exact pose the top card's rise starts from (useSwipeCard)
   face: { flex: 1, padding: 16 },
   topRow: { flexDirection: "row", justifyContent: "space-between", gap: 8 },
   badge: {

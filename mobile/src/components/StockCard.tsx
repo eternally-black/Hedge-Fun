@@ -4,7 +4,7 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { Animated, Image, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { PanGestureHandler } from "react-native-gesture-handler";
-import { useSwipeCard } from "../useSwipeCard";
+import { previewPose, useSwipeCard } from "../useSwipeCard";
 import type { StockDeckCard as StockDeckCardT } from "@contract/api-types";
 import { usd } from "../format";
 import { colors, withAlpha } from "../theme";
@@ -252,7 +252,7 @@ const styles = StyleSheet.create({
     borderRadius: 26, overflow: "hidden",
     backgroundColor: colors.panel2, borderWidth: 1, borderColor: colors.line,
   },
-  preview: { transform: [{ scale: 0.95 }, { translateY: -10 }], opacity: 0.9 },
+  preview: previewPose, // the exact pose the top card's rise starts from (useSwipeCard)
   faceRoot: { flex: 1 },
   faceBg: {
     position: "absolute", top: 0, left: 0, right: 0, bottom: 0,
