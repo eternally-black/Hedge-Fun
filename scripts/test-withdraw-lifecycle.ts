@@ -9,8 +9,10 @@
 //     address is a live one-shot forwarder);
 //   - a SUBMITTING run without a relayer verdict keeps the slot even when the balance dropped
 //     (resetNeedsProof: a queued transfer reads exactly like one that never left);
-//   - a new destination mints a new address; the validation gates refuse before any mint.
-// The route allows 6 POSTs per user per minute; each user below stays at 5 or fewer.
+//   - a new destination mints a new address; the validation gates refuse before any mint;
+//   - a stuck SUBMITTING run that converged as landed answers "done" ONLY to a retry of itself — a
+//     different request starts its own run (it used to be told "done" while nothing moved).
+// The route allows 6 POSTs per user per minute; each user below stays at 6 or fewer.
 // Run: npx tsx scripts/test-withdraw-lifecycle.ts (part of test:db:run). Needs DATABASE_URL.
 import assert from "node:assert";
 import { PrivyClient } from "@privy-io/server-auth";
@@ -222,11 +224,31 @@ async function main() {
     assert.strictEqual(r.state, "SUBMITTING", "the slot is untouched");
     assert.strictEqual(r.runId, "run-inflight");
     assert.strictEqual(mints, 3, "nothing minted while a run is in flight");
+
+    // ── 5. the run LANDED: a retry of it is "done", a different request is a new run (carol) ─────
+    sdkStub.__stubCalls.txState = "STATE_CONFIRMED";
+    res = await post(toSolana(RECIPIENT_A)); // post 5: the very same transfer again
+    assert.strictEqual(res.status, 200);
+    body = await res.json();
+    assert.strictEqual(body.status, "done", "a retry of the landed run is reported done");
+    assert.strictEqual(mints, 3, "and starts nothing");
+    r = await row(carol.id);
+    assert.strictEqual(r.state, "DONE", "the stuck run converged");
+    await setRow(carol.id, { state: "SUBMITTING", expiresAt: new Date(Date.now() + 60_000) });
+    res = await post(toSolana(RECIPIENT_B)); // post 6: a different destination
+    assert.strictEqual(res.status, 200);
+    body = await res.json();
+    assert.strictEqual(body.status, "pending_signature", "a different request is NOT answered with the old run's done");
+    assert.strictEqual(body.bridgeAddress, mintedAddress(4), "it gets its own forwarder");
+    assert.strictEqual(mints, 4);
+    r = await row(carol.id);
+    assert.strictEqual((r.inputs as { recipient: string }).recipient, RECIPIENT_B, "the slot now holds the new run");
+    sdkStub.__stubCalls.txState = null;
     pusdMicro = 5_000_000n;
 
     assert.deepStrictEqual(unexpected, [], `nothing but the bridge and eth_call was called: ${unexpected.join(", ")}`);
     console.log(
-      "✓ test-withdraw-lifecycle: gates refuse before a mint, a parked run is superseded and its forwarder reused, a new destination mints, SUBMITTING holds without proof",
+      "✓ test-withdraw-lifecycle: gates refuse before a mint, a parked run is superseded and its forwarder reused, a new destination mints, SUBMITTING holds without proof, a landed run answers only its own retry",
     );
   } finally {
     for (const u of users) {
