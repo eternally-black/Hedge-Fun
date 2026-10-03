@@ -12,7 +12,16 @@
 // (fetchBlitzDeck breaks early once its buckets fill).
 import { PrismaClient } from "@prisma/client";
 import { fetchBlitzDeck } from "../src/lib/polymarket";
-import { DECK_FETCH_HORIZON_HOURS } from "../src/lib/deck-mix";
+import {
+  DECK_FETCH_HORIZON_HOURS,
+  categoryOf,
+  isContextPoor,
+  isUnnamedMatch,
+  shuffleNoRun,
+  withinCategoryHorizon,
+} from "../src/lib/deck-mix";
+import { servableUpDown } from "../src/lib/updown";
+import { evalMarketDepthBatch } from "../src/lib/depth";
 import { DECK_MIN_LEAD_MS } from "../src/lib/config";
 
 const prisma = new PrismaClient();
@@ -102,6 +111,90 @@ export async function refreshDeck(hours = DECK_FETCH_HORIZON_HOURS, limit = 100)
   const cutoff = Date.now() + DECK_MIN_LEAD_MS;
   const servable = markets.filter((m) => new Date(m.resolutionDeadline).getTime() > cutoff).length;
   return { upserted: markets.length, servable };
+}
+
+// refreshDeck re-reads the same ~200 soonest-ending markets every tick, and the deck drops any row
+// whose book is older than BOOK_MAX_DISPLAY_STALE_MS (10 min) — so whole leagues never reached the
+// deck (2026-10-03: 137 contested Tennis markets, 1 fresh book). This re-reads books for a
+// league-spread sample of cached rows whose book is missing or >5 min old. Every evaluated row gets
+// its true numbers (out-of-band ones too: the serve-time band filter drops them, and a fresh stamp
+// keeps them from being re-picked next tick); untradable rows get the same stamp refreshDeck writes.
+export async function refreshStaleBooks(limit = 150): Promise<{ picked: number; fresh: number; stamped: number }> {
+  const nowMs = Date.now();
+  const candidates = await prisma.market.findMany({
+    where: {
+      status: "OPEN",
+      source: "POLYMARKET",
+      yesTokenId: { not: null },
+      noTokenId: { not: null },
+      resolutionDeadline: {
+        gt: new Date(nowMs + DECK_MIN_LEAD_MS),
+        lte: new Date(nowMs + DECK_FETCH_HORIZON_HOURS * 3_600_000),
+      },
+      OR: [{ bookTsAt: null }, { bookTsAt: { lt: new Date(nowMs - 5 * 60_000) } }],
+    },
+    select: {
+      id: true,
+      question: true,
+      category: true,
+      league: true,
+      outcomeYesLabel: true,
+      outcomeNoLabel: true,
+      yesTokenId: true,
+      noTokenId: true,
+      resolutionDeadline: true,
+    },
+    take: 5000,
+  });
+
+  const rows = candidates.filter((m) => {
+    const deadlineMs = m.resolutionDeadline.getTime();
+    return (
+      !isContextPoor(m) &&
+      !isUnnamedMatch(m) &&
+      servableUpDown(m.question, deadlineMs, nowMs) &&
+      withinCategoryHorizon(m, deadlineMs, nowMs)
+    );
+  });
+
+  const picked = shuffleNoRun(rows, (m) => m.league ?? categoryOf(m), limit, nowMs & 0x7fffffff);
+  if (picked.length === 0) return { picked: 0, fresh: 0, stamped: 0 };
+
+  const depth = await evalMarketDepthBatch(
+    picked.map((m) => ({ key: m.id, yesTokenId: m.yesTokenId, noTokenId: m.noTokenId })),
+  );
+
+  let fresh = 0;
+  const rejects: string[] = [];
+  for (const m of picked) {
+    const d = depth.get(m.id) ?? null;
+    if (d === null) continue; // CLOB down / no tokens — no verdict, write nothing
+    if (!d.tradable || d.yesEffPriceBp === null || d.noEffPriceBp === null) {
+      rejects.push(m.id);
+      continue;
+    }
+    await prisma.market.update({
+      where: { id: m.id },
+      data: {
+        yesEffPriceBp: d.yesEffPriceBp,
+        noEffPriceBp: d.noEffPriceBp,
+        yesMaxStakeCents: d.yesMaxStakeCents,
+        noMaxStakeCents: d.noMaxStakeCents,
+        bookTsAt: d.bookTsAtMs !== null ? new Date(d.bookTsAtMs) : null,
+      },
+    });
+    fresh++;
+  }
+
+  let stamped = 0;
+  if (rejects.length > 0) {
+    const res = await prisma.market.updateMany({
+      where: { id: { in: rejects } },
+      data: { yesEffPriceBp: null, noEffPriceBp: null, yesMaxStakeCents: 0, noMaxStakeCents: 0, bookTsAt: new Date() },
+    });
+    stamped = res.count;
+  }
+  return { picked: picked.length, fresh, stamped };
 }
 
 // Run directly (not when imported by the poller).

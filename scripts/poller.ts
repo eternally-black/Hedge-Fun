@@ -24,7 +24,7 @@ import { watchFunding, rpcChain } from "../src/lib/funding";
 import { watchStuckAttempts } from "../src/lib/attempts-watch";
 import { settleResolvedRealPositions, expireStaleIntents } from "../src/lib/real-settle";
 import { evaluateStreak } from "../src/lib/streak";
-import { refreshDeck } from "./refresh-deck";
+import { refreshDeck, refreshStaleBooks } from "./refresh-deck";
 import { pruneMarkets } from "./prune-markets";
 import { refreshHedgeIndex } from "./refresh-hedge-index";
 import { refreshStockCatalog, refreshStockPrices } from "./refresh-stocks";
@@ -79,6 +79,7 @@ const HEDGE_INDEX_EVERY_N_TICKS = 5;
 // ordinary subsystem failure — the previous deck / index rows stay, nothing partial is written,
 // unsettled markets and unread balances wait a tick.
 const DECK_GAMMA_BUDGET_MS = 45_000;
+const STALE_BOOKS_BUDGET_MS = 20_000; // CLOB-only (one coalesced /books batch), no Gamma
 const HEDGE_INDEX_GAMMA_BUDGET_MS = 120_000;
 const SETTLE_BUDGET_MS = 60_000;
 const FUNDING_BUDGET_MS = 30_000;
@@ -277,6 +278,18 @@ async function tick() {
     subsystemFailed("deck", e);
   }
   mark("deck", t);
+
+  // Rotate fresh books across the WHOLE cached window, league-spread: refreshDeck alone keeps the
+  // same soonest ~200 fresh, and a stale book hides its card (see refreshStaleBooks).
+  t = Date.now();
+  try {
+    const b = await withDeadline(STALE_BOOKS_BUDGET_MS, () => refreshStaleBooks(150));
+    console.log(`[books] re-read ${b.picked} stale books: ${b.fresh} fresh, ${b.stamped} untradable`);
+    beat();
+  } catch (e) {
+    console.warn("[books] stale-book refresh error:", (e as Error).message);
+  }
+  mark("books", t);
 
   // Hedge market index (S1 crypto majors + S2 sports/esports) — SLOWER sibling cadence (every Nth
   // tick). Runs on the FIRST tick after boot then every HEDGE_INDEX_EVERY_N_TICKS ticks, so a fresh
