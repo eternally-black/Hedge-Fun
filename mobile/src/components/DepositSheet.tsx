@@ -28,6 +28,8 @@ export function DepositSheet({ visible, api, pusdMicro, onClose, onToast }: {
   const [chains, setChains] = useState<DepositChain[] | null>(null);
   const [picked, setPicked] = useState<DepositChain | null>(null);
   const [failed, setFailed] = useState(false);
+  // A toast renders under this Modal, so the copy confirmation lives on the button itself.
+  const [copied, setCopied] = useState(false);
   // What the balance was when this sheet opened. An ARRIVAL is an increase over THAT — not simply a
   // non-zero balance, or opening a funded account would announce money that came days ago.
   const [baseline, setBaseline] = useState<bigint | null>(null);
@@ -91,7 +93,8 @@ export function DepositSheet({ visible, api, pusdMicro, onClose, onToast }: {
   const copy = async (value: string) => {
     try {
       await Clipboard.setStringAsync(value);
-      onToast("Copied to clipboard");
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
     } catch {
       onToast("Couldn't copy — select it manually");
     }
@@ -121,7 +124,7 @@ export function DepositSheet({ visible, api, pusdMicro, onClose, onToast }: {
                 <Text style={[styles.caps, styles.sectionTop]}>Send to this address</Text>
                 <TouchableOpacity onPress={() => void copy(picked.address)} style={styles.addressBtn}>
                   <Text selectable style={styles.addressText}>{picked.address}</Text>
-                  <Text style={[styles.caps, styles.tapToCopy]}>Tap to copy</Text>
+                  <Text style={[styles.caps, styles.tapToCopy]}>{copied ? "Copied ✓" : "Tap to copy"}</Text>
                 </TouchableOpacity>
 
                 <Row label="Network" value={picked.name} />

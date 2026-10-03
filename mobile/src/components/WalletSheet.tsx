@@ -221,11 +221,14 @@ function PaperPocket({ me, busy, onTopup }: { me: MeResponse | null; busy: boole
 // address is one tap away from the clipboard.
 function StockPocket({ stock, onToast }: { stock: StockPocketState; onToast: (m: string) => void }) {
   const { address, usdCents, refresh } = stock;
+  // A toast renders under the wallet Modal, so the copy confirmation lives on the button itself.
+  const [copied, setCopied] = useState(false);
   const copy = async () => {
     if (!address) return;
     try {
       await Clipboard.setStringAsync(address);
-      onToast("Address copied");
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
     } catch {
       onToast("Couldn't copy — select the address instead");
     }
@@ -244,7 +247,7 @@ function StockPocket({ stock, onToast }: { stock: StockPocketState; onToast: (m:
           <Text selectable style={styles.address}>{address}</Text>
           <View style={pocketStyles.actionRow}>
             <TouchableOpacity onPress={() => void copy()} style={[pocketStyles.action, pocketStyles.gold]}>
-              <Text style={[pocketStyles.actionText, pocketStyles.goldText]}>Copy address</Text>
+              <Text style={[pocketStyles.actionText, pocketStyles.goldText]}>{copied ? "Copied ✓" : "Copy address"}</Text>
             </TouchableOpacity>
             <TouchableOpacity onPress={() => void refresh()} style={[pocketStyles.action, pocketStyles.quiet]}>
               <Text style={[pocketStyles.actionText, pocketStyles.quietText]}>↻ Refresh</Text>
