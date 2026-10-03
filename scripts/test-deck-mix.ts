@@ -14,6 +14,15 @@ assert.strictEqual(categoryOf({ question: "Norway vs. France: Norway O/U 0.5", o
 assert.strictEqual(categoryOf({ question: "Will BTC close over 100k?", outcomeYesLabel: "Over", outcomeNoLabel: "Under" }), "crypto", "crypto total -> crypto, not overunder");
 
 // ---- isContextPoor: bare Over/Under totals with no match named are dropped from the deck ----
+{
+  const yn = (question: string) => ({ question, outcomeYesLabel: "Yes", outcomeNoLabel: "No" });
+  assert.strictEqual(isContextPoor(yn("Will the fight end before Round 5?")), true, "'the fight' names nobody");
+  assert.strictEqual(isContextPoor(yn("Fight to Go the Distance?")), true, "nameless UFC prop");
+  assert.strictEqual(isContextPoor(yn("Exact Score: Any Other Score?")), true, "catch-all score names no match");
+  assert.strictEqual(isContextPoor(yn("Will Payton Talbott win by KO or TKO?")), false, "names the fighter");
+  assert.strictEqual(isContextPoor(yn("Exact Score: Russia 2 - 0 Namibia?")), false, "names both teams");
+  assert.strictEqual(isContextPoor(yn("UFC 332: King Green vs. Esteban Ribovics: Will the fight go the distance?")), false, "vs names the bout");
+}
 const ou = (q: string) => ({ question: q, outcomeYesLabel: "Over", outcomeNoLabel: "Under" });
 assert.strictEqual(isContextPoor(ou("Games Total: O/U 4.5")), true, "bare total, no match -> poor");
 assert.strictEqual(isContextPoor(ou("Map 1 Total Rounds: Over/Under 21.5")), true, "esports signal but no match named -> poor");
