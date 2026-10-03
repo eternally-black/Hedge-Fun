@@ -69,7 +69,7 @@ jobs:
       - name: Production dependency audits
         run: |
           npm audit --omit=dev --audit-level=high
-          npm audit --prefix mobile --omit=dev --audit-level=high
+          node scripts/audit-gate.mjs mobile
           npm audit --prefix docker/prisma-cli --omit=dev --audit-level=high
 
   # ---------------------------------------------------------------------------
