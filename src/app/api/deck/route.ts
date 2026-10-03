@@ -55,7 +55,7 @@ export async function GET(req: Request) {
   // The contested band is NOT a SQL filter anymore: it must consume the AUTHORITATIVE price per row
   // (the eff VWAP for POLYMARKET — null when no fresh book read exists, i.e. "not servable"; the
   // stored odds for a bookless source) — not expressible as one column predicate. It runs in JS below
-  // alongside the other serve-time quality filters (the take:500 pool leaves ample headroom).
+  // alongside the other serve-time quality filters (the take:5000 pool leaves ample headroom).
   const candidates = await prisma.market.findMany({
     where: {
       status: "OPEN",
@@ -67,7 +67,9 @@ export async function GET(req: Request) {
     orderBy: { resolutionDeadline: "asc" },
     // Cap generously above the live cache size so the soonest-ordered cut can't starve the sparse
     // sports/esports buckets (their cards resolve later, so a tight soonest-N would be all crypto).
-    take: 500,
+    // 5000, not 500: the 72h window holds ~3.7k rows now (2026-10-03), and a soonest-500 cut was
+    // ~45% soccer + ~40% five-minute crypto windows (dropped below) — the deck came out all soccer.
+    take: 5000,
     select: {
       id: true,
       question: true,
@@ -121,9 +123,14 @@ export async function GET(req: Request) {
     .map((c) => ({ c, p: authoritativePrices(c, nowMs) }))
     .filter(({ p }) => p.yes !== null && p.no !== null && priceIsContested(p.yes, p.no));
 
-  // Randomly mix categories with the rule: never >2 cards of the same category in a row.
-  // Seed from the clock so each fetch yields a fresh order.
-  const cards = shuffleNoRun(usable, (u) => categoryOf(u.c), DECK_SIZE, Date.now() & 0x7fffffff);
+  // Mix by league for matches (Soccer, Tennis, NHL, CS2…) and by category otherwise (crypto,
+  // politics…): sqrt-weighted buckets, never >2 of one bucket in a row. Seed from the clock so each
+  // fetch yields a fresh order.
+  const mixKey = (c: (typeof usable)[number]["c"]) => {
+    const f = catFields(c);
+    return f.league ?? f.category;
+  };
+  const cards = shuffleNoRun(usable, (u) => mixKey(u.c), DECK_SIZE, Date.now() & 0x7fffffff);
   const body: DeckResponse = {
     cards: cards.map(({ c, p }) => ({
       // Explicit field list (no spread of the wider select) — the payload is the DeckCard contract.

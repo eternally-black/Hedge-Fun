@@ -224,36 +224,97 @@ function rng(seed: number) {
   };
 }
 
-// Shuffle `items` and emit up to `limit`, never placing >MAX_RUN of the same category in a
-// row. Greedy: shuffle the pool, then repeatedly take the first item whose category wouldn't
-// make a run of >MAX_RUN; if every remaining item would (only one category left), accept it
-// (can't do better). Returns the mixed list.
+// Mix `items` into a deck of up to `limit`. Items are bucketed by `category(x)` and each pick draws a
+// bucket with weight sqrt(remaining size): a dominant group (1000 soccer markets vs 150 NHL) still
+// shows up more often but can no longer take over the deck, and small groups still get dealt. On top,
+// never more than MAX_RUN of one bucket in a row while another bucket is left. Deterministic per seed.
 export function shuffleNoRun<T>(
   items: T[],
   category: (x: T) => string,
   limit: number,
   seed = 1,
 ): T[] {
-  // Fisher–Yates with the seeded rng.
-  const pool = items.slice();
   const rand = rng(seed);
-  for (let i = pool.length - 1; i > 0; i--) {
-    const j = Math.floor(rand() * (i + 1));
-    [pool[i], pool[j]] = [pool[j], pool[i]];
+
+  // Bucket by category, preserving first-appearance order for deterministic output.
+  const buckets = new Map<string, T[]>();
+  for (const item of items) {
+    const key = category(item);
+    const bucket = buckets.get(key);
+    if (bucket) bucket.push(item);
+    else buckets.set(key, [item]);
+  }
+
+  // FisherвЂ“Yates each bucket with the seeded rng.
+  for (const bucket of buckets.values()) {
+    for (let i = bucket.length - 1; i > 0; i--) {
+      const j = Math.floor(rand() * (i + 1));
+      [bucket[i], bucket[j]] = [bucket[j], bucket[i]];
+    }
   }
 
   const out: T[] = [];
   let lastCat: string | null = null;
   let run = 0;
-  while (out.length < limit && pool.length > 0) {
-    // Prefer the first shuffled item that doesn't extend a run past MAX_RUN.
-    let idx = pool.findIndex((x) => !(category(x) === lastCat && run >= MAX_RUN));
-    if (idx === -1) idx = 0; // only the run-category is left — unavoidable, take it
-    const [picked] = pool.splice(idx, 1);
-    const cat = category(picked);
-    run = cat === lastCat ? run + 1 : 1;
-    lastCat = cat;
+
+  while (out.length < limit) {
+    // Eligible: non-empty buckets, excluding the last category when the run is already at MAX_RUN.
+    const eligible: [string, T[]][] = [];
+    for (const entry of buckets) {
+      if (entry[1].length === 0) continue;
+      if (entry[0] === lastCat && run >= MAX_RUN) continue;
+      eligible.push(entry);
+    }
+    // Fall back to all non-empty buckets if the run rule leaves nothing (unavoidable run).
+    if (eligible.length === 0) {
+      for (const entry of buckets) {
+        if (entry[1].length > 0) eligible.push(entry);
+      }
+    }
+    if (eligible.length === 0) break; // all buckets empty
+
+    // Feasibility: the largest bucket can only be split into runs of <=MAX_RUN while enough other
+    // items remain to separate them. If picking another bucket now would leave too few items to fill
+    // the remaining slots without a longer run, take the largest.
+    let left = 0;
+    let largest: [string, T[]] | null = null;
+    for (const entry of buckets) {
+      left += entry[1].length;
+      if (!largest || entry[1].length > largest[1].length) largest = entry;
+    }
+    const n = largest![1].length;
+    // Compare by key: Map iteration yields a fresh [key, value] array each time.
+    const forced = eligible.find((e) => e[0] === largest![0]);
+    const others = left - n;
+    const slotsAfter = limit - out.length - 1;
+    if (forced && Math.min(n, MAX_RUN * others) + others - 1 < slotsAfter) eligible.splice(0, eligible.length, forced);
+
+    // Weight each eligible bucket by sqrt(remaining size).
+    let total = 0;
+    const weights: number[] = [];
+    for (const [, bucket] of eligible) {
+      const w = Math.sqrt(bucket.length);
+      weights.push(w);
+      total += w;
+    }
+
+    // Pick one eligible bucket at random, weighted.
+    let r = rand() * total;
+    let chosen = eligible.length - 1;
+    for (let i = 0; i < eligible.length; i++) {
+      r -= weights[i];
+      if (r <= 0) {
+        chosen = i;
+        break;
+      }
+    }
+
+    const [key, bucket] = eligible[chosen];
+    const picked = bucket.pop()!;
+    run = key === lastCat ? run + 1 : 1;
+    lastCat = key;
     out.push(picked);
   }
+
   return out;
 }
