@@ -182,9 +182,15 @@ export function gameOf(m: Classifiable, cat: Category = categoryOf(m)): string |
 // "Map 1 Total Rounds: O/U 21.5" do NOT — they're bare totals the user can't make sense of.
 const MATCH = /\bvs\.?\b|\bv\.\b|\s@\s|\s+at\s+|\bversus\b/i;
 
+// A prop that points at its event instead of naming it: "Will the fight end before Round 3?",
+// "Fight to Go the Distance?", "Exact Score: Any Other Score?" — Polymarket groups these under an
+// event title we do not carry, so on a card they name nobody. Measured live 2026-10-03: 32 such
+// markets in the 72h window (UFC props, soccer exact-score catch-alls).
+const NAMELESS_PROP = /\bthe (fight|bout|match|game|race)\b|^fight to\b|\bany other score\b/i;
+
 // Context-poor: an Over/Under total with no recognizable match/subject in the question. These cards
-// are jargon ("over/under WHAT?") — we keep them out of the deck. NON-Over/Under markets are never
-// poor (a team name or Yes/No is self-explanatory). The check reads the question + labels only, so
+// are jargon ("over/under WHAT?") — we keep them out of the deck, along with NAMELESS_PROP props.
+// Other non-Over/Under markets are never poor (a team name or Yes/No is self-explanatory). The check reads the question + labels only, so
 // it's the same signal the deck card shows.
 export function isContextPoor(m: {
   question: string;
@@ -193,6 +199,7 @@ export function isContextPoor(m: {
 }): boolean {
   const y = m.outcomeYesLabel.toLowerCase();
   const n = m.outcomeNoLabel.toLowerCase();
+  if (!MATCH.test(m.question) && NAMELESS_PROP.test(m.question)) return true;
   const isOverUnder = y === "over" || y === "under" || n === "over" || n === "under";
   if (!isOverUnder) return false; // teams / Yes/No / Up-Down are self-explanatory
   // O/U is fine IF the question names the match (participants). No match signal -> poor.
