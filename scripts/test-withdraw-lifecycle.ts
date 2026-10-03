@@ -55,6 +55,7 @@ const BASE_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 // ── upstream stubs ────────────────────────────────────────────────────────────────────────────────
 let pusdMicro = 5_000_000n; // what the RPC reports for every deposit wallet
 let mints = 0;
+let completedBridge: string | null = null; // the bridge reports this address COMPLETED
 const mintedAddress = (n: number) => `0x${n.toString(16).padStart(40, "0")}`;
 const unexpected: string[] = [];
 const json = (body: unknown) =>
@@ -75,7 +76,12 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     mints++;
     return json({ address: { evm: mintedAddress(mints) } });
   }
-  if (url.startsWith("https://bridge.polymarket.com/status/")) return json({ transactions: [] });
+  if (url.startsWith("https://bridge.polymarket.com/status/")) {
+    if (completedBridge && url.endsWith(completedBridge)) {
+      return json({ transactions: [{ status: "COMPLETED", txHash: "0xdone", createdTimeMs: 1 }] });
+    }
+    return json({ transactions: [] });
+  }
   if (url === "http://rpc.test") {
     const method = (JSON.parse(String(init?.body ?? "{}")) as { method?: string }).method;
     if (method !== "eth_call") unexpected.push(`rpc ${method}`);
@@ -243,12 +249,24 @@ async function main() {
     assert.strictEqual(mints, 4);
     r = await row(carol.id);
     assert.strictEqual((r.inputs as { recipient: string }).recipient, RECIPIENT_B, "the slot now holds the new run");
+
+    // ── 6. GET converges a SUBMITTING run the bridge reports COMPLETED — never one it does not ────
+    currentDid = DIDS[0];
+    await setRow(alice.id, { state: "SUBMITTING", txHash: `stub-tx-a-${TAG}`, expiresAt: new Date(Date.now() + 60_000) });
+    let gv = (await (await get()).json()) as { workflow: { state: string } };
+    assert.strictEqual(gv.workflow.state, "SUBMITTING", "bridge not completed -> a read changes nothing");
+    assert.strictEqual((await row(alice.id)).state, "SUBMITTING");
+    completedBridge = mintedAddress(2); // alice's live run's forwarder
+    gv = (await (await get()).json()) as { workflow: { state: string } };
+    assert.strictEqual(gv.workflow.state, "DONE", "bridge COMPLETED + relayer confirmed -> the card reads done");
+    assert.strictEqual((await row(alice.id)).state, "DONE", "and the row converged");
+    completedBridge = null;
     sdkStub.__stubCalls.txState = null;
     pusdMicro = 5_000_000n;
 
     assert.deepStrictEqual(unexpected, [], `nothing but the bridge and eth_call was called: ${unexpected.join(", ")}`);
     console.log(
-      "✓ test-withdraw-lifecycle: gates refuse before a mint, a parked run is superseded and its forwarder reused, a new destination mints, SUBMITTING holds without proof, a landed run answers only its own retry",
+      "✓ test-withdraw-lifecycle: gates refuse before a mint, a parked run is superseded and its forwarder reused, a new destination mints, SUBMITTING holds without proof, a landed run answers only its own retry, GET converges a bridge-completed run",
     );
   } finally {
     for (const u of users) {

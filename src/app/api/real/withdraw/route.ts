@@ -302,10 +302,32 @@ export async function GET(req: Request) {
     }
   }
 
+  // A SUBMITTING run has no driver once the device's relay loop is gone: the bridge finishes, the row
+  // stays SUBMITTING, and the card says "relay submitting · bridge completed" until the NEXT POST
+  // converges it (live 2026-10-03, and the 2026-08-19 row sat like that for six weeks). When the
+  // bridge itself reports COMPLETED, converge here with the same chain-backed check the POST uses —
+  // tryConverge only writes DONE on a positive verify, so a read can never close a run that did not land.
+  let state = row.state;
+  const wallet = user.depositWalletAddress;
+  const signerAddress = user.embeddedWalletAddress;
+  if (row.state === "SUBMITTING" && row.runId && inputs?.bridgeAddress && status === "COMPLETED" && wallet && signerAddress) {
+    try {
+      const client = await serverSecureClient(prisma, user);
+      if (client) {
+        const spec = runScoped(bridgeOutSpec(user.id, signerAddress, client, inputs), () =>
+          relayerVerdict(prisma, user.id, "BRIDGE_OUT", client),
+        );
+        if (await tryConverge(prisma, spec, row.runId)) state = "DONE";
+      }
+    } catch {
+      // a read stays a read: no client / no verdict → leave the row for the next POST
+    }
+  }
+
   return NextResponse.json({
     workflow: {
       kind: row.kind,
-      state: row.state,
+      state,
       stepIndex: row.stepIndex,
       error: row.error,
       updatedAt: row.updatedAt.toISOString(),
