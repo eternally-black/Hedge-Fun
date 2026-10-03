@@ -168,6 +168,22 @@ function longestRun(cats: string[]): number {
   assert.notStrictEqual(a, b, "different seeds -> different order");
 }
 
+// ---- a dominant bucket cannot take over the deck (the 2026-10-03 "90% soccer" report) ----
+{
+  const pool = [
+    ...Array.from({ length: 1000 }, (_, i) => ({ id: "s" + i, cat: "Soccer" })),
+    ...Array.from({ length: 150 }, (_, i) => ({ id: "h" + i, cat: "NHL" })),
+    ...Array.from({ length: 80 }, (_, i) => ({ id: "b" + i, cat: "NBA" })),
+    ...Array.from({ length: 60 }, (_, i) => ({ id: "c" + i, cat: "crypto" })),
+  ];
+  for (let seed = 1; seed <= 20; seed++) {
+    const out = shuffleNoRun(pool, (x) => x.cat, 50, seed);
+    const soccer = out.filter((x) => x.cat === "Soccer").length;
+    assert.ok(soccer <= 30, `seed ${seed}: soccer ${soccer}/50 — dominant bucket took over`);
+    assert.ok(new Set(out.map((x) => x.cat)).size === 4, `seed ${seed}: every bucket dealt`);
+  }
+}
+
 // ---- withinCategoryHorizon: per-category resolution window (crypto/OU blitz, sports/esports longer) ----
 {
   const now = 1_000_000_000_000; // fixed clock
