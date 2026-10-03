@@ -142,19 +142,34 @@ export async function POST(req: Request) {
     if (!converged) {
       return NextResponse.json({ error: "withdrawal_in_flight" }, { status: 409 });
     }
-    // Converged means the prior run LANDED. Do NOT fall through into a new withdrawal: this POST is
-    // most likely the user retrying the very transfer that just completed — the card renders a lost
+    // Converged means the prior run LANDED. If this POST asks for exactly that transfer again, do NOT
+    // fall through into a new withdrawal: it is most likely the user retrying the very transfer that
+    // just completed — the card renders a lost
     // response as a plain failure (RealWithdrawCard), so pressing the button again is the natural
     // next move. Falling through minted a fresh forwarder and started a second run, and the retry
     // could not even be recognised as a duplicate downstream: `pusdBaseline` is re-read on every
     // POST, so an identical amount+recipient retry still fails startWorkflow's sameInputs check and
-    // reaches freshRun. Report the completed run instead; a genuinely new withdrawal is one more
-    // POST away, now against a terminal row that the reuse/mint path handles normally.
-    return NextResponse.json({
-      bridgeAddress: prior!.bridgeAddress,
-      amountMicro: prior!.amountMicro,
-      status: "done",
-      converged: true,
+    // reaches freshRun. Report the completed run instead.
+    // A DIFFERENT request (other destination or amount) cannot be that retry, and answering it with
+    // the old run's "done" reports a withdrawal that never ran — live 2026-10-03: a row stuck in
+    // SUBMITTING since 2026-08-19 converged on a new $5 request to a new address, the device showed
+    // "the bridge has the funds", and nothing left the wallet. That one proceeds as a new withdrawal
+    // against the now-terminal row, which the reuse/mint path below handles normally.
+    const sameRequest =
+      prior!.chainId === chainId &&
+      prior!.tokenAddress === tokenAddress &&
+      prior!.recipient === recipient &&
+      prior!.amountMicro === amount.toString();
+    if (sameRequest) {
+      return NextResponse.json({
+        bridgeAddress: prior!.bridgeAddress,
+        amountMicro: prior!.amountMicro,
+        status: "done",
+        converged: true,
+      });
+    }
+    existing = await prisma.walletWorkflow.findUnique({
+      where: { userId_kind: { userId: user.id, kind: "BRIDGE_OUT" } },
     });
   }
 

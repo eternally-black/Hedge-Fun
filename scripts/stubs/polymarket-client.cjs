@@ -5,7 +5,8 @@
 // Installed by scripts/stubs/polymarket-client-hooks.cjs (module.registerHooks) BEFORE the route is
 // imported; only the names the withdraw route's import graph uses are provided, on purpose — a new
 // SDK import in that graph fails loudly here instead of silently talking to production.
-const calls = { prepared: 0, fetched: 0 };
+// txState: null = the relayer probe is unreachable; a string = the relayer reports that state.
+const calls = { prepared: 0, fetched: 0, txState: null };
 
 module.exports = {
   __stubCalls: calls,
@@ -16,6 +17,7 @@ module.exports = {
   // (or, for resetNeedsProof specs, the hold) stay in charge.
   fetchTransaction: async () => {
     calls.fetched++;
+    if (calls.txState) return { state: calls.txState };
     throw new Error("stub: relayer unreachable");
   },
   // bridge-out.ts: the gasless generator. Same protocol as the SDK's: the engine answers
