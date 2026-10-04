@@ -102,10 +102,16 @@ export function DepositSheet({ visible, api, pusdMicro, onClose, onToast }: {
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <Pressable style={styles.backdrop} onPress={onClose} accessibilityLabel="Close">
-        <Pressable style={styles.sheet} onPress={(e) => e.stopPropagation()}>
+      {/* The backdrop tap-to-close is a SIBLING under the sheet, not its parent: a Pressable around
+          the sheet claimed every touch on Android, so the ScrollView inside never got to scroll. */}
+      <View style={styles.backdrop}>
+        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close" />
+        <View style={styles.sheet}>
           <View style={styles.handle} />
-          <ScrollView showsVerticalScrollIndicator={false}>
+          {/* flexShrink: the sheet caps its height (maxHeight 88%), and a ScrollView that doesn't shrink
+              takes its full content height instead — the overflow is clipped by the sheet and there is
+              nothing left to scroll (the History list sat below the fold, unreachable). */}
+          <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
             <View style={styles.header}>
               <Text style={styles.title}>{picked ? picked.name : "Deposit"}</Text>
               <TouchableOpacity onPress={picked ? () => setPicked(null) : onClose} style={styles.headerBtn}>
@@ -168,8 +174,8 @@ export function DepositSheet({ visible, api, pusdMicro, onClose, onToast }: {
               </>
             )}
           </ScrollView>
-        </Pressable>
-      </Pressable>
+        </View>
+      </View>
     </Modal>
   );
 }
@@ -190,6 +196,7 @@ const styles = StyleSheet.create({
     borderTopWidth: 1, borderTopColor: colors.line, paddingHorizontal: 18, paddingBottom: 22, paddingTop: 8,
     maxHeight: "88%",
   },
+  scroll: { flexShrink: 1 },
   handle: { width: 42, height: 5, borderRadius: 4, backgroundColor: colors.line, alignSelf: "center", marginBottom: 14 },
   header: { flexDirection: "row", alignItems: "center", gap: 10 },
   title: { color: colors.text, fontSize: 20, fontWeight: "800", flex: 1 },

@@ -3,7 +3,7 @@
 // purpose (Paper, the play balance; Real · Stocks, the connected Solana wallet; Real · Predictions,
 // the Polymarket balance), then the History tabs (Calls / Stocks / Hedges) like the web sheet.
 import { useCallback, useEffect, useState } from "react";
-import { Modal, Pressable, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { type LayoutChangeEvent, Modal, Pressable, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import * as Clipboard from "expo-clipboard";
 import type { MeResponse, StockPortfolioResponse, StockPositionRow } from "@contract/api-types";
 import { toPredictionRow, useClosePosition, useExitQuotes, usePredictionHistory } from "../usePredictionHistory";
@@ -50,10 +50,16 @@ export function WalletSheet({ visible, me, api, realPusdMicro, stock, onClose, o
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <Pressable style={styles.backdrop} onPress={onClose} accessibilityLabel="Close">
-        <Pressable style={styles.sheet} onPress={(e) => e.stopPropagation()}>
+      {/* The backdrop tap-to-close is a SIBLING under the sheet, not its parent: a Pressable around
+          the sheet claimed every touch on Android, so the ScrollView inside never got to scroll. */}
+      <View style={styles.backdrop}>
+        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close" />
+        <View style={styles.sheet}>
           <View style={styles.handle} />
-          <ScrollView showsVerticalScrollIndicator={false}>
+          {/* flexShrink: the sheet caps its height (maxHeight 88%), and a ScrollView that doesn't shrink
+              takes its full content height instead — the overflow is clipped by the sheet and there is
+              nothing left to scroll (the History list sat below the fold, unreachable). */}
+          <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
             <View style={styles.header}>
               <Text style={styles.title}>Wallet</Text>
               <TouchableOpacity onPress={onClose} style={styles.closeBtn} accessibilityLabel="Close">
@@ -81,8 +87,8 @@ export function WalletSheet({ visible, me, api, realPusdMicro, stock, onClose, o
                 the 1s exit-quote poll never runs for a closed sheet. */}
             {visible ? <History me={me} api={api} onToast={onToast} onClose={onClose} /> : null}
           </ScrollView>
-        </Pressable>
-      </Pressable>
+        </View>
+      </View>
     </Modal>
   );
 }
@@ -139,6 +145,14 @@ function History({ me, api, onToast, onClose }: { me: MeResponse | null; api: Ap
     : "No hedges yet. The Hedge tab turns a life cost or a wallet into one.";
   // Selling is a real-money action — only a build that can sign offers it.
   const canClose = wallet.available;
+  // The list area never shrinks while the sheet is open: switching from a long tab to a short or
+  // empty one (or to "Loading…") would otherwise cut the scroll content under the user's position
+  // and snap the sheet up. It keeps the tallest height it has had; the extra is empty space.
+  const [listMinHeight, setListMinHeight] = useState(0);
+  const onListLayout = useCallback((e: LayoutChangeEvent) => {
+    const h = e.nativeEvent.layout.height;
+    setListMinHeight((cur) => (h > cur ? h : cur));
+  }, []);
 
   return (
     <View>
@@ -167,6 +181,7 @@ function History({ me, api, onToast, onClose }: { me: MeResponse | null; api: Ap
         })}
       </View>
 
+      <View style={{ minHeight: listMinHeight }} onLayout={onListLayout}>
       {loading ? (
         <Text style={styles.historyNote}>Loading…</Text>
       ) : (
@@ -197,6 +212,7 @@ function History({ me, api, onToast, onClose }: { me: MeResponse | null; api: Ap
           ) : null}
         </View>
       )}
+      </View>
     </View>
   );
 }
@@ -299,6 +315,7 @@ const styles = StyleSheet.create({
     borderTopWidth: 1, borderTopColor: colors.line, paddingHorizontal: 18, paddingBottom: 28, paddingTop: 8,
     maxHeight: "88%",
   },
+  scroll: { flexShrink: 1 },
   handle: { width: 42, height: 5, borderRadius: 4, backgroundColor: colors.line, alignSelf: "center", marginBottom: 14 },
   header: { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 12 },
   title: { color: colors.text, fontSize: 26, fontWeight: "900", flex: 1 },
