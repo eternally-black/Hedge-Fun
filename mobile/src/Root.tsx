@@ -1,7 +1,7 @@
 // Root — the native twin of src/app/page.tsx: auth gate, boot ritual, screen state machine,
 // persistent HUD + bottom nav, toast, and the wallet sheet. Server data is rendered as-is.
 import { type Ref, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
-import { ActivityIndicator, AppState, Platform, StatusBar as RNStatusBar, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { ActivityIndicator, AppState, InteractionManager, Platform, StatusBar as RNStatusBar, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { usePrivy } from "@privy-io/expo";
 import { useApi, statusOf } from "./api";
@@ -50,6 +50,16 @@ export default function Root() {
   const [booted, setBooted] = useState(false);
   const ritualDone = useRef(false); // run the auth→boot sequence once per login
   const [walletOpen, setWalletOpen] = useState(false);
+  // Keep-alive tabs: Hedge and Stocks mount once, hidden, as soon as the boot frame has settled
+  // (the deck's first paint goes first), and then stay mounted. Their reads are done before the tab
+  // is tapped, and switching tabs shows the finished screen instead of remounting it from scratch.
+  // Each screen gets `active` and revalidates in place when it becomes visible.
+  const [tabsWarm, setTabsWarm] = useState(false);
+  useEffect(() => {
+    if (!booted) return;
+    const task = InteractionManager.runAfterInteractions(() => setTabsWarm(true));
+    return () => task.cancel();
+  }, [booted]);
   // The results reveal overlay (the web's `reveal`). "ritual" = the boot reveal (finishing may route
   // to Home for the GM check-in); "replay" = asked for from Results, so finishing lands on the deck.
   const [reveal, setReveal] = useState<ResultRow[] | null>(null);
@@ -75,6 +85,7 @@ export default function Root() {
     setMe(null);
     setScreen("deck");
     setBooted(false);
+    setTabsWarm(false);
     ritualDone.current = false;
     balanceGen.current++;
     setRealPusdMicro(null);
@@ -293,8 +304,17 @@ export default function Root() {
           </View>
         )}
         {effectiveScreen === "feed" && <FeedScreen api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openWallet} />}
-        {screen === "stocks" && <PortfolioScreen me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onNeedWallet={goProfile} />}
-        {screen === "hedge" && <HedgeScreen me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openWallet} />}
+        {/* Kept alive once warm (tabsWarm above): display:none hides an inactive tab without unmounting it. */}
+        {(tabsWarm || screen === "stocks") && (
+          <View style={[styles.body, screen !== "stocks" && styles.hidden]}>
+            <PortfolioScreen active={screen === "stocks"} me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onNeedWallet={goProfile} />
+          </View>
+        )}
+        {(tabsWarm || screen === "hedge") && (
+          <View style={[styles.body, screen !== "hedge" && styles.hidden]}>
+            <HedgeScreen active={screen === "hedge"} me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openWallet} />
+          </View>
+        )}
         {screen === "results" && <ResultsScreen api={api} onSeen={markResultsSeen} onAckFailed={refreshMe} onReplay={replayReveal} onOpenStock={goStocks} />}
         {screen === "profile" && <ProfileScreen me={me} api={api} onRefreshMe={refreshMe} onLogout={doLogout} onToast={flashToast} onNav={setScreen} onOpenHistory={openWallet} />}
         {screen === "invite" && <InviteScreen me={me} api={api} onToast={flashToast} />}
@@ -363,6 +383,7 @@ const topPad = Platform.OS === "android" ? (RNStatusBar.currentHeight ?? 0) : 0;
 const styles = StyleSheet.create({
   shell: { flex: 1, backgroundColor: colors.bg, paddingTop: topPad },
   body: { flex: 1 },
+  hidden: { display: "none" },
   boot: { flex: 1, backgroundColor: colors.bg, alignItems: "center", justifyContent: "center", padding: 32 },
   bootBrand: { color: colors.energy, fontSize: 14, fontWeight: "800", letterSpacing: 5 },
   bootSlow: { color: colors.muted, fontSize: 12, marginTop: 18, textAlign: "center", lineHeight: 17 },

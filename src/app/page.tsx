@@ -128,6 +128,15 @@ function App() {
   // the reveal plays. This prevents the deck flashing for a frame before the reveal floats up — the
   // very first content frame is already the right screen (reveal or deck), never an intermediate.
   const [booted, setBooted] = useState(false);
+  // Keep-alive tabs (same as the app's Root): Hedge and Portfolio mount once, hidden, shortly after
+  // the boot paints the deck, and then stay mounted — their reads are done before the tab is
+  // clicked, and a tab switch shows the finished screen instead of remounting it from scratch.
+  const [tabsWarm, setTabsWarm] = useState(false);
+  useEffect(() => {
+    if (!booted) return;
+    const t = window.setTimeout(() => setTabsWarm(true), 800);
+    return () => window.clearTimeout(t);
+  }, [booted]);
   // REAL mode. `me.real.mode` is the server's answer and already accounts for missing or stale
   // consent, so the client never has to re-derive eligibility — it just renders what it is told.
   const realMode = me?.real.mode === "REAL";
@@ -631,6 +640,7 @@ function App() {
     setReveal(null);
     setScreen("deck");
     setBooted(false);
+    setTabsWarm(false);
     ritualDone.current = false;
     await logout().catch(console.error);
   }, [logout]);
@@ -810,13 +820,22 @@ function App() {
         )}
 
         {effectiveScreen === "feed" && <FeedScreen api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openBalance} />}
-        {effectiveScreen === "hedge" && <HedgeScreen api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openBalance} />}
+        {/* Kept alive once warm (tabsWarm above): display:none hides an inactive tab without unmounting it. */}
+        {(tabsWarm || effectiveScreen === "hedge") && (
+          <div style={{ position: "absolute", inset: 0, display: effectiveScreen === "hedge" ? "block" : "none" }}>
+            <HedgeScreen active={effectiveScreen === "hedge"} api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openBalance} />
+          </div>
+        )}
         {effectiveScreen === "gm" && <GmScreen me={me} busy={busy} onGM={gm} onEnterDeck={goDeck} onRevive={revive} />}
         {effectiveScreen === "vault" && <VaultScreen me={me} api={api} onRefresh={refresh} previewCard={top ?? next} />}
         {effectiveScreen === "invite" && <InviteScreen me={me} />}
         {effectiveScreen === "you" && <ProfileScreen me={me} api={api} onRefresh={refresh} onLogout={doLogout} onToast={flashToast} pusdMicro={realPusdMicro} onNav={navTo} />}
         {effectiveScreen === "notifications" && <NotificationsScreen api={api} onSeen={markResultsSeen} onAckFailed={refreshMe} onReplay={replayReveal} onOpenStock={() => setScreen("portfolio")} />}
-        {effectiveScreen === "portfolio" && <PortfolioScreen api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} stocksUsdCents={stocksUsdCents} onOpenWallet={openBalance} />}
+        {(tabsWarm || effectiveScreen === "portfolio") && (
+          <div style={{ position: "absolute", inset: 0, display: effectiveScreen === "portfolio" ? "block" : "none" }}>
+            <PortfolioScreen active={effectiveScreen === "portfolio"} api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} stocksUsdCents={stocksUsdCents} onOpenWallet={openBalance} />
+          </div>
+        )}
       </div>
 
       <BottomNav screen={effectiveScreen} onNav={navTo} deckLocked={deckLocked && deckMode === "predictions"} devFeed={!!me?.dev} />
