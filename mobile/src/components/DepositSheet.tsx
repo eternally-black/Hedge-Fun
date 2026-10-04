@@ -102,8 +102,11 @@ export function DepositSheet({ visible, api, pusdMicro, onClose, onToast }: {
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <Pressable style={styles.backdrop} onPress={onClose} accessibilityLabel="Close">
-        <Pressable style={styles.sheet} onPress={(e) => e.stopPropagation()}>
+      {/* The backdrop tap-to-close is a SIBLING under the sheet, not its parent: a Pressable around
+          the sheet claimed every touch on Android, so the ScrollView inside never got to scroll. */}
+      <View style={styles.backdrop}>
+        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close" />
+        <View style={styles.sheet}>
           <View style={styles.handle} />
           {/* flexShrink: the sheet caps its height (maxHeight 88%), and a ScrollView that doesn't shrink
               takes its full content height instead — the overflow is clipped by the sheet and there is
@@ -171,8 +174,8 @@ export function DepositSheet({ visible, api, pusdMicro, onClose, onToast }: {
               </>
             )}
           </ScrollView>
-        </Pressable>
-      </Pressable>
+        </View>
+      </View>
     </Modal>
   );
 }
