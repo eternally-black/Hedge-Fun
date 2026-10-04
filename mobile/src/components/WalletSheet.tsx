@@ -53,7 +53,10 @@ export function WalletSheet({ visible, me, api, realPusdMicro, stock, onClose, o
       <Pressable style={styles.backdrop} onPress={onClose} accessibilityLabel="Close">
         <Pressable style={styles.sheet} onPress={(e) => e.stopPropagation()}>
           <View style={styles.handle} />
-          <ScrollView showsVerticalScrollIndicator={false}>
+          {/* flexShrink: the sheet caps its height (maxHeight 88%), and a ScrollView that doesn't shrink
+              takes its full content height instead — the overflow is clipped by the sheet and there is
+              nothing left to scroll (the History list sat below the fold, unreachable). */}
+          <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
             <View style={styles.header}>
               <Text style={styles.title}>Wallet</Text>
               <TouchableOpacity onPress={onClose} style={styles.closeBtn} accessibilityLabel="Close">
@@ -299,6 +302,7 @@ const styles = StyleSheet.create({
     borderTopWidth: 1, borderTopColor: colors.line, paddingHorizontal: 18, paddingBottom: 28, paddingTop: 8,
     maxHeight: "88%",
   },
+  scroll: { flexShrink: 1 },
   handle: { width: 42, height: 5, borderRadius: 4, backgroundColor: colors.line, alignSelf: "center", marginBottom: 14 },
   header: { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 12 },
   title: { color: colors.text, fontSize: 26, fontWeight: "900", flex: 1 },
