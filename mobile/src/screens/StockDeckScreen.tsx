@@ -10,15 +10,16 @@
 //   • No pending replay on the phone: the attempt carries the signature server-side, so a confirm lost
 //     between send and book is recovered by the server sweep, not by the device.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { ActivityIndicator, Pressable, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { randomUUID } from "expo-crypto";
 import type { MeResponse, StockDeckCard as StockDeckCardT, StockDeckResponse } from "@contract/api-types";
 import type { Api } from "../api";
-import { colors } from "../theme";
+import { colors, mixWithLine } from "../theme";
 import { useBuyReal } from "../useBuyReal";
 import { useStockStake } from "../useStockStake";
 import { StockConsentSheet } from "../components/StockConsentSheet";
-import { StockDeckCard, StockCardPreview } from "../components/StockCard";
+import { StockDeckCard } from "../components/StockCard";
+import { useStackDepth } from "../useStackDepth";
 import * as wallet from "../platform/wallet.flavor";
 import type { SwipeDir } from "../components/DeckCard";
 
@@ -153,7 +154,8 @@ export function StockDeckScreen({ me, api, onRefreshMe, onToast, onNeedWallet }:
   );
 
   const top = cards?.[0];
-  const next = cards?.[1];
+  const depth = useStackDepth(top?.id);
+  const stack = (cards ?? []).slice(0, depth);
 
   // Remove ONE card, by id. Deliberately not "drop the top one": a real buy finishes minutes after
   // the tap, by which time the user may have skipped past it — advancing the top then would throw
@@ -271,18 +273,20 @@ export function StockDeckScreen({ me, api, onRefreshMe, onToast, onNeedWallet }:
   return (
     <View style={styles.wrap}>
       <View style={styles.stack}>
-        {next && <StockCardPreview key={next.id} card={next} stakeCents={stakeCents} realMode={realMode} />}
-        {top ? (
+        {/* top, the next card, and once settled the one after it (premounted, invisible) — see DeckScreen */}
+        {stack.slice().reverse().map((c, i, all) => (
           <StockDeckCard
-            key={top.id}
-            card={top}
+            key={c.id}
+            card={c}
+            role={i === all.length - 1 ? "top" : i === all.length - 2 ? "next" : "hidden"}
             busy={locked}
             onAction={onAction}
             stakeCents={stakeCents}
             onPickStake={setStakeCents}
             realMode={realMode}
           />
-        ) : loadFailed ? (
+        ))}
+        {top ? null : loadFailed ? (
           <View style={styles.panel}>
             <Text style={styles.panelBody}>Couldn&apos;t load the deck.</Text>
             <TouchableOpacity style={styles.retryBtn} onPress={retry}>
@@ -326,18 +330,19 @@ function CircleBtn({ glyph, color, size, disabled, onPress }: {
   onPress: () => void;
 }) {
   return (
-    <TouchableOpacity
+    // Web CircleBtn: no press animation, border color-mix(color 55%, line) — same as DeckScreen.
+    <Pressable
       accessibilityRole="button"
       onPress={onPress}
       disabled={disabled}
       style={[
         styles.circleBtn,
-        { width: size, height: size, borderRadius: size / 2, borderColor: color },
+        { width: size, height: size, borderRadius: size / 2, borderColor: mixWithLine(color) },
         disabled && { opacity: 0.5 },
       ]}
     >
       <Text style={{ color, fontSize: size > 50 ? 25 : 20, fontWeight: "800" }}>{glyph}</Text>
-    </TouchableOpacity>
+    </Pressable>
   );
 }
 

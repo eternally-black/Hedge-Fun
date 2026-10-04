@@ -3,9 +3,9 @@
 // COMMIT_PX commits with a fling-off, else springs back. The parent is handed the commit mid-fling
 // so the next card rises in sync (same hand-off as web).
 import { memo, useEffect, useState } from "react";
-import { Animated, StyleSheet, Text, TouchableOpacity, View } from "react-native";
-import { PanGestureHandler } from "react-native-gesture-handler";
-import { previewPose, useSwipeCard } from "../useSwipeCard";
+import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import type { StackRole } from "../useSwipeCard";
+import { SwipeShell } from "./SwipeShell";
 import type { DeckCard as DeckCardT } from "@contract/api-types";
 import { colors } from "../theme";
 import { isFootballCard, SkinBackground } from "../skins";
@@ -32,43 +32,32 @@ function useNowMs(): number {
   return nowMs;
 }
 
-export function DeckCard({ card, skinId, stakeCents, enabled, onCommit, onEditStake }: {
+// One card of the deck stack — the top card (live gesture), the next one waiting behind it, or the
+// one after that, premounted and invisible. The role is a prop, not a component type, so promoting
+// the next card is a prop change on an already-mounted card (see StackRole in useSwipeCard).
+export function DeckCard({ card, role, skinId, stakeCents, enabled, onCommit, onEditStake }: {
   card: DeckCardT;
+  role: StackRole;
   skinId: string; // the equipped skin — owns the whole card background (me.skins.equipped)
   stakeCents: number;
-  enabled: boolean; // false = ignore gestures (busy/flying)
+  enabled: boolean; // false = ignore gestures (busy)
   onCommit: (dir: SwipeDir) => void;
   // Present only where the stake is editable (real mode, live top card). Absent → the chip stays
-  // inert text, which is what a preview card sitting behind the top one has to be.
+  // inert text, which is what a card sitting behind the top one has to be.
   onEditStake?: () => void;
 }) {
-  const { handlerProps, cardStyle, yesStyle, noStyle, skipStyle } = useSwipeCard({ enabled, onCommit });
-
+  const labels = sideLabels(card);
+  const cat = catOf(card);
   return (
-    <PanGestureHandler {...handlerProps}>
-    <Animated.View style={[styles.card, cardStyle]}>
-      <CardFace card={card} skinId={skinId} stakeCents={stakeCents} onEditStake={onEditStake} />
-      {/* direction stamps, driven by drag progress */}
-      <Animated.View style={[styles.stamp, styles.stampLeft, { borderColor: colors.no }, noStyle]}>
-        <StampText card={card} dir="NO" />
-      </Animated.View>
-      <Animated.View style={[styles.stamp, styles.stampRight, { borderColor: colors.yes }, yesStyle]}>
-        <StampText card={card} dir="YES" />
-      </Animated.View>
-      <Animated.View style={[styles.stamp, styles.stampTop, { borderColor: colors.skip }, skipStyle]}>
-        <Text style={[styles.stampText, { color: colors.skip }]}>SKIP</Text>
-      </Animated.View>
-    </Animated.View>
-    </PanGestureHandler>
-  );
-}
-
-// The next card, fully rendered behind the top one (not a gray stub) — static, no gestures.
-export function CardPreview({ card, skinId }: { card: DeckCardT; skinId: string }) {
-  return (
-    <View style={[styles.card, styles.preview]} pointerEvents="none">
-      <CardFace card={card} skinId={skinId} stakeCents={null} />
-    </View>
+    <SwipeShell
+      role={role}
+      enabled={enabled}
+      onCommit={onCommit}
+      stampLabels={labels}
+      background={<SkinBackground skinId={skinId} categoryColor={cat.color} isFootball={isFootballCard(card)} />}
+    >
+      <CardContent card={card} stakeCents={stakeCents} onEditStake={role === "top" ? onEditStake : undefined} />
+    </SwipeShell>
   );
 }
 
@@ -114,23 +103,29 @@ const LiveText = memo(function LiveText({ deadline, kind, style }: { deadline: s
   return <Text style={style}>{kind === "rel" ? cd.relText : `Kick-off in ${cd.text} · resolves after the match`}</Text>;
 });
 
-function StampText({ card, dir }: { card: DeckCardT; dir: "YES" | "NO" }) {
-  const labels = sideLabels(card);
-  const label = dir === "YES" ? labels.yes : labels.no;
-  return (
-    <Text style={[styles.stampText, { color: dir === "YES" ? colors.yes : colors.no }]} numberOfLines={1}>
-      {label}
-    </Text>
-  );
-}
-
 // The card face: category + ⏱ cutoff, question, hint, odds split (real side labels, cents), and
 // the stake/payout footer. stakeCents null hides the footer (preview).
-export function CardFace({ card, skinId, stakeCents, dimmed = false, onEditStake }: {
+export function CardFace({ card, skinId, stakeCents, onEditStake }: {
   card: DeckCardT;
   skinId: string;
   stakeCents: number | null;
-  dimmed?: boolean;
+  onEditStake?: () => void;
+}) {
+  const cat = catOf(card);
+  return (
+    <View style={styles.faceRoot}>
+      {/* The equipped skin owns the background: bg → overlay → scrim, then the content above. */}
+      <SkinBackground skinId={skinId} categoryColor={cat.color} isFootball={isFootballCard(card)} />
+      <CardContent card={card} stakeCents={stakeCents} onEditStake={onEditStake} />
+    </View>
+  );
+}
+
+// The content layer alone (no background) — what SwipeShell draws above its stamps. memo'd: a role
+// change or a drag never re-renders it; only a price, stake or deadline change does.
+const CardContent = memo(function CardContent({ card, stakeCents, onEditStake }: {
+  card: DeckCardT;
+  stakeCents: number | null;
   onEditStake?: () => void;
 }) {
   const cat = catOf(card);
@@ -138,9 +133,7 @@ export function CardFace({ card, skinId, stakeCents, dimmed = false, onEditStake
   const hint = marketHint(card);
 
   return (
-    <View style={[styles.face, dimmed && { opacity: 0.75 }]}>
-      {/* The equipped skin owns the background: bg → overlay → scrim, then the content below. */}
-      <SkinBackground skinId={skinId} categoryColor={cat.color} isFootball={isFootballCard(card)} />
+    <View style={styles.face}>
       <View style={styles.topRow}>
         <View style={styles.badge}>
           <View style={[styles.badgeDot, { backgroundColor: cat.color }]} />
@@ -191,15 +184,10 @@ export function CardFace({ card, skinId, stakeCents, dimmed = false, onEditStake
       </View>
     </View>
   );
-}
+});
 
 const styles = StyleSheet.create({
-  card: {
-    position: "absolute", top: 0, left: 0, right: 0, bottom: 0,
-    borderRadius: 26, overflow: "hidden",
-    backgroundColor: colors.panel2, borderWidth: 1, borderColor: colors.line,
-  },
-  preview: previewPose, // the exact pose the top card's rise starts from (useSwipeCard)
+  faceRoot: { flex: 1 },
   face: { flex: 1, padding: 16 },
   topRow: { flexDirection: "row", justifyContent: "space-between", gap: 8 },
   badge: {
@@ -227,12 +215,4 @@ const styles = StyleSheet.create({
   payBox: { flex: 1, minWidth: 0, alignItems: "center", borderWidth: 1, borderRadius: 14, paddingVertical: 8, paddingHorizontal: 6 },
   payLabel: { fontSize: 8, letterSpacing: 1, textTransform: "uppercase" },
   payValue: { fontFamily: "monospace", fontWeight: "700", fontSize: 14 },
-  stamp: {
-    position: "absolute", paddingVertical: 6, paddingHorizontal: 14, borderRadius: 12,
-    borderWidth: 3, backgroundColor: "rgba(10,10,15,0.75)", maxWidth: "80%",
-  },
-  stampLeft: { top: 42, left: 18, transform: [{ rotate: "-14deg" }] },
-  stampRight: { top: 42, right: 18, transform: [{ rotate: "14deg" }] },
-  stampTop: { top: 20, alignSelf: "center" },
-  stampText: { fontSize: 22, fontWeight: "900", letterSpacing: 1 },
 });
