@@ -2,7 +2,7 @@
 // face. Right = YES (side A), left = NO (side B), up = SKIP. Follow-the-finger drag → release past
 // COMMIT_PX commits with a fling-off, else springs back. The parent is handed the commit mid-fling
 // so the next card rises in sync (same hand-off as web).
-import { memo, useEffect, useState } from "react";
+import { createContext, memo, useContext, useEffect, useState } from "react";
 import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import type { StackRole } from "../useSwipeCard";
 import { SwipeShell } from "./SwipeShell";
@@ -23,12 +23,19 @@ export function isFresh(c: DeckCardT, nowMs: number, minLeadMs: number): boolean
 
 // Per-card 1s clock (web: DeckCard.useCountdown). Only the tiny Live* texts below own it, so the tick
 // re-renders a line of text — never the whole card face (skin SVG, odds, footer) under a moving finger.
+// The clock stops while the deck is hidden (Root keeps it mounted behind other tabs) and re-reads
+// the time on the first frame it is shown again.
+export const DeckClockActive = createContext(true);
 function useNowMs(): number {
+  const active = useContext(DeckClockActive);
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
-    const id = setInterval(() => setNowMs(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, []);
+    if (!active) return;
+    const tick = () => setNowMs(Date.now());
+    const raf = requestAnimationFrame(tick);
+    const id = setInterval(tick, 1000);
+    return () => { cancelAnimationFrame(raf); clearInterval(id); };
+  }, [active]);
   return nowMs;
 }
 

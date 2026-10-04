@@ -58,7 +58,8 @@ export function DeckModePill({ mode, onMode }: { mode: DeckMode; onMode: (m: Dec
 // skip (session only). WHOSE money a buy spends is the app's one Paper/Real switch (me.real.mode),
 // exactly as it is for predictions — the card has no second button to choose it.
 // ============================================================================
-export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksUsdCents, onOpenWallet, onOpenPortfolio }: {
+export function StockDeck({ active, api, me, onRefreshMe, onToast, mode, onMode, stocksUsdCents, onOpenWallet, onOpenPortfolio }: {
+  active: boolean; // on screen — page.tsx keeps the deck mounted (hidden) behind other tabs
   api: Api;
   me: Me | null;
   onRefreshMe: () => void | Promise<void>;
@@ -371,7 +372,7 @@ export function StockDeck({ api, me, onRefreshMe, onToast, mode, onMode, stocksU
             : "Paper buys use play money · switch to real money in Profile"}
       </div>
 
-      <StockConsentSheet open={real.consentOpen} busy={real.busy} sponsored={sponsored} onAccept={acceptConsent} onClose={real.closeConsent} />
+      <StockConsentSheet open={active && real.consentOpen /* portalled: a hidden deck must not pop it */} busy={real.busy} sponsored={sponsored} onAccept={acceptConsent} onClose={real.closeConsent} />
     </div>
   );
 }

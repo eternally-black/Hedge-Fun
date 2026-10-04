@@ -12,13 +12,25 @@ import { useRealCtx } from "../useRealCtx";
 import { placeRealOrder } from "@contract/real-client";
 import { realErrText, realResultText, RETRYABLE_REAL_ERRORS } from "@contract/real-copy";
 import { DECK_MIN_LEAD_MS, QUOTE_POLL_MS } from "../../lib/config";
-import { DeckCard, isFresh, type SwipeDir } from "../components/DeckCard";
+import { DeckCard, DeckClockActive, isFresh, type SwipeDir } from "../components/DeckCard";
 import { useStackDepth } from "../useStackDepth";
 import { StakeSheet } from "../components/StakeSheet";
 
 const REFILL_AT = 8; // preload-ahead threshold (same as web) — refill well before the deck runs dry
 
-export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, onRealOrderDone, onOpenFeed, onCapHit }: {
+// Boot prefetch: Root starts the first deal alongside /api/me (behind the boot screen), and the deck's
+// first load takes that promise instead of starting its own — so the first frame already has cards.
+// One-shot: taken once; a retry, or any later mount, deals afresh.
+let prefetchedDeal: Promise<unknown> | null = null;
+export function prefetchDeck(api: Api): void {
+  prefetchedDeal = api("/api/deck");
+  prefetchedDeal.catch(() => { /* the deck's own load reports it */ });
+}
+
+export function DeckScreen({ active, me, api, onRefreshMe, onToast, onTopup, realMode, onRealOrderDone, onOpenFeed, onCapHit }: {
+  // On screen. Root keeps the deck mounted while another tab (or the stock deck) is showing, so the
+  // dealt cards are there the moment the user comes back; hidden, it polls nothing and ticks nothing.
+  active: boolean;
   me: MeResponse | null;
   api: Api;
   onRefreshMe: () => Promise<void>;
@@ -49,7 +61,9 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, o
   // each call, so replacing the deck mid-session would snap a DIFFERENT card into the top slot.
   useEffect(() => {
     let alive = true;
-    api("/api/deck")
+    const deal = (nonce === 0 && prefetchedDeal) || api("/api/deck");
+    prefetchedDeal = null;
+    deal
       .then((d) => { if (alive) { setDeck((d as DeckResponse).cards); setLoadFailed(false); } })
       .catch((e) => { if (alive) { console.error(e); setLoadFailed(true); } });
     return () => { alive = false; };
@@ -77,8 +91,11 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, o
 
   // Live freshness prune: drop cards that aged within the lead buffer so the top never decays to
   // ⏱ -> 0:00 — the next fresh card rises in its place, and a drained deck triggers a refill.
+  // Runs while visible; coming back prunes on the next frame, so a card that aged out while the deck
+  // was hidden never shows (the hidden deck is kept mounted — see Root).
   useEffect(() => {
-    const id = setInterval(() => {
+    if (!active) return;
+    const prune = () => {
       setDeck((d) => {
         if (!d) return d;
         const now = Date.now();
@@ -87,19 +104,22 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, o
         void topUpIfLow(fresh.length);
         return fresh;
       });
-    }, 5000);
-    return () => clearInterval(id);
-  }, [topUpIfLow]);
+    };
+    const raf = requestAnimationFrame(prune);
+    const id = setInterval(prune, 5000);
+    return () => { cancelAnimationFrame(raf); clearInterval(id); };
+  }, [active, topUpIfLow]);
 
   // Live quote on the TOP card (D10 Slice B). A CLOB book churns roughly every 5s, so the price a
   // card was dealt with goes stale while the user deliberates — which is exactly the moment that
   // matters. Only the card they can act on is polled: a next-up card's price is irrelevant until it
   // surfaces, and it gets a live quote the moment it does (this effect re-arms on topId). Paused
   // while the app is backgrounded — no radio spend on a deck nobody is looking at — and re-polled
-  // immediately on return, so a resumed session re-syncs before any swipe can land.
+  // immediately on return, so a resumed session re-syncs before any swipe can land. The same holds
+  // for the tab: hidden (another tab / the stock deck), nothing polls; shown again, it re-quotes at once.
   const topId = deck?.[0]?.id;
   useEffect(() => {
-    if (!topId) return;
+    if (!topId || !active) return;
     let alive = true;
     const poll = async () => {
       if (AppState.currentState !== "active") return;
@@ -132,7 +152,7 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, o
       clearInterval(id);
       sub.remove();
     };
-  }, [topId, api]);
+  }, [topId, active, api]);
 
   // Act on a card: YES/NO post a bet, SKIP posts to /api/skip (always free + unlimited). The
   // advance is OPTIMISTIC — the card flies out and the next rises in sync; the network call runs
@@ -278,6 +298,7 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, o
   const capReached = !realMode && !!me && !me.dev && me.swipes.used >= me.swipes.cap;
 
   return (
+    <DeckClockActive.Provider value={active}>
     <View style={styles.wrap}>
       <View style={styles.stack}>
         {capReached ? (
@@ -357,6 +378,7 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, o
         onToast={onToast}
       />
     </View>
+    </DeckClockActive.Provider>
   );
 }
 
