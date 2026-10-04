@@ -43,8 +43,16 @@ export const KNOWN_REAL_ERRORS: Record<string, string> = {
   post_no_order_id: "the exchange gave no order id — the order is checked within minutes",
 };
 
+// The Polymarket SDK's TransportError = the device never got an HTTP answer from Polymarket. Seen live
+// 2026-10-04 on a Seeker in Ukraine: the ISP's DNS resolves clob/relayer-v2.polymarket.com to a
+// 10.125.0.2 block stub, so the toast read "fetch failed: javax.net.ssl.SSLException: Unable to parse
+// TLS packet header". Not "nothing was placed": the same error after the post left the device is
+// ambiguous, and the orphan sweep is what settles that case.
+const UNREACHABLE = "couldn't reach Polymarket from this network — if the order went out, it is checked within minutes";
+
 export function realErrText(e: unknown): string {
   const code = (e as { body?: { error?: string } }).body?.error;
+  if (!code && e instanceof Error && e.name === "TransportError") return UNREACHABLE;
   if (!code) return e instanceof Error ? e.message : String(e);
   return KNOWN_REAL_ERRORS[code] ?? code;
 }

@@ -29,6 +29,25 @@
     "Bitcoin Up or Down",
     "title is the market itself",
   );
+
+  // ---- Hourly and daily series (2026-10-04). The hourly label names the START hour and endDate is
+  // one hour later. Unparsed, servableUpDown would serve the window before it opens.
+  const h11 = upDownWindow("Bitcoin Up or Down - October 4, 11AM ET");
+  assert.ok(h11, "hourly window parses");
+  assert.strictEqual(h11!.lengthMin, 60);
+  assert.strictEqual(h11!.label, "11AM–12PM ET");
+  assert.strictEqual(upDownWindow("Bitcoin Up or Down - October 4, 11PM ET")!.label, "11PM–12AM ET", "11PM wraps to 12AM");
+  assert.strictEqual(upDownWindow("Bitcoin Up or Down - October 4, 12PM ET")!.label, "12PM–1PM ET", "12PM is noon");
+  assert.strictEqual(upDownWindow("Bitcoin Up or Down on October 4?")!.lengthMin, 1440, "daily window");
+  const hEnd = Date.parse("2026-10-04T16:00:00Z");
+  const hQ = "Bitcoin Up or Down - October 4, 11AM ET";
+  assert.strictEqual(servableUpDown(hQ, hEnd, hEnd - 61 * 60_000), false, "hourly: not open yet");
+  assert.strictEqual(servableUpDown(hQ, hEnd, hEnd - 59 * 60_000), true, "hourly: open");
+  // A 4H window still goes through the range path.
+  assert.strictEqual(upDownWindow("Bitcoin Up or Down - October 4, 8:00AM-12:00PM ET")!.lengthMin, 240);
+  // Legacy minutes-with-no-zone shape is not a window, and non-Up/Down questions never hit the tails.
+  assert.strictEqual(upDownWindow("Bitcoin Up or Down - 9:05AM"), null, "legacy shape");
+  assert.strictEqual(upDownWindow("Will it rain in NYC on October 4, 11AM ET"), null, "not Up/Down");
 }
 
 // Self-check for human-readable Over/Under labels + hint (DB-free, pure).
