@@ -756,8 +756,11 @@ function App() {
       <Hud me={me} pop={pop} pocket={pocket} realPusdMicro={realPusdMicro} stocksUsdCents={stocksUsdCents} onShards={goVault} onGM={goGmScreen} onBalance={openBalance} onBell={goNotifs} />
 
       <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
-        {effectiveScreen === "deck" && deckMode === "stocks" && (
-          <StockDeck api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} mode={deckMode} onMode={setDeckMode} stocksUsdCents={stocksUsdCents} onOpenWallet={openBalance} onOpenPortfolio={goPortfolio} />
+        {/* Kept alive like Hedge/Portfolio: flipping the deck pill shows the cards already dealt. */}
+        {(tabsWarm || (effectiveScreen === "deck" && deckMode === "stocks")) && (
+          <div style={{ position: "absolute", inset: 0, display: effectiveScreen === "deck" && deckMode === "stocks" ? "block" : "none" }}>
+          <StockDeck active={effectiveScreen === "deck" && deckMode === "stocks"} api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} mode={deckMode} onMode={setDeckMode} stocksUsdCents={stocksUsdCents} onOpenWallet={openBalance} onOpenPortfolio={goPortfolio} />
+          </div>
         )}
 
         {effectiveScreen === "deck" && deckMode === "predictions" && (

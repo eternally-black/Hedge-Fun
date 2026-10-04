@@ -14,7 +14,7 @@ import { WalletSheet } from "./components/WalletSheet";
 import { useStockPocket } from "./useStockPocket";
 import { LoginScreen } from "./screens/LoginScreen";
 import { HomeScreen } from "./screens/HomeScreen";
-import { DeckScreen } from "./screens/DeckScreen";
+import { DeckScreen, prefetchDeck } from "./screens/DeckScreen";
 import { FeedScreen } from "./screens/FeedScreen";
 import { HedgeScreen } from "./screens/HedgeScreen";
 import { ResultsScreen } from "./screens/ResultsScreen";
@@ -160,6 +160,7 @@ export default function Root() {
           .then((r) => { if ((r as CaptureRefResponse).captured) void clearRefCode(); })
           .catch(() => { /* idempotent; the GM tap also captures */ });
 
+        prefetchDeck(api); // the first deal runs behind the boot screen, not after it
         const [m, r] = await Promise.all([api("/api/me"), api("/api/results?unseen=1")]);
         const meData = m as MeResponse;
         setMe(meData);
@@ -273,12 +274,18 @@ export default function Root() {
             wallet — the same signer the web uses). The Play build has no wallet port, so a real-mode
             account there gets the notice, never the paper deck (the server follows the account's mode
             for history/results, so paper swipes would write PAPER bets while /api/history reads REAL). */}
-        {effectiveScreen === "deck" && (
-          <View style={styles.body}>
-            <DeckModePill mode={deckMode} onMode={setDeckMode} />
-            {deckMode === "stocks" ? (
+        {/* The Deck tab is kept alive like Hedge and Stocks: both decks stay mounted (the inactive one
+            hidden), so tapping Deck or flipping the pill shows the cards already dealt — never a
+            re-deal behind a spinner. A hidden deck takes no touches, so it can't place an order. */}
+        <View style={[styles.body, effectiveScreen !== "deck" && styles.hidden]}>
+          <DeckModePill mode={deckMode} onMode={setDeckMode} />
+          {(tabsWarm || deckMode === "stocks") && (
+            <View style={[styles.body, deckMode !== "stocks" && styles.hidden]}>
               <StockDeckScreen me={me} api={api} onRefreshMe={refreshMe} onToast={flashToast} onNeedWallet={goProfile} />
-            ) : me?.real?.mode === "REAL" && !wallet.available ? (
+            </View>
+          )}
+          <View style={[styles.body, deckMode !== "predictions" && styles.hidden]}>
+            {me?.real?.mode === "REAL" && !wallet.available ? (
               <View style={styles.realNotice}>
                 <Text style={styles.realNoticeTitle}>Real-money mode is on</Text>
                 <Text style={styles.realNoticeBody}>
@@ -290,6 +297,7 @@ export default function Root() {
               </View>
             ) : (
               <DeckScreen
+                active={effectiveScreen === "deck" && deckMode === "predictions"}
                 me={me}
                 api={api}
                 onRefreshMe={refreshMe}
@@ -302,7 +310,7 @@ export default function Root() {
               />
             )}
           </View>
-        )}
+        </View>
         {effectiveScreen === "feed" && <FeedScreen api={api} me={me} onRefreshMe={refreshMe} onToast={flashToast} onTopup={openWallet} />}
         {/* Kept alive once warm (tabsWarm above): display:none hides an inactive tab without unmounting it. */}
         {(tabsWarm || screen === "stocks") && (
