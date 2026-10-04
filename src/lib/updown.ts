@@ -14,17 +14,39 @@ export function upDownWindow(question: string): { label: string; lengthMin: numb
   const m = question.match(
     /(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*[-–—]\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*(et|edt|est|utc|gmt)?/i,
   );
-  if (!m) return null;
-  const [, h1, m1 = "00", ap1, h2, m2 = "00", ap2, zone] = m;
-  const mins = (h: string, mm: string, ap: string) =>
-    ((Number(h) % 12) + (ap.toLowerCase() === "pm" ? 12 : 0)) * 60 + Number(mm);
-  const lengthMin = (((mins(h2, m2, ap2) - mins(h1, m1, ap1)) % 1440) + 1440) % 1440;
-  if (lengthMin <= 0 || lengthMin > 24 * 60) return null;
-  const at = (h: string, mm: string) => `${Number(h)}:${mm}`;
-  // One meridiem when both ends share it, which is the usual case for these windows.
-  const head = ap1.toLowerCase() === ap2.toLowerCase() ? at(h1, m1) : `${at(h1, m1)}${ap1.toUpperCase()}`;
-  return { label: `${head}–${at(h2, m2)}${ap2.toUpperCase()}${zone ? " " + zone.toUpperCase() : ""}`, lengthMin };
+  if (m) {
+    const [, h1, m1 = "00", ap1, h2, m2 = "00", ap2, zone] = m;
+    const mins = (h: string, mm: string, ap: string) =>
+      ((Number(h) % 12) + (ap.toLowerCase() === "pm" ? 12 : 0)) * 60 + Number(mm);
+    const lengthMin = (((mins(h2, m2, ap2) - mins(h1, m1, ap1)) % 1440) + 1440) % 1440;
+    if (lengthMin <= 0 || lengthMin > 24 * 60) return null;
+    const at = (h: string, mm: string) => `${Number(h)}:${mm}`;
+    // One meridiem when both ends share it, which is the usual case for these windows.
+    const head = ap1.toLowerCase() === ap2.toLowerCase() ? at(h1, m1) : `${at(h1, m1)}${ap1.toUpperCase()}`;
+    return { label: `${head}–${at(h2, m2)}${ap2.toUpperCase()}${zone ? " " + zone.toUpperCase() : ""}`, lengthMin };
+  }
+  if (!/up or down/i.test(question)) return null;
+  const h = question.match(HOURLY_TAIL);
+  if (h) {
+    const [, hh, ap, zone] = h;
+    const startH = (Number(hh) % 12) + (ap.toLowerCase() === "pm" ? 12 : 0);
+    const endH = (startH + 1) % 24;
+    const fmt = (n: number) => `${n % 12 === 0 ? 12 : n % 12}${n < 12 ? "AM" : "PM"}`;
+    return { label: `${fmt(startH)}–${fmt(endH)} ${zone.toUpperCase()}`, lengthMin: 60 };
+  }
+  if (DAILY_TAIL.test(question)) return { label: "24h", lengthMin: 1440 };
+  return null;
 }
+
+// Hourly series: "Bitcoin Up or Down - October 4, 11AM ET" — the label names the START hour and the
+// market's endDate is one hour later (verified 2026-10-04). Anchored at the end so a range question
+// ("…, 11AM-12PM ET") never reaches it — the range path above runs first. Without this parse the
+// hourly series reads as "not an Up/Down window" and servableUpDown would serve it before it opens.
+const HOURLY_TAIL = /,\s*(\d{1,2})\s*(am|pm)\s*(et|edt|est|utc|gmt)\s*$/i;
+
+// Daily series: "Bitcoin Up or Down on October 4?" — a 24-hour window ending at its endDate
+// (verified 2026-10-04: it sits in the 12:00PM ET pile-up with the hourly 11AM window).
+const DAILY_TAIL = /up or down on [a-z]+ \d{1,2}\??\s*$/i;
 
 // The shortest window the deck will serve. Polymarket runs Up/Down series down to five minutes, and
 // the owner's ruling (2026-08-18) is that those are a DIFFERENT product: a card for the five minutes

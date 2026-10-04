@@ -18,6 +18,7 @@ import {
 } from "./deck-mix";
 import { evalMarketDepth } from "./depth";
 import { ClobUnavailableError } from "./clob";
+import { upDownWindow, MIN_UPDOWN_WINDOW_MIN } from "./updown";
 
 const BASE = process.env.POLYMARKET_API_BASE ?? "https://gamma-api.polymarket.com";
 
@@ -560,6 +561,29 @@ const HORIZON_BANDS: { fromH: number; toH: number; share: number }[] = [
   { fromH: 24, toH: 72, share: 0.2 }, // sports/esports only (their horizon runs to 72h)
 ];
 
+// ─── Crypto Up/Down series (measured live 2026-10-04) ─────────────────────────────────────────────
+// The bands above cannot reach crypto Up/Down. Polymarket piles hundreds of markets on the same
+// endDate at every :00 and :30 (371 markets end at 15:30Z, 1474 at 16:00Z), and in Gamma's
+// endDate-ascending order the crypto Up/Down markets ending at those instants sit at index 255 /
+// 645. The 0–1h band stops at its quota (~60 kept rows) long before that, so every 15-minute window
+// ending on :00/:30 and ALL hourly / 4-hour / daily Up/Down windows were never ingested. Only the
+// :15/:45 windows (no pile-up) got in, and those become servable only once open — so most of the
+// time the deck had no crypto at all. The fix is a dedicated pass per series tag, walked by endDate
+// with a tight end_date_max, so the pile-ups are never in the way.
+//
+// Tag ids verified with include_tag=true. 5M (102892) is deliberately absent: MIN_UPDOWN_WINDOW_MIN
+// is 15, and the five-minute series is a different product (see updown.ts).
+const UPDOWN_SERIES_TAGS: { tagId: number; lengthMin: number }[] = [
+  { tagId: 102467, lengthMin: 15 }, // 15M
+  { tagId: 102175, lengthMin: 60 }, // 1H
+  { tagId: 102531, lengthMin: 240 }, // 4H
+  { tagId: 102281, lengthMin: 1440 }, // Daily
+];
+// How far ahead of a window's START we still ingest it. An unopened window is never SERVED (see
+// servableUpDown), but caching it shortly before it opens means the deck has it the moment it does.
+// 20 min covers the poller cadence with room to spare.
+const UPDOWN_OPEN_LOOKAHEAD_MS = 20 * 60_000;
+
 export async function fetchBlitzDeck(hours = DECK_FETCH_HORIZON_HOURS, want = 100): Promise<BlitzDeckResult> {
   const now = new Date();
   const nowMs = now.getTime();
@@ -572,6 +596,12 @@ export async function fetchBlitzDeck(hours = DECK_FETCH_HORIZON_HOURS, want = 10
   // undo the whole point of sampling by horizon (measured: 6-24h contributed 0 cards until the
   // buckets were re-woven across bands below).
   const bandOf = new Map<string, number>();
+  // Up/Down windows from the series pass below. Kept OUT of the round-robin buckets on purpose:
+  // appended to the band-0 crypto bucket they sat behind dozens of band-collected windows that open
+  // hours from now, and the `want` cut dropped them — measured live 2026-10-04, want=100 kept 0 of
+  // the 6 open hourly windows, want=400 kept all 6. They are the only Up/Down rows a card can be
+  // served from right now, so they ride along after the interleave (a few dozen rows at most).
+  const series: MarketCache[] = [];
 
   for (const [bandIdx, band] of HORIZON_BANDS.entries()) {
     const bandFromMs = nowMs + band.fromH * 3_600_000;
@@ -623,12 +653,55 @@ export async function fetchBlitzDeck(hours = DECK_FETCH_HORIZON_HOURS, want = 10
     }
   }
 
+  // Crypto Up/Down pass — see UPDOWN_SERIES_TAGS for why the bands cannot reach these. Sequential
+  // per tag (Gamma 500s under concurrency, see gammaGetWithRetry), and each tag is its own try/catch:
+  // this pass must never take the whole refresh down.
+  for (const { tagId, lengthMin } of UPDOWN_SERIES_TAGS) {
+    // end_date_max bounds the walk to the opening-soon head of the series: a window opening within
+    // the lookahead ends up to lengthMin after that. Unbounded, the 15M tag over 24h is ~8 pages we
+    // would throw away; bounded, it is one or two.
+    const tagMaxMs = Math.min(maxMs, nowMs + UPDOWN_OPEN_LOOKAHEAD_MS + lengthMin * 60_000);
+    let rows: GammaMarket[];
+    try {
+      rows = await gammaWalkByEndDate(
+        {
+          tag_id: String(tagId),
+          active: "true",
+          closed: "false",
+          enableOrderBook: "true",
+          include_tag: "true",
+          end_date_max: new Date(tagMaxMs).toISOString(),
+        },
+        now.toISOString(),
+        { maxRequests: 4 },
+      );
+    } catch (e) {
+      console.warn(`[deck] up/down tag ${tagId} walk failed: ${(e as Error).message}`);
+      continue;
+    }
+    for (const r of rows) {
+      const m = mapMarket(r);
+      if (!m || m.status !== "OPEN" || m.yesPriceBp === null || m.noPriceBp === null) continue;
+      const deadlineMs = new Date(m.resolutionDeadline).getTime();
+      if (deadlineMs > maxMs || !withinCategoryHorizon(m, deadlineMs, nowMs)) continue;
+      if (!priceIsContested(m.yesPriceBp, m.noPriceBp)) continue;
+      if (bandOf.has(m.polymarketId)) continue; // a band already collected it
+      // Open, or opening within the lookahead. Bounding by window START is what keeps this to a few
+      // dozen candidates a run instead of ~800, so the depth gate's CLOB reads stay cheap.
+      const w = upDownWindow(m.question);
+      if (!w || w.lengthMin < MIN_UPDOWN_WINDOW_MIN) continue;
+      if (deadlineMs - w.lengthMin * 60_000 > nowMs + UPDOWN_OPEN_LOOKAHEAD_MS) continue;
+      series.push(m);
+      bandOf.set(m.polymarketId, 0);
+    }
+  }
+
   // Depth-gate BEFORE the round-robin interleave (see header). A market passes only when BOTH sides
   // quote, fill STAKE_CENTS within the eligibility cap, and the EFFECTIVE prices sit in the same
   // 1500..8500 contested band the mid pre-filter used — the band lives in priceIsContested, once.
   // Runs after ALL bands are collected, so the ~17% the gate drops is spread across horizons rather
   // than gutting whichever band happened to be scanned last.
-  const candidates = [...buckets.named, ...buckets.overunder, ...buckets.crypto];
+  const candidates = [...buckets.named, ...buckets.overunder, ...buckets.crypto, ...series];
   const passed = new Set<string>();
   const rejected: string[] = [];
   await Promise.all(
@@ -676,6 +749,7 @@ export async function fetchBlitzDeck(hours = DECK_FETCH_HORIZON_HOURS, want = 10
     }
     if (!added) break; // all buckets exhausted
   }
+  for (const m of series) if (passed.has(m.polymarketId)) out.push(m); // see `series` above
   return { deck: out, rejected };
 }
 
