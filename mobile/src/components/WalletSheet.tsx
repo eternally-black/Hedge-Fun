@@ -3,7 +3,7 @@
 // purpose (Paper, the play balance; Real · Stocks, the connected Solana wallet; Real · Predictions,
 // the Polymarket balance), then the History tabs (Calls / Stocks / Hedges) like the web sheet.
 import { useCallback, useEffect, useState } from "react";
-import { Modal, Pressable, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { type LayoutChangeEvent, Modal, Pressable, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import * as Clipboard from "expo-clipboard";
 import type { MeResponse, StockPortfolioResponse, StockPositionRow } from "@contract/api-types";
 import { toPredictionRow, useClosePosition, useExitQuotes, usePredictionHistory } from "../usePredictionHistory";
@@ -145,6 +145,14 @@ function History({ me, api, onToast, onClose }: { me: MeResponse | null; api: Ap
     : "No hedges yet. The Hedge tab turns a life cost or a wallet into one.";
   // Selling is a real-money action — only a build that can sign offers it.
   const canClose = wallet.available;
+  // The list area never shrinks while the sheet is open: switching from a long tab to a short or
+  // empty one (or to "Loading…") would otherwise cut the scroll content under the user's position
+  // and snap the sheet up. It keeps the tallest height it has had; the extra is empty space.
+  const [listMinHeight, setListMinHeight] = useState(0);
+  const onListLayout = useCallback((e: LayoutChangeEvent) => {
+    const h = e.nativeEvent.layout.height;
+    setListMinHeight((cur) => (h > cur ? h : cur));
+  }, []);
 
   return (
     <View>
@@ -173,6 +181,7 @@ function History({ me, api, onToast, onClose }: { me: MeResponse | null; api: Ap
         })}
       </View>
 
+      <View style={{ minHeight: listMinHeight }} onLayout={onListLayout}>
       {loading ? (
         <Text style={styles.historyNote}>Loading…</Text>
       ) : (
@@ -203,6 +212,7 @@ function History({ me, api, onToast, onClose }: { me: MeResponse | null; api: Ap
           ) : null}
         </View>
       )}
+      </View>
     </View>
   );
 }
