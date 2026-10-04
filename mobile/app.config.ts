@@ -41,7 +41,9 @@ const appConfig = ({ config }: ConfigContext): ExpoConfig => ({
     },
     predictiveBackGestureEnabled: false,
   },
-  plugins: ["./plugins/withShareQueries"],
+  // Real orders post from the phone, so the Seeker build resolves *.polymarket.com over DoH: some
+  // ISP resolvers answer it with a block stub (see the plugin header). Play is paper-only — no need.
+  plugins: ["./plugins/withShareQueries", ...(FLAVOR === "seeker" ? ["./plugins/withPolymarketDoh"] : [])],
   extra: { flavor: FLAVOR },
   web: { favicon: "./assets/favicon.png" },
 });
