@@ -16,3 +16,12 @@ export const colors = {
 
 // hex + alpha suffix ("2e" ≈ 18%) like the web's color-mix usage.
 export const withAlpha = (hex: string, alpha: string) => `${hex}${alpha}`;
+
+// color-mix(in srgb, <hex> 55%, var(--line)) — the web's CircleBtn border. --line is white at 9%,
+// so the mix is done premultiplied, exactly as CSS color-mix does with a translucent colour.
+export function mixWithLine(hex: string, pct = 0.55): string {
+  const lineA = 0.09;
+  const a = pct + (1 - pct) * lineA;
+  const ch = (i: number) => Math.round((pct * parseInt(hex.slice(i, i + 2), 16) + (1 - pct) * lineA * 255) / a);
+  return `rgba(${ch(1)},${ch(3)},${ch(5)},${a.toFixed(4)})`;
+}

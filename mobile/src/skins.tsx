@@ -34,42 +34,38 @@ const VB = "0 0 300 470";
 
 // Readability scrim between the (busy) background and the content: darkens the top chips and the
 // bottom odds/controls, leaves the vivid middle.
+// Pure gradients are native backgrounds (GPU shaders), not react-native-svg: on Android an SvgView
+// rasterises in software into a card-sized bitmap — ~20 ms per view on the Seeker, paid every time a
+// card mounts. Only the skins that draw shapes (pitch lines, the vapor grid) still need an SVG.
 function Scrim() {
-  return (
-    <Svg style={StyleSheet.absoluteFill} viewBox={VB} preserveAspectRatio="none">
-      <Defs>
-        <LinearGradient id="scrim" x1="0" y1="0" x2="0" y2="1">
-          <Stop offset="0" stopColor="#000" stopOpacity={0.34} />
-          <Stop offset="0.22" stopColor="#000" stopOpacity={0} />
-          <Stop offset="0.52" stopColor="#000" stopOpacity={0} />
-          <Stop offset="0.78" stopColor="#000" stopOpacity={0.5} />
-          <Stop offset="1" stopColor="#000" stopOpacity={0.72} />
-        </LinearGradient>
-      </Defs>
-      <Rect x={0} y={0} width={300} height={470} fill="url(#scrim)" />
-    </Svg>
-  );
+  return <View style={[StyleSheet.absoluteFill, bgStyles.scrim]} />;
 }
 
 // Classic: the category tint — a colored bloom from the top-right over a panel2→panel wash (bgGrad).
+// Same geometry as the old SVG on its 300×470 box: the bloom centre (240, 0) is 80% / 0%, its radii
+// 360 × 376 are 120% / 80% of the box.
 function ClassicBg({ color }: { color: string }) {
+  const tint = `radial-gradient(120% 80% at 80% 0%, ${rgba(color, 0.18)}, ${rgba(color, 0)} 55%)`;
   return (
-    <Svg style={StyleSheet.absoluteFill} viewBox={VB} preserveAspectRatio="none">
-      <Defs>
-        <LinearGradient id="wash" x1="0.1" y1="0" x2="0.9" y2="1">
-          <Stop offset="0" stopColor={colors.panel2} />
-          <Stop offset="1" stopColor={colors.panel} />
-        </LinearGradient>
-        <RadialGradient id="tint" cx="240" cy="0" rx="360" ry="376" gradientUnits="userSpaceOnUse">
-          <Stop offset="0" stopColor={color} stopOpacity={0.18} />
-          <Stop offset="0.55" stopColor={color} stopOpacity={0} />
-        </RadialGradient>
-      </Defs>
-      <Rect x={0} y={0} width={300} height={470} fill="url(#wash)" />
-      <Rect x={0} y={0} width={300} height={470} fill="url(#tint)" />
-    </Svg>
+    <>
+      <View style={[StyleSheet.absoluteFill, bgStyles.wash]} />
+      <View style={[StyleSheet.absoluteFill, { experimental_backgroundImage: tint }]} />
+    </>
   );
 }
+
+function rgba(hex: string, a: number): string {
+  return `rgba(${parseInt(hex.slice(1, 3), 16)},${parseInt(hex.slice(3, 5), 16)},${parseInt(hex.slice(5, 7), 16)},${a})`;
+}
+
+const bgStyles = StyleSheet.create({
+  scrim: {
+    experimental_backgroundImage:
+      "linear-gradient(180deg, rgba(0,0,0,0.34) 0%, rgba(0,0,0,0) 22%, rgba(0,0,0,0) 52%, rgba(0,0,0,0.5) 78%, rgba(0,0,0,0.72) 100%)",
+  },
+  // (0.1, 0) → (0.9, 1) of the box: toward the bottom-right, ~152deg on a portrait card.
+  wash: { experimental_backgroundImage: `linear-gradient(152deg, ${colors.panel2} 5%, ${colors.panel} 95%)` },
+});
 
 // Classic on a soccer card: mowed grass (stripes + a green top bloom over deep green) + pitch lines.
 const PITCH_LINE = "rgba(225,255,235,0.26)";

@@ -1,10 +1,10 @@
 // StockCard (native) — the tokenized-stock card: face, preview and the swipeable top card. Native twin of
-// src/app/StockCard.tsx; the gesture physics are DeckCard.tsx's, verbatim (the two decks must feel identical,
-// and DeckCard's stamps are bound to a prediction card's two sides — hence a copy, not a shared wrapper).
+// src/app/StockCard.tsx; the gesture physics are SwipeShell's, shared with DeckCard (the two decks must feel identical,
+// as on the web, where StockDeckCard reuses SwipeShell).
 import { memo, useEffect, useRef, useState } from "react";
-import { Animated, Image, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
-import { PanGestureHandler } from "react-native-gesture-handler";
-import { previewPose, useSwipeCard } from "../useSwipeCard";
+import { Image, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import type { StackRole } from "../useSwipeCard";
+import { SwipeShell } from "./SwipeShell";
 import type { StockDeckCard as StockDeckCardT } from "@contract/api-types";
 import { usd } from "../format";
 import { colors, withAlpha } from "../theme";
@@ -48,8 +48,6 @@ export const StockCardFace = memo(function StockCardFace({ card, stakeCents, onP
 
   return (
     <View style={styles.faceRoot}>
-      <View style={styles.faceBg} pointerEvents="none" />
-
       <View style={styles.content}>
         <View style={styles.topRow}>
           <View style={styles.badge}>
@@ -192,24 +190,13 @@ function StockLogo({ card }: { card: StockDeckCardT }) {
 }
 
 // ============================================================================
-// StockCardPreview — the next stock card sitting behind the top one. Same resting pose as
-// CardPreview (scale / translateY, dimmed, pointerEvents none) so the rise animation hands off
-// seamlessly when this card is promoted.
-// ============================================================================
-export const StockCardPreview = memo(function StockCardPreview({ card, stakeCents, realMode }: { card: StockDeckCardT; stakeCents: number; realMode: boolean }) {
-  return (
-    <View style={[styles.card, styles.preview]} pointerEvents="none">
-      <StockCardFace card={card} stakeCents={stakeCents} onPickStake={NOOP} realMode={realMode} />
-    </View>
-  );
-});
-
-// ============================================================================
-// StockDeckCard — the interactive top card. Same PanResponder + Animated physics as DeckCard.tsx,
-// so the gesture reads identically across the two decks.
+// StockDeckCard — one card of the stock deck stack (top, next, or premounted-hidden). SwipeShell is
+// the prediction deck's shell verbatim, so the physics, the rise and the stamps read identically, as
+// the web's StockDeckCard reuses its SwipeShell.
 // ============================================================================
 export function StockDeckCard({
   card,
+  role,
   busy,
   onAction,
   stakeCents,
@@ -217,42 +204,32 @@ export function StockDeckCard({
   realMode,
 }: {
   card: StockDeckCardT;
+  role: StackRole;
   busy: boolean;
   onAction: (dir: SwipeDir) => void;
   stakeCents: number;
   onPickStake: (c: number) => void;
   realMode: boolean;
 }) {
-  // restoreAfterFling: a REAL buy keeps the card until /confirm books the lot, and a cancelled or
-  // failed one keeps it for good — the card comes back and re-arms if nothing removed it.
-  const { handlerProps, cardStyle, yesStyle, noStyle, skipStyle } = useSwipeCard({ enabled: !busy, onCommit: onAction, restoreAfterFling: true });
-
+  const top = role === "top";
+  // A REAL buy keeps the card until /confirm books the lot, and a cancelled or failed one keeps it for
+  // good — the shell springs a card that is still mounted after its fling back into place (web too).
   return (
-    <PanGestureHandler {...handlerProps}>
-    <Animated.View style={[styles.card, cardStyle]}>
-      <StockCardFace card={card} stakeCents={stakeCents} onPickStake={onPickStake} realMode={realMode} disabled={busy} />
-      {/* direction stamps, driven by drag progress */}
-      <Animated.View style={[styles.stamp, styles.stampLeft, { borderColor: colors.no }, noStyle]} pointerEvents="none">
-        <Text style={[styles.stampText, { color: colors.no }]}>PASS</Text>
-      </Animated.View>
-      <Animated.View style={[styles.stamp, styles.stampRight, { borderColor: colors.yes }, yesStyle]} pointerEvents="none">
-        <Text style={[styles.stampText, { color: colors.yes }]}>BUY</Text>
-      </Animated.View>
-      <Animated.View style={[styles.stamp, styles.stampTop, { borderColor: colors.skip }, skipStyle]} pointerEvents="none">
-        <Text style={[styles.stampText, { color: colors.skip }]}>SKIP</Text>
-      </Animated.View>
-    </Animated.View>
-    </PanGestureHandler>
+    <SwipeShell
+      role={role}
+      enabled={!busy}
+      onCommit={onAction}
+      stampLabels={STAMPS}
+      background={<View style={styles.faceBg} />}
+    >
+      <StockCardFace card={card} stakeCents={stakeCents} onPickStake={top ? onPickStake : NOOP} realMode={realMode} disabled={top && busy} />
+    </SwipeShell>
   );
 }
 
+const STAMPS = { yes: "BUY", no: "PASS" };
+
 const styles = StyleSheet.create({
-  card: {
-    position: "absolute", top: 0, left: 0, right: 0, bottom: 0,
-    borderRadius: 26, overflow: "hidden",
-    backgroundColor: colors.panel2, borderWidth: 1, borderColor: colors.line,
-  },
-  preview: previewPose, // the exact pose the top card's rise starts from (useSwipeCard)
   faceRoot: { flex: 1 },
   faceBg: {
     position: "absolute", top: 0, left: 0, right: 0, bottom: 0,
@@ -299,12 +276,4 @@ const styles = StyleSheet.create({
   chipDollar: { fontWeight: "700", fontSize: 15, color: colors.muted },
   chipInput: { flex: 1, minWidth: 0, margin: 0, padding: 0, fontWeight: "700", fontSize: 15, color: "#fff" },
   cta: { textAlign: "center", marginTop: 12, fontSize: 11, color: "rgba(255,255,255,0.55)", letterSpacing: 0.2 },
-  stamp: {
-    position: "absolute", paddingVertical: 6, paddingHorizontal: 14, borderRadius: 12,
-    borderWidth: 3, backgroundColor: "rgba(10,10,15,0.75)", maxWidth: "80%",
-  },
-  stampLeft: { top: 42, left: 18, transform: [{ rotate: "-14deg" }] },
-  stampRight: { top: 42, right: 18, transform: [{ rotate: "14deg" }] },
-  stampTop: { top: 20, alignSelf: "center" },
-  stampText: { fontSize: 22, fontWeight: "900", letterSpacing: 1 },
 });

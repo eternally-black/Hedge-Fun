@@ -3,16 +3,17 @@
 // advance, preload-ahead refills, live freshness pruning, the 402 → top-up path, and the daily-cap
 // hard stop. The economy stays server-owned — the client renders /api/me and never re-derives it.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ActivityIndicator, AppState, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { ActivityIndicator, AppState, Pressable, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import type { DeckCard as DeckCardT, DeckResponse, MeResponse, QuotesResponse } from "@contract/api-types";
 import { priceMovedBp, statusOf, type Api } from "../api";
-import { colors } from "../theme";
+import { colors, mixWithLine } from "../theme";
 import { usd } from "../format";
 import { useRealCtx } from "../useRealCtx";
 import { placeRealOrder } from "@contract/real-client";
 import { realErrText, realResultText, RETRYABLE_REAL_ERRORS } from "@contract/real-copy";
 import { DECK_MIN_LEAD_MS, QUOTE_POLL_MS } from "../../lib/config";
-import { CardPreview, DeckCard, isFresh, type SwipeDir } from "../components/DeckCard";
+import { DeckCard, isFresh, type SwipeDir } from "../components/DeckCard";
+import { useStackDepth } from "../useStackDepth";
 import { StakeSheet } from "../components/StakeSheet";
 
 const REFILL_AT = 8; // preload-ahead threshold (same as web) — refill well before the deck runs dry
@@ -264,7 +265,12 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, o
   const retry = useCallback(() => { setDeck(null); setLoadFailed(false); setNonce((n) => n + 1); }, []);
 
   const top = deck?.[0];
-  const next = deck?.[1];
+  const openStake = useCallback(() => setStakeOpen(true), []);
+  // The stack: top, the next card, and (once the hand-off animation has settled) the one after it,
+  // premounted and invisible — so a swipe promotes already-mounted cards instead of mounting a face
+  // mid-fling. Rendered bottom-up: the last child is the top card.
+  const depth = useStackDepth(top?.id);
+  const stack = (deck ?? []).slice(0, depth);
   // Hard daily cap: once a non-dev user hits the swipe cap, the deck hard-stops until 00:00 UTC.
   // Paper only — the point-swipe cap is the play economy's, and says nothing about real money.
   // The equipped card design (Vault) — "classic" until /api/me lands.
@@ -288,11 +294,11 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, o
         ) : (
           <>
             {/* next card — FULLY rendered behind the top one (not a gray stub) */}
-            {next && <CardPreview key={next.id} card={next} skinId={skinId} />}
-            {top ? (
+            {stack.slice().reverse().map((c, i, all) => (
               <DeckCard
-                key={top.id}
-                card={top}
+                key={c.id}
+                card={c}
+                role={i === all.length - 1 ? "top" : i === all.length - 2 ? "next" : "hidden"}
                 skinId={skinId}
                 // Display fallback only before the first /api/me lands — the server charges the
                 // real stake regardless (POST /api/swipe carries no amount).
@@ -301,9 +307,10 @@ export function DeckScreen({ me, api, onRefreshMe, onToast, onTopup, realMode, o
                 enabled
                 onCommit={handleCommit}
                 // Paper stake is a game rule, not a setting — only the real one is editable (web too).
-                onEditStake={realMode ? () => setStakeOpen(true) : undefined}
+                onEditStake={realMode ? openStake : undefined}
               />
-            ) : loadFailed ? (
+            ))}
+            {top ? null : loadFailed ? (
               <View style={styles.panel}>
                 <Text style={styles.panelBody}>Couldn&apos;t load the deck.</Text>
                 <TouchableOpacity style={styles.retryBtn} onPress={retry}>
@@ -361,18 +368,20 @@ function CircleBtn({ glyph, color, size, disabled, onPress }: {
   onPress: () => void;
 }) {
   return (
-    <TouchableOpacity
+    // Web CircleBtn: no press animation — the press acts at once (the top card leaves, the next one
+    // rises); the border is color-mix(color 55%, line).
+    <Pressable
       accessibilityRole="button"
       onPress={onPress}
       disabled={disabled}
       style={[
         styles.circleBtn,
-        { width: size, height: size, borderRadius: size / 2, borderColor: color },
+        { width: size, height: size, borderRadius: size / 2, borderColor: mixWithLine(color) },
         disabled && { opacity: 0.5 },
       ]}
     >
       <Text style={{ color, fontSize: size > 50 ? 25 : 20, fontWeight: "800" }}>{glyph}</Text>
-    </TouchableOpacity>
+    </Pressable>
   );
 }
 

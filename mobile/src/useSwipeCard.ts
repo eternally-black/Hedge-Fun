@@ -1,69 +1,111 @@
-// The deck's swipe physics, driven natively. gesture-handler's PanGestureHandler feeds the finger's
-// translation straight into Animated values on the NATIVE driver, so a drag never waits on the JS
-// thread — the old PanResponder + JS-driven Animated version dropped 95% of frames on the emulator
-// (median frame 89 ms) whenever JS was busy. (Reanimated was tried first and dropped: on this RN
-// version it threw on every frame after a card unmounted, and added ~2 s to startup.)
-// Same rules as before and as the web's useCardSwipe: right = YES, left = NO, a clearly-vertical
-// upward drag = SKIP; a release past COMMIT_PX flings the card off, anything shorter springs back.
-// The hand-off is the web's too (src/app/useCardSwipe.ts + DeckCard hfCardRise): the commit fires
-// HALFWAY through the fling so the next card is already rising while this one flies and fades out,
-// and a newly mounted top card rises out of the preview pose instead of snapping to full size.
-import { useEffect, useRef } from "react";
-import { Animated, Easing } from "react-native";
+// The deck's swipe physics — a 1:1 port of the web's useCardSwipe (src/app/useCardSwipe.ts) and
+// SwipeShell's rise (src/app/DeckCard.tsx + globals.css hfCardRise), driven entirely on the UI
+// thread. gesture-handler's PanGestureHandler feeds the finger's translation straight into Animated
+// values on the NATIVE driver, and every derived property (rotation, stamp/overlay intensity, the
+// SKIP-vs-sideways classification itself) is an Animated node graph, so a drag never waits on JS and
+// never re-renders React. (Reanimated was tried and dropped: on this RN version it threw on every
+// frame after a card unmounted, and added ~2 s to startup.)
+//
+// The web's numbers, verbatim:
+//   drag      translate(dx,dy) rotate(dx * 0.05deg), no transition
+//   classify  |dy| > |dx| * 1.15 && dy < 0 → SKIP (progress |dy|/130), else YES/NO (progress |dx|/130)
+//   release   progress >= 1 → fling; else spring back: transform .45s cubic-bezier(.34,1.4,.5,1)
+//   fling     YES translate(150%,-12%) rotate(26deg) · NO translate(-150%,-12%) rotate(-26deg) ·
+//             SKIP translate(0,-170%) rotate(-3deg) — % of the card's own size — over 380ms
+//             cubic-bezier(.45,0,.25,1), opacity → 0 over 380ms `ease`; onCommit at 190ms; a card
+//             still mounted at 440ms (a refused act) springs back, opacity snapping to 1
+//   stamps    only the CURRENT drag direction shows, and only while the finger is down:
+//             opacity (p - .15) / .5, scale .6 + .4p; directional overlay opacity = p
+//   rise      a card that becomes top grows from the preview pose — scale(.957) translateY(13px),
+//             brightness(.82), origin center bottom — over 320ms cubic-bezier(.34,1.2,.5,1);
+//             grabbing it mid-rise cancels the rise
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Animated, Easing, type LayoutChangeEvent } from "react-native";
 import { type PanGestureHandlerStateChangeEvent, State } from "react-native-gesture-handler";
 
 export type SwipeDir = "YES" | "NO" | "SKIP";
-export const COMMIT_PX = 130; // drag distance past which a release commits (design-locked, same as web)
-const FLY_MS = 380; // outgoing card flies off + fades for this long (web FLY_MS)
-const RISE_MS = 320; // the next card rises into the top slot for this long (web RISE_MS)
-// Resting pose of the card waiting behind the top one (web PREVIEW_SCALE / PREVIEW_Y; opacity on the
-// dark backdrop stands in for the web's brightness(.82)). The rise starts from EXACTLY this pose.
+export const COMMIT_PX = 130; // drag distance past which a release commits (design-locked, web COMMIT_PX)
+const FLY_MS = 380; // web FLY_MS
+export const RISE_MS = 320; // web RISE_MS
+const SPRING_MS = 450; // web: transform .45s on spring-back
+const MOVE_EPS = 5; // web MOVE_EPS — px of travel before a press is a drag, not a tap
+const DEG_PER_PX = 0.05; // web: rotate(dx * 0.05deg)
+// Resting pose of the card waiting behind the top one (web PREVIEW_SCALE / PREVIEW_Y). brightness(.82)
+// is a black veil at .18: brightness multiplies each channel by .82, which is exactly what an 18%
+// black layer composited on top does — no offscreen filter pass.
 export const PREVIEW_SCALE = 0.957;
 export const PREVIEW_Y = 13;
-export const PREVIEW_OPACITY = 0.82;
-export const previewPose = {
-  transform: [{ translateY: PREVIEW_Y }, { scale: PREVIEW_SCALE }],
-  opacity: PREVIEW_OPACITY,
-};
-const MOVE_EPS = 5; // px of travel before a press counts as a drag
+export const PREVIEW_VEIL = 0.18;
 
-export function useSwipeCard({ enabled, onCommit, restoreAfterFling = false }: {
+const SPRING_EASE = Easing.bezier(0.34, 1.4, 0.5, 1);
+const FLY_EASE = Easing.bezier(0.45, 0, 0.25, 1);
+const RISE_EASE = Easing.bezier(0.34, 1.2, 0.5, 1);
+const CSS_EASE = Easing.bezier(0.25, 0.1, 0.25, 1); // CSS `ease` — the web's opacity transition
+
+// Where a card sits in the stack. One component renders every role and the role is a prop, so the card
+// behind the top one is PROMOTED in place (no remount of its face mid-fling — that remount was the
+// 100–150 ms hitch at every hand-off); "hidden" is the one after it, premounted and invisible.
+export type StackRole = "top" | "next" | "hidden";
+
+export function useSwipeCard({ role, enabled, onCommit }: {
+  role: StackRole;
   enabled: boolean;
   onCommit: (dir: SwipeDir) => void;
-  // A card that may survive its own commit (a REAL stock buy keeps it until the lot is booked, and a
-  // cancelled one keeps it for good): if it is still mounted after the fling, bring it back and
-  // re-arm the gesture, so the deck the user sees is the deck the buttons act on.
-  restoreAfterFling?: boolean;
 }) {
-  const x = useRef(new Animated.Value(0)).current;
-  const y = useRef(new Animated.Value(0)).current;
-  const rise = useRef(new Animated.Value(0)).current; // 0 = preview pose, 1 = top card
-  const fade = useRef(new Animated.Value(1)).current; // drops to 0 during a fling, like the web
+  // Created once per card (lazy state, not a ref read during render).
+  const [{ x, y, rx, fade, rise, active }] = useState(() => ({
+    x: new Animated.Value(0), // drag/fling translation, px
+    y: new Animated.Value(0),
+    rx: new Animated.Value(0), // rotation beyond dx*0.05 — carries a fling to its exact end angle
+    fade: new Animated.Value(1),
+    rise: new Animated.Value(0), // 0 = preview pose, 1 = top card
+    active: new Animated.Value(0), // 1 while the finger is down (web drag.active)
+  }));
+
+  const size = useRef({ w: 0, h: 0 });
+  const onLayout = (e: LayoutChangeEvent) => {
+    size.current = { w: e.nativeEvent.layout.width, h: e.nativeEvent.layout.height };
+  };
+
   const committed = useRef(false);
+  const rising = useRef<Animated.CompositeAnimation | null>(null);
+  const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const onCommitRef = useRef(onCommit);
   useEffect(() => { onCommitRef.current = onCommit; }, [onCommit]);
-  const mounted = useRef(true);
-  useEffect(() => () => { mounted.current = false; }, []);
+  useEffect(() => () => { timers.current.forEach(clearTimeout); }, []);
+
+  // Becoming the top card plays the rise once (web: SwipeShell mounts with `entering`).
   useEffect(() => {
-    const a = Animated.timing(rise, { toValue: 1, duration: RISE_MS, easing: Easing.bezier(0.34, 1.2, 0.5, 1), useNativeDriver: true });
-    a.start();
+    if (role !== "top") return;
+    const a = Animated.timing(rise, { toValue: 1, duration: RISE_MS, easing: RISE_EASE, useNativeDriver: true });
+    rising.current = a;
+    a.start(() => { rising.current = null; });
     return () => a.stop();
-  }, [rise]);
+  }, [role, rise]);
 
   const springBack = () =>
     Animated.parallel([
-      Animated.spring(x, { toValue: 0, useNativeDriver: true, bounciness: 14 }),
-      Animated.spring(y, { toValue: 0, useNativeDriver: true, bounciness: 14 }),
+      Animated.timing(x, { toValue: 0, duration: SPRING_MS, easing: SPRING_EASE, useNativeDriver: true }),
+      Animated.timing(y, { toValue: 0, duration: SPRING_MS, easing: SPRING_EASE, useNativeDriver: true }),
+      Animated.timing(rx, { toValue: 0, duration: SPRING_MS, easing: SPRING_EASE, useNativeDriver: true }),
     ]).start();
 
   // Native-driven: the gesture's translation lands in x/y on the UI thread, no JS per move event.
-  const onGestureEvent = useRef(
-    Animated.event([{ nativeEvent: { translationX: x, translationY: y } }], { useNativeDriver: true }),
-  ).current;
+  const onGestureEvent = useMemo(
+    () => Animated.event([{ nativeEvent: { translationX: x, translationY: y } }], { useNativeDriver: true }),
+    [x, y],
+  );
 
   const onHandlerStateChange = (e: PanGestureHandlerStateChangeEvent) => {
     const { state, translationX, translationY } = e.nativeEvent;
     if (committed.current) return;
+    if (state === State.BEGAN) {
+      // Grabbing the card cancels the entering rise so the drag takes over cleanly (web onPointerDown).
+      if (rising.current) { rising.current.stop(); rising.current = null; rise.setValue(1); }
+      return;
+    }
+    if (state === State.ACTIVE) { active.setValue(1); return; }
+    active.setValue(0); // released or cancelled: stamps and overlays drop at once (web reset())
     if (state === State.CANCELLED || state === State.FAILED) { springBack(); return; }
     if (state !== State.END) return;
     const ax = Math.abs(translationX), ay = Math.abs(translationY);
@@ -71,35 +113,72 @@ export function useSwipeCard({ enabled, onCommit, restoreAfterFling = false }: {
     if (ay > ax * 1.15 && translationY < 0) { dir = "SKIP"; progress = Math.min(1, ay / COMMIT_PX); }
     else { dir = translationX > 0 ? "YES" : "NO"; progress = Math.min(1, ax / COMMIT_PX); }
     if (progress < 1) { springBack(); return; }
+
     committed.current = true;
-    const easing = Easing.bezier(0.45, 0, 0.25, 1);
+    const w = size.current.w || 400, h = size.current.h || 600;
+    const tx = dir === "YES" ? 1.5 * w : dir === "NO" ? -1.5 * w : 0;
+    const ty = dir === "SKIP" ? -1.7 * h : -0.12 * h;
+    const endDeg = dir === "YES" ? 26 : dir === "NO" ? -26 : -3;
+    const fly = (val: Animated.Value, toValue: number) =>
+      Animated.timing(val, { toValue, duration: FLY_MS, easing: FLY_EASE, useNativeDriver: true });
     Animated.parallel([
-      Animated.timing(x, { toValue: dir === "YES" ? 540 : dir === "NO" ? -540 : 0, duration: FLY_MS, easing, useNativeDriver: true }),
-      Animated.timing(y, { toValue: dir === "SKIP" ? -1000 : -70, duration: FLY_MS, easing, useNativeDriver: true }),
-      Animated.timing(fade, { toValue: 0, duration: FLY_MS, useNativeDriver: true }),
-    ]).start(() => {
-      if (!restoreAfterFling) return;
-      setTimeout(() => {
-        if (!mounted.current) return;
-        committed.current = false;
-        Animated.timing(fade, { toValue: 1, duration: 150, useNativeDriver: true }).start();
-        springBack();
-      }, 150);
-    });
-    // Hand off mid-fling: the parent advances now, so the next card rises while this one leaves.
-    setTimeout(() => onCommitRef.current(dir), Math.round(FLY_MS / 2));
+      fly(x, tx),
+      fly(y, ty),
+      // rotation = x*0.05 + rx; easing rx to (end - tx*0.05) on the same curve makes the angle
+      // travel linearly (in eased time) from the release angle to the web's end angle.
+      fly(rx, endDeg - tx * DEG_PER_PX),
+      Animated.timing(fade, { toValue: 0, duration: FLY_MS, easing: CSS_EASE, useNativeDriver: true }),
+    ]).start();
+    // Hand off mid-fling so the next card starts rising at the 50% point (web flyTimer).
+    timers.current.push(setTimeout(() => onCommitRef.current(dir), Math.round(FLY_MS / 2)));
+    // A consumed card is unmounted long before this fires; only a card the caller refused to consume
+    // (a gated act, a real stock buy still booking) sees it, and springs back visible and grabbable.
+    timers.current.push(setTimeout(() => {
+      committed.current = false;
+      fade.setValue(1);
+      springBack();
+    }, FLY_MS + 60));
   };
 
-  // Web: rotate(dx * 0.05deg) while dragging, 26deg at the end of a fling.
-  const rotate = x.interpolate({ inputRange: [-540, 540], outputRange: ["-27deg", "27deg"] });
-  const riseY = Animated.add(y, rise.interpolate({ inputRange: [0, 1], outputRange: [PREVIEW_Y, 0] }));
-  const scale = rise.interpolate({ inputRange: [0, 1], outputRange: [PREVIEW_SCALE, 1] });
-  const opacity = Animated.multiply(fade, rise.interpolate({ inputRange: [0, 1], outputRange: [PREVIEW_OPACITY, 1] }));
-  const cardStyle = { opacity, transform: [{ translateX: x }, { translateY: riseY }, { rotate }, { scale }] };
-  const yesStyle = { opacity: x.interpolate({ inputRange: [0, COMMIT_PX], outputRange: [0, 1], extrapolate: "clamp" }) };
-  const noStyle = { opacity: x.interpolate({ inputRange: [-COMMIT_PX, 0], outputRange: [1, 0], extrapolate: "clamp" }) };
-  const skipStyle = { opacity: y.interpolate({ inputRange: [-COMMIT_PX, 0], outputRange: [1, 0], extrapolate: "clamp" }) };
+  const styles = useMemo(() => {
+    // Direction classification as a node graph: skipOn = 1 when -dy > 1.15|dx| (web's up-bias).
+    const absX = x.interpolate({ inputRange: [-1, 0, 1], outputRange: [1, 0, 1] });
+    const upBias = Animated.add(Animated.multiply(y, -1), Animated.multiply(absX, -1.15));
+    const skipOn = upBias.interpolate({ inputRange: [0, 0.01], outputRange: [0, 1], extrapolate: "clamp" });
+    const sideOn = Animated.multiply(Animated.subtract(1, skipOn), active);
+    const clamp = "clamp" as const;
+    const yesP = Animated.multiply(x.interpolate({ inputRange: [0, COMMIT_PX], outputRange: [0, 1], extrapolate: clamp }), sideOn);
+    const noP = Animated.multiply(x.interpolate({ inputRange: [-COMMIT_PX, 0], outputRange: [1, 0], extrapolate: clamp }), sideOn);
+    const skipP = Animated.multiply(
+      Animated.multiply(y.interpolate({ inputRange: [-COMMIT_PX, 0], outputRange: [1, 0], extrapolate: clamp }), skipOn),
+      active,
+    );
+    const stamp = (p: Animated.AnimatedMultiplication<number>, rot: string) => ({
+      opacity: p.interpolate({ inputRange: [0.15, 0.65], outputRange: [0, 1], extrapolate: clamp }),
+      transform: [{ rotate: rot }, { scale: p.interpolate({ inputRange: [0, 1], outputRange: [0.6, 1], extrapolate: clamp }) }],
+    });
+    const rotate = Animated.add(Animated.multiply(x, DEG_PER_PX), rx).interpolate({ inputRange: [0, 1], outputRange: ["0deg", "1deg"] });
+    return {
+      // Outer layer: the stack pose (scale about the bottom edge, like transform-origin center bottom).
+      riseStyle: {
+        transformOrigin: "bottom" as const,
+        transform: [
+          { scale: rise.interpolate({ inputRange: [0, 1], outputRange: [PREVIEW_SCALE, 1] }) },
+          { translateY: rise.interpolate({ inputRange: [0, 1], outputRange: [PREVIEW_Y, 0] }) },
+        ],
+      },
+      // Inner layer: the finger (rotation about the centre, like the web's drag transform).
+      cardStyle: { opacity: fade, transform: [{ translateX: x }, { translateY: y }, { rotate }] },
+      veilStyle: { opacity: rise.interpolate({ inputRange: [0, 1], outputRange: [PREVIEW_VEIL, 0] }) },
+      yesOverlay: { opacity: yesP },
+      noOverlay: { opacity: noP },
+      skipOverlay: { opacity: skipP },
+      yesStamp: stamp(yesP, "15deg"),
+      noStamp: stamp(noP, "-15deg"),
+      skipStamp: stamp(skipP, "0deg"),
+    };
+  }, [x, y, rx, fade, rise, active]);
 
-  const handlerProps = { enabled, minDist: MOVE_EPS, onGestureEvent, onHandlerStateChange };
-  return { handlerProps, cardStyle, yesStyle, noStyle, skipStyle };
+  const handlerProps = { enabled: enabled && role === "top", minDist: MOVE_EPS, onGestureEvent, onHandlerStateChange };
+  return { handlerProps, onLayout, ...styles };
 }
