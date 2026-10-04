@@ -15,6 +15,7 @@ type Api = (path: string, init?: RequestInit) => Promise<unknown>;
 // row offers it. Closed lots collapse behind a toggle — they are history, not the thing you came to
 // look at. Pending real buys show as a strip while the poller confirms them.
 export function PortfolioScreen({
+  active,
   api,
   me,
   onRefreshMe,
@@ -22,6 +23,9 @@ export function PortfolioScreen({
   stocksUsdCents,
   onOpenWallet,
 }: {
+  // On screen. page.tsx keeps this screen mounted (hidden) from shortly after boot, so the first
+  // read is done before the tab is clicked; the re-poll runs only while it is visible.
+  active: boolean;
   api: Api;
   me: Me | null;
   onRefreshMe: () => void | Promise<void>;
@@ -50,7 +54,9 @@ export function PortfolioScreen({
     setArmed(null);
   }, []);
 
+  const loadedAt = useRef(0); // when the last read started
   const load = useCallback(async () => {
+    loadedAt.current = Date.now();
     try {
       const r = (await api("/api/stocks/portfolio")) as StockPortfolioResponse;
       setData(r);
@@ -98,8 +104,11 @@ export function PortfolioScreen({
   // ONCE per mount, guarded by a ref: `replayPending` changes identity with every `me` refresh, so
   // without the guard every buy and every sell re-ran this — a second portfolio load and a second
   // replay of the same pending attempts. The poll effect below is the only repeating reader.
+  // Waits for a user: the screen now mounts at boot, and a boot whose /api/me failed would otherwise
+  // spend the once-per-mount replay on a null user (StockDeck guards it the same way).
+  const userId = me?.user.id ?? null;
   useEffect(() => {
-    if (replayed.current) return;
+    if (!userId || replayed.current) return;
     replayed.current = true;
     let alive = true;
     void (async () => {
@@ -116,12 +125,15 @@ export function PortfolioScreen({
       }
     })();
     return () => { alive = false; };
-  }, [load, onToast, replayPending]);
+  }, [userId, load, onToast, replayPending]);
 
-  // Visibility-gated re-poll: a hidden tab is a read for a number nobody is looking at. Coming back
-  // re-reads immediately, which is also the moment someone returns from the wallet they just bought
-  // from. Same pattern as the HUD's real-balance poll.
+  // Visibility-gated re-poll: a hidden screen or browser tab is a read for a number nobody is looking
+  // at. Showing the screen or coming back re-reads immediately (in place — the rows stay), which is
+  // also the moment someone returns from the wallet they just bought from. Same pattern as the HUD's
+  // real-balance poll. A read that started moments ago (the mount's own) is not repeated.
   useEffect(() => {
+    if (!active) return;
+    const raf = window.requestAnimationFrame(() => { if (Date.now() - loadedAt.current > 5_000) void load(); });
     let timer: number | undefined;
     const stop = () => window.clearInterval(timer);
     const start = () => {
@@ -137,11 +149,12 @@ export function PortfolioScreen({
     document.addEventListener("visibilitychange", onVis);
     window.addEventListener("focus", onVis);
     return () => {
+      window.cancelAnimationFrame(raf);
       stop();
       document.removeEventListener("visibilitychange", onVis);
       window.removeEventListener("focus", onVis);
     };
-  }, [load]);
+  }, [active, load]);
 
   const sell = useCallback(
     async (row: StockPositionRow) => {
@@ -194,8 +207,14 @@ export function PortfolioScreen({
         </button>
 
         <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
-          <TotalTile label="Paper" totals={paper} />
-          {hasReal ? <TotalTile label="On-chain" totals={realTotals} /> : null}
+          {data === null ? (
+            <TotalTileSkeleton label="Paper" />
+          ) : (
+            <>
+              <TotalTile label="Paper" totals={paper} />
+              {hasReal ? <TotalTile label="On-chain" totals={realTotals} /> : null}
+            </>
+          )}
         </div>
 
         {pending.length > 0 ? (
@@ -210,7 +229,9 @@ export function PortfolioScreen({
         ) : null}
 
         {data === null ? (
-          <div style={{ textAlign: "center", marginTop: 80, color: "var(--muted)", fontSize: 13 }}>Loading…</div>
+          <div aria-label="Loading your portfolio" style={{ marginTop: 18, display: "flex", flexDirection: "column", gap: 8 }}>
+            {[0, 1, 2].map((i) => <OpenRowSkeleton key={i} />)}
+          </div>
         ) : open.length === 0 && closed.length === 0 ? (
           <div style={{ textAlign: "center", marginTop: 80, color: "var(--muted)", fontSize: 13 }}>
             No stocks yet. Swipe right on the Stocks deck to buy your first one.
@@ -259,7 +280,7 @@ export function PortfolioScreen({
       </div>
 
       <StockConsentSheet
-        open={real.consentOpen}
+        open={active && real.consentOpen /* portalled: display:none on a hidden tab wouldn't hide it */}
         busy={real.busy}
         sponsored={data?.sponsored ?? false}
         onAccept={real.acceptConsent}
@@ -280,6 +301,35 @@ function TotalTile({ label, totals }: { label: string; totals: { costCents: numb
       <div style={{ fontSize: 11, marginTop: 3, color: pnl >= 0 ? "var(--yes)" : "var(--no)" }}>
         {signed(pnl)}
         <span style={{ color: "var(--muted)" }}> (cost {usd(totals.costCents)})</span>
+      </div>
+    </div>
+  );
+}
+
+// First-load placeholders sized like the tile and the open row, so the data landing moves nothing.
+const skel = (w: string | number, h: number, extra?: CSSProperties): CSSProperties => ({ width: w, height: h, borderRadius: 6, background: "var(--panel2)", ...extra });
+function TotalTileSkeleton({ label }: { label: string }) {
+  return (
+    <div style={{ flex: 1, background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 14, padding: "12px 13px" }}>
+      <div style={{ fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700 }}>{label}</div>
+      <div style={skel(96, 26, { margin: "4px 0 3px" })} />
+      <div style={skel(120, 12, { marginTop: 3, marginBottom: 1 })} />
+    </div>
+  );
+}
+function OpenRowSkeleton() {
+  return (
+    <div style={{ background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 14, padding: "12px 13px" }}>
+      <div style={{ display: "flex", gap: 11 }}>
+        <div style={skel(36, 36, { borderRadius: 18, flexShrink: 0 })} />
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 6, paddingTop: 2 }}>
+          <div style={skel("45%", 13)} />
+          <div style={skel("80%", 11)} />
+          <div style={skel("30%", 11)} />
+        </div>
+      </div>
+      <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 10 }}>
+        <div style={skel(64, 29, { borderRadius: 10 })} />
       </div>
     </div>
   );

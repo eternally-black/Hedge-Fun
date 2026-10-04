@@ -7,9 +7,13 @@
 // RETURNED stakeCents, which may be clamped to free Cash. 402 → the shared WalletSheet, exactly
 // like the deck's 402 path. Telemetry: ONE impression per suggestionId per screen mount (deduped
 // here; the server is idempotent per (user, suggestion, event) anyway).
+// Root keeps this screen mounted (hidden) from right after boot, so the first read happens before
+// the tab is ever tapped; `active` says whether it is on screen. While hidden it ticks no clock, and
+// becoming visible revalidates stale data IN PLACE — the cards on screen stay, a header tick shows.
 import { useCallback, useEffect, useRef, useState, type MutableRefObject, type ReactNode } from "react";
 import {
   ActivityIndicator,
+  AppState,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
   ScrollView,
@@ -34,11 +38,16 @@ import { statusOf, type Api } from "../api";
 import { colors } from "../theme";
 import { HedgeCard, type AcceptedInfo } from "../components/HedgeCard";
 import { BASE58_RE, ExposurePanel, WalletForm, WalletIntro, type LinkError } from "../components/HedgeWallet";
+import { SkeletonBar, UpdatingTick } from "../components/Skeleton";
 
 type LoadError = "unavailable" | "generic";
 type SearchResult = { suggestions: HedgeSuggestion[]; isDiscovery: boolean; matchedEntity: string | null };
 
-export function HedgeScreen({ me, api, onRefreshMe, onToast, onTopup }: {
+// A visit re-reads the lists only when the last read is older than this — tab-hopping is free.
+const STALE_MS = 30_000;
+
+export function HedgeScreen({ active, me, api, onRefreshMe, onToast, onTopup }: {
+  active: boolean; // on screen (Root keeps the screen mounted while another tab is showing)
   me: MeResponse | null;
   api: Api;
   onRefreshMe: () => Promise<void>;
@@ -71,8 +80,8 @@ export function HedgeScreen({ me, api, onRefreshMe, onToast, onTopup }: {
   useEffect(() => { meRef.current = me; }, [me]);
   // In-flight guard (ref, so stable callbacks can read it) — `pending` above is its render mirror.
   const inFlight = useRef(new Set<string>());
-  // One impression per suggestionId per SCREEN mount — the Set dies with the screen (nav unmounts
-  // it), so revisiting the tab re-logs, but re-renders / card remounts within a visit never spam.
+  // One impression per suggestionId per SCREEN mount — the screen now lives for the whole session
+  // (Root keeps it mounted), so re-renders, card remounts and tab revisits never spam.
   const impressions = useRef(new Set<string>());
   // This session's dismissed suggestionIds — the server re-derives (and re-serves) dismissed
   // suggestions, so reloads/searches filter them out to keep a dismissal stable within the mount.
@@ -98,15 +107,25 @@ export function HedgeScreen({ me, api, onRefreshMe, onToast, onTopup }: {
     impressionSubs.current.forEach((fn) => fn());
   }, []);
 
-  // One shared, gently-ticked clock for all cards' countdowns + the exposure staleness stamp.
+  // One shared, gently-ticked clock for all cards' countdowns + the exposure staleness stamp. Ticks
+  // only while the tab is on screen; showing it re-reads the clock on the next frame.
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
-    const t = setInterval(() => setNowMs(Date.now()), 15_000);
-    return () => clearInterval(t);
-  }, []);
+    if (!active) return;
+    const tick = () => setNowMs(Date.now());
+    const raf = requestAnimationFrame(tick);
+    const t = setInterval(tick, 15_000);
+    return () => { cancelAnimationFrame(raf); clearInterval(t); };
+  }, [active]);
+
+  // When the S1 list was last read (successfully or not) — the revalidation below keys off it.
+  const loadedAt = useRef(0);
 
   // ─── S1 loading ───
-  const loadSuggestions = useCallback(async () => {
+  // `quiet` = a background revalidation of a list already on screen: a failure keeps the cards the
+  // user is looking at instead of swapping them for the error panel.
+  const loadSuggestions = useCallback(async (quiet = false) => {
+    loadedAt.current = Date.now();
     try {
       const res = (await api("/api/hedge/suggestions")) as HedgeSuggestionsResponse;
       setWalletLinked(res.walletLinked);
@@ -115,6 +134,7 @@ export function HedgeScreen({ me, api, onRefreshMe, onToast, onTopup }: {
       setSuggestions(res.suggestions.filter((s) => !dismissed.current.has(s.suggestionId)));
       setLoadError(null);
     } catch (e) {
+      if (quiet) { console.error(e); return; }
       // 502 = the cached snapshot lapsed and Helius/Jupiter are down — nothing to derive from.
       setLoadError(statusOf(e) === 502 ? "unavailable" : "generic");
       setSuggestions(null);
@@ -193,7 +213,7 @@ export function HedgeScreen({ me, api, onRefreshMe, onToast, onTopup }: {
   const toggleWalletForm = useCallback(() => { setLinkError(null); setWalletFormOpen((v) => !v); }, []);
 
   // ─── S2 pickers + free-text search ───
-  const loadPickers = useCallback(async () => {
+  const loadPickers = useCallback(async (quiet = false) => {
     try {
       const res = (await api("/api/hedge/pickers")) as HedgePickersResponse;
       setLeagues(res.leagues);
@@ -202,6 +222,7 @@ export function HedgeScreen({ me, api, onRefreshMe, onToast, onTopup }: {
       setActiveLeague((cur) => (cur && res.leagues.some((l) => l.slug === cur) ? cur : (res.leagues[0]?.slug ?? null)));
     } catch (e) {
       console.error(e);
+      if (quiet) return; // a failed background re-read keeps the chips already on screen
       // Non-fatal: free-text search below still works without the picker lists.
       setLeagues([]);
       setPickersFailed(true);
@@ -209,6 +230,29 @@ export function HedgeScreen({ me, api, onRefreshMe, onToast, onTopup }: {
   }, [api]);
 
   useEffect(() => { void loadPickers(); }, [loadPickers]);
+
+  // Keep-alive revalidation: becoming visible always re-reads (a wallet linked in Profile or a mode
+  // switch must show up on the very next visit); the app returning to the foreground while this tab
+  // is visible re-reads only stale lists. Both in place. Quietly: a failure keeps whatever is on screen
+  // (cards, chips, or a first load's retry panel); a success replaces it without a spinner.
+  const [revalidating, setRevalidating] = useState(false);
+  const revalidate = useCallback(async (force: boolean) => {
+    if (!force && Date.now() - loadedAt.current < STALE_MS) return;
+    setRevalidating(true);
+    try {
+      await Promise.all([loadWalletState(), loadSuggestions(true), loadPickers(true)]);
+    } finally {
+      setRevalidating(false);
+    }
+  }, [loadWalletState, loadSuggestions, loadPickers]);
+  useEffect(() => {
+    if (!active) return;
+    // Not on the frame the screen mounted already visible (a tap before the warm-up) — that mount's
+    // first read is in flight.
+    const raf = requestAnimationFrame(() => void revalidate(Date.now() - loadedAt.current > 2_000));
+    const sub = AppState.addEventListener("change", (s) => { if (s === "active") void revalidate(false); });
+    return () => { cancelAnimationFrame(raf); sub.remove(); };
+  }, [active, revalidate]);
 
   // The SECONDARY S2 UX: free text → server-side alias/FTS (+ NLU edge below threshold) → S2
   // against-suggestions, or the honestly-labeled discovery fallback. Team-chip taps funnel through
@@ -366,6 +410,8 @@ export function HedgeScreen({ me, api, onRefreshMe, onToast, onTopup }: {
         <Text style={styles.title}>🛡 Hedge</Text>
         <Text style={styles.subtitle}>Paper hedges for your bag & your team</Text>
       </View>
+      {/* Out of the header's flow, so it can never wrap the subtitle onto a second line. */}
+      <View style={styles.tickSlot} pointerEvents="none"><UpdatingTick visible={revalidating} /></View>
 
       {/* ─── S1 · wallet hedge ─── */}
       <Text style={styles.sectionLabel}>Wallet hedge</Text>
@@ -383,10 +429,7 @@ export function HedgeScreen({ me, api, onRefreshMe, onToast, onTopup }: {
           </TouchableOpacity>
         </View>
       ) : walletLinked === null ? (
-        <View style={styles.centerNote}>
-          <ActivityIndicator color={colors.energy} />
-          <Text style={styles.noteText}>Reading your hedges…</Text>
-        </View>
+        <View style={styles.cardList}><HedgeCardSkeleton /></View>
       ) : walletLinked === false ? (
         <WalletIntro address={address} busy={linkBusy} error={linkError} onAddress={setAddress} onSubmit={linkWallet} />
       ) : (
@@ -414,10 +457,7 @@ export function HedgeScreen({ me, api, onRefreshMe, onToast, onTopup }: {
           )}
 
           {suggestions === null ? (
-            <View style={styles.centerNote}>
-              <ActivityIndicator color={colors.energy} />
-              <Text style={styles.noteText}>Reading your hedges…</Text>
-            </View>
+            <View style={styles.cardList}><HedgeCardSkeleton /></View>
           ) : suggestions.length === 0 ? (
             <View style={styles.notePanel}>
               <Text style={styles.emptyTitle}>No matching markets right now.</Text>
@@ -438,7 +478,15 @@ export function HedgeScreen({ me, api, onRefreshMe, onToast, onTopup }: {
       </Text>
 
       {leagues === null ? (
-        <ActivityIndicator color={colors.energy} style={{ marginTop: 12 }} />
+        // The chip rows' own boxes (31 px chips, same gaps), so the lists landing don't move the search row.
+        <View style={{ marginTop: 10 }}>
+          <View style={styles.chipRow}>
+            {[64, 84, 72, 90].map((w) => <SkeletonBar key={w} width={w} height={31} style={{ borderRadius: 16 }} />)}
+          </View>
+          <View style={styles.teamChips}>
+            {[96, 78, 110, 86].map((w) => <SkeletonBar key={w} width={w} height={31} style={{ borderRadius: 14 }} />)}
+          </View>
+        </View>
       ) : pickersFailed ? (
         <View style={styles.inlineNoteRow}>
           <Text style={[styles.inlineNote, { flex: 1 }]}>Couldn&apos;t load the team lists — type below instead.</Text>
@@ -544,6 +592,26 @@ export function HedgeScreen({ me, api, onRefreshMe, onToast, onTopup }: {
   );
 }
 
+// A HedgeCard's box while the first read is in flight: same card chrome, the badge row, a two-line
+// question, the context line, the odds bar and the action row — about the height of a real card.
+function HedgeCardSkeleton() {
+  return (
+    <View style={styles.skeletonCard} accessibilityLabel="Loading hedges">
+      <SkeletonBar width={92} height={20} style={{ borderRadius: 18 }} />
+      <View style={{ paddingVertical: 10, gap: 6 }}>
+        <SkeletonBar width="92%" height={20} />
+        <SkeletonBar width="64%" height={20} />
+        <SkeletonBar width="80%" height={12} style={{ marginTop: 4 }} />
+      </View>
+      <SkeletonBar height={10} style={{ marginTop: 18 }} />
+      <View style={{ flexDirection: "row", gap: 8, marginTop: 10 }}>
+        <SkeletonBar height={38} style={{ flex: 1, borderRadius: 14 }} />
+        <SkeletonBar width={84} height={38} style={{ borderRadius: 14 }} />
+      </View>
+    </View>
+  );
+}
+
 // F9: fires ONE impression the first time its wrapped card overlaps the viewport. Registers a `check`
 // with the screen's subscriber set; the screen re-runs every check on scroll / (re)layout. `check` also
 // runs on this view's own onLayout (covers cards that mount already on-screen). measureInWindow +
@@ -614,7 +682,11 @@ const styles = StyleSheet.create({
     borderRadius: 14, paddingVertical: 10, paddingHorizontal: 20,
   },
   retryText: { color: colors.energy, fontWeight: "700", fontSize: 13 },
-  centerNote: { alignItems: "center", marginTop: 24 },
+  tickSlot: { position: "absolute", top: 19, right: 16 },
+  skeletonCard: {
+    borderRadius: 22, backgroundColor: colors.panel, borderWidth: 1, borderColor: colors.line,
+    padding: 15, minHeight: 220,
+  },
   diffWalletLink: { alignSelf: "flex-end", marginTop: 10, paddingVertical: 6, paddingHorizontal: 4 },
   diffWalletText: { color: colors.muted, fontSize: 11, fontWeight: "700" },
   formPanel: {

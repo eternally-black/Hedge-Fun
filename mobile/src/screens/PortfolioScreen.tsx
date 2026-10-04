@@ -2,6 +2,8 @@
 // src/app/screens/PortfolioScreen.tsx. The web's wallet-pocket line is gone (no wallet pocket on the phone — the
 // Profile owns the wallet), and the pending-buy replay is gone with it (the server sweep + wallet-lot adoption
 // recover a lost confirm; nothing is written to the device). Everything else is the web's logic verbatim.
+// Root keeps this screen mounted (hidden) from right after boot: the first read is done before the tab
+// is tapped, the re-poll runs only while it is on screen, and showing it re-reads in place.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, AppState, Image, RefreshControl, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import type { MeResponse, StockPortfolioResponse, StockPositionRow } from "@contract/api-types";
@@ -10,6 +12,7 @@ import { colors, withAlpha } from "../theme";
 import { usd } from "../format";
 import { useBuyReal } from "../useBuyReal";
 import { StockConsentSheet } from "../components/StockConsentSheet";
+import { SkeletonBar, UpdatingTick } from "../components/Skeleton";
 import * as wallet from "../platform/wallet.flavor";
 import { REAL_BALANCE_POLL_MS } from "../../lib/config";
 
@@ -19,12 +22,14 @@ import { REAL_BALANCE_POLL_MS } from "../../lib/config";
 // row offers it. Closed lots collapse behind a toggle — they are history, not the thing you came to
 // look at. Pending real buys show as a strip while the poller confirms them.
 export function PortfolioScreen({
+  active,
   me,
   api,
   onRefreshMe,
   onToast,
   onNeedWallet,
 }: {
+  active: boolean; // on screen (Root keeps the screen mounted while another tab is showing)
   me: MeResponse | null;
   api: Api;
   onRefreshMe: () => Promise<void>;
@@ -51,7 +56,9 @@ export function PortfolioScreen({
     setArmed(null);
   }, []);
 
+  const loadedAt = useRef(0); // when the last read started
   const load = useCallback(async () => {
+    loadedAt.current = Date.now();
     try {
       const r = (await api("/api/stocks/portfolio")) as StockPortfolioResponse;
       setData(r);
@@ -100,10 +107,20 @@ export function PortfolioScreen({
     void load();
   }, [load]);
 
-  // Foreground-gated re-poll: a backgrounded app is a read for a number nobody is looking at.
-  // Coming back re-reads immediately, which is also the moment someone returns from the wallet
-  // they just bought from.
+  // Showing the tab re-reads what it already shows, in place: the rows stay, the header tick turns.
+  // Skipped when a read started moments ago (the mount's own first read, a tab flick).
+  const [revalidating, setRevalidating] = useState(false);
+  const revalidate = useCallback(async () => {
+    if (Date.now() - loadedAt.current < 5_000) return;
+    setRevalidating(true);
+    try { await load(); } finally { setRevalidating(false); }
+  }, [load]);
+
+  // Visible- and foreground-gated re-poll: a hidden tab or a backgrounded app is a read for a number
+  // nobody is looking at. Becoming visible re-reads immediately, and so does coming back to the app,
+  // which is also the moment someone returns from the wallet they just bought from.
   useEffect(() => {
+    if (!active) return;
     let timer: ReturnType<typeof setInterval> | undefined;
     const stop = () => { if (timer !== undefined) { clearInterval(timer); timer = undefined; } };
     const start = () => {
@@ -112,12 +129,13 @@ export function PortfolioScreen({
     };
     const sub = AppState.addEventListener("change", (state) => {
       if (state !== "active") { stop(); return; }
-      void load();
+      void revalidate();
       start();
     });
+    const raf = requestAnimationFrame(() => void revalidate());
     if (AppState.currentState === "active") start();
-    return () => { stop(); sub.remove(); };
-  }, [load]);
+    return () => { stop(); sub.remove(); cancelAnimationFrame(raf); };
+  }, [active, load, revalidate]);
 
   const sell = useCallback(
     async (row: StockPositionRow) => {
@@ -165,12 +183,21 @@ export function PortfolioScreen({
         contentContainerStyle={styles.content}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onPullRefresh} tintColor={colors.energy} />}
       >
-        <Text style={styles.title}>Portfolio</Text>
+        <View style={styles.titleRow}>
+          <Text style={styles.title}>Portfolio</Text>
+          <UpdatingTick visible={revalidating} />
+        </View>
         <Text style={styles.subtitle}>Tokenized stocks you own — paper and on-chain.</Text>
 
         <View style={styles.tilesRow}>
-          <TotalTile label="Paper" totals={paper} />
-          {hasReal ? <TotalTile label="On-chain" totals={realTotals} /> : null}
+          {data === null && !loadFailed ? (
+            <TotalTileSkeleton label="Paper" />
+          ) : (
+            <>
+              <TotalTile label="Paper" totals={paper} />
+              {hasReal ? <TotalTile label="On-chain" totals={realTotals} /> : null}
+            </>
+          )}
         </View>
 
         {pending.length > 0 ? (
@@ -185,7 +212,9 @@ export function PortfolioScreen({
         ) : null}
 
         {data === null && !loadFailed ? (
-          <ActivityIndicator color={colors.energy} style={{ marginTop: 80 }} />
+          <View style={styles.openList} accessibilityLabel="Loading your portfolio">
+            {[0, 1, 2].map((i) => <OpenRowSkeleton key={i} />)}
+          </View>
         ) : loadFailed && data === null ? (
           <View style={styles.centerBlock}>
             <Text style={styles.empty}>Couldn&apos;t load your portfolio.</Text>
@@ -264,6 +293,36 @@ function TotalTile({ label, totals }: { label: string; totals: { costCents: numb
         {signed(pnl)}
         <Text style={styles.tileCost}> (cost {usd(totals.costCents)})</Text>
       </Text>
+    </View>
+  );
+}
+
+// The tile's box before the first read: label, a value bar at the 22 px value's line height, the P&L line.
+function TotalTileSkeleton({ label }: { label: string }) {
+  return (
+    <View style={styles.tile}>
+      <Text style={styles.tileLabel}>{label}</Text>
+      <SkeletonBar width={96} height={26} style={{ marginVertical: 3.5 }} />
+      <SkeletonBar width={120} height={11} style={{ marginTop: 5, marginBottom: 2 }} />
+    </View>
+  );
+}
+
+// An open row's box before the first read: logo, the title / meta / P&L lines, the Sell button row.
+function OpenRowSkeleton() {
+  return (
+    <View style={styles.row}>
+      <View style={styles.rowTop}>
+        <SkeletonBar width={36} height={36} style={{ borderRadius: 18 }} />
+        <View style={[styles.rowMiddle, { gap: 6, paddingTop: 2 }]}>
+          <SkeletonBar width="45%" height={13} />
+          <SkeletonBar width="80%" height={11} />
+          <SkeletonBar width="30%" height={11} />
+        </View>
+      </View>
+      <View style={styles.rowActions}>
+        <SkeletonBar width={64} height={31} style={{ borderRadius: 10 }} />
+      </View>
     </View>
   );
 }
@@ -428,7 +487,8 @@ function Logo({ url, symbol }: { url: string | null; symbol: string }) {
 const styles = StyleSheet.create({
   scroll: { flex: 1 },
   content: { paddingHorizontal: 16, paddingTop: 6, paddingBottom: 20 },
-  title: { color: colors.text, fontSize: 26, fontWeight: "900", marginTop: 4 },
+  titleRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 4 },
+  title: { color: colors.text, fontSize: 26, fontWeight: "900" },
   subtitle: { color: colors.muted, fontSize: 11, marginTop: 2 },
   tilesRow: { flexDirection: "row", gap: 10, marginTop: 16 },
   tile: {

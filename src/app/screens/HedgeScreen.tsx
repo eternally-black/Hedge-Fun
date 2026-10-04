@@ -49,13 +49,19 @@ type LoadError = "unavailable" | "generic";
 // All shapes come straight from src/lib/api-types.ts; the server re-derives everything from the
 // suggestionId, so this client never sends market/side/stake.
 // ============================================================================
+// Page keeps this screen mounted (hidden) from shortly after boot; `active` says it is on screen.
+// Hidden, it ticks no clock; becoming visible re-reads stale lists IN PLACE (cards stay on screen).
+const STALE_MS = 30_000;
+
 export function HedgeScreen({
+  active,
   api,
   me,
   onRefreshMe,
   onToast,
   onTopup,
 }: {
+  active: boolean; // on screen (page.tsx keeps the screen mounted while another tab is showing)
   api: Api;
   me: Me | null; // kept in the contract (page.tsx passes it); accept no longer pre-gates on it — the
   // server's 402 is authoritative, so an already-accepted id can still replay for free at $0 Cash (F7).
@@ -76,8 +82,8 @@ export function HedgeScreen({
 
   // In-flight guard (ref, so stable callbacks can read it) — `pending` above is its render mirror.
   const inFlight = useRef(new Set<string>());
-  // One impression per suggestionId per SCREEN mount — the Set dies with the screen (nav unmounts
-  // it), so revisiting the tab re-logs, but re-renders / card remounts within a visit never spam.
+  // One impression per suggestionId per SCREEN mount — the screen now lives for the whole session
+  // (page.tsx keeps it mounted), so re-renders, card remounts and tab revisits never spam.
   const impressions = useRef(new Set<string>());
   // This session's dismissed suggestionIds — the server re-derives (and re-serves) dismissed
   // suggestions, so loadSuggestions filters them out to keep a dismissal stable within the mount.
@@ -86,12 +92,21 @@ export function HedgeScreen({
   // One shared, gently-ticked clock for all cards' countdowns (15s, like the feed — the deck ticks
   // per-second because it's a single focused card). Lazy init keeps Date.now() out of SSR render.
   const [nowMs, setNowMs] = useState(() => Date.now());
+  // Ticks only while the tab is on screen; showing it re-reads the clock on the next frame.
   useEffect(() => {
-    const t = window.setInterval(() => setNowMs(Date.now()), 15_000);
-    return () => window.clearInterval(t);
-  }, []);
+    if (!active) return;
+    const tick = () => setNowMs(Date.now());
+    const raf = window.requestAnimationFrame(tick);
+    const t = window.setInterval(tick, 15_000);
+    return () => { window.cancelAnimationFrame(raf); window.clearInterval(t); };
+  }, [active]);
 
-  const loadSuggestions = useCallback(async () => {
+  // When the lists were last read — the keep-alive revalidation below keys off it.
+  const loadedAt = useRef(0);
+
+  // `quiet` = a background revalidation of a list already on screen: a failure keeps the cards.
+  const loadSuggestions = useCallback(async (quiet = false) => {
+    loadedAt.current = Date.now();
     try {
       const res = (await api("/api/hedge/suggestions")) as HedgeSuggestionsResponse;
       setWalletLinked(res.walletLinked);
@@ -101,6 +116,7 @@ export function HedgeScreen({
       setStockSuggestions((res.stockSuggestions ?? []).filter((s) => !dismissed.current.has(s.suggestionId)));
       setLoadError(null);
     } catch (e) {
+      if (quiet) { console.error(e); return; }
       const status = (e as { status?: number }).status;
       // 502 = the cached snapshot lapsed and Helius/Jupiter are down — nothing to derive from.
       setLoadError(status === 502 ? "unavailable" : "generic");
@@ -133,8 +149,38 @@ export function HedgeScreen({
     }
   }, [api]);
 
+  // The stock ctx (verified wallets + consent + fee sponsorship), read with the suggestions — on
+  // mount and again on every revalidation (the screen stays mounted, and a consent accepted or a
+  // wallet connected elsewhere must reach the next buy). Without it the hook re-fetches
+  // /api/stocks/portfolio on every single tap of a buy button. Best-effort: a failure leaves the
+  // last ctx (or undefined, and the hook fetches it itself).
+  const [stockCtx, setStockCtx] = useState<BuyRealCtx | undefined>(undefined);
+  const loadStockCtx = useCallback(async () => {
+    try {
+      const r = (await api("/api/stocks/portfolio")) as StockPortfolioResponse;
+      setStockCtx({ wallets: r.wallets, stockConsent: r.stockConsent, sponsored: r.sponsored });
+    } catch {
+      /* keep the last ctx; undefined → the hook reads it itself on the first buy */
+    }
+  }, [api]);
+
   // First load on mount.
-  useEffect(() => { void loadWalletState(); void loadSuggestions(); void loadSpotted(); }, [loadWalletState, loadSuggestions, loadSpotted]);
+  useEffect(() => { void loadWalletState(); void loadSuggestions(); void loadSpotted(); void loadStockCtx(); }, [loadWalletState, loadSuggestions, loadSpotted, loadStockCtx]);
+
+  // Keep-alive revalidation, in place — no "Reading…" note over cards already on screen. Becoming
+  // visible always re-reads (a wallet linked or a mode switched elsewhere must show up on the very
+  // next visit); the browser tab coming back re-reads only stale lists.
+  const revalidate = useCallback((force: boolean) => {
+    if (!force && Date.now() - loadedAt.current < STALE_MS) return;
+    void loadWalletState(); void loadSuggestions(true); void loadSpotted(); void loadStockCtx();
+  }, [loadWalletState, loadSuggestions, loadSpotted, loadStockCtx]);
+  useEffect(() => {
+    if (!active) return;
+    const raf = window.requestAnimationFrame(() => revalidate(Date.now() - loadedAt.current > 2_000));
+    const onVis = () => { if (!document.hidden) revalidate(false); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => { window.cancelAnimationFrame(raf); document.removeEventListener("visibilitychange", onVis); };
+  }, [active, revalidate]);
 
   // The wallet-link flow shared with the Profile (paste = read-only, Privy connect = verified). What
   // this screen does with a fresh link: draw the exposure, close the "different wallet" form, and
@@ -257,22 +303,6 @@ export function HedgeScreen({
   // no money switch of its own, the same rule the stock deck follows.
   const realMode = me?.real.mode === "REAL";
 
-  // The stock ctx (verified wallets + consent + fee sponsorship), read ONCE with the suggestions.
-  // Without it the hook re-fetches /api/stocks/portfolio on every single tap of a buy button.
-  // Best-effort: a failure leaves it undefined and the hook fetches it itself, exactly as before.
-  const [stockCtx, setStockCtx] = useState<BuyRealCtx | undefined>(undefined);
-  useEffect(() => {
-    let alive = true;
-    void (async () => {
-      try {
-        const r = (await api("/api/stocks/portfolio")) as StockPortfolioResponse;
-        if (alive) setStockCtx({ wallets: r.wallets, stockConsent: r.stockConsent, sponsored: r.sponsored });
-      } catch {
-        /* undefined ctx → the hook reads it itself on the first buy */
-      }
-    })();
-    return () => { alive = false; };
-  }, [api]);
 
   const onBuyReal = useCallback(
     (s: HedgeSuggestion) => {
@@ -342,7 +372,7 @@ export function HedgeScreen({
           </div>
         </div>
       ) : walletLinked === null ? (
-        <CenterNote>Reading your hedges…</CenterNote>
+        <HedgeCardSkeleton />
       ) : walletLinked === false ? (
         <WalletIntro address={address} busy={linkBusy} error={linkError} onAddress={setAddress} onSubmit={linkWallet} onConnect={connectWallet} />
       ) : (
@@ -363,7 +393,7 @@ export function HedgeScreen({
           )}
 
           {suggestions === null ? (
-            <CenterNote>Reading your hedges…</CenterNote>
+            <HedgeCardSkeleton />
           ) : suggestions.length === 0 && stockSuggestions.length === 0 ? (
             <div style={{ textAlign: "center", marginTop: 60, padding: "0 24px" }}>
               <div style={{ fontFamily: "var(--df)", fontSize: 22 }}>No matching markets right now.</div>
@@ -413,14 +443,14 @@ export function HedgeScreen({
           but in info mode: no checkbox to tick just to close a page of reading. A real consent
           takes priority, so the two can never be stacked on top of each other. */}
       <StockConsentSheet
-        open={real.consentOpen}
+        open={active && real.consentOpen /* portalled: display:none on a hidden tab wouldn't hide it */}
         busy={real.busy}
         sponsored={me?.stockSponsored ?? false}
         onAccept={onAcceptConsent}
         onClose={real.closeConsent}
       />
       <StockConsentSheet
-        open={infoOpen && !real.consentOpen}
+        open={active && infoOpen && !real.consentOpen}
         busy={false}
         mode="info"
         sponsored={me?.stockSponsored ?? false}
@@ -1235,9 +1265,23 @@ function WalletIntro({
   );
 }
 
-function CenterNote({ children }: { children: React.ReactNode }) {
+// A hedge card's box while the first read is in flight — the list landing swaps it without a jump.
+function HedgeCardSkeleton() {
+  const bar = (w: string | number, h: number, extra?: React.CSSProperties): React.CSSProperties => ({ width: w, height: h, borderRadius: 6, background: "var(--panel2)", ...extra });
   return (
-    <div style={{ textAlign: "center", marginTop: 80, color: "var(--muted)", fontSize: 13, padding: "0 24px" }}>{children}</div>
+    <div aria-label="Loading hedges" style={{ marginTop: 14, background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 22, padding: 15, minHeight: 220, boxSizing: "border-box" }}>
+      <div style={bar(92, 20, { borderRadius: 18 })} />
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: "10px 0" }}>
+        <div style={bar("92%", 20)} />
+        <div style={bar("64%", 20)} />
+        <div style={bar("80%", 12, { marginTop: 4 })} />
+      </div>
+      <div style={bar("100%", 10, { marginTop: 18 })} />
+      <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+        <div style={bar("100%", 38, { flex: 1, borderRadius: 14 })} />
+        <div style={bar(84, 38, { flexShrink: 0, borderRadius: 14 })} />
+      </div>
+    </div>
   );
 }
 
