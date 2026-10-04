@@ -231,12 +231,13 @@ export function HedgeScreen({ active, me, api, onRefreshMe, onToast, onTopup }: 
 
   useEffect(() => { void loadPickers(); }, [loadPickers]);
 
-  // Keep-alive revalidation: becoming visible (or the app returning to the foreground while this
-  // tab is visible) re-reads stale lists in place. Quietly: a failure keeps whatever is on screen
+  // Keep-alive revalidation: becoming visible always re-reads (a wallet linked in Profile or a mode
+  // switch must show up on the very next visit); the app returning to the foreground while this tab
+  // is visible re-reads only stale lists. Both in place. Quietly: a failure keeps whatever is on screen
   // (cards, chips, or a first load's retry panel); a success replaces it without a spinner.
   const [revalidating, setRevalidating] = useState(false);
-  const revalidate = useCallback(async () => {
-    if (Date.now() - loadedAt.current < STALE_MS) return;
+  const revalidate = useCallback(async (force: boolean) => {
+    if (!force && Date.now() - loadedAt.current < STALE_MS) return;
     setRevalidating(true);
     try {
       await Promise.all([loadWalletState(), loadSuggestions(true), loadPickers(true)]);
@@ -246,8 +247,10 @@ export function HedgeScreen({ active, me, api, onRefreshMe, onToast, onTopup }: 
   }, [loadWalletState, loadSuggestions, loadPickers]);
   useEffect(() => {
     if (!active) return;
-    const raf = requestAnimationFrame(() => void revalidate());
-    const sub = AppState.addEventListener("change", (s) => { if (s === "active") void revalidate(); });
+    // Not on the frame the screen mounted already visible (a tap before the warm-up) — that mount's
+    // first read is in flight.
+    const raf = requestAnimationFrame(() => void revalidate(Date.now() - loadedAt.current > 2_000));
+    const sub = AppState.addEventListener("change", (s) => { if (s === "active") void revalidate(false); });
     return () => { cancelAnimationFrame(raf); sub.remove(); };
   }, [active, revalidate]);
 
@@ -406,8 +409,9 @@ export function HedgeScreen({ active, me, api, onRefreshMe, onToast, onTopup }: 
       <View style={styles.headerRow}>
         <Text style={styles.title}>🛡 Hedge</Text>
         <Text style={styles.subtitle}>Paper hedges for your bag & your team</Text>
-        <View style={styles.tickSlot}><UpdatingTick visible={revalidating} /></View>
       </View>
+      {/* Out of the header's flow, so it can never wrap the subtitle onto a second line. */}
+      <View style={styles.tickSlot} pointerEvents="none"><UpdatingTick visible={revalidating} /></View>
 
       {/* ─── S1 · wallet hedge ─── */}
       <Text style={styles.sectionLabel}>Wallet hedge</Text>
@@ -678,7 +682,7 @@ const styles = StyleSheet.create({
     borderRadius: 14, paddingVertical: 10, paddingHorizontal: 20,
   },
   retryText: { color: colors.energy, fontWeight: "700", fontSize: 13 },
-  tickSlot: { marginLeft: "auto", alignSelf: "center" },
+  tickSlot: { position: "absolute", top: 19, right: 16 },
   skeletonCard: {
     borderRadius: 22, backgroundColor: colors.panel, borderWidth: 1, borderColor: colors.line,
     padding: 15, minHeight: 220,

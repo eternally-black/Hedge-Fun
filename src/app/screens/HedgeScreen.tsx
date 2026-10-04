@@ -149,19 +149,35 @@ export function HedgeScreen({
     }
   }, [api]);
 
-  // First load on mount.
-  useEffect(() => { void loadWalletState(); void loadSuggestions(); void loadSpotted(); }, [loadWalletState, loadSuggestions, loadSpotted]);
+  // The stock ctx (verified wallets + consent + fee sponsorship), read with the suggestions — on
+  // mount and again on every revalidation (the screen stays mounted, and a consent accepted or a
+  // wallet connected elsewhere must reach the next buy). Without it the hook re-fetches
+  // /api/stocks/portfolio on every single tap of a buy button. Best-effort: a failure leaves the
+  // last ctx (or undefined, and the hook fetches it itself).
+  const [stockCtx, setStockCtx] = useState<BuyRealCtx | undefined>(undefined);
+  const loadStockCtx = useCallback(async () => {
+    try {
+      const r = (await api("/api/stocks/portfolio")) as StockPortfolioResponse;
+      setStockCtx({ wallets: r.wallets, stockConsent: r.stockConsent, sponsored: r.sponsored });
+    } catch {
+      /* keep the last ctx; undefined → the hook reads it itself on the first buy */
+    }
+  }, [api]);
 
-  // Keep-alive revalidation: becoming visible (or the browser tab coming back while this screen is
-  // visible) re-reads stale lists in place — no "Reading…" note over cards already on screen.
-  const revalidate = useCallback(() => {
-    if (Date.now() - loadedAt.current < STALE_MS) return;
-    void loadWalletState(); void loadSuggestions(true); void loadSpotted();
-  }, [loadWalletState, loadSuggestions, loadSpotted]);
+  // First load on mount.
+  useEffect(() => { void loadWalletState(); void loadSuggestions(); void loadSpotted(); void loadStockCtx(); }, [loadWalletState, loadSuggestions, loadSpotted, loadStockCtx]);
+
+  // Keep-alive revalidation, in place — no "Reading…" note over cards already on screen. Becoming
+  // visible always re-reads (a wallet linked or a mode switched elsewhere must show up on the very
+  // next visit); the browser tab coming back re-reads only stale lists.
+  const revalidate = useCallback((force: boolean) => {
+    if (!force && Date.now() - loadedAt.current < STALE_MS) return;
+    void loadWalletState(); void loadSuggestions(true); void loadSpotted(); void loadStockCtx();
+  }, [loadWalletState, loadSuggestions, loadSpotted, loadStockCtx]);
   useEffect(() => {
     if (!active) return;
-    const raf = window.requestAnimationFrame(revalidate);
-    const onVis = () => { if (!document.hidden) revalidate(); };
+    const raf = window.requestAnimationFrame(() => revalidate(Date.now() - loadedAt.current > 2_000));
+    const onVis = () => { if (!document.hidden) revalidate(false); };
     document.addEventListener("visibilitychange", onVis);
     return () => { window.cancelAnimationFrame(raf); document.removeEventListener("visibilitychange", onVis); };
   }, [active, revalidate]);
@@ -287,22 +303,6 @@ export function HedgeScreen({
   // no money switch of its own, the same rule the stock deck follows.
   const realMode = me?.real.mode === "REAL";
 
-  // The stock ctx (verified wallets + consent + fee sponsorship), read ONCE with the suggestions.
-  // Without it the hook re-fetches /api/stocks/portfolio on every single tap of a buy button.
-  // Best-effort: a failure leaves it undefined and the hook fetches it itself, exactly as before.
-  const [stockCtx, setStockCtx] = useState<BuyRealCtx | undefined>(undefined);
-  useEffect(() => {
-    let alive = true;
-    void (async () => {
-      try {
-        const r = (await api("/api/stocks/portfolio")) as StockPortfolioResponse;
-        if (alive) setStockCtx({ wallets: r.wallets, stockConsent: r.stockConsent, sponsored: r.sponsored });
-      } catch {
-        /* undefined ctx → the hook reads it itself on the first buy */
-      }
-    })();
-    return () => { alive = false; };
-  }, [api]);
 
   const onBuyReal = useCallback(
     (s: HedgeSuggestion) => {
@@ -443,14 +443,14 @@ export function HedgeScreen({
           but in info mode: no checkbox to tick just to close a page of reading. A real consent
           takes priority, so the two can never be stacked on top of each other. */}
       <StockConsentSheet
-        open={real.consentOpen}
+        open={active && real.consentOpen /* portalled: display:none on a hidden tab wouldn't hide it */}
         busy={real.busy}
         sponsored={me?.stockSponsored ?? false}
         onAccept={onAcceptConsent}
         onClose={real.closeConsent}
       />
       <StockConsentSheet
-        open={infoOpen && !real.consentOpen}
+        open={active && infoOpen && !real.consentOpen}
         busy={false}
         mode="info"
         sponsored={me?.stockSponsored ?? false}

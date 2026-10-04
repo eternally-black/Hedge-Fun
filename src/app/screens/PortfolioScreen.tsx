@@ -104,8 +104,11 @@ export function PortfolioScreen({
   // ONCE per mount, guarded by a ref: `replayPending` changes identity with every `me` refresh, so
   // without the guard every buy and every sell re-ran this — a second portfolio load and a second
   // replay of the same pending attempts. The poll effect below is the only repeating reader.
+  // Waits for a user: the screen now mounts at boot, and a boot whose /api/me failed would otherwise
+  // spend the once-per-mount replay on a null user (StockDeck guards it the same way).
+  const userId = me?.user.id ?? null;
   useEffect(() => {
-    if (replayed.current) return;
+    if (!userId || replayed.current) return;
     replayed.current = true;
     let alive = true;
     void (async () => {
@@ -122,7 +125,7 @@ export function PortfolioScreen({
       }
     })();
     return () => { alive = false; };
-  }, [load, onToast, replayPending]);
+  }, [userId, load, onToast, replayPending]);
 
   // Visibility-gated re-poll: a hidden screen or browser tab is a read for a number nobody is looking
   // at. Showing the screen or coming back re-reads immediately (in place — the rows stay), which is
@@ -277,7 +280,7 @@ export function PortfolioScreen({
       </div>
 
       <StockConsentSheet
-        open={real.consentOpen}
+        open={active && real.consentOpen /* portalled: display:none on a hidden tab wouldn't hide it */}
         busy={real.busy}
         sponsored={data?.sponsored ?? false}
         onAccept={real.acceptConsent}
