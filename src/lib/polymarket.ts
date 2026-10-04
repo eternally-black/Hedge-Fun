@@ -641,7 +641,12 @@ export async function fetchBlitzDeck(hours = DECK_FETCH_HORIZON_HOURS, want = 10
           withinCategoryHorizon(m, new Date(m.resolutionDeadline).getTime(), nowMs) && // per-category cap
           priceIsContested(m.yesPriceBp, m.noPriceBp) && // cheap MID pre-filter; the AUTHORITATIVE band runs on the eff price below
           !isContextPoor(m) && // drop bare Over/Under totals with no match named ("Games Total: O/U 4.5")
-          !isUnnamedMatch(m) // a match card must say WHICH sport / which game — no generic "SPORTS"
+          !isUnnamedMatch(m) && // a match card must say WHICH sport / which game — no generic "SPORTS"
+          // Up/Down windows belong to the series pass below, never to a band. In the 0–1h band they
+          // were mostly five-minute windows (never served) and 15-minute ones opening hours later,
+          // eating the quota the in-play totals need; and a band-collected open window could still be
+          // cut by `want` (see `series`).
+          upDownWindow(m.question) === null
         ) {
           buckets[shapeOf(m)].push(m);
           bandOf.set(m.polymarketId, bandIdx);
@@ -685,7 +690,7 @@ export async function fetchBlitzDeck(hours = DECK_FETCH_HORIZON_HOURS, want = 10
       const deadlineMs = new Date(m.resolutionDeadline).getTime();
       if (deadlineMs > maxMs || !withinCategoryHorizon(m, deadlineMs, nowMs)) continue;
       if (!priceIsContested(m.yesPriceBp, m.noPriceBp)) continue;
-      if (bandOf.has(m.polymarketId)) continue; // a band already collected it
+
       // Open, or opening within the lookahead. Bounding by window START is what keeps this to a few
       // dozen candidates a run instead of ~800, so the depth gate's CLOB reads stay cheap.
       const w = upDownWindow(m.question);
