@@ -13,6 +13,7 @@ import { placeRealOrder } from "@contract/real-client";
 import { realErrText, realResultText, RETRYABLE_REAL_ERRORS } from "@contract/real-copy";
 import { DECK_MIN_LEAD_MS, QUOTE_POLL_MS } from "../../lib/config";
 import { DeckCard, DeckClockActive, isFresh, type SwipeDir } from "../components/DeckCard";
+import { pushOrder, settleOrder } from "../orderStatus";
 import { useStackDepth } from "../useStackDepth";
 import { StakeSheet } from "../components/StakeSheet";
 
@@ -183,6 +184,11 @@ export function DeckScreen({ active, me, api, onRefreshMe, onToast, onTopup, rea
         return;
       }
       advance();
+      // A real order turns the HUD bell into its status the moment the card flies (OrderStatusBell):
+      // the answer arrives while the user is already on the next card, and that is how they know each
+      // swipe went through. Success needs no words; a refusal still toasts its reason.
+      const realOrder = dir !== "SKIP" && realModeRef.current && !!realCtxRef.current;
+      const orderId = realOrder ? pushOrder(dir) : 0;
       // Echo the price the user was LOOKING AT for the side they picked, so the server can refuse
       // rather than silently book a worse one if the live book moved against them (D10 Slice B).
       // A YES/NO in real mode goes through the two-phase order protocol (intent → device signs →
@@ -213,7 +219,13 @@ export function DeckScreen({ active, me, api, onRefreshMe, onToast, onTopup, rea
           // A real order that did not fully fill says so — "posted"/"submitting" are not a fill.
           if (dir !== "SKIP" && realModeRef.current) {
             const res = r as { status: string; filledSharesMicro?: string };
-            if (res.status !== "filled") onToast(realResultText(res));
+            if (orderId) {
+              if (res.status === "filled" || res.status === "partial") settleOrder(orderId, "filled");
+              else if (res.status === "killed") settleOrder(orderId, "failed");
+              else settleOrder(orderId, "posted");
+            }
+            // A killed order (no fill) is a refusal the ✕ alone does not explain.
+            if (res.status === "killed") onToast(realResultText(res));
           }
           // Paper only: the swipe that spent the LAST point swipe of the day (count == cap, not over)
           // arms the one-shot hand-off to the feed. The server's own count is authoritative.
@@ -226,11 +238,16 @@ export function DeckScreen({ active, me, api, onRefreshMe, onToast, onTopup, rea
         .catch((e) => {
           const status = statusOf(e);
           const body = (e as { body?: { error?: string } }).body;
+          // A refused card comes back as the NEXT card, not on top: the user has already moved on to
+          // the card that rose in its place, and yanking that away would be the jolt; they meet the
+          // refused one again right after.
+          const asNext = (cur: DeckCardT[], c: DeckCardT) => (cur.length ? [cur[0], c, ...cur.slice(1)] : [c]);
           const restore = () =>
             setDeck((d) => {
               const cur = d ?? [];
-              return cur.some((c) => c.id === card.id) ? d : [card, ...cur]; // double-tap race
+              return cur.some((c) => c.id === card.id) ? d : asNext(cur, card); // double-tap race
             });
+          if (orderId) settleOrder(orderId, "failed");
           // Real refusals come before the paper chain below, which swallows every non-price_moved
           // 409 — and approvals_required is exactly the 409 the user must be told about. Nothing was
           // signed or spent, so the card comes back.
@@ -265,9 +282,9 @@ export function DeckScreen({ active, me, api, onRefreshMe, onToast, onTopup, rea
                 const restored: DeckCardT = dir === "YES"
                   ? { ...card, yesPriceBp: fresh }
                   : { ...card, noPriceBp: fresh };
-                return [restored, ...cur];
+                return asNext(cur, restored);
               });
-              onToast("Price moved — swipe again to confirm");
+              onToast("Price moved — it's back as the next card");
             }
           }
           else console.error(e);

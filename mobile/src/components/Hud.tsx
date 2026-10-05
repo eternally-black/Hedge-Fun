@@ -4,6 +4,7 @@ import { memo } from "react";
 import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import type { MeResponse } from "@contract/api-types";
 import { colors } from "../theme";
+import { OrderStatusBell } from "./OrderStatusBell";
 import { num, usd, usdFromMicro } from "../format";
 import * as wallet from "../platform/wallet.flavor";
 
@@ -86,7 +87,9 @@ export const Hud = memo(function Hud({ me, onGM, onShards, onBalance, onBell, po
 
         {/* Bell → results inbox */}
         <TouchableOpacity style={styles.bell} onPress={onBell} accessibilityLabel={unread > 0 ? `Notifications, ${unread} unread` : "Notifications"}>
-          <Text style={styles.bellGlyph}>🔔</Text>
+          {/* In real money the bell is also the order indicator: a ring with the count in flight that
+              resolves to ✓ / ✕ (OrderStatusBell); idle, it is the plain bell. */}
+          {real ? <OrderStatusBell bell={<Text style={styles.bellGlyph}>🔔</Text>} /> : <Text style={styles.bellGlyph}>🔔</Text>}
           {unread > 0 && (
             <View style={styles.badge}>
               <Text style={styles.badgeText}>{unread}</Text>
