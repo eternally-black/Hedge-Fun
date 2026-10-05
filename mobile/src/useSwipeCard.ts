@@ -30,6 +30,12 @@ export const RISE_MS = 320; // web RISE_MS
 const SPRING_MS = 450; // web: transform .45s on spring-back
 const MOVE_EPS = 5; // web MOVE_EPS — px of travel before a press is a drag, not a tap
 const DEG_PER_PX = 0.05; // web: rotate(dx * 0.05deg)
+// Down is not a direction (only YES / NO / SKIP-up commit), so a downward drag is rubber-banded: the
+// card follows at a fifth of the finger and stops 80 px down, instead of sliding over the action
+// buttons and uncovering the card behind it (seen on the Seeker, 2026-10-04). Display only — the
+// release classification below still reads the raw translation, so nothing a drag can do changes.
+const DOWN_FOLLOW_PX = 400;
+const DOWN_MAX_PX = 80;
 // Resting pose of the card waiting behind the top one (web PREVIEW_SCALE / PREVIEW_Y). brightness(.82)
 // is a black veil at .18: brightness multiplies each channel by .82, which is exactly what an 18%
 // black layer composited on top does — no offscreen filter pass.
@@ -157,6 +163,14 @@ export function useSwipeCard({ role, enabled, onCommit }: {
       opacity: p.interpolate({ inputRange: [0.15, 0.65], outputRange: [0, 1], extrapolate: clamp }),
       transform: [{ rotate: rot }, { scale: p.interpolate({ inputRange: [0, 1], outputRange: [0.6, 1], extrapolate: clamp }) }],
     });
+    // Up (negative) passes through 1:1 — the first segment's slope extends to the left; down is
+    // scaled by DOWN_MAX_PX / DOWN_FOLLOW_PX and clamped.
+    const shownY = y.interpolate({
+      inputRange: [-1, 0, DOWN_FOLLOW_PX],
+      outputRange: [-1, 0, DOWN_MAX_PX],
+      extrapolateLeft: "extend",
+      extrapolateRight: clamp,
+    });
     const rotate = Animated.add(Animated.multiply(x, DEG_PER_PX), rx).interpolate({ inputRange: [0, 1], outputRange: ["0deg", "1deg"] });
     return {
       // Outer layer: the stack pose (scale about the bottom edge, like transform-origin center bottom).
@@ -168,7 +182,7 @@ export function useSwipeCard({ role, enabled, onCommit }: {
         ],
       },
       // Inner layer: the finger (rotation about the centre, like the web's drag transform).
-      cardStyle: { opacity: fade, transform: [{ translateX: x }, { translateY: y }, { rotate }] },
+      cardStyle: { opacity: fade, transform: [{ translateX: x }, { translateY: shownY }, { rotate }] },
       veilStyle: { opacity: rise.interpolate({ inputRange: [0, 1], outputRange: [PREVIEW_VEIL, 0] }) },
       yesOverlay: { opacity: yesP },
       noOverlay: { opacity: noP },
