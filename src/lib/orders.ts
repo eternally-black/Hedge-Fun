@@ -2,6 +2,7 @@
 // fill booking into the append-only ledger + the REAL Bet aggregate. SDK-free and pure where
 // possible — the route wires the SDK; this module is what the tests pin.
 import { createHash } from "node:crypto";
+import { TypedData } from "ox";
 import type { PrismaClient, OrderAttempt } from "@prisma/client";
 import { centsFromMicro, costBasisMicro, feePerShareMicro } from "./quote";
 import { SHARE_TICK_MICRO } from "./config";
@@ -197,6 +198,79 @@ export function validateSignedSellOrder(
   if (takerAmount * 10_000n < makerAmount * BigInt(intent.minPriceBp)) return "below_min_price";
   return null;
 }
+
+// ------------------------------------------------------------------ exact order id
+// A CLOB order id IS the EIP-712 hash of the signed Order struct (domain "Polymarket CTF
+// Exchange", version "2", Polygon, verifyingContract = the exchange). Verified 2026-10-05 against
+// all 12 booked prod orders (ENTRY and EXIT): each externalOrderId equals this hash on the standard
+// exchange. So an id the client reports can be checked against the attempt's OWN signed payload
+// exactly — no trade-shape inference. NOTE `signedOrderHash` on the attempt is our own payload
+// digest, not this.
+const ORDER_EXCHANGES = [
+  "0xE111180000d2663C0091e4f400237545B87B996B", // standardExchange — verified against prod
+  "0xe2222d279d744050d28e00520010520000310F59", // negRiskExchange — same scheme, not yet seen in prod
+] as const;
+const ORDER_TYPES = {
+  Order: [
+    { name: "salt", type: "uint256" },
+    { name: "maker", type: "address" },
+    { name: "signer", type: "address" },
+    { name: "tokenId", type: "uint256" },
+    { name: "makerAmount", type: "uint256" },
+    { name: "takerAmount", type: "uint256" },
+    { name: "side", type: "uint8" },
+    { name: "signatureType", type: "uint8" },
+    { name: "timestamp", type: "uint256" },
+    { name: "metadata", type: "bytes32" },
+    { name: "builder", type: "bytes32" },
+  ],
+} as const;
+const ZERO32 = `0x${"0".repeat(64)}`;
+
+// The ids this signed order can have (one per exchange), lowercased; null when the payload cannot
+// be hashed (a malformed or pre-protocol row) — callers must treat null as "cannot tell", never as
+// "not ours".
+export function exchangeOrderIds(signed: SignedOrderWire | null | undefined): string[] | null {
+  if (!signed || typeof signed !== "object") return null;
+  const w = signed as unknown as Record<string, unknown>;
+  try {
+    const side = String(w.side).toUpperCase() === "SELL" || Number(w.side) === 1 ? 1 : 0;
+    const message = {
+      salt: BigInt(String(w.salt)),
+      maker: String(w.maker) as `0x${string}`,
+      signer: String(w.signer) as `0x${string}`,
+      tokenId: BigInt(String(w.tokenId)),
+      makerAmount: BigInt(String(w.makerAmount)),
+      takerAmount: BigInt(String(w.takerAmount)),
+      side,
+      signatureType: Number(w.signatureType),
+      timestamp: BigInt(String(w.timestamp)),
+      metadata: (typeof w.metadata === "string" ? w.metadata : ZERO32) as `0x${string}`,
+      builder: (typeof w.builder === "string" ? w.builder : ZERO32) as `0x${string}`,
+    };
+    return ORDER_EXCHANGES.map((verifyingContract) =>
+      TypedData.getSignPayload({
+        domain: { name: "Polymarket CTF Exchange", version: "2", chainId: 137, verifyingContract },
+        types: ORDER_TYPES,
+        primaryType: "Order",
+        message,
+      }).toLowerCase(),
+    );
+  } catch {
+    return null;
+  }
+}
+
+// true = the id is this signed order's; false = provably another order; null = cannot tell.
+export function isThisSignedOrder(signed: SignedOrderWire | null | undefined, orderId: string): boolean | null {
+  const ids = exchangeOrderIds(signed);
+  if (!ids) return null;
+  return ids.includes(orderId.toLowerCase());
+}
+
+// The marker /api/real/posted writes into `error` for a reported id it could not prove yet; the
+// reported-id fast pass (reconcile.ts) works off it, and the orphan kill below must not touch it.
+export const REPORTED_UNVERIFIED_PREFIX = "reported_unverified:";
 
 // ------------------------------------------------------------------ exchange-order identity
 // The CLOB's own view of an order, read back server-side. It exists because the order is now
@@ -404,7 +478,8 @@ export async function bookEntryFills(
   fills: NormalizedFill[],
   // killOnlyUnbound: the orphan sweep's kill. It acts on a snapshot read before discovery, and the
   // row may have been adopted since (the fast pass, or a re-report) — so the zero-fill kill must
-  // match only a row that is STILL SUBMITTING with no exchange id, in the same statement.
+  // match only a row that is STILL SUBMITTING with no exchange id and no reported id waiting to be
+  // proven, in the same statement.
   opts?: { cumulative?: boolean; killOnlyUnbound?: boolean },
 ): Promise<"FILLED" | "PARTIAL" | "KILLED"> {
   if (fills.length === 0) {
@@ -414,7 +489,7 @@ export async function bookEntryFills(
     await prisma.$transaction(async (tx) => {
       const k = await tx.orderAttempt.updateMany({
         where: opts?.killOnlyUnbound
-          ? { id: attempt.id, state: "SUBMITTING", externalOrderId: null }
+          ? { id: attempt.id, state: "SUBMITTING", externalOrderId: null, OR: [{ error: null }, { NOT: { error: { startsWith: REPORTED_UNVERIFIED_PREFIX } } }] }
           : { id: attempt.id, state: { in: ["SUBMITTING", "POSTED"] } },
         data: { state: "KILLED" },
       });
@@ -668,7 +743,7 @@ export async function bookExitFills(
   if (fills.length === 0) {
     await prisma.orderAttempt.updateMany({
       where: opts?.killOnlyUnbound
-        ? { id: attempt.id, state: "SUBMITTING", externalOrderId: null }
+        ? { id: attempt.id, state: "SUBMITTING", externalOrderId: null, OR: [{ error: null }, { NOT: { error: { startsWith: REPORTED_UNVERIFIED_PREFIX } } }] }
         : { id: attempt.id, state: { in: ["SUBMITTING", "POSTED"] } },
       data: { state: "KILLED" },
     });

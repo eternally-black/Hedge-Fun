@@ -504,6 +504,33 @@ async function main() {
     assert.strictEqual(a10Row.externalOrderId, `${tag}-r10`);
     console.log("OK: the orphan kill re-claims the row first — it never kills what the fast pass adopted");
 
+    // ---- 11. A late report the sweep's snapshot predates: the row is still SUBMITTING and unbound,
+    // but now carries a reported id waiting to be proven. The orphan kill must refuse it.
+    const m11 = await mkMarket("c11");
+    const a11 = await mkAttempt(m11.id, { state: "SUBMITTING", approvedParams: params9 });
+    const snapshot11 = await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a11.id } });
+    await prisma.orderAttempt.update({ where: { id: a11.id }, data: { error: `${REPORTED_UNVERIFIED_PREFIX}${tag}-r11` } });
+    assert.strictEqual(
+      await resolveOrphanAttempt(prisma, snapshot11, async () => ({ orderId: null }), async () => null, FEE_EXP_MILLI),
+      "unknown",
+    );
+    assert.strictEqual((await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a11.id } })).state, "SUBMITTING", "a reported row is never killed");
+    console.log("OK: the orphan kill refuses a row carrying a reported id");
+
+    // ---- 12. A stale mismatch must not erase a newer report: while the pass was verifying X, the
+    // phone reported Y. The mismatch write is conditional on the marker it read.
+    const m12 = await mkMarket("c12");
+    const a12 = await mkAttempt(m12.id, { state: "SUBMITTING", approvedParams: params9, error: `${REPORTED_UNVERIFIED_PREFIX}${tag}-x12` });
+    const newer = `${REPORTED_UNVERIFIED_PREFIX}${tag}-y12`;
+    const racing: ReportedConfirm = async (attempt) => {
+      if (attempt.id !== a12.id) return { ok: false, reason: "unverifiable" };
+      await prisma.orderAttempt.update({ where: { id: a12.id }, data: { error: newer } }); // the re-report lands
+      return { ok: false, reason: "mismatch", detail: "x was not ours" };
+    };
+    await confirmReportedAttempts(prisma, racing, async () => null, { minAgeMs: 0, limit: 50 });
+    assert.strictEqual((await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a12.id } })).error, newer, "the newer report survives");
+    console.log("OK: the fast pass only rewrites the exact marker it read");
+
     console.log("OK: unknown probe / matched-without-trades / terminal + live zero-match verdicts");
     console.log("OK: trade records replace the receipt estimate — delta booked, fee trued up");
     console.log("OK: EXIT true-up moves realized PnL by the charged close fee");

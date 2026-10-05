@@ -5,7 +5,7 @@
 import assert from "node:assert";
 import { verifyReportedOrder } from "../src/lib/order-probe";
 import type { ReconcilableAttempt } from "../src/lib/reconcile";
-import type { SignedOrderWire } from "../src/lib/orders";
+import { exchangeOrderIds, isThisSignedOrder, type SignedOrderWire } from "../src/lib/orders";
 
 // A signed order that matchesExchangeOrder accepts: every field the identity test reads is
 // derived from this, so the fixture must be internally consistent with the exchange view below.
@@ -188,6 +188,42 @@ async function main() {
       }),
     });
     assert.deepStrictEqual(verdict, { ok: false, reason: "unverifiable" }, "oversize is left to the orphan sweep, never a red error");
+  }
+
+  // 13. Exact identity: a CLOB order id is the EIP-712 hash of the signed Order. The expected value
+  //     was computed with viem's hashTypedData (an independent implementation) for this synthetic
+  //     payload; the scheme itself was checked against all 12 booked prod orders on 2026-10-05.
+  {
+    const realSigned = {
+      salt: "4422653138285458",
+      maker: "0x1111111111111111111111111111111111111111",
+      signer: "0x1111111111111111111111111111111111111111",
+      tokenId: "54779572715312001889451200805664620346156336491952555736541797575917215068195",
+      makerAmount: "1000000",
+      takerAmount: "2500000",
+      side: "BUY",
+      signatureType: 3,
+      timestamp: "1759600000000",
+      metadata: "0x" + "0".repeat(64),
+      builder: "0x0690dceb8b95e90b8b846d61c8ea729c89be6ca550c204ec4eaabb6043f6740c",
+      orderType: "FAK",
+      signature: "0x" + "ab".repeat(131),
+    } as unknown as SignedOrderWire;
+    const expectedId = "0x0b3f0e4141e5fe6676c6ff1d2026aaf080fff7762bd0ac6d9ddb0ea8ecca4f30";
+    assert.strictEqual(exchangeOrderIds(realSigned)?.[0], expectedId, "standard-exchange hash matches viem");
+    assert.strictEqual(isThisSignedOrder(realSigned, expectedId.toUpperCase().replace("0X", "0x")), true, "case-insensitive");
+    assert.strictEqual(isThisSignedOrder(realSigned, "0x" + "1".repeat(64)), false);
+    assert.strictEqual(isThisSignedOrder({ ...realSigned, salt: "4422653138285459" } as SignedOrderWire, expectedId), false, "any field change → another id");
+    assert.strictEqual(isThisSignedOrder({ ...realSigned, maker: "not-an-address" } as SignedOrderWire, expectedId), null, "unhashable → cannot tell");
+
+    // A reported id that is provably another order is refused before any exchange read.
+    let reads = 0;
+    const foreign = await verifyReportedOrder(client, attemptFixture({ signedOrder: realSigned as never }), "0x" + "1".repeat(64), "0xdepositwallet", {
+      fetchOrder: async () => { reads++; return null; },
+      pageTrades: async () => { reads++; return { rows: [], complete: true }; },
+    });
+    assert.deepStrictEqual(foreign, { ok: false, reason: "mismatch", detail: "order_id_not_this_signed_order" });
+    assert.strictEqual(reads, 0, "no exchange read for a foreign id");
   }
 
   // 9. Without tradeRetryDelaysMs (the poller's fast pass) there is exactly one read and no wait.

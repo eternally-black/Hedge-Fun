@@ -4,7 +4,8 @@
 // SDK-free by design: the caller supplies a `probe` callback (the same shape as workflow.ts's
 // `runScoped` verdict), so the tests drive it with fakes and the poller never imports the SDK.
 import type { PrismaClient, OrderAttempt } from "@prisma/client";
-import { bookEntryFills, bookExitFills, receiptFillKey, trueUpAttemptFee } from "./orders";
+import { bookEntryFills, bookExitFills, receiptFillKey, trueUpAttemptFee, REPORTED_UNVERIFIED_PREFIX } from "./orders";
+export { REPORTED_UNVERIFIED_PREFIX };
 import { feePerShareMicro } from "./quote";
 import { REAL_FEE_FALLBACK_RATE_BP } from "./config";
 import { readSweepCursor, writeSweepCursor, type SweepCursorValue } from "./sweep-cursor";
@@ -239,7 +240,6 @@ export async function discoverOrphanAttempts(
 // and killing too early would strand money. This pass can only ADOPT: it proves the reported id
 // with exchange evidence and books it, or leaves the row exactly as it was. So it is safe to run
 // every poller tick, and the position shows up in a minute instead of a quarter of an hour.
-export const REPORTED_UNVERIFIED_PREFIX = "reported_unverified:";
 export type ReportedConfirm = (
   attempt: ReconcilableAttempt,
   orderId: string,
@@ -272,8 +272,10 @@ export async function confirmReportedAttempts(
       error: { startsWith: REPORTED_UNVERIFIED_PREFIX },
       updatedAt: { lt: cutoff, gte: oldest },
     },
-    orderBy: { updatedAt: "asc" },
-    take: opts.limit ?? 10,
+    // Newest first: a just-swiped order is the one a user is waiting on, and rows that keep
+    // failing to prove must not hold the head of the queue for their whole 20-minute window.
+    orderBy: { updatedAt: "desc" },
+    take: opts.limit ?? 25,
   });
 
   const counts: Record<ReportedOutcome, number> = { confirmed: 0, pending: 0, mismatch: 0 };
@@ -286,8 +288,9 @@ export async function confirmReportedAttempts(
       if (!verdict.ok) {
         // Same as the route: a wrong id proves nothing about the real order, so record it and stop
         // fast-tracking this row. The orphan sweep (discovery by token) still owns its outcome.
+        // Only if the marker is still the one this pass read: a newer report may have replaced it.
         await prisma.orderAttempt.updateMany({
-          where: { id: attempt.id, state: "SUBMITTING", externalOrderId: null },
+          where: { id: attempt.id, state: "SUBMITTING", externalOrderId: null, error: attempt.error },
           data: { error: `order_mismatch: ${verdict.detail}` },
         });
         counts.mismatch++;
@@ -298,7 +301,7 @@ export async function confirmReportedAttempts(
       let cas;
       try {
         cas = await prisma.orderAttempt.updateMany({
-          where: { id: attempt.id, state: "SUBMITTING", externalOrderId: null },
+          where: { id: attempt.id, state: "SUBMITTING", externalOrderId: null, error: attempt.error },
           data: { state: "POSTED", externalOrderId: orderId, postResponse: verdict.order as never, error: null },
         });
       } catch (e) {

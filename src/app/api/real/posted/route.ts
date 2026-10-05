@@ -13,7 +13,7 @@ import { authUser } from "@/lib/privy";
 import { isRealMoneyEligible, hasRealConsent, sameOrigin } from "@/lib/real";
 import { captureToGlitchTip } from "@/lib/glitchtip";
 import { serverSecureClient } from "@/lib/polymarket-server";
-import { type SignedOrderWire } from "@/lib/orders";
+import { isThisSignedOrder, type SignedOrderWire } from "@/lib/orders";
 import { reconcileAttempt, REPORTED_UNVERIFIED_PREFIX } from "@/lib/reconcile";
 import { realProbes, verifyReportedOrder } from "@/lib/order-probe";
 import { rateLimit } from "@/lib/ratelimit";
@@ -84,6 +84,17 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "no_signed_order" }, { status: 409 });
   }
 
+  // Record the reported id BEFORE any exchange read, so a request that dies mid-read (the phone's
+  // 15 s abort, a restart) still leaves the fast pass something to prove. Only for an id of the
+  // right shape that IS this signed order's hash (when the payload hashes); everything else is
+  // refused below without a marker.
+  if (ORDER_ID_RE.test(orderId) && isThisSignedOrder(signed, orderId) !== false) {
+    await prisma.orderAttempt.updateMany({
+      where: { id: attempt.id, state: "SUBMITTING", externalOrderId: null },
+      data: { error: `${REPORTED_UNVERIFIED_PREFIX}${orderId}` },
+    });
+  }
+
   const client = await serverSecureClient(prisma, user);
   if (!client) return NextResponse.json({ error: "real_not_configured" }, { status: 503 });
 
@@ -123,12 +134,6 @@ export async function POST(req: Request) {
     // (confirmReportedAttempts) proves and books it within a tick or two — that pass can only adopt,
     // never kill, so unlike the orphan sweep it needs no 15-minute floor. Answering 502 here (as
     // this route first did) turned a filled order into a red error in the middle of a swipe.
-    if (ORDER_ID_RE.test(orderId)) {
-      await prisma.orderAttempt.updateMany({
-        where: { id: attempt.id, state: "SUBMITTING", externalOrderId: null },
-        data: { error: `${REPORTED_UNVERIFIED_PREFIX}${orderId}` },
-      });
-    }
     await captureToGlitchTip(new Error("reported order not yet verifiable"), {
       route: "real/posted",
       attemptId: attempt.id,
