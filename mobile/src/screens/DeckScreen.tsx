@@ -229,7 +229,8 @@ export function DeckScreen({ active, me, api, onRefreshMe, onToast, onTopup, rea
             const res = r as { status: string; filledSharesMicro?: string };
             if (orderId) {
               if (res.status === "filled" || res.status === "partial") {
-                settleOrder(orderId, "filled", `${(Number(res.filledSharesMicro ?? "0") / 1e6).toFixed(2)} sh`);
+                const sh = Number(res.filledSharesMicro ?? "0") / 1e6;
+                settleOrder(orderId, "filled", sh > 0 ? `${sh.toFixed(2)} sh` : "Filled");
               } else if (res.status === "killed") {
                 settleOrder(orderId, "failed", "No fill");
               } else {
@@ -390,7 +391,8 @@ export function DeckScreen({ active, me, api, onRefreshMe, onToast, onTopup, rea
       {/* fallback buttons — hidden once the daily cap is reached */}
       {!capReached && (
         <>
-          {realMode && trayStyle === "A" ? <OrderChips /> : null}
+          {/* Owner asked for A 5 px lower (2026-10-05) — closer to the buttons, same strip height. */}
+          {realMode && trayStyle === "A" ? <OrderChips offsetY={5} /> : null}
           <View style={styles.btnRow}>
             <CircleBtn glyph="✕" color={colors.no} size={56} disabled={!top} onPress={() => top && act(top, "NO")} />
             <CircleBtn glyph="↑" color={colors.skip} size={46} disabled={!top} onPress={() => top && act(top, "SKIP")} />

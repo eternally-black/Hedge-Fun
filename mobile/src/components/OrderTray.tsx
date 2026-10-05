@@ -13,12 +13,13 @@ import { type OrderStatusItem, useOrderStatus } from "../orderStatus";
 const MAX_CHIPS = 3;
 export const ORDER_TRAY_HEIGHT = 26;
 
-export function OrderChips() {
+// offsetY nudges the chips without changing the strip's height (the deck above never moves).
+export function OrderChips({ offsetY = 0 }: { offsetY?: number }) {
   const items = useOrderStatus();
   const shown = items.slice(-MAX_CHIPS);
   const hidden = items.length - shown.length;
   return (
-    <View style={styles.tray} pointerEvents="none" accessibilityLiveRegion="polite">
+    <View style={[styles.tray, offsetY ? { transform: [{ translateY: offsetY }] } : null]} pointerEvents="none" accessibilityLiveRegion="polite">
       {hidden > 0 ? <Text style={styles.more}>+{hidden}</Text> : null}
       {shown.map((it) => <Chip key={it.id} item={it} />)}
     </View>
@@ -56,8 +57,8 @@ const Chip = memo(function Chip({ item }: { item: OrderStatusItem }) {
       ) : (
         <Text style={[styles.glyph, { color: tone.fg }]}>{tone.glyph}</Text>
       )}
-      <Text style={[styles.side, { color: item.side === "YES" ? colors.yes : colors.no }]}>{item.side}</Text>
-      <Text style={styles.label} numberOfLines={1}>{item.label}</Text>
+      {/* The outcome as the card named it, in the side's colour — "YES Up" said the same thing twice. */}
+      <Text style={[styles.label, { color: item.side === "YES" ? colors.yes : colors.no }]} numberOfLines={1}>{item.label}</Text>
       {item.detail ? <Text style={[styles.detail, { color: tone.fg }]} numberOfLines={1}>{item.detail}</Text> : null}
     </Animated.View>
   );
@@ -113,7 +114,6 @@ const styles = StyleSheet.create({
   },
   spin: { transform: [{ scale: 0.6 }], width: 14, height: 14 },
   glyph: { fontSize: 12, fontWeight: "900", width: 14, textAlign: "center" },
-  side: { fontSize: 10, fontWeight: "900", letterSpacing: 0.4 },
   label: { color: colors.text, fontSize: 11, fontWeight: "600", flexShrink: 1 },
   detail: { fontSize: 10, fontWeight: "700" },
   badgeWrap: { width: 26, height: 26, alignItems: "center", justifyContent: "center", marginLeft: -4 },
