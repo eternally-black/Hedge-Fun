@@ -18,6 +18,13 @@ import { reconcileAttempt, REPORTED_UNVERIFIED_PREFIX } from "@/lib/reconcile";
 import { realProbes, verifyReportedOrder } from "@/lib/order-probe";
 import { rateLimit } from "@/lib/ratelimit";
 
+// The shares the ledger holds for this attempt — what a booked answer reports, as /api/real/submit
+// does, so the client can say "1.56 sh" instead of nothing.
+async function bookedShares(attemptId: string): Promise<string> {
+  const fills = await prisma.fill.findMany({ where: { attemptId }, select: { sharesMicro: true } });
+  return fills.reduce((s, f) => s + f.sharesMicro, 0n).toString();
+}
+
 // Re-reads of the trades after a post whose order record is unreadable (see verifyReportedOrder).
 // 6 s of waiting in total: the phone's api() aborts at 15 s, and the reads themselves need room too.
 const TRADE_RETRY_DELAYS_MS = [1000, 2000, 3000] as const;
@@ -65,7 +72,7 @@ export async function POST(req: Request) {
   // Already booked: the browser is retrying after a dropped response. Answer with the durable
   // state, exactly as submit does.
   if (attempt.state === "FILLED" || attempt.state === "PARTIAL" || attempt.state === "KILLED") {
-    return NextResponse.json({ status: attempt.state.toLowerCase() });
+    return NextResponse.json({ status: attempt.state.toLowerCase(), filledSharesMicro: await bookedShares(attempt.id) });
   }
   if (attempt.state === "POSTED") {
     // A re-report of the SAME id is legitimate — the first booking may have come back unresolved,
@@ -216,7 +223,7 @@ export async function POST(req: Request) {
 
   if (outcome === "booked" || outcome === "killed") {
     const final = await prisma.orderAttempt.findUnique({ where: { id: attempt.id }, select: { state: true } });
-    return NextResponse.json({ status: (final?.state ?? "POSTED").toLowerCase() });
+    return NextResponse.json({ status: (final?.state ?? "POSTED").toLowerCase(), filledSharesMicro: await bookedShares(attempt.id) });
   }
   // pending / unknown: a fresh match's trade records are often not queryable for a few seconds.
   // Nothing is lost — the poller's reconcile pass books it within minutes.
