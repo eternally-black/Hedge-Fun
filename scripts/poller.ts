@@ -552,18 +552,28 @@ async function tick() {
   // 503 means reconciliation is silently NOT happening, which is exactly what ops must hear.
   const reconcileUrl = process.env.REAL_RECONCILE_URL;
   const reconcileSecret = process.env.REAL_RECONCILE_SECRET;
-  if (reconcileUrl && reconcileSecret && (tickCount - 1) % RECONCILE_EVERY_N_TICKS === 4) {
+  // Every tick: the reported-id fast pass alone (adopt-only, so it is safe that often — it is what
+  // makes a just-swiped position show up in a minute). Every Nth tick: the full sweeps as before.
+  const fullReconcile = (tickCount - 1) % RECONCILE_EVERY_N_TICKS === 4;
+  if (reconcileUrl && reconcileSecret) {
     try {
       const resp = await fetch(reconcileUrl, {
         method: "POST",
         headers: { "content-type": "application/json", "x-reconcile-secret": reconcileSecret },
-        body: JSON.stringify({}),
+        body: JSON.stringify(fullReconcile ? {} : { reportedOnly: true }),
         signal: AbortSignal.timeout(20_000),
       });
       if (!resp.ok) throw new Error(`reconcile HTTP ${resp.status}`);
       const c = (await resp.json()) as Partial<Record<"booked" | "killed" | "pending" | "unknown" | "scanned", number>> & {
         orphans?: Partial<Record<"adopted" | "killed" | "unknown" | "scanned", number>>;
+        reported?: Partial<Record<"confirmed" | "pending" | "mismatch" | "scanned", number>>;
       };
+      const rp = c.reported;
+      if ((rp?.scanned ?? 0) > 0) {
+        console.log(
+          `[real-reported] scanned ${rp?.scanned}: confirmed ${rp?.confirmed ?? 0}, pending ${rp?.pending ?? 0}, mismatch ${rp?.mismatch ?? 0}`,
+        );
+      }
       if ((c.scanned ?? 0) > 0) {
         console.log(
           `[real-reconcile] scanned ${c.scanned}: booked ${c.booked ?? 0}, killed ${c.killed ?? 0}, pending ${c.pending ?? 0}, unknown ${c.unknown ?? 0}`,

@@ -124,6 +124,54 @@ async function main() {
     assert.deepStrictEqual(verdict, { ok: false, reason: "mismatch", detail: "no_signed_order" });
   }
 
+  // 7. The order record answers null (a FAK fill) and the trade lands on the SECOND read → the
+  //    retry finds it; one wait happened, with the first configured delay.
+  {
+    let reads = 0;
+    const waits: number[] = [];
+    const verdict = await verifyReportedOrder(client, attemptFixture(), "order-1", "0xdepositwallet", {
+      fetchOrder: async () => null,
+      pageTrades: async () => {
+        reads++;
+        return reads < 2
+          ? { rows: [], complete: true }
+          : { rows: [{ takerOrderId: "order-1", traderSide: "TAKER", matchedAt: "2026-08-17T12:00:45Z" }], complete: true };
+      },
+      tradeRetryDelaysMs: [1000, 2000, 3000],
+      sleep: async (ms) => { waits.push(ms); },
+    });
+    assert.deepStrictEqual(verdict, { ok: true, order: { id: "order-1", source: "trade-evidence" } });
+    assert.strictEqual(reads, 2);
+    assert.deepStrictEqual(waits, [1000]);
+  }
+
+  // 8. Retries exhausted with no trade → unverifiable after one read per delay plus the first.
+  {
+    let reads = 0;
+    const waits: number[] = [];
+    const verdict = await verifyReportedOrder(client, attemptFixture(), "order-1", "0xdepositwallet", {
+      fetchOrder: async () => null,
+      pageTrades: async () => { reads++; return { rows: [], complete: true }; },
+      tradeRetryDelaysMs: [1000, 2000, 3000],
+      sleep: async (ms) => { waits.push(ms); },
+    });
+    assert.deepStrictEqual(verdict, { ok: false, reason: "unverifiable" });
+    assert.strictEqual(reads, 4);
+    assert.deepStrictEqual(waits, [1000, 2000, 3000]);
+  }
+
+  // 9. Without tradeRetryDelaysMs (the poller's fast pass) there is exactly one read and no wait.
+  {
+    let reads = 0;
+    const verdict = await verifyReportedOrder(client, attemptFixture(), "order-1", "0xdepositwallet", {
+      fetchOrder: async () => null,
+      pageTrades: async () => { reads++; return { rows: [], complete: true }; },
+      sleep: async () => { throw new Error("must not wait"); },
+    });
+    assert.deepStrictEqual(verdict, { ok: false, reason: "unverifiable" });
+    assert.strictEqual(reads, 1);
+  }
+
   console.log("✓ order-probe: a reported id is booked only when the exchange's own record or trade names it");
 }
 

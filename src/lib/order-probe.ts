@@ -22,6 +22,7 @@ import type {
   OrderVerdict,
   OrphanDiscover,
   ReconcilableAttempt,
+  ReportedConfirm,
   TradeRecord,
 } from "./reconcile";
 import { matchesExchangeOrder, type ExchangeOrderView, type SignedOrderWire } from "./orders";
@@ -143,6 +144,12 @@ export async function verifyReportedOrder(
   deps: {
     fetchOrder?: (client: NonNullable<ServerClient>, args: { orderId: string }) => Promise<unknown>;
     pageTrades?: (client: NonNullable<ServerClient>, attempt: ReconcilableAttempt) => Promise<{ rows: unknown[]; complete: boolean }>;
+    // Re-read the trades after each of these delays before answering "unverifiable". An order that
+    // fills at once (FAK) is not readable as an order at all (/data/order answers null), and its
+    // trade record lands a few seconds after the match — so the route that runs right after the
+    // post waits a little instead of leaving the position unbooked for the 15-minute sweep.
+    tradeRetryDelaysMs?: readonly number[];
+    sleep?: (ms: number) => Promise<void>;
   } = {},
 ): Promise<ReportedOrderVerdict> {
   const signed = attempt.signedOrder as unknown as SignedOrderWire | null;
@@ -182,19 +189,27 @@ export async function verifyReportedOrder(
   // are a tight one: a trade that names this id as its TAKER order, on the token this attempt
   // signed for, after the intent existed, in an account only these credentials can read. A client
   // cannot fabricate that — it would have to make the exchange print someone else's trade.
-  const { rows, complete } = await (deps.pageTrades ?? pageTrades)(client, attempt);
   const floorMs = attempt.createdAt.getTime() - CLOCK_SKEW_MS;
-  const named = rows.some((row) => {
-    const t = row as Record<string, unknown>;
-    if (String(t.takerOrderId ?? "") !== orderId) return false;
-    if (String(t.traderSide ?? "") !== "TAKER") return false;
-    const stamped = t.matchedAt ?? t.updatedAt;
-    const ts = stamped ? new Date(String(stamped)).getTime() : Number.NaN;
-    return Number.isFinite(ts) && ts >= floorMs;
-  });
-  if (named) {
-    console.warn(`[order-probe] ${attempt.id}: reported order ${orderId} verified from trade evidence`);
-    return { ok: true, order: { id: orderId, source: "trade-evidence" } };
+  const delays = deps.tradeRetryDelaysMs ?? [];
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  let complete = true;
+  for (let i = 0; ; i++) {
+    const read = await (deps.pageTrades ?? pageTrades)(client, attempt);
+    complete = read.complete;
+    const named = read.rows.some((row) => {
+      const t = row as Record<string, unknown>;
+      if (String(t.takerOrderId ?? "") !== orderId) return false;
+      if (String(t.traderSide ?? "") !== "TAKER") return false;
+      const stamped = t.matchedAt ?? t.updatedAt;
+      const ts = stamped ? new Date(String(stamped)).getTime() : Number.NaN;
+      return Number.isFinite(ts) && ts >= floorMs;
+    });
+    if (named) {
+      console.warn(`[order-probe] ${attempt.id}: reported order ${orderId} verified from trade evidence`);
+      return { ok: true, order: { id: orderId, source: "trade-evidence" } };
+    }
+    if (i >= delays.length) break;
+    await sleep(delays[i]);
   }
   // Nothing yet, or the trade read failed. Either way this is "ask again later", never a refusal:
   // the trade records lag a match by a beat, and /api/real/posted runs milliseconds after it.
@@ -202,7 +217,7 @@ export async function verifyReportedOrder(
   return { ok: false, reason: "unverifiable" };
 }
 
-export function realProbes(prisma: PrismaClient): { probe: OrderProbe; discover: OrphanDiscover } {
+export function realProbes(prisma: PrismaClient): { probe: OrderProbe; discover: OrphanDiscover; confirmReported: ReportedConfirm } {
   // One client per OWNER, cached for this request — each attempt is probed with its own user's
   // credentials (the CLOB only reports an account its creds own). The deposit wallet rides along
   // because discovery needs it to tell this user's order apart from their other ones.
@@ -407,5 +422,14 @@ export function realProbes(prisma: PrismaClient): { probe: OrderProbe; discover:
     }
   };
 
-  return { probe, discover };
+  // The fast pass's check: the id the browser REPORTED, proven by the same reads /api/real/posted
+  // uses (order record, else a taker trade naming the id). One read, no waiting — the poller asks
+  // again next tick.
+  const confirmReported: ReportedConfirm = async (attempt, orderId) => {
+    const { client, depositWallet } = await clientFor(attempt.userId);
+    if (!client || !depositWallet) return null;
+    return verifyReportedOrder(client, attempt, orderId, depositWallet);
+  };
+
+  return { probe, discover, confirmReported };
 }

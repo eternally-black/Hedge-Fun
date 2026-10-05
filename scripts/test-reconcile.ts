@@ -9,6 +9,9 @@ import {
   reconcileStuckAttempts,
   resolveOrphanAttempt,
   discoverOrphanAttempts,
+  confirmReportedAttempts,
+  REPORTED_UNVERIFIED_PREFIX,
+  type ReportedConfirm,
   type OrderProbe,
   type OrphanDiscover,
   type TradeRecord,
@@ -418,6 +421,70 @@ async function main() {
     });
     assert.strictEqual(sweptOrphans.scanned, orphanCount, "scanned exactly the id-less SUBMITTING attempts");
     assert.strictEqual(sweptOrphans.unknown, sweptOrphans.scanned, "a null discover leaves everything unknown");
+
+    // ---- 9. The reported-id fast pass: it can only ADOPT. Rows carry the id /api/real/posted wrote
+    // under REPORTED_UNVERIFIED_PREFIX; anything without it is invisible to this pass.
+    const params9 = { betSide: "YES", sharesMicro: "6000000", feeRateBp: FEE_RATE_BP, feeExpMilli: FEE_EXP_MILLI };
+    const m9a = await mkMarket("c9a");
+    const a9a = await mkAttempt(m9a.id, { state: "SUBMITTING", approvedParams: params9, error: `${REPORTED_UNVERIFIED_PREFIX}${tag}-r9a` });
+    const m9b = await mkMarket("c9b");
+    const a9b = await mkAttempt(m9b.id, { state: "SUBMITTING", approvedParams: params9, error: `${REPORTED_UNVERIFIED_PREFIX}${tag}-r9b` });
+    const m9c = await mkMarket("c9c");
+    const a9c = await mkAttempt(m9c.id, { state: "SUBMITTING", approvedParams: params9, error: `${REPORTED_UNVERIFIED_PREFIX}${tag}-r9c` });
+    const m9d = await mkMarket("c9d");
+    const a9d = await mkAttempt(m9d.id, { state: "SUBMITTING", approvedParams: params9 }); // never reported
+
+    const asked: string[] = [];
+    const confirm9: ReportedConfirm = async (attempt, orderId) => {
+      asked.push(orderId);
+      if (attempt.id === a9a.id) return { ok: false, reason: "unverifiable" };
+      if (attempt.id === a9b.id) return { ok: true, order: { id: orderId, source: "trade-evidence" } };
+      if (attempt.id === a9c.id) return { ok: false, reason: "mismatch", detail: "maker differs" };
+      throw new Error(`asked about an unreported attempt ${attempt.id}`);
+    };
+    const probe9: OrderProbe = async (attempt) =>
+      attempt.id === a9b.id
+        ? {
+            terminal: true,
+            matchedSharesMicro: 6_000_000n,
+            trades: [{ id: `${tag}-t9b`, priceBp: 5200, sizeMicro: 6_000_000n, feeRateBp: FEE_RATE_BP, ts: new Date() }],
+          }
+        : null;
+    const fast = await confirmReportedAttempts(prisma, confirm9, probe9, { minAgeMs: 0, limit: 50 });
+    assert.deepStrictEqual(
+      { confirmed: fast.confirmed, pending: fast.pending, mismatch: fast.mismatch, scanned: fast.scanned },
+      { confirmed: 1, pending: 1, mismatch: 1, scanned: 3 },
+      "only the three reported rows are scanned",
+    );
+    assert.deepStrictEqual(asked.sort(), [`${tag}-r9a`, `${tag}-r9b`, `${tag}-r9c`].sort(), "each asked by its REPORTED id");
+
+    // 9a. Unverifiable → untouched: still SUBMITTING, still carrying its reported id. Never killed.
+    const a9aRow = await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a9a.id } });
+    assert.strictEqual(a9aRow.state, "SUBMITTING");
+    assert.strictEqual(a9aRow.error, `${REPORTED_UNVERIFIED_PREFIX}${tag}-r9a`);
+    // 9b. Proven → bound to the reported id and booked from the exchange's trades; the marker is cleared.
+    const a9bRow = await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a9b.id } });
+    assert.strictEqual(a9bRow.externalOrderId, `${tag}-r9b`);
+    assert.strictEqual(a9bRow.state, "FILLED");
+    assert.strictEqual(a9bRow.error, null);
+    const bet9b = await prisma.bet.findUniqueOrThrow({
+      where: { userId_marketId_mode: { userId: user.id, marketId: m9b.id, mode: "REAL" } },
+    });
+    assert.strictEqual(bet9b.filledSharesMicro, 6_000_000n, "the position shows up");
+    // 9c. A mismatch is recorded and drops out of the fast pass; the row stays for the orphan sweep.
+    const a9cRow = await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a9c.id } });
+    assert.strictEqual(a9cRow.state, "SUBMITTING");
+    assert.strictEqual(a9cRow.externalOrderId, null);
+    assert.ok(a9cRow.error?.startsWith("order_mismatch:"), "the mismatch is on the row");
+    // 9d. The unreported orphan was never touched by this pass.
+    assert.strictEqual((await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a9d.id } })).state, "SUBMITTING");
+    // A second pass sees only the still-unverified row.
+    const again = await confirmReportedAttempts(prisma, async () => ({ ok: false, reason: "unverifiable" }), probe9, { minAgeMs: 0 });
+    assert.strictEqual(again.scanned, 1);
+    // The age floor keeps a row the posted route is still working on out of the pass.
+    const young = await confirmReportedAttempts(prisma, confirm9, probe9, { minAgeMs: 3_600_000 });
+    assert.strictEqual(young.scanned, 0);
+    console.log("OK: reported-id fast pass — adopts a proven id, leaves the unverifiable alone, records a mismatch, never kills");
 
     console.log("OK: unknown probe / matched-without-trades / terminal + live zero-match verdicts");
     console.log("OK: trade records replace the receipt estimate — delta booked, fee trued up");

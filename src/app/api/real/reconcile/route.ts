@@ -6,7 +6,7 @@
 import { NextResponse } from "next/server";
 import { timingSafeEqual } from "node:crypto";
 import { prisma } from "@/lib/prisma";
-import { reconcileStuckAttempts, discoverOrphanAttempts } from "@/lib/reconcile";
+import { reconcileStuckAttempts, discoverOrphanAttempts, confirmReportedAttempts } from "@/lib/reconcile";
 import { captureToGlitchTip } from "@/lib/glitchtip";
 import { realProbes } from "@/lib/order-probe";
 
@@ -20,11 +20,21 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
-  const body = (await req.json().catch(() => ({}))) as { limit?: unknown; minAgeMs?: unknown };
+  const body = (await req.json().catch(() => ({}))) as { limit?: unknown; minAgeMs?: unknown; reportedOnly?: unknown };
   const limit = typeof body.limit === "number" ? Math.min(50, Math.max(1, Math.round(body.limit))) : undefined;
   const minAgeMs = typeof body.minAgeMs === "number" ? Math.max(60_000, Math.round(body.minAgeMs)) : undefined;
 
-  const { probe, discover } = realProbes(prisma);
+  const { probe, discover, confirmReported } = realProbes(prisma);
+
+  // The fast pass runs first and on every call: it can only adopt (see confirmReportedAttempts), so
+  // the poller calls this route every tick with reportedOnly and the full sweeps every Nth tick.
+  let reported = { confirmed: 0, pending: 0, mismatch: 0, scanned: 0 };
+  try {
+    reported = await confirmReportedAttempts(prisma, confirmReported, probe, { limit });
+  } catch (e) {
+    await captureToGlitchTip(e, { route: "real/reconcile", stage: "reported-confirm" });
+  }
+  if (body.reportedOnly === true) return NextResponse.json({ reported });
 
   try {
     const counts = await reconcileStuckAttempts(prisma, probe, { limit, minAgeMs });
@@ -43,7 +53,7 @@ export async function POST(req: Request) {
       await captureToGlitchTip(e, { route: "real/reconcile", stage: "orphan-sweep" });
     }
 
-    return NextResponse.json({ ...counts, orphans });
+    return NextResponse.json({ ...counts, orphans, reported });
   } catch (e) {
     await captureToGlitchTip(e, { route: "real/reconcile" });
     return NextResponse.json({ error: "reconcile_failed" }, { status: 500 });
