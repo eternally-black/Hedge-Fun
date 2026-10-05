@@ -203,12 +203,16 @@ export async function verifyReportedOrder(
   const floorMs = attempt.createdAt.getTime() - CLOCK_SKEW_MS;
   // The trade path must bind as tightly as the order record does (matchesExchangeOrder): the id is
   // client-supplied, so a trade "naming" it proves nothing unless it is on the SIGNED token, in the
-  // attempt's direction, and no bigger in total than the signed order. Without the side check a
+  // attempt's direction, and within what the signed order can spend. Without the side check a
   // user's own BUY elsewhere could be booked as an EXIT's sale proceeds.
+  // The bound is the signed order's FIXED side, which is makerAmount in both directions: a BUY fixes
+  // the USDC it pays (takerAmount is only the MINIMUM shares — at a better price the taker gets more:
+  // live 2026-10-05, $1 signed with takerAmount 1.4493 filled 1.5625 shares at 0.64); a SELL fixes
+  // the shares it offers.
   const wantSide = dir === "EXIT" ? "SELL" : "BUY";
-  let signedSharesMicro: bigint;
+  let signedCapMicro: bigint;
   try {
-    signedSharesMicro = BigInt(dir === "EXIT" ? signed.makerAmount : signed.takerAmount);
+    signedCapMicro = BigInt(signed.makerAmount);
   } catch {
     return { ok: false, reason: "mismatch", detail: "bad_order_shape" };
   }
@@ -228,16 +232,28 @@ export async function verifyReportedOrder(
       const ts = stamped ? new Date(String(stamped)).getTime() : Number.NaN;
       return Number.isFinite(ts) && ts >= floorMs;
     });
-    // More matched than was signed is not this order as we know it. NOT a refusal, though: whether
-    // the exchange can hand a taker extra shares (price improvement) is unconfirmed, and a refusal
-    // would show a red error for an order whose money is spent. Unverifiable leaves it to the
-    // orphan sweep, and the warning makes it visible.
-    const namedMicro = named.reduce<bigint>((sum, row) => {
-      const size = Number((row as Record<string, unknown>).size);
-      return sum + (Number.isFinite(size) && size > 0 ? BigInt(Math.round(size * 1_000_000)) : 0n);
-    }, 0n);
-    if (named.length > 0 && namedMicro > signedSharesMicro + 1n) {
-      console.warn(`[order-probe] ${attempt.id}: trades for ${orderId} total ${namedMicro} > signed ${signedSharesMicro} — left unverified`);
+    // What these trades used of the fixed side: USDC (size × price) for a BUY, shares for a SELL.
+    // Over the signed amount (beyond a micro of rounding per trade) is not this order as we know it,
+    // and a trade we cannot measure cannot be bounded — both stay "unverifiable" (never a 422, which
+    // would show a red error for an order whose money is spent); the orphan sweep and the warning
+    // take it from there.
+    let usedMicro = 0n;
+    let measurable = true;
+    for (const row of named) {
+      const t = row as Record<string, unknown>;
+      const size = Number(t.size);
+      const price = Number(t.price);
+      if (!Number.isFinite(size) || size <= 0) { measurable = false; break; }
+      if (dir === "EXIT") usedMicro += BigInt(Math.round(size * 1_000_000));
+      else {
+        if (!Number.isFinite(price) || price <= 0 || price >= 1) { measurable = false; break; }
+        usedMicro += BigInt(Math.round(size * price * 1_000_000));
+      }
+    }
+    if (named.length > 0 && (!measurable || usedMicro > signedCapMicro + BigInt(named.length))) {
+      console.warn(
+        `[order-probe] ${attempt.id}: trades for ${orderId} use ${measurable ? usedMicro : "an unmeasurable amount"} of signed ${signedCapMicro} (${dir === "EXIT" ? "shares" : "USDC"}) — left unverified`,
+      );
       return { ok: false, reason: "unverifiable" };
     }
     if (named.length > 0) {
