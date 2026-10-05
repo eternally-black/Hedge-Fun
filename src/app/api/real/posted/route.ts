@@ -46,15 +46,18 @@ export async function POST(req: Request) {
   const embeddedWallet = user.embeddedWalletAddress;
   if (!depositWallet || !embeddedWallet) return NextResponse.json({ error: "no_deposit_wallet" }, { status: 409 });
 
-  let intentId: unknown, orderId: unknown;
+  let intentId: unknown, rawOrderId: unknown;
   try {
-    ({ intentId, orderId } = await req.json());
+    ({ intentId, orderId: rawOrderId } = await req.json());
   } catch {
     return NextResponse.json({ error: "bad_json" }, { status: 400 });
   }
-  if (typeof intentId !== "string" || typeof orderId !== "string" || !orderId) {
+  if (typeof intentId !== "string" || typeof rawOrderId !== "string" || !rawOrderId) {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
+  // One canonical spelling: the id is a hex hash, and marker equality, the idempotent re-report and
+  // the unique binding must not be defeated by letter case.
+  const orderId = rawOrderId.toLowerCase();
 
   const attempt = await prisma.orderAttempt.findUnique({ where: { id: intentId } });
   if (!attempt || attempt.userId !== user.id) return NextResponse.json({ error: "unknown_intent" }, { status: 404 });

@@ -120,6 +120,13 @@ export async function reconcileAttempt(
     ts: verdict.trades.reduce((latest, t) => (t.ts > latest ? t.ts : latest), verdict.trades[0].ts),
   };
 
+  // What was booked BEFORE this pass. "Final" is only claimed when a pass finds nothing new: a
+  // single read can be complete for its moment while a fill's later trades are still being indexed
+  // (true even for an old fill seen for the first time), so the stamp waits for a second identical
+  // observation — the sweep revisits unstamped FILLED/PARTIAL rows anyway.
+  const bookedBefore = (await prisma.fill.findMany({ where: { attemptId: attempt.id }, select: { sharesMicro: true } }))
+    .reduce((s, f) => s + f.sharesMicro, 0n);
+
   // Cumulative: these are the ORDER's totals, so the booker writes only what is missing.
   if (dir === "EXIT") await bookExitFills(prisma, attempt, requested, [fill], { cumulative: true });
   else await bookEntryFills(prisma, attempt, betSide, requested, [fill], { cumulative: true });
@@ -129,7 +136,10 @@ export async function reconcileAttempt(
   // the sweep stops re-probing it. Both happen in ONE transaction under the position lock, and only
   // if this read covers everything already booked: a concurrent run that read the fill when it was
   // still partly indexed must neither shrink the fee to the partial fill's nor close the attempt.
-  await trueUpAttemptFee(prisma, attempt, feeMicro, { observedSharesMicro: sharesMicro, stampReconciled: verdict.terminal });
+  await trueUpAttemptFee(prisma, attempt, feeMicro, {
+    observedSharesMicro: sharesMicro,
+    stampReconciled: verdict.terminal && bookedBefore === sharesMicro,
+  });
   return "booked";
 }
 
@@ -211,9 +221,9 @@ export async function discoverOrphanAttempts(
   // A progressing cursor, not "oldest first": an orphan that keeps answering "unknown" is never
   // written, so it would sit at the head of an updatedAt-ordered batch forever and starve every
   // later attempt (a filled order among them). The cursor walks the set and wraps at the end.
-  const attempts = await cursorBatch(prisma, ORPHAN_CURSOR, opts.limit ?? 10, (after) =>
+  const attempts = await cursorBatch(prisma, ORPHAN_CURSOR, opts.limit ?? 10, (after, highWater) =>
     prisma.orderAttempt.findMany({
-      where: { state: "SUBMITTING", externalOrderId: null, updatedAt: { lt: cutoff }, ...afterCursor(after) },
+      where: { state: "SUBMITTING", externalOrderId: null, updatedAt: { lt: cutoff }, createdAt: { lte: highWater }, ...afterCursor(after) },
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],
       take: opts.limit ?? 10,
     }),
@@ -247,16 +257,37 @@ function afterCursor(after: SweepCursorValue | null) {
     ? { AND: [{ OR: [{ createdAt: { gt: after.createdAt } }, { createdAt: after.createdAt, id: { gt: after.id } }] }] }
     : {};
 }
+// A cycle is bounded by a high-water mark taken when it starts (stored as `<name>:hw`, its id a
+// placeholder — readSweepCursor treats an empty id as no cursor at all): rows
+// created after it wait for the next cycle, so a steady stream of new rows cannot keep every batch
+// full and push the wrap — and an older row that just became eligible behind the cursor — away
+// forever. Concurrent callers may replay a batch (the cursor is last-writer-wins); that is harmless:
+// every write in both passes is a CAS on the row's state.
 async function cursorBatch<T extends { createdAt: Date; id: string }>(
   prisma: PrismaClient,
   name: string,
   limit: number,
-  find: (after: SweepCursorValue | null) => Promise<T[]>,
+  find: (after: SweepCursorValue | null, highWater: Date) => Promise<T[]>,
 ): Promise<T[]> {
+  const hwName = `${name}:hw`;
   let after: SweepCursorValue | null = null;
-  try { after = await readSweepCursor(prisma, name); } catch { after = null; }
-  let rows = await find(after);
-  if (rows.length === 0 && after) rows = await find(null); // wrapped: start over from the beginning
+  let highWater: Date | null = null;
+  try {
+    after = await readSweepCursor(prisma, name);
+    highWater = after ? (await readSweepCursor(prisma, hwName))?.createdAt ?? null : null;
+  } catch { after = null; highWater = null; }
+  if (!after || !highWater) {
+    after = null;
+    highWater = new Date();
+    try { await writeSweepCursor(prisma, hwName, { createdAt: highWater, id: "hw" }); } catch { /* bookkeeping */ }
+  }
+  let rows = await find(after, highWater);
+  if (rows.length === 0 && after) {
+    // The cycle ended exactly on a full batch: start the next one now.
+    highWater = new Date();
+    try { await writeSweepCursor(prisma, hwName, { createdAt: highWater, id: "hw" }); } catch { /* bookkeeping */ }
+    rows = await find(null, highWater);
+  }
   const last = rows[rows.length - 1];
   try {
     await writeSweepCursor(prisma, name, rows.length >= limit && last ? { createdAt: last.createdAt, id: last.id } : null);
@@ -299,13 +330,14 @@ export async function confirmReportedAttempts(
   const oldest = new Date(now.getTime() - (opts.maxAgeMs ?? 20 * 60_000));
   // A progressing cursor (see the orphan sweep): rows that keep failing to prove are never written,
   // so any fixed ordering would let them hold the head of the queue for their whole window.
-  const attempts = await cursorBatch(prisma, REPORTED_CURSOR, opts.limit ?? 25, (after) =>
+  const attempts = await cursorBatch(prisma, REPORTED_CURSOR, opts.limit ?? 25, (after, highWater) =>
     prisma.orderAttempt.findMany({
       where: {
         state: "SUBMITTING",
         externalOrderId: null,
         error: { startsWith: REPORTED_UNVERIFIED_PREFIX },
         updatedAt: { lt: cutoff, gte: oldest },
+        createdAt: { lte: highWater },
         ...afterCursor(after),
       },
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],

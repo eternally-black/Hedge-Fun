@@ -25,7 +25,7 @@ import type {
   ReportedConfirm,
   TradeRecord,
 } from "./reconcile";
-import { isThisSignedOrder, matchesExchangeOrder, type ExchangeOrderView, type SignedOrderWire } from "./orders";
+import { exchangeOrderIds, isThisSignedOrder, matchesExchangeOrder, type ExchangeOrderView, type SignedOrderWire } from "./orders";
 
 // A terminal verdict is what KILLS an attempt, so the terminal set is explicit and everything
 // unrecognized reads as still-matchable (fail-safe).
@@ -339,6 +339,9 @@ export function realProbes(prisma: PrismaClient): { probe: OrderProbe; discover:
       // CAS claim, so a SUBMITTING row without one never reached the posting step at all.
       const signed = attempt.signedOrder as unknown as SignedOrderWire | null;
       if (!signed || typeof signed !== "object") return null;
+      // Identity is the exact hash now; a payload we cannot hash can neither be adopted nor declared
+      // absent (an empty listing would otherwise read as absence with no identity check ever run).
+      if (!exchangeOrderIds(signed)) return null;
 
       const { client, depositWallet } = await clientFor(attempt.userId);
       // No client, or no wallet to compare the maker against: the exchange is effectively

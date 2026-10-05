@@ -156,10 +156,13 @@ async function main() {
       "ledger and aggregate agree after the true-up",
     );
 
-    // ---- 5b. A terminal verdict with trade records stamps reconciledAt, so the sweep stops
-    // re-probing the attempt every pass: a spy probe must never be asked about it again.
+    // ---- 5b. "Final" needs two identical observations: the pass that booked the missing 3 shares
+    // does NOT stamp (a fill can still be indexing); the next pass, which finds nothing new, does —
+    // and from then on the sweep stops re-probing the attempt: a spy probe is never asked again.
+    assert.strictEqual((await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a5.id } })).reconciledAt, null, "a pass that booked something new does not stamp");
+    assert.strictEqual(await reconcileAttempt(prisma, await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a5.id } }), truth5, FEE_EXP_MILLI), "booked");
     const a5stamped = await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a5.id } });
-    assert.notStrictEqual(a5stamped.reconciledAt, null, "terminal trade records stamp reconciledAt");
+    assert.notStrictEqual(a5stamped.reconciledAt, null, "a second identical terminal observation stamps reconciledAt");
     const probedIds: string[] = [];
     const spy: typeof truth5 = async (a) => {
       probedIds.push(a.id);
@@ -259,7 +262,7 @@ async function main() {
         updatedAt: window,
       },
     });
-    await prisma.sweepCursor.deleteMany({ where: { name: { in: ["polymarket-order-reconcile-v1", "polymarket-orphan-sweep-v1", "polymarket-reported-fast-v1"] } } });
+    await prisma.sweepCursor.deleteMany({ where: { name: { startsWith: "polymarket-" } } });
     const swept = await reconcileStuckAttempts(prisma, async (attempt) => attempt.id === a7old.id ? {
       terminal: true,
       matchedSharesMicro: 1_000_000n,
@@ -578,17 +581,38 @@ async function main() {
     assert.ok(seen[1].every((id) => !seen[0].includes(id)), "the second batch moved past the first");
     console.log("OK: the orphan sweep walks a cursor — unknown rows cannot hold the head of the queue");
 
-    // ---- 15. The marker's grace runs out: a reported id nobody could prove for 30+ minutes no longer
-    // shields its row from an exact-hash discovery's verdict of absence.
+    // ---- 15. A reported row is never killed on absence, however old: an empty exchange answer does
+    // not prove the order the phone reported (and whose id IS this payload's hash) does not exist.
     const m15 = await mkMarket("c15");
     const a15 = await mkAttempt(m15.id, { state: "SUBMITTING", approvedParams: params9, error: `${REPORTED_UNVERIFIED_PREFIX}${tag}-r15` });
     await prisma.$executeRaw`UPDATE order_attempts SET "updatedAt" = now() - interval '31 minutes' WHERE id = ${a15.id}`;
     const old15 = await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a15.id } });
     assert.strictEqual(
       await resolveOrphanAttempt(prisma, old15, async () => ({ orderId: null }), async () => null, FEE_EXP_MILLI),
-      "killed",
+      "unknown",
     );
-    console.log("OK: a reported marker shields its row only within its grace period");
+    assert.strictEqual((await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a15.id } })).state, "SUBMITTING");
+    console.log("OK: a reported row is never killed on absence, at any age");
+
+    // ---- 16. A cycle is bounded by its start: a row created after the cycle began waits for the next
+    // cycle, so a stream of new rows cannot keep every batch full and starve older ones.
+    await prisma.sweepCursor.deleteMany({ where: { name: { in: ["polymarket-orphan-sweep-v1", "polymarket-orphan-sweep-v1:hw"] } } });
+    const firstBatch: string[] = [];
+    await discoverOrphanAttempts(prisma, async (a) => { firstBatch.push(a.id); return null; }, async () => null, { minAgeMs: 0, limit: 1 });
+    assert.strictEqual(firstBatch.length, 1, "the cycle has started");
+    const m16 = await mkMarket("c16");
+    const a16 = await mkAttempt(m16.id, { state: "SUBMITTING", approvedParams: params9 }); // born mid-cycle
+    const restOfCycle: string[] = [];
+    const hwOf = async () => (await prisma.sweepCursor.findUnique({ where: { name: "polymarket-orphan-sweep-v1:hw" } }))?.afterCreatedAt?.getTime();
+    const cycleStart = await hwOf();
+    for (let i = 0; i < 200; i++) {
+      const batch: string[] = [];
+      await discoverOrphanAttempts(prisma, async (a) => { batch.push(a.id); return null; }, async () => null, { minAgeMs: 0, limit: 1 });
+      if ((await hwOf()) !== cycleStart) break; // this call ended the cycle and began the next one
+      restOfCycle.push(...batch);
+    }
+    assert.ok(!restOfCycle.includes(a16.id), "a row born mid-cycle is not part of that cycle");
+    console.log("OK: a sweep cycle is bounded by its high-water mark");
 
     console.log("OK: unknown probe / matched-without-trades / terminal + live zero-match verdicts");
     console.log("OK: trade records replace the receipt estimate — delta booked, fee trued up");

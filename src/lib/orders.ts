@@ -288,23 +288,17 @@ export function isThisSignedOrder(signed: SignedOrderWire | null | undefined, or
 // The marker /api/real/posted writes into `error` for a reported id it could not prove yet; the
 // reported-id fast pass (reconcile.ts) works off it, and the orphan kill below must not touch it.
 export const REPORTED_UNVERIFIED_PREFIX = "reported_unverified:";
-// How long a reported id protects its row from the orphan kill. Past this (no new report, the fast
-// pass's window long over), the orphan sweep — whose discovery now identifies our order by its exact
-// hash — is trusted to decide, so a marker that can never resolve (missing credentials, a duplicate)
-// cannot wedge the market slot forever.
-export const REPORTED_MARKER_GRACE_MS = 30 * 60_000;
-// The orphan kill's CAS: still unbound and SUBMITTING, and not carrying a reported id that is still
-// within its grace period.
+// The orphan kill's CAS: still unbound and SUBMITTING, and NOT carrying a reported id — ever. The
+// phone reported an id that IS this signed order's hash, i.e. it says it posted it; an empty answer
+// from the exchange later does not prove otherwise (the trade index can lag), so absence must never
+// close such a row. It is adopted as soon as discovery or the fast pass finds the order, and if that
+// never happens the stuck-attempt watcher pages a human (it alerts on SUBMITTING > 15 min).
 function orphanKillWhere(id: string) {
   return {
     id,
     state: "SUBMITTING" as const,
     externalOrderId: null,
-    OR: [
-      { error: null },
-      { NOT: { error: { startsWith: REPORTED_UNVERIFIED_PREFIX } } },
-      { updatedAt: { lt: new Date(Date.now() - REPORTED_MARKER_GRACE_MS) } },
-    ],
+    OR: [{ error: null }, { NOT: { error: { startsWith: REPORTED_UNVERIFIED_PREFIX } } }],
   };
 }
 
