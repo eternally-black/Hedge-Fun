@@ -552,18 +552,33 @@ async function tick() {
   // 503 means reconciliation is silently NOT happening, which is exactly what ops must hear.
   const reconcileUrl = process.env.REAL_RECONCILE_URL;
   const reconcileSecret = process.env.REAL_RECONCILE_SECRET;
-  if (reconcileUrl && reconcileSecret && (tickCount - 1) % RECONCILE_EVERY_N_TICKS === 4) {
+  // Every tick: the reported-id fast pass alone (adopt-only, so it is safe that often — it is what
+  // makes a just-swiped position show up in a minute). Every Nth tick: the full sweeps as before.
+  const fullReconcile = (tickCount - 1) % RECONCILE_EVERY_N_TICKS === 4;
+  if (reconcileUrl && reconcileSecret) {
     try {
       const resp = await fetch(reconcileUrl, {
         method: "POST",
         headers: { "content-type": "application/json", "x-reconcile-secret": reconcileSecret },
-        body: JSON.stringify({}),
+        body: JSON.stringify(fullReconcile ? {} : { reportedOnly: true }),
         signal: AbortSignal.timeout(20_000),
       });
       if (!resp.ok) throw new Error(`reconcile HTTP ${resp.status}`);
       const c = (await resp.json()) as Partial<Record<"booked" | "killed" | "pending" | "unknown" | "scanned", number>> & {
         orphans?: Partial<Record<"adopted" | "killed" | "unknown" | "scanned", number>>;
+        reported?: Partial<Record<"confirmed" | "pending" | "mismatch" | "scanned", number>>;
+        reportedFailed?: boolean;
       };
+      // Counted on its OWN subsystem: four healthy fast-pass calls per full sweep would otherwise
+      // reset the failure streak of a full sweep that fails every time, and it would never page.
+      if (c.reportedFailed) subsystemFailed("real-reported", new Error("reported-id fast pass failed"));
+      else subsystemOk("real-reported");
+      const rp = c.reported;
+      if ((rp?.scanned ?? 0) > 0) {
+        console.log(
+          `[real-reported] scanned ${rp?.scanned}: confirmed ${rp?.confirmed ?? 0}, pending ${rp?.pending ?? 0}, mismatch ${rp?.mismatch ?? 0}`,
+        );
+      }
       if ((c.scanned ?? 0) > 0) {
         console.log(
           `[real-reconcile] scanned ${c.scanned}: booked ${c.booked ?? 0}, killed ${c.killed ?? 0}, pending ${c.pending ?? 0}, unknown ${c.unknown ?? 0}`,
@@ -578,10 +593,10 @@ async function tick() {
           `[real-orphans] scanned ${o?.scanned}: adopted ${o?.adopted ?? 0}, killed ${o?.killed ?? 0}, unknown ${o?.unknown ?? 0}`,
         );
       }
-      subsystemOk("real-reconcile");
+      if (fullReconcile) subsystemOk("real-reconcile");
     } catch (e) {
       console.warn("[real-reconcile] error:", (e as Error).message);
-      subsystemFailed("real-reconcile", e);
+      subsystemFailed(fullReconcile ? "real-reconcile" : "real-reported", e);
     }
   }
 

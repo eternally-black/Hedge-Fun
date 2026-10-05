@@ -2,6 +2,7 @@
 // fill booking into the append-only ledger + the REAL Bet aggregate. SDK-free and pure where
 // possible — the route wires the SDK; this module is what the tests pin.
 import { createHash } from "node:crypto";
+import { TypedData } from "ox";
 import type { PrismaClient, OrderAttempt } from "@prisma/client";
 import { centsFromMicro, costBasisMicro, feePerShareMicro } from "./quote";
 import { SHARE_TICK_MICRO } from "./config";
@@ -196,6 +197,109 @@ export function validateSignedSellOrder(
   // takerAmount/makerAmount must be >= minPriceBp.
   if (takerAmount * 10_000n < makerAmount * BigInt(intent.minPriceBp)) return "below_min_price";
   return null;
+}
+
+// ------------------------------------------------------------------ exact order id
+// A CLOB order id IS the EIP-712 hash of the signed Order struct (domain "Polymarket CTF
+// Exchange", version "2", Polygon, verifyingContract = the exchange). Verified 2026-10-05 against
+// all 12 booked prod orders (ENTRY and EXIT): each externalOrderId equals this hash on the standard
+// exchange. So an id the client reports can be checked against the attempt's OWN signed payload
+// exactly — no trade-shape inference. NOTE `signedOrderHash` on the attempt is our own payload
+// digest, not this.
+const ORDER_EXCHANGES = [
+  "0xE111180000d2663C0091e4f400237545B87B996B", // standardExchange — verified against prod
+  "0xe2222d279d744050d28e00520010520000310F59", // negRiskExchange — same scheme, not yet seen in prod
+] as const;
+const ORDER_TYPES = {
+  Order: [
+    { name: "salt", type: "uint256" },
+    { name: "maker", type: "address" },
+    { name: "signer", type: "address" },
+    { name: "tokenId", type: "uint256" },
+    { name: "makerAmount", type: "uint256" },
+    { name: "takerAmount", type: "uint256" },
+    { name: "side", type: "uint8" },
+    { name: "signatureType", type: "uint8" },
+    { name: "timestamp", type: "uint256" },
+    { name: "metadata", type: "bytes32" },
+    { name: "builder", type: "bytes32" },
+  ],
+} as const;
+const ZERO32 = `0x${"0".repeat(64)}`;
+
+// The ids this signed order can have (one per exchange), lowercased; null when the payload cannot
+// be hashed (a malformed or pre-protocol row) — callers must treat null as "cannot tell", never as
+// "not ours".
+export function exchangeOrderIds(signed: SignedOrderWire | null | undefined): string[] | null {
+  if (!signed || typeof signed !== "object") return null;
+  const w = signed as unknown as Record<string, unknown>;
+  // Every field is validated BEFORE hashing: a malformed payload must answer "cannot tell" (null),
+  // never a hash of coerced values that would make its real id read as "provably another order".
+  const uint = (v: unknown) => (typeof v === "string" && /^\d+$/.test(v)) || (typeof v === "number" && Number.isSafeInteger(v) && v >= 0);
+  const addr = (v: unknown) => typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v);
+  // metadata / builder are optional in the wire (the SDK defaults both to zero); present = bytes32.
+  const b32 = (v: unknown) => v === undefined || v === null || (typeof v === "string" && /^0x[0-9a-fA-F]{64}$/.test(v));
+  const sideRaw = typeof w.side === "string" ? w.side.toUpperCase() : w.side;
+  const side = sideRaw === "BUY" || sideRaw === 0 ? 0 : sideRaw === "SELL" || sideRaw === 1 ? 1 : null;
+  const sigType = typeof w.signatureType === "number" ? w.signatureType : Number.NaN;
+  if (
+    side === null ||
+    !Number.isInteger(sigType) || sigType < 0 || sigType > 3 ||
+    !uint(w.salt) || !uint(w.tokenId) || !uint(w.makerAmount) || !uint(w.takerAmount) || !uint(w.timestamp) ||
+    !addr(w.maker) || !addr(w.signer) ||
+    !b32(w.metadata) || !b32(w.builder)
+  ) {
+    return null;
+  }
+  try {
+    const message = {
+      salt: BigInt(String(w.salt)),
+      maker: String(w.maker) as `0x${string}`,
+      signer: String(w.signer) as `0x${string}`,
+      tokenId: BigInt(String(w.tokenId)),
+      makerAmount: BigInt(String(w.makerAmount)),
+      takerAmount: BigInt(String(w.takerAmount)),
+      side,
+      signatureType: sigType,
+      timestamp: BigInt(String(w.timestamp)),
+      metadata: (typeof w.metadata === "string" ? w.metadata : ZERO32) as `0x${string}`,
+      builder: (typeof w.builder === "string" ? w.builder : ZERO32) as `0x${string}`,
+    };
+    return ORDER_EXCHANGES.map((verifyingContract) =>
+      TypedData.getSignPayload({
+        domain: { name: "Polymarket CTF Exchange", version: "2", chainId: 137, verifyingContract },
+        types: ORDER_TYPES,
+        primaryType: "Order",
+        message,
+      }).toLowerCase(),
+    );
+  } catch {
+    return null;
+  }
+}
+
+// true = the id is this signed order's; false = provably another order; null = cannot tell.
+export function isThisSignedOrder(signed: SignedOrderWire | null | undefined, orderId: string): boolean | null {
+  const ids = exchangeOrderIds(signed);
+  if (!ids) return null;
+  return ids.includes(orderId.toLowerCase());
+}
+
+// The marker /api/real/posted writes into `error` for a reported id it could not prove yet; the
+// reported-id fast pass (reconcile.ts) works off it, and the orphan kill below must not touch it.
+export const REPORTED_UNVERIFIED_PREFIX = "reported_unverified:";
+// The orphan kill's CAS: still unbound and SUBMITTING, and NOT carrying a reported id — ever. The
+// phone reported an id that IS this signed order's hash, i.e. it says it posted it; an empty answer
+// from the exchange later does not prove otherwise (the trade index can lag), so absence must never
+// close such a row. It is adopted as soon as discovery or the fast pass finds the order, and if that
+// never happens the stuck-attempt watcher pages a human (it alerts on SUBMITTING > 15 min).
+function orphanKillWhere(id: string) {
+  return {
+    id,
+    state: "SUBMITTING" as const,
+    externalOrderId: null,
+    OR: [{ error: null }, { NOT: { error: { startsWith: REPORTED_UNVERIFIED_PREFIX } } }],
+  };
 }
 
 // ------------------------------------------------------------------ exchange-order identity
@@ -402,7 +506,11 @@ export async function bookEntryFills(
   betSide: "YES" | "NO",
   requestedSharesMicro: bigint,
   fills: NormalizedFill[],
-  opts?: { cumulative?: boolean },
+  // killOnlyUnbound: the orphan sweep's kill. It acts on a snapshot read before discovery, and the
+  // row may have been adopted since (the fast pass, or a re-report) — so the zero-fill kill must
+  // match only a row that is STILL SUBMITTING with no exchange id and no reported id waiting to be
+  // proven, in the same statement.
+  opts?: { cumulative?: boolean; killOnlyUnbound?: boolean },
 ): Promise<"FILLED" | "PARTIAL" | "KILLED"> {
   if (fills.length === 0) {
     // KILL and release in ONE transaction. Two statements meant a crash in between left the attempt
@@ -410,7 +518,9 @@ export async function bookEntryFills(
     // rows, so nothing downstream can tell that the release still owes.
     await prisma.$transaction(async (tx) => {
       const k = await tx.orderAttempt.updateMany({
-        where: { id: attempt.id, state: { in: ["SUBMITTING", "POSTED"] } },
+        where: opts?.killOnlyUnbound
+          ? orphanKillWhere(attempt.id)
+          : { id: attempt.id, state: { in: ["SUBMITTING", "POSTED"] } },
         data: { state: "KILLED" },
       });
       // Gated on the update actually landing, so a replayed receipt against an already-KILLED
@@ -655,11 +765,16 @@ export async function bookExitFills(
   attempt: OrderAttempt & { userId: string; marketId: string },
   requestedSharesMicro: bigint,
   fills: NormalizedFill[],
-  opts?: { cumulative?: boolean },
+  // killOnlyUnbound: the orphan sweep's kill. It acts on a snapshot read before discovery, and the
+  // row may have been adopted since (the fast pass, or a re-report) — so the zero-fill kill must
+  // match only a row that is STILL SUBMITTING with no exchange id, in the same statement.
+  opts?: { cumulative?: boolean; killOnlyUnbound?: boolean },
 ): Promise<"FILLED" | "PARTIAL" | "KILLED"> {
   if (fills.length === 0) {
     await prisma.orderAttempt.updateMany({
-      where: { id: attempt.id, state: { in: ["SUBMITTING", "POSTED"] } },
+      where: opts?.killOnlyUnbound
+        ? orphanKillWhere(attempt.id)
+        : { id: attempt.id, state: { in: ["SUBMITTING", "POSTED"] } },
       data: { state: "KILLED" },
     });
     return "KILLED";
@@ -886,6 +1001,15 @@ export async function trueUpAttemptFee(
   prisma: PrismaClient,
   attempt: OrderAttempt & { userId: string; marketId: string },
   trueFeeMicro: bigint,
+  // observedSharesMicro: how many shares the exchange read behind `trueFeeMicro` covered. Two
+  // reconciliations can run at once (the posted route, the fast pass, the sweep); one may have read
+  // the trades BEFORE the rest of the fill was indexed. Its fee total is then the fee of a smaller
+  // fill, and applying it after the other run booked the whole fill would cut the ledger's fee to
+  // the partial one (understated basis, overstated PnL). So the correction is applied only when the
+  // observation covers at least what is booked — checked under the position lock, like the write.
+  // stampReconciled: mark the attempt reconciled in the same transaction, and only when the
+  // observation is current — a stale run must not close the attempt to further sweeps either.
+  opts: { observedSharesMicro?: bigint; stampReconciled?: boolean } = {},
 ): Promise<bigint> {
   return prisma.$transaction(async (tx) => {
     // Serialise against the other position writers (bookEntryFills, bookExitFills,
@@ -893,6 +1017,16 @@ export async function trueUpAttemptFee(
     if (attempt.betId) await lockBetRow(tx, { id: attempt.betId });
     else await lockBetRow(tx, { userId: attempt.userId, marketId: attempt.marketId });
     const fills = await tx.fill.findMany({ where: { attemptId: attempt.id }, orderBy: { createdAt: "asc" } });
+    if (opts.observedSharesMicro !== undefined) {
+      const bookedShares = fills.reduce((s, f) => s + f.sharesMicro, 0n);
+      if (opts.observedSharesMicro < bookedShares) return 0n; // a stale read — a newer one booked more
+    }
+    if (opts.stampReconciled) {
+      await tx.orderAttempt.updateMany({
+        where: { id: attempt.id, state: { in: ["FILLED", "PARTIAL"] } },
+        data: { reconciledAt: new Date() },
+      });
+    }
     if (fills.length === 0) return 0n;
     const booked = fills.reduce((s, f) => s + f.feeMicro, 0n);
 

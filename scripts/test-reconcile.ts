@@ -9,11 +9,15 @@ import {
   reconcileStuckAttempts,
   resolveOrphanAttempt,
   discoverOrphanAttempts,
+  confirmReportedAttempts,
+  REPORTED_UNVERIFIED_PREFIX,
+  type ReportedConfirm,
   type OrderProbe,
   type OrphanDiscover,
   type TradeRecord,
 } from "../src/lib/reconcile";
 import { feePerShareMicro } from "../src/lib/quote";
+import { trueUpAttemptFee } from "../src/lib/orders";
 
 const FEE_EXP_MILLI = 1000;
 const FEE_RATE_BP = 700;
@@ -152,10 +156,13 @@ async function main() {
       "ledger and aggregate agree after the true-up",
     );
 
-    // ---- 5b. A terminal verdict with trade records stamps reconciledAt, so the sweep stops
-    // re-probing the attempt every pass: a spy probe must never be asked about it again.
+    // ---- 5b. "Final" needs two identical observations: the pass that booked the missing 3 shares
+    // does NOT stamp (a fill can still be indexing); the next pass, which finds nothing new, does —
+    // and from then on the sweep stops re-probing the attempt: a spy probe is never asked again.
+    assert.strictEqual((await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a5.id } })).reconciledAt, null, "a pass that booked something new does not stamp");
+    assert.strictEqual(await reconcileAttempt(prisma, await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a5.id } }), truth5, FEE_EXP_MILLI), "booked");
     const a5stamped = await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a5.id } });
-    assert.notStrictEqual(a5stamped.reconciledAt, null, "terminal trade records stamp reconciledAt");
+    assert.notStrictEqual(a5stamped.reconciledAt, null, "a second identical terminal observation stamps reconciledAt");
     const probedIds: string[] = [];
     const spy: typeof truth5 = async (a) => {
       probedIds.push(a.id);
@@ -255,7 +262,7 @@ async function main() {
         updatedAt: window,
       },
     });
-    await prisma.sweepCursor.deleteMany({ where: { name: "polymarket-order-reconcile-v1" } });
+    await prisma.sweepCursor.deleteMany({ where: { name: { startsWith: "polymarket-" } } });
     const swept = await reconcileStuckAttempts(prisma, async (attempt) => attempt.id === a7old.id ? {
       terminal: true,
       matchedSharesMicro: 1_000_000n,
@@ -418,6 +425,194 @@ async function main() {
     });
     assert.strictEqual(sweptOrphans.scanned, orphanCount, "scanned exactly the id-less SUBMITTING attempts");
     assert.strictEqual(sweptOrphans.unknown, sweptOrphans.scanned, "a null discover leaves everything unknown");
+
+    // ---- 9. The reported-id fast pass: it can only ADOPT. Rows carry the id /api/real/posted wrote
+    // under REPORTED_UNVERIFIED_PREFIX; anything without it is invisible to this pass.
+    const params9 = { betSide: "YES", sharesMicro: "6000000", feeRateBp: FEE_RATE_BP, feeExpMilli: FEE_EXP_MILLI };
+    const m9a = await mkMarket("c9a");
+    const a9a = await mkAttempt(m9a.id, { state: "SUBMITTING", approvedParams: params9, error: `${REPORTED_UNVERIFIED_PREFIX}${tag}-r9a` });
+    const m9b = await mkMarket("c9b");
+    const a9b = await mkAttempt(m9b.id, { state: "SUBMITTING", approvedParams: params9, error: `${REPORTED_UNVERIFIED_PREFIX}${tag}-r9b` });
+    const m9c = await mkMarket("c9c");
+    const a9c = await mkAttempt(m9c.id, { state: "SUBMITTING", approvedParams: params9, error: `${REPORTED_UNVERIFIED_PREFIX}${tag}-r9c` });
+    const m9d = await mkMarket("c9d");
+    const a9d = await mkAttempt(m9d.id, { state: "SUBMITTING", approvedParams: params9 }); // never reported
+
+    const asked: string[] = [];
+    const confirm9: ReportedConfirm = async (attempt, orderId) => {
+      asked.push(orderId);
+      if (attempt.id === a9a.id) return { ok: false, reason: "unverifiable" };
+      if (attempt.id === a9b.id) return { ok: true, order: { id: orderId, source: "trade-evidence" } };
+      if (attempt.id === a9c.id) return { ok: false, reason: "mismatch", detail: "maker differs" };
+      throw new Error(`asked about an unreported attempt ${attempt.id}`);
+    };
+    const probe9: OrderProbe = async (attempt) =>
+      attempt.id === a9b.id
+        ? {
+            terminal: true,
+            matchedSharesMicro: 6_000_000n,
+            trades: [{ id: `${tag}-t9b`, priceBp: 5200, sizeMicro: 6_000_000n, feeRateBp: FEE_RATE_BP, ts: new Date() }],
+          }
+        : null;
+    const fast = await confirmReportedAttempts(prisma, confirm9, probe9, { minAgeMs: 0, limit: 50 });
+    assert.deepStrictEqual(
+      { confirmed: fast.confirmed, pending: fast.pending, mismatch: fast.mismatch, scanned: fast.scanned },
+      { confirmed: 1, pending: 1, mismatch: 1, scanned: 3 },
+      "only the three reported rows are scanned",
+    );
+    assert.deepStrictEqual(asked.sort(), [`${tag}-r9a`, `${tag}-r9b`, `${tag}-r9c`].sort(), "each asked by its REPORTED id");
+
+    // 9a. Unverifiable → untouched: still SUBMITTING, still carrying its reported id. Never killed.
+    const a9aRow = await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a9a.id } });
+    assert.strictEqual(a9aRow.state, "SUBMITTING");
+    assert.strictEqual(a9aRow.error, `${REPORTED_UNVERIFIED_PREFIX}${tag}-r9a`);
+    // 9b. Proven → bound to the reported id and booked from the exchange's trades; the marker is cleared.
+    const a9bRow = await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a9b.id } });
+    assert.strictEqual(a9bRow.externalOrderId, `${tag}-r9b`);
+    assert.strictEqual(a9bRow.state, "FILLED");
+    assert.strictEqual(a9bRow.error, null);
+    const bet9b = await prisma.bet.findUniqueOrThrow({
+      where: { userId_marketId_mode: { userId: user.id, marketId: m9b.id, mode: "REAL" } },
+    });
+    assert.strictEqual(bet9b.filledSharesMicro, 6_000_000n, "the position shows up");
+    // 9c. A mismatch is recorded and drops out of the fast pass; the row stays for the orphan sweep.
+    const a9cRow = await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a9c.id } });
+    assert.strictEqual(a9cRow.state, "SUBMITTING");
+    assert.strictEqual(a9cRow.externalOrderId, null);
+    assert.ok(a9cRow.error?.startsWith("order_mismatch:"), "the mismatch is on the row");
+    // 9d. The unreported orphan was never touched by this pass.
+    assert.strictEqual((await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a9d.id } })).state, "SUBMITTING");
+    // A second pass sees only the still-unverified row.
+    const again = await confirmReportedAttempts(prisma, async () => ({ ok: false, reason: "unverifiable" }), probe9, { minAgeMs: 0 });
+    assert.strictEqual(again.scanned, 1);
+    // The age floor keeps a row the posted route is still working on out of the pass.
+    const young = await confirmReportedAttempts(prisma, confirm9, probe9, { minAgeMs: 3_600_000 });
+    assert.strictEqual(young.scanned, 0);
+    // The upper age bound hands an old unproven row to the orphan sweep: past maxAgeMs it is not scanned.
+    const stale = await confirmReportedAttempts(prisma, confirm9, probe9, { minAgeMs: 0, maxAgeMs: 1 });
+    assert.strictEqual(stale.scanned, 0, "a row older than maxAgeMs is out of the fast pass");
+    console.log("OK: reported-id fast pass — adopts a proven id, leaves the unverifiable alone, records a mismatch, never kills");
+
+    // ---- 10. The orphan sweep's kill on a STALE snapshot: the fast pass adopted the row after the
+    // sweep read it. The kill must back off rather than kill an adopted (possibly filled) order.
+    const m10 = await mkMarket("c10");
+    const a10 = await mkAttempt(m10.id, { state: "SUBMITTING", approvedParams: params9, error: `${REPORTED_UNVERIFIED_PREFIX}${tag}-r10` });
+    const snapshot10 = await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a10.id } });
+    await prisma.orderAttempt.update({ where: { id: a10.id }, data: { state: "POSTED", externalOrderId: `${tag}-r10`, error: null } });
+    assert.strictEqual(
+      await resolveOrphanAttempt(prisma, snapshot10, async () => ({ orderId: null }), async () => null, FEE_EXP_MILLI),
+      "unknown",
+    );
+    const a10Row = await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a10.id } });
+    assert.strictEqual(a10Row.state, "POSTED", "an adopted row is never killed off a stale snapshot");
+    assert.strictEqual(a10Row.externalOrderId, `${tag}-r10`);
+    console.log("OK: the orphan kill re-claims the row first — it never kills what the fast pass adopted");
+
+    // ---- 11. A late report the sweep's snapshot predates: the row is still SUBMITTING and unbound,
+    // but now carries a reported id waiting to be proven. The orphan kill must refuse it.
+    const m11 = await mkMarket("c11");
+    const a11 = await mkAttempt(m11.id, { state: "SUBMITTING", approvedParams: params9 });
+    const snapshot11 = await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a11.id } });
+    await prisma.orderAttempt.update({ where: { id: a11.id }, data: { error: `${REPORTED_UNVERIFIED_PREFIX}${tag}-r11` } });
+    assert.strictEqual(
+      await resolveOrphanAttempt(prisma, snapshot11, async () => ({ orderId: null }), async () => null, FEE_EXP_MILLI),
+      "unknown",
+    );
+    assert.strictEqual((await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a11.id } })).state, "SUBMITTING", "a reported row is never killed");
+    console.log("OK: the orphan kill refuses a row carrying a reported id");
+
+    // ---- 12. A stale mismatch must not erase a newer report: while the pass was verifying X, the
+    // phone reported Y. The mismatch write is conditional on the marker it read.
+    const m12 = await mkMarket("c12");
+    const a12 = await mkAttempt(m12.id, { state: "SUBMITTING", approvedParams: params9, error: `${REPORTED_UNVERIFIED_PREFIX}${tag}-x12` });
+    const newer = `${REPORTED_UNVERIFIED_PREFIX}${tag}-y12`;
+    const racing: ReportedConfirm = async (attempt) => {
+      if (attempt.id !== a12.id) return { ok: false, reason: "unverifiable" };
+      await prisma.orderAttempt.update({ where: { id: a12.id }, data: { error: newer } }); // the re-report lands
+      return { ok: false, reason: "mismatch", detail: "x was not ours" };
+    };
+    await confirmReportedAttempts(prisma, racing, async () => null, { minAgeMs: 0, limit: 50 });
+    assert.strictEqual((await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a12.id } })).error, newer, "the newer report survives");
+    console.log("OK: the fast pass only rewrites the exact marker it read");
+
+    // ---- 13. Two reconciliations race: B read the WHOLE fill (10 shares) and booked it with the
+    // full fee; A had read it while only 4 shares were indexed and applies its fee true-up late.
+    // A's correction (and its "reconciled" stamp) must be refused: it would cut the fee to the
+    // partial fill's and close the attempt on a stale view.
+    const m13 = await mkMarket("c13");
+    const a13 = await mkAttempt(m13.id, {
+      externalOrderId: `${tag}-o13`,
+      approvedParams: { betSide: "YES", sharesMicro: "10000000", feeRateBp: FEE_RATE_BP, feeExpMilli: FEE_EXP_MILLI },
+    });
+    const full13: OrderProbe = async () => ({
+      terminal: false, // not stamped by B either, so the test can see whether A stamps
+      matchedSharesMicro: 10_000_000n,
+      trades: [
+        { id: `${tag}-t13a`, priceBp: 5200, sizeMicro: 4_000_000n, feeRateBp: FEE_RATE_BP, ts: new Date() },
+        { id: `${tag}-t13b`, priceBp: 5200, sizeMicro: 6_000_000n, feeRateBp: FEE_RATE_BP, ts: new Date() },
+      ],
+    });
+    assert.strictEqual(await reconcileAttempt(prisma, a13, full13, FEE_EXP_MILLI), "booked");
+    const feeAfterB = (await prisma.fill.findMany({ where: { attemptId: a13.id } })).reduce((s, f) => s + f.feeMicro, 0n);
+    assert.strictEqual(feeAfterB, tradeFee(5200, 4_000_000n) + tradeFee(5200, 6_000_000n), "B booked the full fee");
+    const a13Row = await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a13.id } });
+    const staleApplied = await trueUpAttemptFee(prisma, a13Row, tradeFee(5200, 4_000_000n), {
+      observedSharesMicro: 4_000_000n,
+      stampReconciled: true,
+    });
+    assert.strictEqual(staleApplied, 0n, "a stale observation applies nothing");
+    const feeAfterA = (await prisma.fill.findMany({ where: { attemptId: a13.id } })).reduce((s, f) => s + f.feeMicro, 0n);
+    assert.strictEqual(feeAfterA, feeAfterB, "the full fee survives the stale true-up");
+    assert.strictEqual((await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a13.id } })).reconciledAt, null, "and it does not close the attempt");
+    // A CURRENT observation still stamps.
+    await trueUpAttemptFee(prisma, a13Row, feeAfterB, { observedSharesMicro: 10_000_000n, stampReconciled: true });
+    assert.ok((await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a13.id } })).reconciledAt, "a current read stamps");
+    console.log("OK: a stale fee true-up is refused under the position lock; only a current read stamps");
+
+    // ---- 14. The orphan sweep progresses: rows that stay "unknown" are never written, yet two
+    // consecutive small batches must cover DIFFERENT rows (a cursor, not "the same head forever").
+    await prisma.sweepCursor.deleteMany({ where: { name: "polymarket-orphan-sweep-v1" } });
+    const seen: string[][] = [[], []];
+    for (let pass = 0; pass < 2; pass++) {
+      await discoverOrphanAttempts(prisma, async (a) => { seen[pass].push(a.id); return null; }, async () => null, { minAgeMs: 0, limit: 2 });
+    }
+    assert.strictEqual(seen[0].length, 2);
+    assert.ok(seen[1].length >= 1, "the second batch is not empty");
+    assert.ok(seen[1].every((id) => !seen[0].includes(id)), "the second batch moved past the first");
+    console.log("OK: the orphan sweep walks a cursor — unknown rows cannot hold the head of the queue");
+
+    // ---- 15. A reported row is never killed on absence, however old: an empty exchange answer does
+    // not prove the order the phone reported (and whose id IS this payload's hash) does not exist.
+    const m15 = await mkMarket("c15");
+    const a15 = await mkAttempt(m15.id, { state: "SUBMITTING", approvedParams: params9, error: `${REPORTED_UNVERIFIED_PREFIX}${tag}-r15` });
+    await prisma.$executeRaw`UPDATE order_attempts SET "updatedAt" = now() - interval '31 minutes' WHERE id = ${a15.id}`;
+    const old15 = await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a15.id } });
+    assert.strictEqual(
+      await resolveOrphanAttempt(prisma, old15, async () => ({ orderId: null }), async () => null, FEE_EXP_MILLI),
+      "unknown",
+    );
+    assert.strictEqual((await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a15.id } })).state, "SUBMITTING");
+    console.log("OK: a reported row is never killed on absence, at any age");
+
+    // ---- 16. A cycle is bounded by its start: a row created after the cycle began waits for the next
+    // cycle, so a stream of new rows cannot keep every batch full and starve older ones.
+    await prisma.sweepCursor.deleteMany({ where: { name: { in: ["polymarket-orphan-sweep-v1", "polymarket-orphan-sweep-v1:hw"] } } });
+    const firstBatch: string[] = [];
+    await discoverOrphanAttempts(prisma, async (a) => { firstBatch.push(a.id); return null; }, async () => null, { minAgeMs: 0, limit: 1 });
+    assert.strictEqual(firstBatch.length, 1, "the cycle has started");
+    const m16 = await mkMarket("c16");
+    const a16 = await mkAttempt(m16.id, { state: "SUBMITTING", approvedParams: params9 }); // born mid-cycle
+    const restOfCycle: string[] = [];
+    const hwOf = async () => (await prisma.sweepCursor.findUnique({ where: { name: "polymarket-orphan-sweep-v1:hw" } }))?.afterCreatedAt?.getTime();
+    const cycleStart = await hwOf();
+    for (let i = 0; i < 200; i++) {
+      const batch: string[] = [];
+      await discoverOrphanAttempts(prisma, async (a) => { batch.push(a.id); return null; }, async () => null, { minAgeMs: 0, limit: 1 });
+      if ((await hwOf()) !== cycleStart) break; // this call ended the cycle and began the next one
+      restOfCycle.push(...batch);
+    }
+    assert.ok(!restOfCycle.includes(a16.id), "a row born mid-cycle is not part of that cycle");
+    console.log("OK: a sweep cycle is bounded by its high-water mark");
 
     console.log("OK: unknown probe / matched-without-trades / terminal + live zero-match verdicts");
     console.log("OK: trade records replace the receipt estimate — delta booked, fee trued up");

@@ -66,7 +66,9 @@ export function realResultText(res: { status: string; filledSharesMicro?: string
     case "killed":
       return "no fill — the market slot is free again";
     case "posted":
-      return "posted, awaiting the exchange — the reconciler books it when the trade record lands";
+      // The order is on the exchange; the server books it as soon as the exchange's trade record
+      // appears (the poller's fast pass, usually within a minute or two).
+      return "Order placed — it shows in History once the exchange confirms it";
     // NOT the same promise. "posted" carries an exchange order id, so the reconciler resolves it
     // from the trade records. "submitting" means the outcome is unknown and the row has NO order
     // id, which every reconcile scan filters out (`externalOrderId: { not: null }`) — that used to

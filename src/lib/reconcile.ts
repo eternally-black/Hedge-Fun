@@ -4,7 +4,8 @@
 // SDK-free by design: the caller supplies a `probe` callback (the same shape as workflow.ts's
 // `runScoped` verdict), so the tests drive it with fakes and the poller never imports the SDK.
 import type { PrismaClient, OrderAttempt } from "@prisma/client";
-import { bookEntryFills, bookExitFills, receiptFillKey, trueUpAttemptFee } from "./orders";
+import { bookEntryFills, bookExitFills, receiptFillKey, trueUpAttemptFee, REPORTED_UNVERIFIED_PREFIX } from "./orders";
+export { REPORTED_UNVERIFIED_PREFIX };
 import { feePerShareMicro } from "./quote";
 import { REAL_FEE_FALLBACK_RATE_BP } from "./config";
 import { readSweepCursor, writeSweepCursor, type SweepCursorValue } from "./sweep-cursor";
@@ -119,17 +120,26 @@ export async function reconcileAttempt(
     ts: verdict.trades.reduce((latest, t) => (t.ts > latest ? t.ts : latest), verdict.trades[0].ts),
   };
 
+  // What was booked BEFORE this pass. "Final" is only claimed when a pass finds nothing new: a
+  // single read can be complete for its moment while a fill's later trades are still being indexed
+  // (true even for an old fill seen for the first time), so the stamp waits for a second identical
+  // observation — the sweep revisits unstamped FILLED/PARTIAL rows anyway.
+  const bookedBefore = (await prisma.fill.findMany({ where: { attemptId: attempt.id }, select: { sharesMicro: true } }))
+    .reduce((s, f) => s + f.sharesMicro, 0n);
+
   // Cumulative: these are the ORDER's totals, so the booker writes only what is missing.
   if (dir === "EXIT") await bookExitFills(prisma, attempt, requested, [fill], { cumulative: true });
   else await bookEntryFills(prisma, attempt, betSide, requested, [fill], { cumulative: true });
 
   // The estimate dies here: whatever the receipt guessed, the charged total is now on the ledger.
-  await trueUpAttemptFee(prisma, attempt, feeMicro);
-  // The exchange's terminal trade records are the final word: stamp the attempt so the sweep stops
-  // re-probing it every pass for 48h.
-  if (verdict.terminal) {
-    await prisma.orderAttempt.updateMany({ where: { id: attempt.id, state: { in: ["FILLED", "PARTIAL"] } }, data: { reconciledAt: new Date() } });
-  }
+  // The exchange's terminal trade records are the final word, so they also stamp the attempt and
+  // the sweep stops re-probing it. Both happen in ONE transaction under the position lock, and only
+  // if this read covers everything already booked: a concurrent run that read the fill when it was
+  // still partly indexed must neither shrink the fee to the partial fill's nor close the attempt.
+  await trueUpAttemptFee(prisma, attempt, feeMicro, {
+    observedSharesMicro: sharesMicro,
+    stampReconciled: verdict.terminal && bookedBefore === sharesMicro,
+  });
   return "booked";
 }
 
@@ -164,11 +174,15 @@ export async function resolveOrphanAttempt(
   if (found.orderId === null) {
     // Nothing exists at the exchange, so no money moved. Booking zero fills is the existing
     // terminal path: SUBMITTING → KILLED plus the reserved daily-cap slot handed back.
+    // This snapshot was read before discovery, and the row may have been adopted since (the
+    // reported-id fast pass, or a re-report): the kill matches only a row that is STILL unbound
+    // and SUBMITTING, in the same statement, and the outcome is read back rather than assumed.
     const params = attempt.approvedParams as { betSide?: "YES" | "NO"; sharesMicro?: string } | null;
     const requested = BigInt(params?.sharesMicro ?? "0");
-    if (attempt.dir === "EXIT") await bookExitFills(prisma, attempt, requested, []);
-    else await bookEntryFills(prisma, attempt, params?.betSide === "NO" ? "NO" : "YES", requested, []);
-    return "killed";
+    if (attempt.dir === "EXIT") await bookExitFills(prisma, attempt, requested, [], { killOnlyUnbound: true });
+    else await bookEntryFills(prisma, attempt, params?.betSide === "NO" ? "NO" : "YES", requested, [], { killOnlyUnbound: true });
+    const after = await prisma.orderAttempt.findUnique({ where: { id: attempt.id }, select: { state: true } });
+    return after?.state === "KILLED" ? "killed" : "unknown";
   }
 
   // Adopt it. The CAS gates on the row still being an unbound SUBMITTING one, and the unique index
@@ -177,7 +191,7 @@ export async function resolveOrphanAttempt(
   try {
     const cas = await prisma.orderAttempt.updateMany({
       where: { id: attempt.id, state: "SUBMITTING", externalOrderId: null },
-      data: { state: "POSTED", externalOrderId: found.orderId, postResponse: found.order as never },
+      data: { state: "POSTED", externalOrderId: found.orderId, postResponse: found.order as never, error: null },
     });
     if (cas.count === 0) return "unknown"; // someone else moved the row
   } catch (e) {
@@ -204,11 +218,16 @@ export async function discoverOrphanAttempts(
 ): Promise<Record<OrphanOutcome, number> & { scanned: number }> {
   const now = opts.now ?? new Date();
   const cutoff = new Date(now.getTime() - (opts.minAgeMs ?? 15 * 60_000));
-  const attempts = await prisma.orderAttempt.findMany({
-    where: { state: "SUBMITTING", externalOrderId: null, updatedAt: { lt: cutoff } },
-    orderBy: { updatedAt: "asc" },
-    take: opts.limit ?? 10,
-  });
+  // A progressing cursor, not "oldest first": an orphan that keeps answering "unknown" is never
+  // written, so it would sit at the head of an updatedAt-ordered batch forever and starve every
+  // later attempt (a filled order among them). The cursor walks the set and wraps at the end.
+  const attempts = await cursorBatch(prisma, ORPHAN_CURSOR, opts.limit ?? 10, (after, highWater) =>
+    prisma.orderAttempt.findMany({
+      where: { state: "SUBMITTING", externalOrderId: null, updatedAt: { lt: cutoff }, createdAt: { lte: highWater }, ...afterCursor(after) },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      take: opts.limit ?? 10,
+    }),
+  );
 
   const counts: Record<OrphanOutcome, number> = { unknown: 0, adopted: 0, killed: 0 };
   for (const attempt of attempts) {
@@ -222,6 +241,153 @@ export async function discoverOrphanAttempts(
       ]++;
     } catch {
       counts.unknown++; // one attempt's failure must not abort the sweep
+    }
+  }
+  return { ...counts, scanned: attempts.length };
+}
+
+// ── Progressing batches ──
+// The orphan sweep and the fast pass both select rows they may leave untouched ("unknown",
+// "pending"), so a plain ordered LIMIT would hand them the same head rows every pass. They walk the
+// set with a stored (createdAt, id) cursor instead, and wrap to the start after a short batch.
+const ORPHAN_CURSOR = "polymarket-orphan-sweep-v1";
+const REPORTED_CURSOR = "polymarket-reported-fast-v1";
+function afterCursor(after: SweepCursorValue | null) {
+  return after
+    ? { AND: [{ OR: [{ createdAt: { gt: after.createdAt } }, { createdAt: after.createdAt, id: { gt: after.id } }] }] }
+    : {};
+}
+// A cycle is bounded by a high-water mark taken when it starts (stored as `<name>:hw`, its id a
+// placeholder — readSweepCursor treats an empty id as no cursor at all): rows
+// created after it wait for the next cycle, so a steady stream of new rows cannot keep every batch
+// full and push the wrap — and an older row that just became eligible behind the cursor — away
+// forever. Concurrent callers may replay a batch (the cursor is last-writer-wins); that is harmless:
+// every write in both passes is a CAS on the row's state.
+async function cursorBatch<T extends { createdAt: Date; id: string }>(
+  prisma: PrismaClient,
+  name: string,
+  limit: number,
+  find: (after: SweepCursorValue | null, highWater: Date) => Promise<T[]>,
+): Promise<T[]> {
+  const hwName = `${name}:hw`;
+  let after: SweepCursorValue | null = null;
+  let highWater: Date | null = null;
+  try {
+    after = await readSweepCursor(prisma, name);
+    highWater = after ? (await readSweepCursor(prisma, hwName))?.createdAt ?? null : null;
+  } catch { after = null; highWater = null; }
+  if (!after || !highWater) {
+    after = null;
+    highWater = new Date();
+    try { await writeSweepCursor(prisma, hwName, { createdAt: highWater, id: "hw" }); } catch { /* bookkeeping */ }
+  }
+  let rows = await find(after, highWater);
+  if (rows.length === 0 && after) {
+    // The cycle ended exactly on a full batch: start the next one now.
+    highWater = new Date();
+    try { await writeSweepCursor(prisma, hwName, { createdAt: highWater, id: "hw" }); } catch { /* bookkeeping */ }
+    rows = await find(null, highWater);
+  }
+  const last = rows[rows.length - 1];
+  try {
+    await writeSweepCursor(prisma, name, rows.length >= limit && last ? { createdAt: last.createdAt, id: last.id } : null);
+  } catch { /* bookkeeping only — never a reason to skip the money pass */ }
+  return rows;
+}
+
+// ── Reported-but-unverified attempts (the fast pass) ──
+// /api/real/posted got an order id from the browser but could not prove it yet (a FAK order that
+// filled at once is not readable as an order, and its trade record lags the match). The route
+// leaves the attempt SUBMITTING and writes the reported id into `error` under this prefix. The
+// orphan sweep above would find it too — but only after 15 minutes, because that sweep may KILL,
+// and killing too early would strand money. This pass can only ADOPT: it proves the reported id
+// with exchange evidence and books it, or leaves the row exactly as it was. So it is safe to run
+// every poller tick, and the position shows up in a minute instead of a quarter of an hour.
+export type ReportedConfirm = (
+  attempt: ReconcilableAttempt,
+  orderId: string,
+) => Promise<
+  | { ok: true; order: unknown }
+  | { ok: false; reason: "mismatch"; detail: string }
+  | { ok: false; reason: "unverifiable" }
+  // null = not configured / no credentials → nothing to say, never a state change
+  | null
+>;
+export type ReportedOutcome = "confirmed" | "pending" | "mismatch";
+
+export async function confirmReportedAttempts(
+  prisma: PrismaClient,
+  confirm: ReportedConfirm,
+  probe: OrderProbe,
+  // minAgeMs: the posted route itself just spent a few seconds trying, so a row younger than this
+  // is still in that request's hands. maxAgeMs: past it the orphan sweep (15 min floor) owns the
+  // row — a reported id that never proves (a made-up id, broken credentials) must not hold this
+  // pass's queue, or spend that user's exchange quota, forever.
+  opts: { now?: Date; minAgeMs?: number; maxAgeMs?: number; limit?: number; feeExpMilli?: number } = {},
+): Promise<Record<ReportedOutcome, number> & { scanned: number }> {
+  const now = opts.now ?? new Date();
+  const cutoff = new Date(now.getTime() - (opts.minAgeMs ?? 30_000));
+  const oldest = new Date(now.getTime() - (opts.maxAgeMs ?? 20 * 60_000));
+  // A progressing cursor (see the orphan sweep): rows that keep failing to prove are never written,
+  // so any fixed ordering would let them hold the head of the queue for their whole window.
+  const attempts = await cursorBatch(prisma, REPORTED_CURSOR, opts.limit ?? 25, (after, highWater) =>
+    prisma.orderAttempt.findMany({
+      where: {
+        state: "SUBMITTING",
+        externalOrderId: null,
+        error: { startsWith: REPORTED_UNVERIFIED_PREFIX },
+        updatedAt: { lt: cutoff, gte: oldest },
+        createdAt: { lte: highWater },
+        ...afterCursor(after),
+      },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      take: opts.limit ?? 25,
+    }),
+  );
+
+  const counts: Record<ReportedOutcome, number> = { confirmed: 0, pending: 0, mismatch: 0 };
+  for (const attempt of attempts) {
+    try {
+      const orderId = (attempt.error ?? "").slice(REPORTED_UNVERIFIED_PREFIX.length);
+      if (!orderId) { counts.pending++; continue; }
+      const verdict = await confirm(attempt, orderId);
+      if (!verdict || (!verdict.ok && verdict.reason === "unverifiable")) { counts.pending++; continue; }
+      if (!verdict.ok) {
+        // Same as the route: a wrong id proves nothing about the real order, so record it and stop
+        // fast-tracking this row. The orphan sweep (discovery by token) still owns its outcome.
+        // Only if the marker is still the one this pass read: a newer report may have replaced it.
+        await prisma.orderAttempt.updateMany({
+          where: { id: attempt.id, state: "SUBMITTING", externalOrderId: null, error: attempt.error },
+          data: { error: `order_mismatch: ${verdict.detail}` },
+        });
+        counts.mismatch++;
+        continue;
+      }
+      // Adopt exactly as /api/real/posted does: CAS on an unbound SUBMITTING row; the unique index
+      // on externalOrderId is the backstop against binding one exchange order to two attempts.
+      let cas;
+      try {
+        cas = await prisma.orderAttempt.updateMany({
+          where: { id: attempt.id, state: "SUBMITTING", externalOrderId: null, error: attempt.error },
+          data: { state: "POSTED", externalOrderId: orderId, postResponse: verdict.order as never, error: null },
+        });
+      } catch (e) {
+        if ((e as { code?: string }).code === "P2002") { counts.pending++; continue; }
+        throw e;
+      }
+      if (cas.count === 0) { counts.pending++; continue; } // someone else moved the row
+      const market = await prisma.market.findUnique({ where: { id: attempt.marketId }, select: { feeExpMilli: true } });
+      // Booking failures are fine to leave: the row is POSTED with its id now, which the ordinary
+      // reconcile sweep owns.
+      await reconcileAttempt(
+        prisma,
+        { ...attempt, state: "POSTED", externalOrderId: orderId },
+        probe,
+        market?.feeExpMilli ?? opts.feeExpMilli ?? 1000,
+      ).catch(() => "unknown");
+      counts.confirmed++;
+    } catch {
+      counts.pending++; // one attempt's failure must not abort the pass
     }
   }
   return { ...counts, scanned: attempts.length };

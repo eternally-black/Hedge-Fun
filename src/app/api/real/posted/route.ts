@@ -13,10 +13,21 @@ import { authUser } from "@/lib/privy";
 import { isRealMoneyEligible, hasRealConsent, sameOrigin } from "@/lib/real";
 import { captureToGlitchTip } from "@/lib/glitchtip";
 import { serverSecureClient } from "@/lib/polymarket-server";
-import { type SignedOrderWire } from "@/lib/orders";
-import { reconcileAttempt } from "@/lib/reconcile";
+import { isThisSignedOrder, type SignedOrderWire } from "@/lib/orders";
+import { reconcileAttempt, REPORTED_UNVERIFIED_PREFIX } from "@/lib/reconcile";
 import { realProbes, verifyReportedOrder } from "@/lib/order-probe";
 import { rateLimit } from "@/lib/ratelimit";
+
+// Re-reads of the trades after a post whose order record is unreadable (see verifyReportedOrder).
+// 6 s of waiting in total: the phone's api() aborts at 15 s, and the reads themselves need room too.
+const TRADE_RETRY_DELAYS_MS = [1000, 2000, 3000] as const;
+// Whole-request budget for those waits (exchange reads included): the phone's api() aborts at 15 s.
+const WAIT_BUDGET_MS = 9_000;
+// Hard cap on the whole verification, reads included.
+const VERIFY_DEADLINE_MS = 11_000;
+class WaitBudgetSpent extends Error {}
+// A CLOB order id is the order's 32-byte hash. Only an id of that shape is worth fast-tracking.
+const ORDER_ID_RE = /^0x[0-9a-fA-F]{64}$/;
 
 export async function POST(req: Request) {
   const user = await authUser(req);
@@ -35,15 +46,18 @@ export async function POST(req: Request) {
   const embeddedWallet = user.embeddedWalletAddress;
   if (!depositWallet || !embeddedWallet) return NextResponse.json({ error: "no_deposit_wallet" }, { status: 409 });
 
-  let intentId: unknown, orderId: unknown;
+  let intentId: unknown, rawOrderId: unknown;
   try {
-    ({ intentId, orderId } = await req.json());
+    ({ intentId, orderId: rawOrderId } = await req.json());
   } catch {
     return NextResponse.json({ error: "bad_json" }, { status: 400 });
   }
-  if (typeof intentId !== "string" || typeof orderId !== "string" || !orderId) {
+  if (typeof intentId !== "string" || typeof rawOrderId !== "string" || !rawOrderId) {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
+  // One canonical spelling: the id is a hex hash, and marker equality, the idempotent re-report and
+  // the unique binding must not be defeated by letter case.
+  const orderId = rawOrderId.toLowerCase();
 
   const attempt = await prisma.orderAttempt.findUnique({ where: { id: intentId } });
   if (!attempt || attempt.userId !== user.id) return NextResponse.json({ error: "unknown_intent" }, { status: 404 });
@@ -75,6 +89,20 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "no_signed_order" }, { status: 409 });
   }
 
+  // Record the reported id BEFORE any exchange read, so a request that dies mid-read (the phone's
+  // 15 s abort, a restart) still leaves the fast pass something to prove. Only for an id of the
+  // right shape that IS this signed order's hash (when the payload hashes); everything else is
+  // refused below without a marker.
+  const marker = `${REPORTED_UNVERIFIED_PREFIX}${orderId}`;
+  if (ORDER_ID_RE.test(orderId) && isThisSignedOrder(signed, orderId) === true) {
+    // Idempotent: re-reporting the same id must not refresh updatedAt (the stuck-attempt watcher
+    // and the marker's grace period both measure age from it).
+    await prisma.orderAttempt.updateMany({
+      where: { id: attempt.id, state: "SUBMITTING", externalOrderId: null, OR: [{ error: null }, { NOT: { error: marker } }] },
+      data: { error: marker },
+    });
+  }
+
   const client = await serverSecureClient(prisma, user);
   if (!client) return NextResponse.json({ error: "real_not_configured" }, { status: 503 });
 
@@ -82,13 +110,44 @@ export async function POST(req: Request) {
   // trade of this account naming that id as its taker order. The second path is not a convenience —
   // a FAK order that fills immediately was, in the one case that mattered, not retrievable as an
   // order at all, and the position went unbooked while the money was gone.
-  const verdict = await verifyReportedOrder(client, attempt, orderId, depositWallet);
+  // An order that filled at once is not readable as an order, and its trade lands a few seconds
+  // after the match — so wait for it here (~6 s at most) rather than hand the booking to a sweep.
+  // The waits stop once the request has used WAIT_BUDGET_MS, whatever the exchange reads cost.
+  const startedAt = Date.now();
+  const verifying = verifyReportedOrder(client, attempt, orderId, depositWallet, {
+    tradeRetryDelaysMs: TRADE_RETRY_DELAYS_MS,
+    sleep: async (ms) => {
+      const left = WAIT_BUDGET_MS - (Date.now() - startedAt);
+      if (left <= 0) throw new WaitBudgetSpent();
+      await new Promise<void>((r) => setTimeout(r, Math.min(ms, left)));
+    },
+  }).catch((e: unknown) => {
+    if (e instanceof WaitBudgetSpent) return { ok: false, reason: "unverifiable" } as const;
+    throw e;
+  });
+  // The whole verification — exchange reads included, not just the waits — is bounded, so the
+  // phone's 15 s abort is never reached. Past the deadline the answer is "unverifiable": the marker
+  // above is already durable, and the fast pass finishes the job. (The abandoned reads are reads
+  // only; their result is dropped.)
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  const verdict = await Promise.race([
+    verifying,
+    new Promise<{ ok: false; reason: "unverifiable" }>((resolve) => {
+      deadline = setTimeout(() => resolve({ ok: false, reason: "unverifiable" }), VERIFY_DEADLINE_MS);
+    }),
+  ]).finally(() => clearTimeout(deadline));
+  verifying.catch(() => { /* a late failure of an abandoned read is not this request's */ });
   if (!verdict.ok && verdict.reason === "mismatch") {
     // A wrong id proves nothing about our real order — it may still be live under an id nobody
     // reported. So this records the evidence and refuses; killing the attempt here would strand a
     // position, and the discovery sweep is the thing allowed to decide that an order does not exist.
+    // Never over a DIFFERENT reported id: a newer report may have replaced this one meanwhile.
     await prisma.orderAttempt.updateMany({
-      where: { id: attempt.id, state: "SUBMITTING" },
+      where: {
+        id: attempt.id,
+        state: "SUBMITTING",
+        OR: [{ error: null }, { error: marker }, { NOT: { error: { startsWith: REPORTED_UNVERIFIED_PREFIX } } }],
+      },
       data: { error: `order_mismatch: ${verdict.detail}` },
     });
     return NextResponse.json({ error: "order_mismatch", detail: verdict.detail }, { status: 422 });
@@ -96,8 +155,10 @@ export async function POST(req: Request) {
   if (!verdict.ok) {
     // Unverifiable YET. The browser did post — it has an order id — and the exchange's own records
     // simply have not caught up, so this is not a failure to report to the user. The attempt keeps
-    // its claim and the discovery sweep books it minutes later. Answering 502 here (as this route
-    // first did) turned a filled order into a red error in the middle of a swipe.
+    // its claim, and the reported id is written down so the poller's fast pass
+    // (confirmReportedAttempts) proves and books it within a tick or two — that pass can only adopt,
+    // never kill, so unlike the orphan sweep it needs no 15-minute floor. Answering 502 here (as
+    // this route first did) turned a filled order into a red error in the middle of a swipe.
     await captureToGlitchTip(new Error("reported order not yet verifiable"), {
       route: "real/posted",
       attemptId: attempt.id,

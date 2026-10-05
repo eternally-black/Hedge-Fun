@@ -22,9 +22,10 @@ import type {
   OrderVerdict,
   OrphanDiscover,
   ReconcilableAttempt,
+  ReportedConfirm,
   TradeRecord,
 } from "./reconcile";
-import { matchesExchangeOrder, type ExchangeOrderView, type SignedOrderWire } from "./orders";
+import { exchangeOrderIds, isThisSignedOrder, matchesExchangeOrder, type ExchangeOrderView, type SignedOrderWire } from "./orders";
 
 // A terminal verdict is what KILLS an attempt, so the terminal set is explicit and everything
 // unrecognized reads as still-matchable (fail-safe).
@@ -37,6 +38,9 @@ const MAX_TRADE_PAGES = 20;
 const MAX_CANDIDATES = 10;
 // The exchange's clock is not ours, so a trade may be stamped slightly before the intent it belongs to.
 const CLOCK_SKEW_MS = 120_000;
+// How long after the LATEST trade (or the intent, if later) a trade-only booking stays open: the
+// index lags a match by seconds, so ten quiet minutes after the last trade is a settled fill.
+const TRADES_SETTLE_MS = 10 * 60_000;
 
 type ServerClient = Awaited<ReturnType<typeof serverSecureClient>>;
 
@@ -143,11 +147,25 @@ export async function verifyReportedOrder(
   deps: {
     fetchOrder?: (client: NonNullable<ServerClient>, args: { orderId: string }) => Promise<unknown>;
     pageTrades?: (client: NonNullable<ServerClient>, attempt: ReconcilableAttempt) => Promise<{ rows: unknown[]; complete: boolean }>;
+    // Re-read the trades after each of these delays before answering "unverifiable". An order that
+    // fills at once (FAK) is not readable as an order at all (/data/order answers null), and its
+    // trade record lands a few seconds after the match — so the route that runs right after the
+    // post waits a little instead of leaving the position unbooked for the 15-minute sweep.
+    tradeRetryDelaysMs?: readonly number[];
+    sleep?: (ms: number) => Promise<void>;
   } = {},
 ): Promise<ReportedOrderVerdict> {
   const signed = attempt.signedOrder as unknown as SignedOrderWire | null;
   if (!signed || typeof signed !== "object") return { ok: false, reason: "mismatch", detail: "no_signed_order" };
   const dir = attempt.dir === "EXIT" ? "EXIT" : "ENTRY";
+  // The id must be THIS signed order's own hash — exact, no exchange read needed. A reported id that
+  // is another order (even the same account's, same token, same direction) is refused here; only a
+  // payload that cannot be hashed falls through to the evidence checks below.
+  const own = isThisSignedOrder(signed, orderId);
+  if (own === false) return { ok: false, reason: "mismatch", detail: "order_id_not_this_signed_order" };
+  // A payload we cannot hash cannot be bound to an id exactly, and the shape checks below are not a
+  // substitute (a same-account order could pass them). Leave it to a human via the stuck watcher.
+  if (own === null) return { ok: false, reason: "unverifiable" };
 
   let raw: Record<string, unknown> | null = null;
   try {
@@ -182,19 +200,52 @@ export async function verifyReportedOrder(
   // are a tight one: a trade that names this id as its TAKER order, on the token this attempt
   // signed for, after the intent existed, in an account only these credentials can read. A client
   // cannot fabricate that — it would have to make the exchange print someone else's trade.
-  const { rows, complete } = await (deps.pageTrades ?? pageTrades)(client, attempt);
   const floorMs = attempt.createdAt.getTime() - CLOCK_SKEW_MS;
-  const named = rows.some((row) => {
-    const t = row as Record<string, unknown>;
-    if (String(t.takerOrderId ?? "") !== orderId) return false;
-    if (String(t.traderSide ?? "") !== "TAKER") return false;
-    const stamped = t.matchedAt ?? t.updatedAt;
-    const ts = stamped ? new Date(String(stamped)).getTime() : Number.NaN;
-    return Number.isFinite(ts) && ts >= floorMs;
-  });
-  if (named) {
-    console.warn(`[order-probe] ${attempt.id}: reported order ${orderId} verified from trade evidence`);
-    return { ok: true, order: { id: orderId, source: "trade-evidence" } };
+  // The trade path must bind as tightly as the order record does (matchesExchangeOrder): the id is
+  // client-supplied, so a trade "naming" it proves nothing unless it is on the SIGNED token, in the
+  // attempt's direction, and no bigger in total than the signed order. Without the side check a
+  // user's own BUY elsewhere could be booked as an EXIT's sale proceeds.
+  const wantSide = dir === "EXIT" ? "SELL" : "BUY";
+  let signedSharesMicro: bigint;
+  try {
+    signedSharesMicro = BigInt(dir === "EXIT" ? signed.makerAmount : signed.takerAmount);
+  } catch {
+    return { ok: false, reason: "mismatch", detail: "bad_order_shape" };
+  }
+  const delays = deps.tradeRetryDelaysMs ?? [];
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  let complete = true;
+  for (let i = 0; ; i++) {
+    const read = await (deps.pageTrades ?? pageTrades)(client, attempt);
+    complete = read.complete;
+    const named = read.rows.filter((row) => {
+      const t = row as Record<string, unknown>;
+      if (String(t.takerOrderId ?? "") !== orderId) return false;
+      if (String(t.traderSide ?? "") !== "TAKER") return false;
+      if (String(t.tokenId ?? "") !== signed.tokenId) return false;
+      if (String(t.side ?? "").toUpperCase() !== wantSide) return false;
+      const stamped = t.matchedAt ?? t.updatedAt;
+      const ts = stamped ? new Date(String(stamped)).getTime() : Number.NaN;
+      return Number.isFinite(ts) && ts >= floorMs;
+    });
+    // More matched than was signed is not this order as we know it. NOT a refusal, though: whether
+    // the exchange can hand a taker extra shares (price improvement) is unconfirmed, and a refusal
+    // would show a red error for an order whose money is spent. Unverifiable leaves it to the
+    // orphan sweep, and the warning makes it visible.
+    const namedMicro = named.reduce<bigint>((sum, row) => {
+      const size = Number((row as Record<string, unknown>).size);
+      return sum + (Number.isFinite(size) && size > 0 ? BigInt(Math.round(size * 1_000_000)) : 0n);
+    }, 0n);
+    if (named.length > 0 && namedMicro > signedSharesMicro + 1n) {
+      console.warn(`[order-probe] ${attempt.id}: trades for ${orderId} total ${namedMicro} > signed ${signedSharesMicro} — left unverified`);
+      return { ok: false, reason: "unverifiable" };
+    }
+    if (named.length > 0) {
+      console.warn(`[order-probe] ${attempt.id}: reported order ${orderId} verified from trade evidence`);
+      return { ok: true, order: { id: orderId, source: "trade-evidence" } };
+    }
+    if (i >= delays.length) break;
+    await sleep(delays[i]);
   }
   // Nothing yet, or the trade read failed. Either way this is "ask again later", never a refusal:
   // the trade records lag a match by a beat, and /api/real/posted runs milliseconds after it.
@@ -202,7 +253,7 @@ export async function verifyReportedOrder(
   return { ok: false, reason: "unverifiable" };
 }
 
-export function realProbes(prisma: PrismaClient): { probe: OrderProbe; discover: OrphanDiscover } {
+export function realProbes(prisma: PrismaClient): { probe: OrderProbe; discover: OrphanDiscover; confirmReported: ReportedConfirm } {
   // One client per OWNER, cached for this request — each attempt is probed with its own user's
   // credentials (the CLOB only reports an account its creds own). The deposit wallet rides along
   // because discovery needs it to tell this user's order apart from their other ones.
@@ -270,7 +321,12 @@ export function realProbes(prisma: PrismaClient): { probe: OrderProbe; discover:
     // that cannot be undone.
     if (!complete || mine.length === 0) return null;
     console.warn(`[order-probe] ${attempt.id}: order record unreadable, settled from ${mine.length} trade(s)`);
-    return { terminal: true, matchedSharesMicro: collectedMicro, trades: mine };
+    // A complete read is complete for THIS moment only: a fill's later trades can still be on their
+    // way into the index. While the order is young the booking stays non-terminal, so the ordinary
+    // reconcile sweep re-reads it (booking any late delta, cumulatively) before stamping it final.
+    const lastTradeMs = mine.reduce((latest, t) => Math.max(latest, t.ts.getTime()), 0);
+    const settled = Date.now() - Math.max(lastTradeMs, attempt.createdAt.getTime()) > TRADES_SETTLE_MS;
+    return { terminal: settled, matchedSharesMicro: collectedMicro, trades: mine };
   };
 
   // Find the exchange order an attempt never managed to report. Reads only — the caller decides
@@ -283,6 +339,9 @@ export function realProbes(prisma: PrismaClient): { probe: OrderProbe; discover:
       // CAS claim, so a SUBMITTING row without one never reached the posting step at all.
       const signed = attempt.signedOrder as unknown as SignedOrderWire | null;
       if (!signed || typeof signed !== "object") return null;
+      // Identity is the exact hash now; a payload we cannot hash can neither be adopted nor declared
+      // absent (an empty listing would otherwise read as absence with no identity check ever run).
+      if (!exchangeOrderIds(signed)) return null;
 
       const { client, depositWallet } = await clientFor(attempt.userId);
       // No client, or no wallet to compare the maker against: the exchange is effectively
@@ -307,6 +366,8 @@ export function realProbes(prisma: PrismaClient): { probe: OrderProbe; discover:
           sizeMatched: String(raw.sizeMatched ?? ""),
           createdAt: String(raw.createdAt ?? ""),
         };
+        // Exact identity first: only this signed payload's own hash can be adopted.
+        if (isThisSignedOrder(signed, id) !== true) return false;
         return matchesExchangeOrder(view, { signed, dir, depositWallet, notBefore }) === null;
       };
 
@@ -366,9 +427,15 @@ export function realProbes(prisma: PrismaClient): { probe: OrderProbe; discover:
         if (!takerOrderId) continue;
         const stamped = row.matchedAt ?? row.updatedAt;
         const ts = stamped ? new Date(String(stamped)).getTime() : Number.NaN;
-        // Without a readable timestamp this cannot be told apart from one of the user's older
-        // trades on the same token, so it is not a candidate.
-        if (!Number.isFinite(ts) || ts < floorMs) continue;
+        // An unreadable timestamp is uncertainty, not "old": it could be ours. Checked first, then the
+        // window: a trade provably older than the intent says nothing either way (and must not turn
+        // every pass into "unknown").
+        if (!Number.isFinite(ts)) { incomplete = true; continue; }
+        if (ts < floorMs) continue;
+        // In the window: our order iff its id is this signed payload's exact hash. Anything else —
+        // another order, or a payload we cannot hash — is not adoptable, and not proof of absence
+        // either, so the answer becomes "unknown": never a kill, never an adoption.
+        if (isThisSignedOrder(signed, takerOrderId) !== true) { incomplete = true; continue; }
         if (!candidates.includes(takerOrderId)) candidates.push(takerOrderId);
       }
       if (candidates.length > MAX_CANDIDATES) incomplete = true; // an unchecked candidate may be ours
@@ -407,5 +474,14 @@ export function realProbes(prisma: PrismaClient): { probe: OrderProbe; discover:
     }
   };
 
-  return { probe, discover };
+  // The fast pass's check: the id the browser REPORTED, proven by the same reads /api/real/posted
+  // uses (order record, else a taker trade naming the id). One read, no waiting — the poller asks
+  // again next tick.
+  const confirmReported: ReportedConfirm = async (attempt, orderId) => {
+    const { client, depositWallet } = await clientFor(attempt.userId);
+    if (!client || !depositWallet) return null;
+    return verifyReportedOrder(client, attempt, orderId, depositWallet);
+  };
+
+  return { probe, discover, confirmReported };
 }
