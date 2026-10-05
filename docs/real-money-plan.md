@@ -95,11 +95,32 @@ authoritative object, and every parameter in it must be server-derived **first**
    is about the TRADER, so a server post put our datacentre in front of a decision about the user):
    `/api/real/submit` stops right after the CAS claim and returns `{ status: "approved" }`, the
    browser posts with its own SecureClient, and it reports **only the order id** to
-   `POST /api/real/posted`. A client RECEIPT is refused in both arms — `/api/real/posted` re-reads
-   the order server-side (`fetchOrder`; reads are not geoblocked), proves it against the persisted
-   signed order (`matchesExchangeOrder`: token, side, maker = deposit wallet, size to one
-   micro-share, created-after-intent) and books through the ordinary reconcile path, so every
-   number on the ledger still comes from the exchange's own trade records.
+   `POST /api/real/posted`. A client RECEIPT is refused in both arms — `/api/real/posted` proves
+   the reported id server-side and books through the ordinary reconcile path, so every number on
+   the ledger still comes from the exchange's own trade records. **How the id is proven (2026-10-05,
+   PRs #45/#50):**
+   - **Exact identity first.** A CLOB order id IS the EIP-712 hash of the signed Order (domain
+     "Polymarket CTF Exchange", version "2", chainId 137, the exchange as verifying contract) —
+     verified against all 12 booked prod orders. `exchangeOrderIds` / `isThisSignedOrder`
+     (`src/lib/orders.ts`, via `ox`) validate every field and hash the attempt's OWN signed payload;
+     an id that is not that hash is refused before any exchange read, and a payload that cannot be
+     hashed is "unverifiable", never accepted on weaker evidence. (`signedOrderHash` on the
+     attempt is our payload digest, NOT this id.)
+   - **Then the exchange.** `fetchOrder` → `matchesExchangeOrder` when the record is readable. A FAK
+     that filled at once is NOT readable (`/data/order` answers `null`; SDK 0.6.0 throws
+     `UnexpectedResponseError`), so the usual proof is a TAKER trade naming the id, on the signed
+     token, in the attempt's direction, after the intent, within the signed FIXED side:
+     `makerAmount` = the USDC a BUY pays (Σ size × price; `takerAmount` is only the MINIMUM shares —
+     a better price fills more) or the shares a SELL offers.
+   - **Timing.** The trade record lags the match by seconds, so the route re-reads trades after
+     1 / 2 / 3 s (9 s wait budget, 11 s hard deadline, under the phone's 15 s abort). Live
+     2026-10-05: swipe → FILLED in 3.3 s.
+   - **Still unproven** → the route answers `{status:"posted"}` (never a red error) and the id waits
+     on the row as `error = "reported_unverified:<id>"` (written BEFORE any exchange read,
+     idempotently, lowercase). The poller's **fast pass** (`confirmReportedAttempts`, every tick via
+     `/api/real/reconcile {reportedOnly:true}`) proves and books it within a tick; it can ONLY adopt
+     (CAS on the exact marker it read), walks a cursor bounded by a per-cycle high-water mark, and
+     drops a row after 20 min. Alerting: its own poller subsystem, `real-reported`.
    Either way the full response is persisted on the attempt; order hash and external order id are
    unique columns (replay-proof).
    4a. **Orphan discovery** (`discoverOrphanAttempts`, run by the reconcile route on the poller's
@@ -107,8 +128,13 @@ authoritative object, and every parameter in it must be server-derived **first**
    leaves a live order on a SUBMITTING row with no `externalOrderId`, which every reconcile scan
    filters out and which the one-in-flight partial index turns into a permanently wedged market.
    The sweep asks the exchange (open orders, then the taker-order ids of the account's trades on
-   that token), adopts the order if the identity check passes, and only kills the attempt when
-   every read succeeded and nothing matched — an incomplete read is "unknown", never a kill.
+   that token), adopts ONLY an order whose id is the attempt's exact hash, and only kills the
+   attempt when every read succeeded and nothing matched — an incomplete read, an unreadable trade
+   timestamp, an in-window trade of another order, or an unhashable payload are "unknown", never a
+   kill. Its kill matches only an unbound SUBMITTING row **without a reported id, at any age**: an
+   empty exchange answer does not disprove an order the phone reported (the trade index lags), so
+   such a row is adopted when found or escalated by the stuck-attempt watcher (SUBMITTING > 15 min
+   pages ops). The sweep walks a cursor (a stuck "unknown" row cannot hold the head of the queue).
 5. Zero fill → attempt `KILLED`, **no position row** — the market slot frees for a retry.
    Fill(s) → `Fill` rows and a real `Bet` position row created/updated from **actual** fills.
    A receipt reports the ORDER's **cumulative** matched totals, so booking subtracts what the
@@ -127,7 +153,12 @@ authoritative object, and every parameter in it must be server-derived **first**
    the delta lands and the fee ESTIMATE is replaced by the CHARGED total (`trueUpAttemptFee`,
    per-trade fee at each trade's own price and rate — the fee is convex in price). Unreachable or
    unpriced → no writes, the next pass retries. Only POSTED attempts carrying an exchange order id
-   are reconcilable; a SUBMITTING one has no id to ask about and stays with the ops watcher.
+   are reconcilable; a SUBMITTING one has no id to ask about and is the orphan sweep's (4a).
+   Concurrency guards (2026-10-05): the fee true-up takes the share coverage its read saw and, under
+   the position lock, refuses a read smaller than what is booked (a partial read must not shrink a
+   fully booked fee); `reconciledAt` ("final, stop re-probing") is stamped in that same transaction
+   and only on a SECOND identical terminal observation — one read can be complete for its moment
+   while a fill's later trades are still being indexed.
 
 **WITHDRAW truncation:** the collateral-return service truncates a plan it cannot fit in one
 router call. The run then drains only part of the balance and still converges (convergence only
