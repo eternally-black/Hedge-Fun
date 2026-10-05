@@ -33,6 +33,7 @@ const TRAY_OPTIONS = [
   { key: "A", hint: "chips above buttons" },
   { key: "B", hint: "chips under the pill" },
   { key: "C", hint: "badge on balance" },
+  { key: "D", hint: "the bell itself" },
 ] as const;
 
 export function ProfileScreen({ me, api, onRefreshMe, onLogout, onToast, onNav, onOpenHistory }: {

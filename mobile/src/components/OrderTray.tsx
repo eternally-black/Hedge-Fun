@@ -5,7 +5,7 @@
 //                  flashing green when one fills.
 // Everything that moves is native-driver Animated (opacity / translate / scale); a status change
 // re-renders one chip, never the deck.
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState, type ReactNode } from "react";
 import { ActivityIndicator, Animated, StyleSheet, Text, Vibration, View } from "react-native";
 import { colors } from "../theme";
 import { type OrderStatusItem, useOrderStatus } from "../orderStatus";
@@ -71,6 +71,42 @@ const TONE = {
   failed: { glyph: "✕", fg: colors.no, border: "rgba(255,59,78,0.45)", bg: "rgba(255,59,78,0.10)" },
 } as const;
 
+// Style D: the bell IS the indicator. While orders are in flight it becomes a spinning ring with the
+// count (1, 2, 3…); when they settle it resolves to ✓ or ✕ for a moment, then the bell is back.
+// With nothing to say it renders `fallback` (the ordinary bell).
+export function BellOrderStatus({ fallback }: { fallback: ReactNode }) {
+  const items = useOrderStatus();
+  const pending = items.filter((i) => i.state === "pending").length;
+  const settled = items.filter((i) => i.state !== "pending");
+  const last = settled.length ? settled.reduce((a, b) => (b.id > a.id ? b : a)) : null;
+  const [pop] = useState(() => new Animated.Value(1));
+  const lastId = useRef(0);
+  useEffect(() => {
+    if (!last || last.id <= lastId.current || pending > 0) return;
+    lastId.current = last.id;
+    if (last.state === "filled") Vibration.vibrate(12);
+    pop.setValue(1.3);
+    Animated.spring(pop, { toValue: 1, friction: 4, useNativeDriver: true }).start();
+  }, [last, pending, pop]);
+  if (pending > 0) {
+    return (
+      <View style={styles.bellBox} accessibilityLabel={`${pending} order${pending > 1 ? "s" : ""} in flight`}>
+        <ActivityIndicator size="small" color={colors.gold} style={styles.bellSpin} />
+        <Text style={styles.bellCount}>{pending}</Text>
+      </View>
+    );
+  }
+  if (!last) return <>{fallback}</>;
+  const ok = last.state === "filled" || last.state === "posted";
+  return (
+    <Animated.View style={[styles.bellBox, { transform: [{ scale: pop }] }]} accessibilityLabel={ok ? "Order placed" : "Order not placed"}>
+      <Text style={[styles.bellMark, { color: last.state === "failed" ? colors.no : last.state === "posted" ? colors.gold : colors.yes }]}>
+        {last.state === "failed" ? "✕" : "✓"}
+      </Text>
+    </Animated.View>
+  );
+}
+
 // Style C: the count of orders still in flight, beside the balance. Renders nothing while idle.
 export function OrderBadge() {
   const items = useOrderStatus();
@@ -120,4 +156,8 @@ const styles = StyleSheet.create({
   badgeFlash: { position: "absolute", width: 26, height: 26, borderRadius: 13, backgroundColor: "rgba(182,255,46,0.35)" },
   badgeSpin: { position: "absolute", transform: [{ scale: 0.9 }] },
   badgeCount: { color: colors.gold, fontSize: 10, fontWeight: "900" },
+  bellBox: { width: 24, height: 24, alignItems: "center", justifyContent: "center" },
+  bellSpin: { position: "absolute", transform: [{ scale: 1.05 }] },
+  bellCount: { color: colors.gold, fontSize: 11, fontWeight: "900" },
+  bellMark: { fontSize: 18, fontWeight: "900" },
 });

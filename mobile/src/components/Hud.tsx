@@ -4,7 +4,7 @@ import { memo } from "react";
 import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import type { MeResponse } from "@contract/api-types";
 import { colors } from "../theme";
-import { OrderBadge } from "./OrderTray";
+import { BellOrderStatus, OrderBadge } from "./OrderTray";
 import { useTrayStyle } from "../orderStatus";
 import { num, usd, usdFromMicro } from "../format";
 import * as wallet from "../platform/wallet.flavor";
@@ -49,6 +49,7 @@ export const Hud = memo(function Hud({ me, onGM, onShards, onBalance, onBell, po
   const unread = (me?.unreadResults ?? 0) + (me?.unreadStockAlerts ?? 0); // settled calls + stock profit alerts
 
   const trayStyle = useTrayStyle();
+  const bellStatus = real && trayStyle === "D" ? <BellOrderStatusSlot /> : null;
   return (
     <View style={styles.wrap}>
       <View style={styles.row}>
@@ -91,7 +92,9 @@ export const Hud = memo(function Hud({ me, onGM, onShards, onBalance, onBell, po
 
         {/* Bell → results inbox */}
         <TouchableOpacity style={styles.bell} onPress={onBell} accessibilityLabel={unread > 0 ? `Notifications, ${unread} unread` : "Notifications"}>
-          <Text style={styles.bellGlyph}>🔔</Text>
+          {/* Style D of the order-status test: the bell spins with the count of orders in flight and
+              resolves to ✓ / ✕; idle, it is the plain bell. */}
+          {bellStatus ?? <Text style={styles.bellGlyph}>🔔</Text>}
           {unread > 0 && (
             <View style={styles.badge}>
               <Text style={styles.badgeText}>{unread}</Text>
@@ -147,3 +150,8 @@ const styles = StyleSheet.create({
   shardFill: { height: "100%", backgroundColor: colors.gold, borderRadius: 6 },
   shardHint: { color: colors.muted, fontSize: 9 },
 });
+
+// The bell slot in style D: the order status while there is one, else the plain bell.
+function BellOrderStatusSlot() {
+  return <BellOrderStatus fallback={<Text style={styles.bellGlyph}>🔔</Text>} />;
+}

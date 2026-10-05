@@ -196,7 +196,8 @@ export function DeckScreen({ active, me, api, onRefreshMe, onToast, onTopup, rea
       const realOrder = dir !== "SKIP" && realModeRef.current && !!realCtxRef.current;
       const labels = sideLabels(card);
       const orderId = realOrder ? pushOrder(dir === "YES" ? labels.yes : labels.no, dir) : 0;
-      const toastReal = trayStyleRef.current === "C";
+      const toastReal = trayStyleRef.current === "C"; // C: every real result also toasts
+      const toastFail = toastReal || trayStyleRef.current === "D"; // D: a ✕ on the bell needs its reason
       // Echo the price the user was LOOKING AT for the side they picked, so the server can refuse
       // rather than silently book a worse one if the live book moved against them (D10 Slice B).
       // A YES/NO in real mode goes through the two-phase order protocol (intent → device signs →
@@ -279,7 +280,7 @@ export function DeckScreen({ active, me, api, onRefreshMe, onToast, onTopup, rea
           // terminal for it. The toast always names the reason.
           else if (realModeRef.current && dir !== "SKIP" && priceMovedBp(e) === undefined) {
             if (body?.error && RETRYABLE_REAL_ERRORS.has(body.error)) restore();
-            if (toastReal || !orderId) onToast(realErrText(e));
+            if (toastFail || !orderId) onToast(realErrText(e));
             void onRefreshMe();
           }
           // 403 = daily swipe cap (raced the client gate). The bet wasn't stored; refreshMe pulls
@@ -303,7 +304,7 @@ export function DeckScreen({ active, me, api, onRefreshMe, onToast, onTopup, rea
                   : { ...card, noPriceBp: fresh };
                 return asNext(cur, restored);
               });
-              if (toastReal || !orderId) onToast("Price moved — it's back as the next card");
+              if (toastFail || !orderId) onToast("Price moved — it's back as the next card");
             }
           }
           else console.error(e);

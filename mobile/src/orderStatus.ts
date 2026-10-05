@@ -1,7 +1,8 @@
 // Live status of real orders the user just swiped — the deck flies the card at once and keeps going,
 // so the answer (filled / waiting on the exchange / refused) arrives while they are already on the
 // next card. This module is the one place that answer lives; the deck writes it, and whichever
-// indicator style is selected (OrderTray: A above the buttons, B under the deck pill, C a HUD badge)
+// indicator style is selected (OrderTray: A above the buttons, B under the deck pill, C a HUD badge,
+// D the bell itself)
 // reads it. Module-level on purpose: the deck, the HUD and the toast host are different trees.
 import { useSyncExternalStore } from "react";
 import * as SecureStore from "expo-secure-store";
@@ -52,9 +53,9 @@ export function useOrderStatus(): OrderStatusItem[] {
 }
 
 // ── Which indicator is shown (an A/B/C test the owner switches in Profile) ──
-export type TrayStyle = "A" | "B" | "C";
+export type TrayStyle = "A" | "B" | "C" | "D";
 const STYLE_KEY = "hf_order_tray_style_v1"; // SecureStore: the store the app already uses for prefs
-let style: TrayStyle = "A";
+let style: TrayStyle = "D"; // the owner's pick so far (2026-10-05); A/B/C stay switchable
 let styleLoaded = false;
 const styleListeners = new Set<() => void>();
 
@@ -63,7 +64,7 @@ function loadStyle(): void {
   styleLoaded = true;
   SecureStore.getItemAsync(STYLE_KEY)
     .then((v) => {
-      if (v === "A" || v === "B" || v === "C") { style = v; styleListeners.forEach((l) => l()); }
+      if (v === "A" || v === "B" || v === "C" || v === "D") { style = v; styleListeners.forEach((l) => l()); }
     })
     .catch(() => undefined);
 }
