@@ -42,5 +42,15 @@ Each phase ends with: mobile `tsc` green → x86_64 APK on the emulator → scre
 
 ## Deliberate differences (keep)
 - Play flavor: no real-money surface at all (`wallet.available === false`).
+- Real-order status (2026-10-05, PR #52): the HUD bell becomes a spinning ring with the count of
+  orders in flight and resolves to ✓ / ✕ (`mobile/src/orderStatus.ts`, `OrderStatusBell`); success
+  shows no toast. A refused real card returns as the NEXT card, not on top. The web still toasts and
+  restores on top — a parity gap to close when the web gets the same pass.
+- Keep-alive tabs (2026-10-04, PRs #41/#42): Hedge, Stocks and both decks stay mounted (hidden with
+  `display:none`), the first deck deal starts behind the boot screen, and an `active` prop gates every
+  poll and clock. The web keeps Hedge / Portfolio / StockDeck mounted the same way.
+- Seeker DNS: `*.polymarket.com` over DoH (`mobile/plugins/withPolymarketDoh.js`, PR #44) — a UA ISP
+  DNS block stub otherwise kills real orders. Needs `expo prebuild`; the okhttp-dnsoverhttps version
+  must equal the okhttp React Native resolves (4.9.2 on RN 0.86).
 - Seeker stock pocket = the MWA-verified wallet (web: Privy embedded Solana wallet).
 - Native sheets (`Modal`) instead of portals onto the phone mock.

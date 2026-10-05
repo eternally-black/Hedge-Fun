@@ -334,8 +334,9 @@ Order of operations for a fresh account — each step's button stays visible unt
    `setApprovalForAll` to both). Both ride the relay: the server drives the SDK generator, the device
    signs, the relayer submits.
 5. **Order** — pick a market, type the stake (it is the all-in cap, fee included), Buy YES/NO. The
-   result line never says "success": a killed attempt says the slot is free, a posted one says the
-   reconciler will book it when the trade record lands.
+   result line never says "success": a killed attempt says the slot is free, a posted one says it
+   shows in History once the exchange confirms it (usually seconds — see "Real order confirmation"
+   below).
 6. **Recovery** — Close (sells the whole remainder), Redeem resolved, Withdraw.
 
 Env this page needs beyond the list above: `POLYMARKET_BUILDER_{API_KEY,SECRET,PASSPHRASE}` (server
@@ -343,6 +344,29 @@ only — `/api/builder/sign` signs browser requests with them), `POLYMARKET_BUIL
 public twin `NEXT_PUBLIC_POLYMARKET_BUILDER_CODE` (attribution tag, signed INTO each order),
 `REAL_CREDS_KEY` (AES-256-GCM key for stored CLOB creds), `APP_ORIGIN` (same-origin enforcement),
 and `REAL_RECONCILE_URL` + `REAL_RECONCILE_SECRET` for the poller's reconciliation pass.
+
+### Real order confirmation — what the logs mean
+
+Full design: `docs/real-money-plan.md` §4. In `docker logs hedgefun-app-1`:
+
+- `[order-probe] … fetchOrder(reported) failed … UnexpectedResponseError` — **expected** for a FAK that
+  filled at once (the exchange answers `null` for its record). Not an incident by itself.
+- `reported order <id> verified from trade evidence` — the normal path; the booking follows.
+- `trades for <id> use X of signed Y (USDC|shares) — left unverified` — the trades exceeded the signed
+  fixed side. Never seen in prod; investigate before assuming the bound is wrong.
+- GlitchTip `reported order not yet verifiable` — the route ran out of its wait; the fast pass
+  should book it within a tick. Poller log: `[real-reported] scanned N: confirmed …`.
+
+In the DB, an attempt waiting on the fast pass is `state = 'SUBMITTING'` with
+`error = 'reported_unverified:<order id>'`. Such a row is never killed by the orphan sweep; if it is
+still there after ~20 min the fast pass has dropped it and the stuck-attempt watcher pages — read the
+order id from `error`, check its trades, and book or escalate by hand.
+
+**Ukrainian ISP DNS.** Some UA resolvers answer `*.polymarket.com` with a block stub (`10.125.0.2`),
+which kills a real order on the phone with `TransportError … Unable to parse TLS packet header`
+(Polymarket itself serves UA: `/api/geoblock` → `blocked:false`). The Seeker build resolves
+`*.polymarket.com` over DoH (`mobile/plugins/withPolymarketDoh.js`, Cloudflare then Google, by IP;
+team decision 2026-10-04, PR #44). The web app has no such bypass.
 
 **If `/api/builder/sign` starts logging `builder sign refused` to GlitchTip**, the SDK is calling a
 path outside the allowlist (any GET, plus POST to `/submit`, `/order`, `/orders`, `/auth/api-key`).
