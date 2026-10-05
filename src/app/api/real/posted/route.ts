@@ -23,6 +23,8 @@ import { rateLimit } from "@/lib/ratelimit";
 const TRADE_RETRY_DELAYS_MS = [1000, 2000, 3000] as const;
 // Whole-request budget for those waits (exchange reads included): the phone's api() aborts at 15 s.
 const WAIT_BUDGET_MS = 9_000;
+// Hard cap on the whole verification, reads included.
+const VERIFY_DEADLINE_MS = 11_000;
 class WaitBudgetSpent extends Error {}
 // A CLOB order id is the order's 32-byte hash. Only an id of that shape is worth fast-tracking.
 const ORDER_ID_RE = /^0x[0-9a-fA-F]{64}$/;
@@ -88,10 +90,13 @@ export async function POST(req: Request) {
   // 15 s abort, a restart) still leaves the fast pass something to prove. Only for an id of the
   // right shape that IS this signed order's hash (when the payload hashes); everything else is
   // refused below without a marker.
-  if (ORDER_ID_RE.test(orderId) && isThisSignedOrder(signed, orderId) !== false) {
+  const marker = `${REPORTED_UNVERIFIED_PREFIX}${orderId}`;
+  if (ORDER_ID_RE.test(orderId) && isThisSignedOrder(signed, orderId) === true) {
+    // Idempotent: re-reporting the same id must not refresh updatedAt (the stuck-attempt watcher
+    // and the marker's grace period both measure age from it).
     await prisma.orderAttempt.updateMany({
-      where: { id: attempt.id, state: "SUBMITTING", externalOrderId: null },
-      data: { error: `${REPORTED_UNVERIFIED_PREFIX}${orderId}` },
+      where: { id: attempt.id, state: "SUBMITTING", externalOrderId: null, OR: [{ error: null }, { NOT: { error: marker } }] },
+      data: { error: marker },
     });
   }
 
@@ -106,7 +111,7 @@ export async function POST(req: Request) {
   // after the match — so wait for it here (~6 s at most) rather than hand the booking to a sweep.
   // The waits stop once the request has used WAIT_BUDGET_MS, whatever the exchange reads cost.
   const startedAt = Date.now();
-  const verdict = await verifyReportedOrder(client, attempt, orderId, depositWallet, {
+  const verifying = verifyReportedOrder(client, attempt, orderId, depositWallet, {
     tradeRetryDelaysMs: TRADE_RETRY_DELAYS_MS,
     sleep: async (ms) => {
       const left = WAIT_BUDGET_MS - (Date.now() - startedAt);
@@ -117,12 +122,29 @@ export async function POST(req: Request) {
     if (e instanceof WaitBudgetSpent) return { ok: false, reason: "unverifiable" } as const;
     throw e;
   });
+  // The whole verification — exchange reads included, not just the waits — is bounded, so the
+  // phone's 15 s abort is never reached. Past the deadline the answer is "unverifiable": the marker
+  // above is already durable, and the fast pass finishes the job. (The abandoned reads are reads
+  // only; their result is dropped.)
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  const verdict = await Promise.race([
+    verifying,
+    new Promise<{ ok: false; reason: "unverifiable" }>((resolve) => {
+      deadline = setTimeout(() => resolve({ ok: false, reason: "unverifiable" }), VERIFY_DEADLINE_MS);
+    }),
+  ]).finally(() => clearTimeout(deadline));
+  verifying.catch(() => { /* a late failure of an abandoned read is not this request's */ });
   if (!verdict.ok && verdict.reason === "mismatch") {
     // A wrong id proves nothing about our real order — it may still be live under an id nobody
     // reported. So this records the evidence and refuses; killing the attempt here would strand a
     // position, and the discovery sweep is the thing allowed to decide that an order does not exist.
+    // Never over a DIFFERENT reported id: a newer report may have replaced this one meanwhile.
     await prisma.orderAttempt.updateMany({
-      where: { id: attempt.id, state: "SUBMITTING" },
+      where: {
+        id: attempt.id,
+        state: "SUBMITTING",
+        OR: [{ error: null }, { error: marker }, { NOT: { error: { startsWith: REPORTED_UNVERIFIED_PREFIX } } }],
+      },
       data: { error: `order_mismatch: ${verdict.detail}` },
     });
     return NextResponse.json({ error: "order_mismatch", detail: verdict.detail }, { status: 422 });

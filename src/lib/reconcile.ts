@@ -125,12 +125,11 @@ export async function reconcileAttempt(
   else await bookEntryFills(prisma, attempt, betSide, requested, [fill], { cumulative: true });
 
   // The estimate dies here: whatever the receipt guessed, the charged total is now on the ledger.
-  await trueUpAttemptFee(prisma, attempt, feeMicro);
-  // The exchange's terminal trade records are the final word: stamp the attempt so the sweep stops
-  // re-probing it every pass for 48h.
-  if (verdict.terminal) {
-    await prisma.orderAttempt.updateMany({ where: { id: attempt.id, state: { in: ["FILLED", "PARTIAL"] } }, data: { reconciledAt: new Date() } });
-  }
+  // The exchange's terminal trade records are the final word, so they also stamp the attempt and
+  // the sweep stops re-probing it. Both happen in ONE transaction under the position lock, and only
+  // if this read covers everything already booked: a concurrent run that read the fill when it was
+  // still partly indexed must neither shrink the fee to the partial fill's nor close the attempt.
+  await trueUpAttemptFee(prisma, attempt, feeMicro, { observedSharesMicro: sharesMicro, stampReconciled: verdict.terminal });
   return "booked";
 }
 
@@ -209,11 +208,16 @@ export async function discoverOrphanAttempts(
 ): Promise<Record<OrphanOutcome, number> & { scanned: number }> {
   const now = opts.now ?? new Date();
   const cutoff = new Date(now.getTime() - (opts.minAgeMs ?? 15 * 60_000));
-  const attempts = await prisma.orderAttempt.findMany({
-    where: { state: "SUBMITTING", externalOrderId: null, updatedAt: { lt: cutoff } },
-    orderBy: { updatedAt: "asc" },
-    take: opts.limit ?? 10,
-  });
+  // A progressing cursor, not "oldest first": an orphan that keeps answering "unknown" is never
+  // written, so it would sit at the head of an updatedAt-ordered batch forever and starve every
+  // later attempt (a filled order among them). The cursor walks the set and wraps at the end.
+  const attempts = await cursorBatch(prisma, ORPHAN_CURSOR, opts.limit ?? 10, (after) =>
+    prisma.orderAttempt.findMany({
+      where: { state: "SUBMITTING", externalOrderId: null, updatedAt: { lt: cutoff }, ...afterCursor(after) },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      take: opts.limit ?? 10,
+    }),
+  );
 
   const counts: Record<OrphanOutcome, number> = { unknown: 0, adopted: 0, killed: 0 };
   for (const attempt of attempts) {
@@ -230,6 +234,34 @@ export async function discoverOrphanAttempts(
     }
   }
   return { ...counts, scanned: attempts.length };
+}
+
+// ── Progressing batches ──
+// The orphan sweep and the fast pass both select rows they may leave untouched ("unknown",
+// "pending"), so a plain ordered LIMIT would hand them the same head rows every pass. They walk the
+// set with a stored (createdAt, id) cursor instead, and wrap to the start after a short batch.
+const ORPHAN_CURSOR = "polymarket-orphan-sweep-v1";
+const REPORTED_CURSOR = "polymarket-reported-fast-v1";
+function afterCursor(after: SweepCursorValue | null) {
+  return after
+    ? { AND: [{ OR: [{ createdAt: { gt: after.createdAt } }, { createdAt: after.createdAt, id: { gt: after.id } }] }] }
+    : {};
+}
+async function cursorBatch<T extends { createdAt: Date; id: string }>(
+  prisma: PrismaClient,
+  name: string,
+  limit: number,
+  find: (after: SweepCursorValue | null) => Promise<T[]>,
+): Promise<T[]> {
+  let after: SweepCursorValue | null = null;
+  try { after = await readSweepCursor(prisma, name); } catch { after = null; }
+  let rows = await find(after);
+  if (rows.length === 0 && after) rows = await find(null); // wrapped: start over from the beginning
+  const last = rows[rows.length - 1];
+  try {
+    await writeSweepCursor(prisma, name, rows.length >= limit && last ? { createdAt: last.createdAt, id: last.id } : null);
+  } catch { /* bookkeeping only — never a reason to skip the money pass */ }
+  return rows;
 }
 
 // ── Reported-but-unverified attempts (the fast pass) ──
@@ -265,18 +297,21 @@ export async function confirmReportedAttempts(
   const now = opts.now ?? new Date();
   const cutoff = new Date(now.getTime() - (opts.minAgeMs ?? 30_000));
   const oldest = new Date(now.getTime() - (opts.maxAgeMs ?? 20 * 60_000));
-  const attempts = await prisma.orderAttempt.findMany({
-    where: {
-      state: "SUBMITTING",
-      externalOrderId: null,
-      error: { startsWith: REPORTED_UNVERIFIED_PREFIX },
-      updatedAt: { lt: cutoff, gte: oldest },
-    },
-    // Newest first: a just-swiped order is the one a user is waiting on, and rows that keep
-    // failing to prove must not hold the head of the queue for their whole 20-minute window.
-    orderBy: { updatedAt: "desc" },
-    take: opts.limit ?? 25,
-  });
+  // A progressing cursor (see the orphan sweep): rows that keep failing to prove are never written,
+  // so any fixed ordering would let them hold the head of the queue for their whole window.
+  const attempts = await cursorBatch(prisma, REPORTED_CURSOR, opts.limit ?? 25, (after) =>
+    prisma.orderAttempt.findMany({
+      where: {
+        state: "SUBMITTING",
+        externalOrderId: null,
+        error: { startsWith: REPORTED_UNVERIFIED_PREFIX },
+        updatedAt: { lt: cutoff, gte: oldest },
+        ...afterCursor(after),
+      },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      take: opts.limit ?? 25,
+    }),
+  );
 
   const counts: Record<ReportedOutcome, number> = { confirmed: 0, pending: 0, mismatch: 0 };
   for (const attempt of attempts) {

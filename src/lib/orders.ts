@@ -233,8 +233,25 @@ const ZERO32 = `0x${"0".repeat(64)}`;
 export function exchangeOrderIds(signed: SignedOrderWire | null | undefined): string[] | null {
   if (!signed || typeof signed !== "object") return null;
   const w = signed as unknown as Record<string, unknown>;
+  // Every field is validated BEFORE hashing: a malformed payload must answer "cannot tell" (null),
+  // never a hash of coerced values that would make its real id read as "provably another order".
+  const uint = (v: unknown) => (typeof v === "string" && /^\d+$/.test(v)) || (typeof v === "number" && Number.isSafeInteger(v) && v >= 0);
+  const addr = (v: unknown) => typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v);
+  // metadata / builder are optional in the wire (the SDK defaults both to zero); present = bytes32.
+  const b32 = (v: unknown) => v === undefined || v === null || (typeof v === "string" && /^0x[0-9a-fA-F]{64}$/.test(v));
+  const sideRaw = typeof w.side === "string" ? w.side.toUpperCase() : w.side;
+  const side = sideRaw === "BUY" || sideRaw === 0 ? 0 : sideRaw === "SELL" || sideRaw === 1 ? 1 : null;
+  const sigType = typeof w.signatureType === "number" ? w.signatureType : Number.NaN;
+  if (
+    side === null ||
+    !Number.isInteger(sigType) || sigType < 0 || sigType > 3 ||
+    !uint(w.salt) || !uint(w.tokenId) || !uint(w.makerAmount) || !uint(w.takerAmount) || !uint(w.timestamp) ||
+    !addr(w.maker) || !addr(w.signer) ||
+    !b32(w.metadata) || !b32(w.builder)
+  ) {
+    return null;
+  }
   try {
-    const side = String(w.side).toUpperCase() === "SELL" || Number(w.side) === 1 ? 1 : 0;
     const message = {
       salt: BigInt(String(w.salt)),
       maker: String(w.maker) as `0x${string}`,
@@ -243,7 +260,7 @@ export function exchangeOrderIds(signed: SignedOrderWire | null | undefined): st
       makerAmount: BigInt(String(w.makerAmount)),
       takerAmount: BigInt(String(w.takerAmount)),
       side,
-      signatureType: Number(w.signatureType),
+      signatureType: sigType,
       timestamp: BigInt(String(w.timestamp)),
       metadata: (typeof w.metadata === "string" ? w.metadata : ZERO32) as `0x${string}`,
       builder: (typeof w.builder === "string" ? w.builder : ZERO32) as `0x${string}`,
@@ -271,6 +288,25 @@ export function isThisSignedOrder(signed: SignedOrderWire | null | undefined, or
 // The marker /api/real/posted writes into `error` for a reported id it could not prove yet; the
 // reported-id fast pass (reconcile.ts) works off it, and the orphan kill below must not touch it.
 export const REPORTED_UNVERIFIED_PREFIX = "reported_unverified:";
+// How long a reported id protects its row from the orphan kill. Past this (no new report, the fast
+// pass's window long over), the orphan sweep — whose discovery now identifies our order by its exact
+// hash — is trusted to decide, so a marker that can never resolve (missing credentials, a duplicate)
+// cannot wedge the market slot forever.
+export const REPORTED_MARKER_GRACE_MS = 30 * 60_000;
+// The orphan kill's CAS: still unbound and SUBMITTING, and not carrying a reported id that is still
+// within its grace period.
+function orphanKillWhere(id: string) {
+  return {
+    id,
+    state: "SUBMITTING" as const,
+    externalOrderId: null,
+    OR: [
+      { error: null },
+      { NOT: { error: { startsWith: REPORTED_UNVERIFIED_PREFIX } } },
+      { updatedAt: { lt: new Date(Date.now() - REPORTED_MARKER_GRACE_MS) } },
+    ],
+  };
+}
 
 // ------------------------------------------------------------------ exchange-order identity
 // The CLOB's own view of an order, read back server-side. It exists because the order is now
@@ -489,7 +525,7 @@ export async function bookEntryFills(
     await prisma.$transaction(async (tx) => {
       const k = await tx.orderAttempt.updateMany({
         where: opts?.killOnlyUnbound
-          ? { id: attempt.id, state: "SUBMITTING", externalOrderId: null, OR: [{ error: null }, { NOT: { error: { startsWith: REPORTED_UNVERIFIED_PREFIX } } }] }
+          ? orphanKillWhere(attempt.id)
           : { id: attempt.id, state: { in: ["SUBMITTING", "POSTED"] } },
         data: { state: "KILLED" },
       });
@@ -743,7 +779,7 @@ export async function bookExitFills(
   if (fills.length === 0) {
     await prisma.orderAttempt.updateMany({
       where: opts?.killOnlyUnbound
-        ? { id: attempt.id, state: "SUBMITTING", externalOrderId: null, OR: [{ error: null }, { NOT: { error: { startsWith: REPORTED_UNVERIFIED_PREFIX } } }] }
+        ? orphanKillWhere(attempt.id)
         : { id: attempt.id, state: { in: ["SUBMITTING", "POSTED"] } },
       data: { state: "KILLED" },
     });
@@ -971,6 +1007,15 @@ export async function trueUpAttemptFee(
   prisma: PrismaClient,
   attempt: OrderAttempt & { userId: string; marketId: string },
   trueFeeMicro: bigint,
+  // observedSharesMicro: how many shares the exchange read behind `trueFeeMicro` covered. Two
+  // reconciliations can run at once (the posted route, the fast pass, the sweep); one may have read
+  // the trades BEFORE the rest of the fill was indexed. Its fee total is then the fee of a smaller
+  // fill, and applying it after the other run booked the whole fill would cut the ledger's fee to
+  // the partial one (understated basis, overstated PnL). So the correction is applied only when the
+  // observation covers at least what is booked — checked under the position lock, like the write.
+  // stampReconciled: mark the attempt reconciled in the same transaction, and only when the
+  // observation is current — a stale run must not close the attempt to further sweeps either.
+  opts: { observedSharesMicro?: bigint; stampReconciled?: boolean } = {},
 ): Promise<bigint> {
   return prisma.$transaction(async (tx) => {
     // Serialise against the other position writers (bookEntryFills, bookExitFills,
@@ -978,6 +1023,16 @@ export async function trueUpAttemptFee(
     if (attempt.betId) await lockBetRow(tx, { id: attempt.betId });
     else await lockBetRow(tx, { userId: attempt.userId, marketId: attempt.marketId });
     const fills = await tx.fill.findMany({ where: { attemptId: attempt.id }, orderBy: { createdAt: "asc" } });
+    if (opts.observedSharesMicro !== undefined) {
+      const bookedShares = fills.reduce((s, f) => s + f.sharesMicro, 0n);
+      if (opts.observedSharesMicro < bookedShares) return 0n; // a stale read — a newer one booked more
+    }
+    if (opts.stampReconciled) {
+      await tx.orderAttempt.updateMany({
+        where: { id: attempt.id, state: { in: ["FILLED", "PARTIAL"] } },
+        data: { reconciledAt: new Date() },
+      });
+    }
     if (fills.length === 0) return 0n;
     const booked = fills.reduce((s, f) => s + f.feeMicro, 0n);
 

@@ -38,7 +38,8 @@ const MAX_TRADE_PAGES = 20;
 const MAX_CANDIDATES = 10;
 // The exchange's clock is not ours, so a trade may be stamped slightly before the intent it belongs to.
 const CLOCK_SKEW_MS = 120_000;
-// How long after the intent a trade-only booking is still treated as possibly incomplete.
+// How long after the LATEST trade (or the intent, if later) a trade-only booking stays open: the
+// index lags a match by seconds, so ten quiet minutes after the last trade is a settled fill.
 const TRADES_SETTLE_MS = 10 * 60_000;
 
 type ServerClient = Awaited<ReturnType<typeof serverSecureClient>>;
@@ -160,9 +161,11 @@ export async function verifyReportedOrder(
   // The id must be THIS signed order's own hash — exact, no exchange read needed. A reported id that
   // is another order (even the same account's, same token, same direction) is refused here; only a
   // payload that cannot be hashed falls through to the evidence checks below.
-  if (isThisSignedOrder(signed, orderId) === false) {
-    return { ok: false, reason: "mismatch", detail: "order_id_not_this_signed_order" };
-  }
+  const own = isThisSignedOrder(signed, orderId);
+  if (own === false) return { ok: false, reason: "mismatch", detail: "order_id_not_this_signed_order" };
+  // A payload we cannot hash cannot be bound to an id exactly, and the shape checks below are not a
+  // substitute (a same-account order could pass them). Leave it to a human via the stuck watcher.
+  if (own === null) return { ok: false, reason: "unverifiable" };
 
   let raw: Record<string, unknown> | null = null;
   try {
@@ -321,7 +324,8 @@ export function realProbes(prisma: PrismaClient): { probe: OrderProbe; discover:
     // A complete read is complete for THIS moment only: a fill's later trades can still be on their
     // way into the index. While the order is young the booking stays non-terminal, so the ordinary
     // reconcile sweep re-reads it (booking any late delta, cumulatively) before stamping it final.
-    const settled = Date.now() - attempt.createdAt.getTime() > TRADES_SETTLE_MS;
+    const lastTradeMs = mine.reduce((latest, t) => Math.max(latest, t.ts.getTime()), 0);
+    const settled = Date.now() - Math.max(lastTradeMs, attempt.createdAt.getTime()) > TRADES_SETTLE_MS;
     return { terminal: settled, matchedSharesMicro: collectedMicro, trades: mine };
   };
 
@@ -359,6 +363,8 @@ export function realProbes(prisma: PrismaClient): { probe: OrderProbe; discover:
           sizeMatched: String(raw.sizeMatched ?? ""),
           createdAt: String(raw.createdAt ?? ""),
         };
+        // Exact identity first: only this signed payload's own hash can be adopted.
+        if (isThisSignedOrder(signed, id) !== true) return false;
         return matchesExchangeOrder(view, { signed, dir, depositWallet, notBefore }) === null;
       };
 
@@ -418,23 +424,15 @@ export function realProbes(prisma: PrismaClient): { probe: OrderProbe; discover:
         if (!takerOrderId) continue;
         const stamped = row.matchedAt ?? row.updatedAt;
         const ts = stamped ? new Date(String(stamped)).getTime() : Number.NaN;
-        // Without a readable timestamp this cannot be told apart from one of the user's older
-        // trades on the same token, so it is not a candidate. Checked FIRST: an old trade is out of
-        // the window and says nothing either way (it must not turn every pass into "unknown").
-        if (!Number.isFinite(ts) || ts < floorMs) continue;
-        // In the window: our order iff its id is this signed payload's hash. Anything else is not
-        // ours — but "not ours" is not proof of absence (an unhashable payload, an exchange we have
-        // not verified), so it makes the answer "unknown", never a kill and never an adoption.
-        const own = isThisSignedOrder(signed, takerOrderId);
-        if (own === false) { incomplete = true; continue; }
-        if (
-          own === null &&
-          (String(row.tokenId ?? "") !== signed.tokenId ||
-            String(row.side ?? "").toUpperCase() !== (attempt.dir === "EXIT" ? "SELL" : "BUY"))
-        ) {
-          incomplete = true;
-          continue;
-        }
+        // An unreadable timestamp is uncertainty, not "old": it could be ours. Checked first, then the
+        // window: a trade provably older than the intent says nothing either way (and must not turn
+        // every pass into "unknown").
+        if (!Number.isFinite(ts)) { incomplete = true; continue; }
+        if (ts < floorMs) continue;
+        // In the window: our order iff its id is this signed payload's exact hash. Anything else —
+        // another order, or a payload we cannot hash — is not adoptable, and not proof of absence
+        // either, so the answer becomes "unknown": never a kill, never an adoption.
+        if (isThisSignedOrder(signed, takerOrderId) !== true) { incomplete = true; continue; }
         if (!candidates.includes(takerOrderId)) candidates.push(takerOrderId);
       }
       if (candidates.length > MAX_CANDIDATES) incomplete = true; // an unchecked candidate may be ours

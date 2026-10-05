@@ -17,6 +17,7 @@ import {
   type TradeRecord,
 } from "../src/lib/reconcile";
 import { feePerShareMicro } from "../src/lib/quote";
+import { trueUpAttemptFee } from "../src/lib/orders";
 
 const FEE_EXP_MILLI = 1000;
 const FEE_RATE_BP = 700;
@@ -258,7 +259,7 @@ async function main() {
         updatedAt: window,
       },
     });
-    await prisma.sweepCursor.deleteMany({ where: { name: "polymarket-order-reconcile-v1" } });
+    await prisma.sweepCursor.deleteMany({ where: { name: { in: ["polymarket-order-reconcile-v1", "polymarket-orphan-sweep-v1", "polymarket-reported-fast-v1"] } } });
     const swept = await reconcileStuckAttempts(prisma, async (attempt) => attempt.id === a7old.id ? {
       terminal: true,
       matchedSharesMicro: 1_000_000n,
@@ -530,6 +531,64 @@ async function main() {
     await confirmReportedAttempts(prisma, racing, async () => null, { minAgeMs: 0, limit: 50 });
     assert.strictEqual((await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a12.id } })).error, newer, "the newer report survives");
     console.log("OK: the fast pass only rewrites the exact marker it read");
+
+    // ---- 13. Two reconciliations race: B read the WHOLE fill (10 shares) and booked it with the
+    // full fee; A had read it while only 4 shares were indexed and applies its fee true-up late.
+    // A's correction (and its "reconciled" stamp) must be refused: it would cut the fee to the
+    // partial fill's and close the attempt on a stale view.
+    const m13 = await mkMarket("c13");
+    const a13 = await mkAttempt(m13.id, {
+      externalOrderId: `${tag}-o13`,
+      approvedParams: { betSide: "YES", sharesMicro: "10000000", feeRateBp: FEE_RATE_BP, feeExpMilli: FEE_EXP_MILLI },
+    });
+    const full13: OrderProbe = async () => ({
+      terminal: false, // not stamped by B either, so the test can see whether A stamps
+      matchedSharesMicro: 10_000_000n,
+      trades: [
+        { id: `${tag}-t13a`, priceBp: 5200, sizeMicro: 4_000_000n, feeRateBp: FEE_RATE_BP, ts: new Date() },
+        { id: `${tag}-t13b`, priceBp: 5200, sizeMicro: 6_000_000n, feeRateBp: FEE_RATE_BP, ts: new Date() },
+      ],
+    });
+    assert.strictEqual(await reconcileAttempt(prisma, a13, full13, FEE_EXP_MILLI), "booked");
+    const feeAfterB = (await prisma.fill.findMany({ where: { attemptId: a13.id } })).reduce((s, f) => s + f.feeMicro, 0n);
+    assert.strictEqual(feeAfterB, tradeFee(5200, 4_000_000n) + tradeFee(5200, 6_000_000n), "B booked the full fee");
+    const a13Row = await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a13.id } });
+    const staleApplied = await trueUpAttemptFee(prisma, a13Row, tradeFee(5200, 4_000_000n), {
+      observedSharesMicro: 4_000_000n,
+      stampReconciled: true,
+    });
+    assert.strictEqual(staleApplied, 0n, "a stale observation applies nothing");
+    const feeAfterA = (await prisma.fill.findMany({ where: { attemptId: a13.id } })).reduce((s, f) => s + f.feeMicro, 0n);
+    assert.strictEqual(feeAfterA, feeAfterB, "the full fee survives the stale true-up");
+    assert.strictEqual((await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a13.id } })).reconciledAt, null, "and it does not close the attempt");
+    // A CURRENT observation still stamps.
+    await trueUpAttemptFee(prisma, a13Row, feeAfterB, { observedSharesMicro: 10_000_000n, stampReconciled: true });
+    assert.ok((await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a13.id } })).reconciledAt, "a current read stamps");
+    console.log("OK: a stale fee true-up is refused under the position lock; only a current read stamps");
+
+    // ---- 14. The orphan sweep progresses: rows that stay "unknown" are never written, yet two
+    // consecutive small batches must cover DIFFERENT rows (a cursor, not "the same head forever").
+    await prisma.sweepCursor.deleteMany({ where: { name: "polymarket-orphan-sweep-v1" } });
+    const seen: string[][] = [[], []];
+    for (let pass = 0; pass < 2; pass++) {
+      await discoverOrphanAttempts(prisma, async (a) => { seen[pass].push(a.id); return null; }, async () => null, { minAgeMs: 0, limit: 2 });
+    }
+    assert.strictEqual(seen[0].length, 2);
+    assert.ok(seen[1].length >= 1, "the second batch is not empty");
+    assert.ok(seen[1].every((id) => !seen[0].includes(id)), "the second batch moved past the first");
+    console.log("OK: the orphan sweep walks a cursor — unknown rows cannot hold the head of the queue");
+
+    // ---- 15. The marker's grace runs out: a reported id nobody could prove for 30+ minutes no longer
+    // shields its row from an exact-hash discovery's verdict of absence.
+    const m15 = await mkMarket("c15");
+    const a15 = await mkAttempt(m15.id, { state: "SUBMITTING", approvedParams: params9, error: `${REPORTED_UNVERIFIED_PREFIX}${tag}-r15` });
+    await prisma.$executeRaw`UPDATE order_attempts SET "updatedAt" = now() - interval '31 minutes' WHERE id = ${a15.id}`;
+    const old15 = await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a15.id } });
+    assert.strictEqual(
+      await resolveOrphanAttempt(prisma, old15, async () => ({ orderId: null }), async () => null, FEE_EXP_MILLI),
+      "killed",
+    );
+    console.log("OK: a reported marker shields its row only within its grace period");
 
     console.log("OK: unknown probe / matched-without-trades / terminal + live zero-match verdicts");
     console.log("OK: trade records replace the receipt estimate — delta booked, fee trued up");
