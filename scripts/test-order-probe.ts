@@ -15,7 +15,7 @@ const signedOrder: SignedOrderWire = {
   builder: "0x" + "0".repeat(63) + "7",
   expiration: 0,
   maker: DEPOSIT,
-  makerAmount: "1000000", // SELL: shares offered (micro); ENTRY uses takerAmount for shares
+  makerAmount: "1000000", // the FIXED side: BUY = USDC paid (micro), SELL = shares offered
   orderType: "FAK",
   salt: "12345",
   side: "BUY",
@@ -90,7 +90,7 @@ async function main() {
         throw new Error("rpc down");
       },
       pageTrades: async () => ({
-        rows: [{ takerOrderId: ORDER_ID, traderSide: "TAKER", tokenId: "123456789", side: "BUY", size: "5", matchedAt: "2026-08-17T12:00:45Z" }],
+        rows: [{ takerOrderId: ORDER_ID, traderSide: "TAKER", tokenId: "123456789", side: "BUY", size: "5", price: "0.2", matchedAt: "2026-08-17T12:00:45Z" }],
         complete: true,
       }),
     });
@@ -104,7 +104,7 @@ async function main() {
         throw new Error("rpc down");
       },
       pageTrades: async () => ({
-        rows: [{ takerOrderId: ORDER_ID, traderSide: "TAKER", tokenId: "123456789", side: "BUY", size: "5", matchedAt: "2026-08-17T10:00:00Z" }], // 2h before, beyond any skew
+        rows: [{ takerOrderId: ORDER_ID, traderSide: "TAKER", tokenId: "123456789", side: "BUY", size: "5", price: "0.2", matchedAt: "2026-08-17T10:00:00Z" }], // 2h before, beyond any skew
         complete: true,
       }),
     });
@@ -139,7 +139,7 @@ async function main() {
         reads++;
         return reads < 2
           ? { rows: [], complete: true }
-          : { rows: [{ takerOrderId: ORDER_ID, traderSide: "TAKER", tokenId: "123456789", side: "BUY", size: "5", matchedAt: "2026-08-17T12:00:45Z" }], complete: true };
+          : { rows: [{ takerOrderId: ORDER_ID, traderSide: "TAKER", tokenId: "123456789", side: "BUY", size: "5", price: "0.2", matchedAt: "2026-08-17T12:00:45Z" }], complete: true };
       },
       tradeRetryDelaysMs: [1000, 2000, 3000],
       sleep: async (ms) => { waits.push(ms); },
@@ -171,7 +171,7 @@ async function main() {
     const verdict = await verifyReportedOrder(client, attemptFixture(), ORDER_ID, DEPOSIT, {
       fetchOrder: async () => null,
       pageTrades: async () => ({
-        rows: [{ takerOrderId: ORDER_ID, traderSide: "TAKER", tokenId: "123456789", side: "BUY", size: "5", matchedAt: "2026-08-17T12:00:45Z", ...wrong }],
+        rows: [{ takerOrderId: ORDER_ID, traderSide: "TAKER", tokenId: "123456789", side: "BUY", size: "5", price: "0.2", matchedAt: "2026-08-17T12:00:45Z", ...wrong }],
         complete: true,
       }),
     });
@@ -185,13 +185,39 @@ async function main() {
       fetchOrder: async () => null,
       pageTrades: async () => ({
         rows: [
-          { takerOrderId: ORDER_ID, traderSide: "TAKER", tokenId: "123456789", side: "BUY", size: "3", matchedAt: "2026-08-17T12:00:45Z" },
-          { takerOrderId: ORDER_ID, traderSide: "TAKER", tokenId: "123456789", side: "BUY", size: "3", matchedAt: "2026-08-17T12:00:46Z" },
+          // 3 + 3 shares at 0.20 = $1.20 of a $1.00 (makerAmount) BUY → more USDC than signed.
+          { takerOrderId: ORDER_ID, traderSide: "TAKER", tokenId: "123456789", side: "BUY", size: "3", price: "0.2", matchedAt: "2026-08-17T12:00:45Z" },
+          { takerOrderId: ORDER_ID, traderSide: "TAKER", tokenId: "123456789", side: "BUY", size: "3", price: "0.2", matchedAt: "2026-08-17T12:00:46Z" },
         ],
         complete: true,
       }),
     });
     assert.deepStrictEqual(verdict, { ok: false, reason: "unverifiable" }, "oversize is left to the orphan sweep, never a red error");
+  }
+
+  // 12b. MORE shares than takerAmount but within the signed USDC is a normal BUY fill (price
+  //      improvement — live 2026-10-05: $1 signed, takerAmount 1.4493, filled 1.5625 at 0.64). Here:
+  //      6 shares at 0.16 = $0.96 of $1.00, while takerAmount says 5 → verified.
+  {
+    const verdict = await verifyReportedOrder(client, attemptFixture(), ORDER_ID, DEPOSIT, {
+      fetchOrder: async () => null,
+      pageTrades: async () => ({
+        rows: [{ takerOrderId: ORDER_ID, traderSide: "TAKER", tokenId: "123456789", side: "BUY", size: "6", price: "0.16", matchedAt: "2026-08-17T12:00:45Z" }],
+        complete: true,
+      }),
+    });
+    assert.deepStrictEqual(verdict, { ok: true, order: { id: ORDER_ID, source: "trade-evidence" } });
+  }
+  // 12c. A BUY trade without a usable price cannot be bounded → unverifiable.
+  {
+    const verdict = await verifyReportedOrder(client, attemptFixture(), ORDER_ID, DEPOSIT, {
+      fetchOrder: async () => null,
+      pageTrades: async () => ({
+        rows: [{ takerOrderId: ORDER_ID, traderSide: "TAKER", tokenId: "123456789", side: "BUY", size: "5", matchedAt: "2026-08-17T12:00:45Z" }],
+        complete: true,
+      }),
+    });
+    assert.deepStrictEqual(verdict, { ok: false, reason: "unverifiable" });
   }
 
   // 13. Exact identity: a CLOB order id is the EIP-712 hash of the signed Order. The expected value
