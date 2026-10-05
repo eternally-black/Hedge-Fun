@@ -28,6 +28,9 @@ const tradeFee = (priceBp: number, sizeMicro: bigint): bigint =>
 const entryNotional = (priceBp: number, sizeMicro: bigint): bigint => (sizeMicro * BigInt(priceBp) + 9_999n) / 10_000n;
 
 async function main() {
+  // "Now" for sweeps over rows created a moment ago: their age floors compare updatedAt < now, and
+  // on a fast machine (CI) a row can be created and queried within the same millisecond.
+  const soon = () => new Date(Date.now() + 1_000);
   const tag = `rec-${process.pid}-${Date.now() & 0xffffff}`;
   const user = await prisma.user.create({
     data: { privyId: `did:privy:${tag}`, authProvider: "EMAIL", referralCode: randomCode() },
@@ -168,7 +171,7 @@ async function main() {
       probedIds.push(a.id);
       return truth5(a);
     };
-    await reconcileStuckAttempts(prisma, spy, { minAgeMs: 0, limit: 50 });
+    await reconcileStuckAttempts(prisma, spy, { minAgeMs: 0, now: soon(), limit: 50 });
     assert.ok(!probedIds.includes(a5.id), "a reconciled attempt is not probed again");
     console.log("OK: a reconciled attempt is not probed again");
 
@@ -267,7 +270,7 @@ async function main() {
       terminal: true,
       matchedSharesMicro: 1_000_000n,
       trades: [{ id: `${tag}-t7old`, priceBp: 5000, sizeMicro: 1_000_000n, feeRateBp: FEE_RATE_BP, ts: new Date() }],
-    } : null, { minAgeMs: 0, limit: 50 });
+    } : null, { minAgeMs: 0, now: soon(), limit: 50 });
     assert.strictEqual(swept.scanned, eligible, "scanned every old id-carrying unresolved attempt");
     assert.ok(
       await prisma.orderAttempt
@@ -420,7 +423,7 @@ async function main() {
     const orphanCount = await prisma.orderAttempt.count({ where: { state: "SUBMITTING", externalOrderId: null } });
     assert.ok(orphanCount >= 1, "at least one orphan is on the table");
     const sweptOrphans = await discoverOrphanAttempts(prisma, async () => null, async () => null, {
-      minAgeMs: 0,
+      minAgeMs: 0, now: soon(),
       limit: 50,
     });
     assert.strictEqual(sweptOrphans.scanned, orphanCount, "scanned exactly the id-less SUBMITTING attempts");
@@ -454,7 +457,7 @@ async function main() {
             trades: [{ id: `${tag}-t9b`, priceBp: 5200, sizeMicro: 6_000_000n, feeRateBp: FEE_RATE_BP, ts: new Date() }],
           }
         : null;
-    const fast = await confirmReportedAttempts(prisma, confirm9, probe9, { minAgeMs: 0, limit: 50 });
+    const fast = await confirmReportedAttempts(prisma, confirm9, probe9, { minAgeMs: 0, now: soon(), limit: 50 });
     assert.deepStrictEqual(
       { confirmed: fast.confirmed, pending: fast.pending, mismatch: fast.mismatch, scanned: fast.scanned },
       { confirmed: 1, pending: 1, mismatch: 1, scanned: 3 },
@@ -483,13 +486,13 @@ async function main() {
     // 9d. The unreported orphan was never touched by this pass.
     assert.strictEqual((await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a9d.id } })).state, "SUBMITTING");
     // A second pass sees only the still-unverified row.
-    const again = await confirmReportedAttempts(prisma, async () => ({ ok: false, reason: "unverifiable" }), probe9, { minAgeMs: 0 });
+    const again = await confirmReportedAttempts(prisma, async () => ({ ok: false, reason: "unverifiable" }), probe9, { minAgeMs: 0, now: soon() });
     assert.strictEqual(again.scanned, 1);
     // The age floor keeps a row the posted route is still working on out of the pass.
     const young = await confirmReportedAttempts(prisma, confirm9, probe9, { minAgeMs: 3_600_000 });
     assert.strictEqual(young.scanned, 0);
     // The upper age bound hands an old unproven row to the orphan sweep: past maxAgeMs it is not scanned.
-    const stale = await confirmReportedAttempts(prisma, confirm9, probe9, { minAgeMs: 0, maxAgeMs: 1 });
+    const stale = await confirmReportedAttempts(prisma, confirm9, probe9, { minAgeMs: 0, now: soon(), maxAgeMs: 1 });
     assert.strictEqual(stale.scanned, 0, "a row older than maxAgeMs is out of the fast pass");
     console.log("OK: reported-id fast pass — adopts a proven id, leaves the unverifiable alone, records a mismatch, never kills");
 
@@ -531,7 +534,7 @@ async function main() {
       await prisma.orderAttempt.update({ where: { id: a12.id }, data: { error: newer } }); // the re-report lands
       return { ok: false, reason: "mismatch", detail: "x was not ours" };
     };
-    await confirmReportedAttempts(prisma, racing, async () => null, { minAgeMs: 0, limit: 50 });
+    await confirmReportedAttempts(prisma, racing, async () => null, { minAgeMs: 0, now: soon(), limit: 50 });
     assert.strictEqual((await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a12.id } })).error, newer, "the newer report survives");
     console.log("OK: the fast pass only rewrites the exact marker it read");
 
@@ -574,7 +577,7 @@ async function main() {
     await prisma.sweepCursor.deleteMany({ where: { name: "polymarket-orphan-sweep-v1" } });
     const seen: string[][] = [[], []];
     for (let pass = 0; pass < 2; pass++) {
-      await discoverOrphanAttempts(prisma, async (a) => { seen[pass].push(a.id); return null; }, async () => null, { minAgeMs: 0, limit: 2 });
+      await discoverOrphanAttempts(prisma, async (a) => { seen[pass].push(a.id); return null; }, async () => null, { minAgeMs: 0, now: soon(), limit: 2 });
     }
     assert.strictEqual(seen[0].length, 2);
     assert.ok(seen[1].length >= 1, "the second batch is not empty");
@@ -598,7 +601,7 @@ async function main() {
     // cycle, so a stream of new rows cannot keep every batch full and starve older ones.
     await prisma.sweepCursor.deleteMany({ where: { name: { in: ["polymarket-orphan-sweep-v1", "polymarket-orphan-sweep-v1:hw"] } } });
     const firstBatch: string[] = [];
-    await discoverOrphanAttempts(prisma, async (a) => { firstBatch.push(a.id); return null; }, async () => null, { minAgeMs: 0, limit: 1 });
+    await discoverOrphanAttempts(prisma, async (a) => { firstBatch.push(a.id); return null; }, async () => null, { minAgeMs: 0, now: soon(), limit: 1 });
     assert.strictEqual(firstBatch.length, 1, "the cycle has started");
     const m16 = await mkMarket("c16");
     const a16 = await mkAttempt(m16.id, { state: "SUBMITTING", approvedParams: params9 }); // born mid-cycle
@@ -607,7 +610,7 @@ async function main() {
     const cycleStart = await hwOf();
     for (let i = 0; i < 200; i++) {
       const batch: string[] = [];
-      await discoverOrphanAttempts(prisma, async (a) => { batch.push(a.id); return null; }, async () => null, { minAgeMs: 0, limit: 1 });
+      await discoverOrphanAttempts(prisma, async (a) => { batch.push(a.id); return null; }, async () => null, { minAgeMs: 0, now: soon(), limit: 1 });
       if ((await hwOf()) !== cycleStart) break; // this call ended the cycle and began the next one
       restOfCycle.push(...batch);
     }
