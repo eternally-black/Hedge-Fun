@@ -26,15 +26,19 @@ export async function POST(req: Request) {
 
   const { probe, discover, confirmReported } = realProbes(prisma);
 
-  // The fast pass runs first and on every call: it can only adopt (see confirmReportedAttempts), so
-  // the poller calls this route every tick with reportedOnly and the full sweeps every Nth tick.
-  let reported = { confirmed: 0, pending: 0, mismatch: 0, scanned: 0 };
-  try {
-    reported = await confirmReportedAttempts(prisma, confirmReported, probe, { limit });
-  } catch (e) {
-    await captureToGlitchTip(e, { route: "real/reconcile", stage: "reported-confirm" });
-  }
-  if (body.reportedOnly === true) return NextResponse.json({ reported });
+  // The fast pass runs on every call: it can only adopt (see confirmReportedAttempts), so the poller
+  // calls this route every tick with reportedOnly, and with the full sweeps every Nth tick — where
+  // it runs LAST, so a backlog here can never eat the sweeps' time budget. A throw is reported as
+  // reportedFailed so the poller can count it (a 200 alone would read as healthy).
+  const runReported = async () => {
+    try {
+      return { reported: await confirmReportedAttempts(prisma, confirmReported, probe, { limit }), reportedFailed: false };
+    } catch (e) {
+      await captureToGlitchTip(e, { route: "real/reconcile", stage: "reported-confirm" });
+      return { reported: { confirmed: 0, pending: 0, mismatch: 0, scanned: 0 }, reportedFailed: true };
+    }
+  };
+  if (body.reportedOnly === true) return NextResponse.json(await runReported());
 
   try {
     const counts = await reconcileStuckAttempts(prisma, probe, { limit, minAgeMs });
@@ -53,7 +57,7 @@ export async function POST(req: Request) {
       await captureToGlitchTip(e, { route: "real/reconcile", stage: "orphan-sweep" });
     }
 
-    return NextResponse.json({ ...counts, orphans, reported });
+    return NextResponse.json({ ...counts, orphans, ...(await runReported()) });
   } catch (e) {
     await captureToGlitchTip(e, { route: "real/reconcile" });
     return NextResponse.json({ error: "reconcile_failed" }, { status: 500 });

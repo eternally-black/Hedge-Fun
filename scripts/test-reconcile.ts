@@ -484,7 +484,25 @@ async function main() {
     // The age floor keeps a row the posted route is still working on out of the pass.
     const young = await confirmReportedAttempts(prisma, confirm9, probe9, { minAgeMs: 3_600_000 });
     assert.strictEqual(young.scanned, 0);
+    // The upper age bound hands an old unproven row to the orphan sweep: past maxAgeMs it is not scanned.
+    const stale = await confirmReportedAttempts(prisma, confirm9, probe9, { minAgeMs: 0, maxAgeMs: 1 });
+    assert.strictEqual(stale.scanned, 0, "a row older than maxAgeMs is out of the fast pass");
     console.log("OK: reported-id fast pass — adopts a proven id, leaves the unverifiable alone, records a mismatch, never kills");
+
+    // ---- 10. The orphan sweep's kill on a STALE snapshot: the fast pass adopted the row after the
+    // sweep read it. The kill must back off rather than kill an adopted (possibly filled) order.
+    const m10 = await mkMarket("c10");
+    const a10 = await mkAttempt(m10.id, { state: "SUBMITTING", approvedParams: params9, error: `${REPORTED_UNVERIFIED_PREFIX}${tag}-r10` });
+    const snapshot10 = await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a10.id } });
+    await prisma.orderAttempt.update({ where: { id: a10.id }, data: { state: "POSTED", externalOrderId: `${tag}-r10`, error: null } });
+    assert.strictEqual(
+      await resolveOrphanAttempt(prisma, snapshot10, async () => ({ orderId: null }), async () => null, FEE_EXP_MILLI),
+      "unknown",
+    );
+    const a10Row = await prisma.orderAttempt.findUniqueOrThrow({ where: { id: a10.id } });
+    assert.strictEqual(a10Row.state, "POSTED", "an adopted row is never killed off a stale snapshot");
+    assert.strictEqual(a10Row.externalOrderId, `${tag}-r10`);
+    console.log("OK: the orphan kill re-claims the row first — it never kills what the fast pass adopted");
 
     console.log("OK: unknown probe / matched-without-trades / terminal + live zero-match verdicts");
     console.log("OK: trade records replace the receipt estimate — delta booked, fee trued up");

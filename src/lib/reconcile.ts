@@ -164,6 +164,14 @@ export async function resolveOrphanAttempt(
   if (found.orderId === null) {
     // Nothing exists at the exchange, so no money moved. Booking zero fills is the existing
     // terminal path: SUBMITTING → KILLED plus the reserved daily-cap slot handed back.
+    // The kill's own CAS also accepts POSTED rows, so first re-claim the row as still unbound and
+    // SUBMITTING (and drop any reported-id marker, which takes it out of the fast pass): if the
+    // fast pass adopted it meanwhile, this snapshot is stale and killing would strand a fill.
+    const still = await prisma.orderAttempt.updateMany({
+      where: { id: attempt.id, state: "SUBMITTING", externalOrderId: null },
+      data: { error: "orphan_absent" },
+    });
+    if (still.count === 0) return "unknown";
     const params = attempt.approvedParams as { betSide?: "YES" | "NO"; sharesMicro?: string } | null;
     const requested = BigInt(params?.sharesMicro ?? "0");
     if (attempt.dir === "EXIT") await bookExitFills(prisma, attempt, requested, []);
@@ -177,7 +185,7 @@ export async function resolveOrphanAttempt(
   try {
     const cas = await prisma.orderAttempt.updateMany({
       where: { id: attempt.id, state: "SUBMITTING", externalOrderId: null },
-      data: { state: "POSTED", externalOrderId: found.orderId, postResponse: found.order as never },
+      data: { state: "POSTED", externalOrderId: found.orderId, postResponse: found.order as never, error: null },
     });
     if (cas.count === 0) return "unknown"; // someone else moved the row
   } catch (e) {
@@ -253,17 +261,20 @@ export async function confirmReportedAttempts(
   confirm: ReportedConfirm,
   probe: OrderProbe,
   // minAgeMs: the posted route itself just spent a few seconds trying, so a row younger than this
-  // is still in that request's hands.
-  opts: { now?: Date; minAgeMs?: number; limit?: number; feeExpMilli?: number } = {},
+  // is still in that request's hands. maxAgeMs: past it the orphan sweep (15 min floor) owns the
+  // row — a reported id that never proves (a made-up id, broken credentials) must not hold this
+  // pass's queue, or spend that user's exchange quota, forever.
+  opts: { now?: Date; minAgeMs?: number; maxAgeMs?: number; limit?: number; feeExpMilli?: number } = {},
 ): Promise<Record<ReportedOutcome, number> & { scanned: number }> {
   const now = opts.now ?? new Date();
   const cutoff = new Date(now.getTime() - (opts.minAgeMs ?? 30_000));
+  const oldest = new Date(now.getTime() - (opts.maxAgeMs ?? 20 * 60_000));
   const attempts = await prisma.orderAttempt.findMany({
     where: {
       state: "SUBMITTING",
       externalOrderId: null,
       error: { startsWith: REPORTED_UNVERIFIED_PREFIX },
-      updatedAt: { lt: cutoff },
+      updatedAt: { lt: cutoff, gte: oldest },
     },
     orderBy: { updatedAt: "asc" },
     take: opts.limit ?? 10,

@@ -190,21 +190,42 @@ export async function verifyReportedOrder(
   // signed for, after the intent existed, in an account only these credentials can read. A client
   // cannot fabricate that — it would have to make the exchange print someone else's trade.
   const floorMs = attempt.createdAt.getTime() - CLOCK_SKEW_MS;
+  // The trade path must bind as tightly as the order record does (matchesExchangeOrder): the id is
+  // client-supplied, so a trade "naming" it proves nothing unless it is on the SIGNED token, in the
+  // attempt's direction, and no bigger in total than the signed order. Without the side check a
+  // user's own BUY elsewhere could be booked as an EXIT's sale proceeds.
+  const wantSide = dir === "EXIT" ? "SELL" : "BUY";
+  let signedSharesMicro: bigint;
+  try {
+    signedSharesMicro = BigInt(dir === "EXIT" ? signed.makerAmount : signed.takerAmount);
+  } catch {
+    return { ok: false, reason: "mismatch", detail: "bad_order_shape" };
+  }
   const delays = deps.tradeRetryDelaysMs ?? [];
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   let complete = true;
   for (let i = 0; ; i++) {
     const read = await (deps.pageTrades ?? pageTrades)(client, attempt);
     complete = read.complete;
-    const named = read.rows.some((row) => {
+    const named = read.rows.filter((row) => {
       const t = row as Record<string, unknown>;
       if (String(t.takerOrderId ?? "") !== orderId) return false;
       if (String(t.traderSide ?? "") !== "TAKER") return false;
+      if (String(t.tokenId ?? "") !== signed.tokenId) return false;
+      if (String(t.side ?? "").toUpperCase() !== wantSide) return false;
       const stamped = t.matchedAt ?? t.updatedAt;
       const ts = stamped ? new Date(String(stamped)).getTime() : Number.NaN;
       return Number.isFinite(ts) && ts >= floorMs;
     });
-    if (named) {
+    // More matched than was signed means these trades are not this order's — refuse to call it ours.
+    const namedMicro = named.reduce<bigint>((sum, row) => {
+      const size = Number((row as Record<string, unknown>).size);
+      return sum + (Number.isFinite(size) && size > 0 ? BigInt(Math.round(size * 1_000_000)) : 0n);
+    }, 0n);
+    if (named.length > 0 && namedMicro > signedSharesMicro + 1n) {
+      return { ok: false, reason: "mismatch", detail: "trade_size_exceeds_signed" };
+    }
+    if (named.length > 0) {
       console.warn(`[order-probe] ${attempt.id}: reported order ${orderId} verified from trade evidence`);
       return { ok: true, order: { id: orderId, source: "trade-evidence" } };
     }

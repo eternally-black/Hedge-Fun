@@ -567,7 +567,12 @@ async function tick() {
       const c = (await resp.json()) as Partial<Record<"booked" | "killed" | "pending" | "unknown" | "scanned", number>> & {
         orphans?: Partial<Record<"adopted" | "killed" | "unknown" | "scanned", number>>;
         reported?: Partial<Record<"confirmed" | "pending" | "mismatch" | "scanned", number>>;
+        reportedFailed?: boolean;
       };
+      // Counted on its OWN subsystem: four healthy fast-pass calls per full sweep would otherwise
+      // reset the failure streak of a full sweep that fails every time, and it would never page.
+      if (c.reportedFailed) subsystemFailed("real-reported", new Error("reported-id fast pass failed"));
+      else subsystemOk("real-reported");
       const rp = c.reported;
       if ((rp?.scanned ?? 0) > 0) {
         console.log(
@@ -588,10 +593,10 @@ async function tick() {
           `[real-orphans] scanned ${o?.scanned}: adopted ${o?.adopted ?? 0}, killed ${o?.killed ?? 0}, unknown ${o?.unknown ?? 0}`,
         );
       }
-      subsystemOk("real-reconcile");
+      if (fullReconcile) subsystemOk("real-reconcile");
     } catch (e) {
       console.warn("[real-reconcile] error:", (e as Error).message);
-      subsystemFailed("real-reconcile", e);
+      subsystemFailed(fullReconcile ? "real-reconcile" : "real-reported", e);
     }
   }
 

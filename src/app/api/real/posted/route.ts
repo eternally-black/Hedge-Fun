@@ -21,6 +21,11 @@ import { rateLimit } from "@/lib/ratelimit";
 // Re-reads of the trades after a post whose order record is unreadable (see verifyReportedOrder).
 // 6 s of waiting in total: the phone's api() aborts at 15 s, and the reads themselves need room too.
 const TRADE_RETRY_DELAYS_MS = [1000, 2000, 3000] as const;
+// Whole-request budget for those waits (exchange reads included): the phone's api() aborts at 15 s.
+const WAIT_BUDGET_MS = 9_000;
+class WaitBudgetSpent extends Error {}
+// A CLOB order id is the order's 32-byte hash. Only an id of that shape is worth fast-tracking.
+const ORDER_ID_RE = /^0x[0-9a-fA-F]{64}$/;
 
 export async function POST(req: Request) {
   const user = await authUser(req);
@@ -88,8 +93,18 @@ export async function POST(req: Request) {
   // order at all, and the position went unbooked while the money was gone.
   // An order that filled at once is not readable as an order, and its trade lands a few seconds
   // after the match — so wait for it here (~6 s at most) rather than hand the booking to a sweep.
+  // The waits stop once the request has used WAIT_BUDGET_MS, whatever the exchange reads cost.
+  const startedAt = Date.now();
   const verdict = await verifyReportedOrder(client, attempt, orderId, depositWallet, {
     tradeRetryDelaysMs: TRADE_RETRY_DELAYS_MS,
+    sleep: async (ms) => {
+      const left = WAIT_BUDGET_MS - (Date.now() - startedAt);
+      if (left <= 0) throw new WaitBudgetSpent();
+      await new Promise<void>((r) => setTimeout(r, Math.min(ms, left)));
+    },
+  }).catch((e: unknown) => {
+    if (e instanceof WaitBudgetSpent) return { ok: false, reason: "unverifiable" } as const;
+    throw e;
   });
   if (!verdict.ok && verdict.reason === "mismatch") {
     // A wrong id proves nothing about our real order — it may still be live under an id nobody
@@ -108,10 +123,12 @@ export async function POST(req: Request) {
     // (confirmReportedAttempts) proves and books it within a tick or two — that pass can only adopt,
     // never kill, so unlike the orphan sweep it needs no 15-minute floor. Answering 502 here (as
     // this route first did) turned a filled order into a red error in the middle of a swipe.
-    await prisma.orderAttempt.updateMany({
-      where: { id: attempt.id, state: "SUBMITTING", externalOrderId: null },
-      data: { error: `${REPORTED_UNVERIFIED_PREFIX}${orderId}` },
-    });
+    if (ORDER_ID_RE.test(orderId)) {
+      await prisma.orderAttempt.updateMany({
+        where: { id: attempt.id, state: "SUBMITTING", externalOrderId: null },
+        data: { error: `${REPORTED_UNVERIFIED_PREFIX}${orderId}` },
+      });
+    }
     await captureToGlitchTip(new Error("reported order not yet verifiable"), {
       route: "real/posted",
       attemptId: attempt.id,

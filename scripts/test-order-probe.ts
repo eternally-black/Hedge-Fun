@@ -86,7 +86,7 @@ async function main() {
         throw new Error("rpc down");
       },
       pageTrades: async () => ({
-        rows: [{ takerOrderId: "order-1", traderSide: "TAKER", matchedAt: "2026-08-17T12:00:45Z" }],
+        rows: [{ takerOrderId: "order-1", traderSide: "TAKER", tokenId: "0xtoken123", side: "BUY", size: "5", matchedAt: "2026-08-17T12:00:45Z" }],
         complete: true,
       }),
     });
@@ -100,7 +100,7 @@ async function main() {
         throw new Error("rpc down");
       },
       pageTrades: async () => ({
-        rows: [{ takerOrderId: "order-1", traderSide: "TAKER", matchedAt: "2026-08-17T10:00:00Z" }], // 2h before, beyond any skew
+        rows: [{ takerOrderId: "order-1", traderSide: "TAKER", tokenId: "0xtoken123", side: "BUY", size: "5", matchedAt: "2026-08-17T10:00:00Z" }], // 2h before, beyond any skew
         complete: true,
       }),
     });
@@ -135,7 +135,7 @@ async function main() {
         reads++;
         return reads < 2
           ? { rows: [], complete: true }
-          : { rows: [{ takerOrderId: "order-1", traderSide: "TAKER", matchedAt: "2026-08-17T12:00:45Z" }], complete: true };
+          : { rows: [{ takerOrderId: "order-1", traderSide: "TAKER", tokenId: "0xtoken123", side: "BUY", size: "5", matchedAt: "2026-08-17T12:00:45Z" }], complete: true };
       },
       tradeRetryDelaysMs: [1000, 2000, 3000],
       sleep: async (ms) => { waits.push(ms); },
@@ -158,6 +158,35 @@ async function main() {
     assert.deepStrictEqual(verdict, { ok: false, reason: "unverifiable" });
     assert.strictEqual(reads, 4);
     assert.deepStrictEqual(waits, [1000, 2000, 3000]);
+  }
+
+  // 10. The trade names the id but is a SELL, against an ENTRY attempt → not ours (unverifiable,
+  //     never a booking): a user's own trade in the other direction must not be adopted.
+  // 11. Same for a trade on a different token.
+  for (const wrong of [{ side: "SELL" }, { tokenId: "0xothertoken" }]) {
+    const verdict = await verifyReportedOrder(client, attemptFixture(), "order-1", "0xdepositwallet", {
+      fetchOrder: async () => null,
+      pageTrades: async () => ({
+        rows: [{ takerOrderId: "order-1", traderSide: "TAKER", tokenId: "0xtoken123", side: "BUY", size: "5", matchedAt: "2026-08-17T12:00:45Z", ...wrong }],
+        complete: true,
+      }),
+    });
+    assert.deepStrictEqual(verdict, { ok: false, reason: "unverifiable" }, JSON.stringify(wrong));
+  }
+
+  // 12. Trades naming the id add up to MORE than was signed → a mismatch, refused outright.
+  {
+    const verdict = await verifyReportedOrder(client, attemptFixture(), "order-1", "0xdepositwallet", {
+      fetchOrder: async () => null,
+      pageTrades: async () => ({
+        rows: [
+          { takerOrderId: "order-1", traderSide: "TAKER", tokenId: "0xtoken123", side: "BUY", size: "3", matchedAt: "2026-08-17T12:00:45Z" },
+          { takerOrderId: "order-1", traderSide: "TAKER", tokenId: "0xtoken123", side: "BUY", size: "3", matchedAt: "2026-08-17T12:00:46Z" },
+        ],
+        complete: true,
+      }),
+    });
+    assert.deepStrictEqual(verdict, { ok: false, reason: "mismatch", detail: "trade_size_exceeds_signed" });
   }
 
   // 9. Without tradeRetryDelaysMs (the poller's fast pass) there is exactly one read and no wait.
