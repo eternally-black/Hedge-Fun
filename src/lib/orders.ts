@@ -402,7 +402,10 @@ export async function bookEntryFills(
   betSide: "YES" | "NO",
   requestedSharesMicro: bigint,
   fills: NormalizedFill[],
-  opts?: { cumulative?: boolean },
+  // killOnlyUnbound: the orphan sweep's kill. It acts on a snapshot read before discovery, and the
+  // row may have been adopted since (the fast pass, or a re-report) — so the zero-fill kill must
+  // match only a row that is STILL SUBMITTING with no exchange id, in the same statement.
+  opts?: { cumulative?: boolean; killOnlyUnbound?: boolean },
 ): Promise<"FILLED" | "PARTIAL" | "KILLED"> {
   if (fills.length === 0) {
     // KILL and release in ONE transaction. Two statements meant a crash in between left the attempt
@@ -410,7 +413,9 @@ export async function bookEntryFills(
     // rows, so nothing downstream can tell that the release still owes.
     await prisma.$transaction(async (tx) => {
       const k = await tx.orderAttempt.updateMany({
-        where: { id: attempt.id, state: { in: ["SUBMITTING", "POSTED"] } },
+        where: opts?.killOnlyUnbound
+          ? { id: attempt.id, state: "SUBMITTING", externalOrderId: null }
+          : { id: attempt.id, state: { in: ["SUBMITTING", "POSTED"] } },
         data: { state: "KILLED" },
       });
       // Gated on the update actually landing, so a replayed receipt against an already-KILLED
@@ -655,11 +660,16 @@ export async function bookExitFills(
   attempt: OrderAttempt & { userId: string; marketId: string },
   requestedSharesMicro: bigint,
   fills: NormalizedFill[],
-  opts?: { cumulative?: boolean },
+  // killOnlyUnbound: the orphan sweep's kill. It acts on a snapshot read before discovery, and the
+  // row may have been adopted since (the fast pass, or a re-report) — so the zero-fill kill must
+  // match only a row that is STILL SUBMITTING with no exchange id, in the same statement.
+  opts?: { cumulative?: boolean; killOnlyUnbound?: boolean },
 ): Promise<"FILLED" | "PARTIAL" | "KILLED"> {
   if (fills.length === 0) {
     await prisma.orderAttempt.updateMany({
-      where: { id: attempt.id, state: { in: ["SUBMITTING", "POSTED"] } },
+      where: opts?.killOnlyUnbound
+        ? { id: attempt.id, state: "SUBMITTING", externalOrderId: null }
+        : { id: attempt.id, state: { in: ["SUBMITTING", "POSTED"] } },
       data: { state: "KILLED" },
     });
     return "KILLED";

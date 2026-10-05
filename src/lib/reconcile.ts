@@ -164,19 +164,15 @@ export async function resolveOrphanAttempt(
   if (found.orderId === null) {
     // Nothing exists at the exchange, so no money moved. Booking zero fills is the existing
     // terminal path: SUBMITTING → KILLED plus the reserved daily-cap slot handed back.
-    // The kill's own CAS also accepts POSTED rows, so first re-claim the row as still unbound and
-    // SUBMITTING (and drop any reported-id marker, which takes it out of the fast pass): if the
-    // fast pass adopted it meanwhile, this snapshot is stale and killing would strand a fill.
-    const still = await prisma.orderAttempt.updateMany({
-      where: { id: attempt.id, state: "SUBMITTING", externalOrderId: null },
-      data: { error: "orphan_absent" },
-    });
-    if (still.count === 0) return "unknown";
+    // This snapshot was read before discovery, and the row may have been adopted since (the
+    // reported-id fast pass, or a re-report): the kill matches only a row that is STILL unbound
+    // and SUBMITTING, in the same statement, and the outcome is read back rather than assumed.
     const params = attempt.approvedParams as { betSide?: "YES" | "NO"; sharesMicro?: string } | null;
     const requested = BigInt(params?.sharesMicro ?? "0");
-    if (attempt.dir === "EXIT") await bookExitFills(prisma, attempt, requested, []);
-    else await bookEntryFills(prisma, attempt, params?.betSide === "NO" ? "NO" : "YES", requested, []);
-    return "killed";
+    if (attempt.dir === "EXIT") await bookExitFills(prisma, attempt, requested, [], { killOnlyUnbound: true });
+    else await bookEntryFills(prisma, attempt, params?.betSide === "NO" ? "NO" : "YES", requested, [], { killOnlyUnbound: true });
+    const after = await prisma.orderAttempt.findUnique({ where: { id: attempt.id }, select: { state: true } });
+    return after?.state === "KILLED" ? "killed" : "unknown";
   }
 
   // Adopt it. The CAS gates on the row still being an unbound SUBMITTING one, and the unique index

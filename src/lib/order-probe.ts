@@ -217,13 +217,17 @@ export async function verifyReportedOrder(
       const ts = stamped ? new Date(String(stamped)).getTime() : Number.NaN;
       return Number.isFinite(ts) && ts >= floorMs;
     });
-    // More matched than was signed means these trades are not this order's — refuse to call it ours.
+    // More matched than was signed is not this order as we know it. NOT a refusal, though: whether
+    // the exchange can hand a taker extra shares (price improvement) is unconfirmed, and a refusal
+    // would show a red error for an order whose money is spent. Unverifiable leaves it to the
+    // orphan sweep, and the warning makes it visible.
     const namedMicro = named.reduce<bigint>((sum, row) => {
       const size = Number((row as Record<string, unknown>).size);
       return sum + (Number.isFinite(size) && size > 0 ? BigInt(Math.round(size * 1_000_000)) : 0n);
     }, 0n);
     if (named.length > 0 && namedMicro > signedSharesMicro + 1n) {
-      return { ok: false, reason: "mismatch", detail: "trade_size_exceeds_signed" };
+      console.warn(`[order-probe] ${attempt.id}: trades for ${orderId} total ${namedMicro} > signed ${signedSharesMicro} — left unverified`);
+      return { ok: false, reason: "unverifiable" };
     }
     if (named.length > 0) {
       console.warn(`[order-probe] ${attempt.id}: reported order ${orderId} verified from trade evidence`);
@@ -400,6 +404,17 @@ export function realProbes(prisma: PrismaClient): { probe: OrderProbe; discover:
         if (String(row.traderSide ?? "") !== "TAKER") continue; // our FAK order is always the taker
         const takerOrderId = String(row.takerOrderId ?? "");
         if (!takerOrderId) continue;
+        // A taker trade on this account that is on another token or in the other direction is not
+        // our order — but it is not proof of absence either, so it only makes the answer "unknown".
+        // (Adopting it would book, say, the user's own BUY elsewhere as an EXIT's sale proceeds;
+        // declaring absence on it would let the sweep kill an attempt whose money may be spent.)
+        if (
+          String(row.tokenId ?? "") !== signed.tokenId ||
+          String(row.side ?? "").toUpperCase() !== (attempt.dir === "EXIT" ? "SELL" : "BUY")
+        ) {
+          incomplete = true;
+          continue;
+        }
         const stamped = row.matchedAt ?? row.updatedAt;
         const ts = stamped ? new Date(String(stamped)).getTime() : Number.NaN;
         // Without a readable timestamp this cannot be told apart from one of the user's older

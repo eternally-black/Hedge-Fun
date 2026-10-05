@@ -174,7 +174,8 @@ async function main() {
     assert.deepStrictEqual(verdict, { ok: false, reason: "unverifiable" }, JSON.stringify(wrong));
   }
 
-  // 12. Trades naming the id add up to MORE than was signed → a mismatch, refused outright.
+  // 12. Trades naming the id add up to MORE than was signed → unverifiable (not a 422: whether a taker can get
+  //     extra shares is unconfirmed, and a refusal would show an error for a filled order).
   {
     const verdict = await verifyReportedOrder(client, attemptFixture(), "order-1", "0xdepositwallet", {
       fetchOrder: async () => null,
@@ -186,7 +187,7 @@ async function main() {
         complete: true,
       }),
     });
-    assert.deepStrictEqual(verdict, { ok: false, reason: "mismatch", detail: "trade_size_exceeds_signed" });
+    assert.deepStrictEqual(verdict, { ok: false, reason: "unverifiable" }, "oversize is left to the orphan sweep, never a red error");
   }
 
   // 9. Without tradeRetryDelaysMs (the poller's fast pass) there is exactly one read and no wait.
