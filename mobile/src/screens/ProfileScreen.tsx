@@ -8,6 +8,7 @@ import { useLinkWithOAuth, usePrivy, useUnlinkOAuth } from "@privy-io/expo";
 import type { MeResponse } from "@contract/api-types";
 import { type Api, statusOf } from "../api";
 import { colors } from "../theme";
+import { setTrayStyle, useTrayStyle } from "../orderStatus";
 import { num, usd } from "../format";
 import { RealModeSwitch } from "../components/RealModeSwitch";
 import { RealPredictionsSetup } from "../components/RealPredictionsSetup";
@@ -28,6 +29,12 @@ const MORE: { key: "history" | "vault" | "invite"; glyph: string; label: string;
 
 type TwitterAccount = { type: string; username?: string | null; subject?: string };
 
+const TRAY_OPTIONS = [
+  { key: "A", hint: "chips above buttons" },
+  { key: "B", hint: "chips under the pill" },
+  { key: "C", hint: "badge on balance" },
+] as const;
+
 export function ProfileScreen({ me, api, onRefreshMe, onLogout, onToast, onNav, onOpenHistory }: {
   me: MeResponse | null;
   api: Api;
@@ -37,6 +44,7 @@ export function ProfileScreen({ me, api, onRefreshMe, onLogout, onToast, onNav, 
   onNav: (s: "vault" | "invite") => void;
   onOpenHistory: () => void;
 }) {
+  const trayStyle = useTrayStyle();
   const handle = me?.user.twitter ?? (me?.user.email ? me.user.email.split("@")[0] : "degen");
   const initials = handle.slice(0, 2).toUpperCase();
   const [resetting, setResetting] = useState(false);
@@ -171,6 +179,27 @@ export function ProfileScreen({ me, api, onRefreshMe, onLogout, onToast, onNav, 
       {/* The phone's TradingWallet is the web's linked-wallet list (it renders its own heading). */}
       <TradingWallet me={me} api={api} onRefreshMe={onRefreshMe} onToast={onToast} />
 
+      {/* A/B/C test of how a real swipe's order status is shown (orderStatus.ts). Owner-facing for
+          now: pick one, swipe a few cards, compare. */}
+      <Text style={styles.sectionLabel}>Order status (test)</Text>
+      <View style={styles.trayRow}>
+        {TRAY_OPTIONS.map((o) => {
+          const on = trayStyle === o.key;
+          return (
+            <TouchableOpacity
+              key={o.key}
+              style={[styles.trayBtn, on && styles.trayBtnOn]}
+              onPress={() => setTrayStyle(o.key)}
+              accessibilityRole="button"
+              accessibilityState={{ selected: on }}
+            >
+              <Text style={[styles.trayKey, on && styles.trayKeyOn]}>{o.key}</Text>
+              <Text style={styles.trayHint}>{o.hint}</Text>
+            </TouchableOpacity>
+          );
+        })}
+      </View>
+
       <Text style={styles.sectionLabel}>Account</Text>
       <View style={styles.accountRow}>
         <View style={{ minWidth: 0, flex: 1 }}>
@@ -254,6 +283,15 @@ const styles = StyleSheet.create({
   devBody: { color: colors.muted, fontSize: 12, marginTop: 4 },
   devBtn: { marginTop: 10, backgroundColor: colors.skip, borderRadius: 12, paddingVertical: 12, alignItems: "center" },
   devBtnText: { color: "#04121f", fontWeight: "700", fontSize: 13 },
+  trayRow: { flexDirection: "row", gap: 8, marginTop: 10 },
+  trayBtn: {
+    flex: 1, paddingVertical: 9, paddingHorizontal: 8, borderRadius: 12, alignItems: "center",
+    backgroundColor: colors.panel, borderWidth: 1, borderColor: colors.line,
+  },
+  trayBtnOn: { borderColor: colors.energy, backgroundColor: "rgba(255,61,205,0.12)" },
+  trayKey: { color: colors.muted, fontSize: 15, fontWeight: "900" },
+  trayKeyOn: { color: colors.energy },
+  trayHint: { color: colors.muted, fontSize: 10, marginTop: 2, textAlign: "center" },
   sectionLabel: { color: colors.muted, fontSize: 10, letterSpacing: 1.4, textTransform: "uppercase", fontWeight: "700", marginTop: 22 },
   accountRow: {
     marginTop: 10, backgroundColor: colors.panel, borderWidth: 1, borderColor: colors.line, borderRadius: 14,

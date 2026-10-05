@@ -13,6 +13,9 @@ import { placeRealOrder } from "@contract/real-client";
 import { realErrText, realResultText, RETRYABLE_REAL_ERRORS } from "@contract/real-copy";
 import { DECK_MIN_LEAD_MS, QUOTE_POLL_MS } from "../../lib/config";
 import { DeckCard, DeckClockActive, isFresh, type SwipeDir } from "../components/DeckCard";
+import { OrderChips } from "../components/OrderTray";
+import { pushOrder, settleOrder, useTrayStyle } from "../orderStatus";
+import { sideLabels } from "../format";
 import { useStackDepth } from "../useStackDepth";
 import { StakeSheet } from "../components/StakeSheet";
 
@@ -56,6 +59,11 @@ export function DeckScreen({ active, me, api, onRefreshMe, onToast, onTopup, rea
   useEffect(() => { realCtxRef.current = realCtx; }, [realCtx]);
   const realModeRef = useRef(realMode);
   useEffect(() => { realModeRef.current = realMode; }, [realMode]);
+  // Where real-order feedback goes (an A/B/C test switched in Profile): A/B show it as chips by the
+  // deck and drop the bottom toasts for it; C keeps the toasts and shows a badge by the HUD balance.
+  const trayStyle = useTrayStyle();
+  const trayStyleRef = useRef(trayStyle);
+  useEffect(() => { trayStyleRef.current = trayStyle; }, [trayStyle]);
 
   // Initial load (and retry). NOT re-run after swipes — /api/deck re-shuffles with a fresh seed
   // each call, so replacing the deck mid-session would snap a DIFFERENT card into the top slot.
@@ -183,6 +191,12 @@ export function DeckScreen({ active, me, api, onRefreshMe, onToast, onTopup, rea
         return;
       }
       advance();
+      // A real order gets a status chip the moment the card flies — the answer arrives while the user
+      // is already on the next card, so this is how they know each swipe went through.
+      const realOrder = dir !== "SKIP" && realModeRef.current && !!realCtxRef.current;
+      const labels = sideLabels(card);
+      const orderId = realOrder ? pushOrder(dir === "YES" ? labels.yes : labels.no, dir) : 0;
+      const toastReal = trayStyleRef.current === "C";
       // Echo the price the user was LOOKING AT for the side they picked, so the server can refuse
       // rather than silently book a worse one if the live book moved against them (D10 Slice B).
       // A YES/NO in real mode goes through the two-phase order protocol (intent → device signs →
@@ -213,7 +227,16 @@ export function DeckScreen({ active, me, api, onRefreshMe, onToast, onTopup, rea
           // A real order that did not fully fill says so — "posted"/"submitting" are not a fill.
           if (dir !== "SKIP" && realModeRef.current) {
             const res = r as { status: string; filledSharesMicro?: string };
-            if (res.status !== "filled") onToast(realResultText(res));
+            if (orderId) {
+              if (res.status === "filled" || res.status === "partial") {
+                settleOrder(orderId, "filled", `${(Number(res.filledSharesMicro ?? "0") / 1e6).toFixed(2)} sh`);
+              } else if (res.status === "killed") {
+                settleOrder(orderId, "failed", "No fill");
+              } else {
+                settleOrder(orderId, "posted", "Confirming");
+              }
+            }
+            if (res.status !== "filled" && toastReal) onToast(realResultText(res));
           }
           // Paper only: the swipe that spent the LAST point swipe of the day (count == cap, not over)
           // arms the one-shot hand-off to the feed. The server's own count is authoritative.
@@ -226,11 +249,23 @@ export function DeckScreen({ active, me, api, onRefreshMe, onToast, onTopup, rea
         .catch((e) => {
           const status = statusOf(e);
           const body = (e as { body?: { error?: string } }).body;
+          // A refused card comes back as the NEXT card, not on top: the user has already moved on to
+          // the card that rose in its place, and yanking that away would be the jolt; they meet the
+          // refused one again right after.
+          const asNext = (cur: DeckCardT[], c: DeckCardT) => (cur.length ? [cur[0], c, ...cur.slice(1)] : [c]);
           const restore = () =>
             setDeck((d) => {
               const cur = d ?? [];
-              return cur.some((c) => c.id === card.id) ? d : [card, ...cur]; // double-tap race
+              return cur.some((c) => c.id === card.id) ? d : asNext(cur, card); // double-tap race
             });
+          if (orderId) {
+            const fresh = priceMovedBp(e);
+            settleOrder(
+              orderId,
+              "failed",
+              fresh !== undefined || (body?.error && RETRYABLE_REAL_ERRORS.has(body.error)) ? "Back as next card" : "Not placed",
+            );
+          }
           // Real refusals come before the paper chain below, which swallows every non-price_moved
           // 409 — and approvals_required is exactly the 409 the user must be told about. Nothing was
           // signed or spent, so the card comes back.
@@ -243,7 +278,7 @@ export function DeckScreen({ active, me, api, onRefreshMe, onToast, onTopup, rea
           // terminal for it. The toast always names the reason.
           else if (realModeRef.current && dir !== "SKIP" && priceMovedBp(e) === undefined) {
             if (body?.error && RETRYABLE_REAL_ERRORS.has(body.error)) restore();
-            onToast(realErrText(e));
+            if (toastReal || !orderId) onToast(realErrText(e));
             void onRefreshMe();
           }
           // 403 = daily swipe cap (raced the client gate). The bet wasn't stored; refreshMe pulls
@@ -265,9 +300,9 @@ export function DeckScreen({ active, me, api, onRefreshMe, onToast, onTopup, rea
                 const restored: DeckCardT = dir === "YES"
                   ? { ...card, yesPriceBp: fresh }
                   : { ...card, noPriceBp: fresh };
-                return [restored, ...cur];
+                return asNext(cur, restored);
               });
-              onToast("Price moved — swipe again to confirm");
+              if (toastReal || !orderId) onToast("Price moved — it's back as the next card");
             }
           }
           else console.error(e);
@@ -300,6 +335,7 @@ export function DeckScreen({ active, me, api, onRefreshMe, onToast, onTopup, rea
   return (
     <DeckClockActive.Provider value={active}>
     <View style={styles.wrap}>
+      {realMode && trayStyle === "B" ? <OrderChips /> : null}
       <View style={styles.stack}>
         {capReached ? (
           <View style={styles.panel}>
@@ -354,6 +390,7 @@ export function DeckScreen({ active, me, api, onRefreshMe, onToast, onTopup, rea
       {/* fallback buttons — hidden once the daily cap is reached */}
       {!capReached && (
         <>
+          {realMode && trayStyle === "A" ? <OrderChips /> : null}
           <View style={styles.btnRow}>
             <CircleBtn glyph="✕" color={colors.no} size={56} disabled={!top} onPress={() => top && act(top, "NO")} />
             <CircleBtn glyph="↑" color={colors.skip} size={46} disabled={!top} onPress={() => top && act(top, "SKIP")} />

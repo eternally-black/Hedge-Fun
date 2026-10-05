@@ -4,6 +4,8 @@ import { memo } from "react";
 import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import type { MeResponse } from "@contract/api-types";
 import { colors } from "../theme";
+import { OrderBadge } from "./OrderTray";
+import { useTrayStyle } from "../orderStatus";
 import { num, usd, usdFromMicro } from "../format";
 import * as wallet from "../platform/wallet.flavor";
 
@@ -46,6 +48,7 @@ export const Hud = memo(function Hud({ me, onGM, onShards, onBalance, onBell, po
   const shardPct = Math.min(100, Math.round((shards / per) * 100));
   const unread = (me?.unreadResults ?? 0) + (me?.unreadStockAlerts ?? 0); // settled calls + stock profit alerts
 
+  const trayStyle = useTrayStyle();
   return (
     <View style={styles.wrap}>
       <View style={styles.row}>
@@ -82,6 +85,8 @@ export const Hud = memo(function Hud({ me, onGM, onShards, onBalance, onBell, po
             <Text style={[styles.cashValue, { color: real ? colors.gold : colors.yes }]}>{amount}</Text>
             <Text style={styles.chipLabel}>{label}</Text>
           </View>
+          {/* Style C of the order-status test: orders in flight, by the balance they spend. */}
+          {showPredictions && trayStyle === "C" ? <OrderBadge /> : null}
         </TouchableOpacity>
 
         {/* Bell → results inbox */}
