@@ -22,6 +22,15 @@ import { deadlineLeftMs, boundedTimeoutMs } from "../src/lib/deadline";
 
 const prisma = new PrismaClient();
 
+// Row writes go out in chunked transactions, never one autocommit per row: each commit pays a WAL
+// fsync, ~17.6 ms on prod VPS1 vs ~2 ms per statement inside a transaction (measured 2026-10-08).
+// ~1.3k autocommitted catalog upserts ate ~24 s of the catalog tick's 30 s budget before Jupiter was
+// even asked, so the price reads hit "Jupiter time budget exhausted" on ~70% of catalog ticks.
+const WRITE_CHUNK = 200;
+async function inChunks<T>(items: T[], write: (chunk: T[]) => Promise<unknown>): Promise<void> {
+  for (let i = 0; i < items.length; i += WRITE_CHUNK) await write(items.slice(i, i + WRITE_CHUNK));
+}
+
 const XSTOCKS_BASE = process.env.XSTOCKS_API_BASE || "https://api.xstocks.fi/api/v2";
 const PAGE_SIZE = 100;
 const MAX_PAGES = 20; // ~9 pages today; the cap is a runaway guard, not a target
@@ -64,8 +73,8 @@ export interface CatalogResult {
 export async function refreshStockCatalog(): Promise<CatalogResult> {
   const nodes = await fetchXStocksCatalog();
   const assets = nodes.map(xstockToAsset).filter((a): a is NonNullable<typeof a> => a !== null);
-  for (const a of assets) {
-    await prisma.stockAsset.upsert({
+  await inChunks(assets, (chunk) => prisma.$transaction(chunk.map((a) =>
+    prisma.stockAsset.upsert({
       where: { mint: a.mint },
       create: {
         mint: a.mint,
@@ -91,8 +100,8 @@ export async function refreshStockCatalog(): Promise<CatalogResult> {
         tradingHours: a.tradingHours,
         openNow: a.openNow,
       },
-    });
-  }
+    }),
+  )));
   const priced = await priceAssets(assets.map((a) => a.mint));
 
   // Eligibility is a RANKING, not a per-row predicate: the deck draws from the top STOCK_DECK_POOL
@@ -157,24 +166,14 @@ async function priceAssets(mints: string[]): Promise<number> {
   if (mints.length === 0) return 0;
   const entries = await getPriceEntries(mints);
   const now = new Date();
-  let updated = 0;
-  // Bounded concurrency: ~800 updates one-by-one is a minute of round trips on the catalog tick.
-  // 8 is enough to hide the latency without opening a pool of connections the DB has to queue.
-  const queue = [...mints];
-  const workers = Array.from({ length: Math.min(8, queue.length) }, async () => {
-    while (queue.length) {
-      const mint = queue.shift()!;
-      const fields = priceFieldsFrom(entries[mint]);
-      if (!fields) continue;
-      await prisma.stockAsset.update({
-        where: { mint },
-        data: { ...fields, pricedAt: now },
-      });
-      updated++;
-    }
+  const updates = mints.flatMap((mint) => {
+    const fields = priceFieldsFrom(entries[mint]);
+    return fields ? [{ mint, fields }] : [];
   });
-  await Promise.all(workers);
-  return updated;
+  await inChunks(updates, (chunk) => prisma.$transaction(chunk.map((u) =>
+    prisma.stockAsset.update({ where: { mint: u.mint }, data: { ...u.fields, pricedAt: now } }),
+  )));
+  return updates.length;
 }
 
 // One-off dev fill: keep calling fillMissingBlurbs until a pass writes nothing (every remaining

@@ -19,13 +19,23 @@
 // cached row would keep serving stale eff prices on the shared Market row (deck/feed/fallback pool)
 // until the display-staleness bound. Unevaluated rows (missing token ids, CLOB outage) are left
 // untouched: unproven is not untradable.
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, type Prisma } from "@prisma/client";
 import { fetchMajorsMarkets, fetchSportsMarkets, type MarketCache, type SportsMarketRaw } from "../src/lib/polymarket";
 import { parseStrikeMarket, type HedgeAsset } from "../src/lib/hedge/parse";
 import { S2_SIDE_FLOOR_BP, S2_SIDE_CEIL_BP } from "../src/lib/config";
 import { evalMarketDepthBatch, type MarketDepth } from "../src/lib/depth";
 
 const prisma = new PrismaClient();
+
+// Writes are flushed in chunks, each chunk ONE transaction. Autocommitted, every upsert paid its own
+// WAL fsync: prod VPS1 measured ~17.6 ms per commit vs ~2 ms per statement inside a transaction
+// (2026-10-08), and the index issues two upserts per market (~3.6k markets) — ~7.3k commits, ~130 s
+// of fsync alone. The run grew to 200–280 s, past the poller's 180 s heartbeat bound, and the
+// watchdog restarted a healthy poller mid-run. A chunk of 100 markets is ~200 statements, well inside
+// the transaction timeout below; a failed chunk rolls back and throws out of the run as before.
+const WRITE_CHUNK = 100;
+const WRITE_TX_TIMEOUT_MS = 30_000;
+type Db = PrismaClient | Prisma.TransactionClient;
 
 // Gamma tag ids for the majors (verified live 2026-07-17 via /tags/slug/<slug>).
 const MAJOR_TAGS: { slug: string; tagId: number; asset: HedgeAsset }[] = [
@@ -84,8 +94,8 @@ export interface HedgeIndexStats {
 // Shared upsert for BOTH refresh passes (S1 crypto + S2 sports). The two blocks were byte-identical
 // copies of refresh-deck's upsert, and the fixes that landed there (no status on update, league
 // backfill) reached neither copy; one function keeps them honest.
-export async function upsertIndexedMarket(m: MarketCache, depth: MarketDepth): Promise<{ id: string }> {
-  return prisma.market.upsert({
+export async function upsertIndexedMarket(m: MarketCache, depth: MarketDepth, db: Db = prisma): Promise<{ id: string }> {
+  return db.market.upsert({
     where: { polymarketId: m.polymarketId },
     create: {
       polymarketId: m.polymarketId,
@@ -122,7 +132,45 @@ export async function upsertIndexedMarket(m: MarketCache, depth: MarketDepth): P
   });
 }
 
-export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
+// One pending write: the Market cache row plus its MarketMeta enrichment (needs the row's id).
+type MetaData = Omit<Prisma.MarketMetaUncheckedCreateInput, "marketId" | "id">;
+interface PendingWrite {
+  m: MarketCache;
+  depth: MarketDepth;
+  meta: MetaData;
+}
+
+// Flush pending writes in WRITE_CHUNK-sized transactions; returns the Market ids in input order.
+// onProgress fires after every committed chunk — the poller's heartbeat, so a long index run that
+// is still making progress is never read as a dead poller.
+async function flushWrites(writes: PendingWrite[], onProgress?: () => void): Promise<string[]> {
+  const ids: string[] = [];
+  for (let i = 0; i < writes.length; i += WRITE_CHUNK) {
+    const chunk = writes.slice(i, i + WRITE_CHUNK);
+    const chunkIds = await prisma.$transaction(
+      async (tx) => {
+        const out: string[] = [];
+        for (const w of chunk) {
+          const market = await upsertIndexedMarket(w.m, w.depth, tx);
+          await tx.marketMeta.upsert({
+            where: { marketId: market.id },
+            create: { marketId: market.id, ...w.meta },
+            update: w.meta,
+          });
+          out.push(market.id);
+        }
+        return out;
+      },
+      { timeout: WRITE_TX_TIMEOUT_MS },
+    );
+    ids.push(...chunkIds);
+    onProgress?.();
+  }
+  return ids;
+}
+
+export async function refreshHedgeIndex(opts: { onProgress?: () => void } = {}): Promise<HedgeIndexStats> {
+  const { onProgress } = opts;
   const stats: HedgeIndexStats = {
     discovered: 0,
     upserted: 0,
@@ -158,6 +206,8 @@ export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
     const depths = await evalMarketDepthBatch(
       rows.map((r) => ({ key: r.cache.polymarketId, yesTokenId: r.cache.yesTokenId, noTokenId: r.cache.noTokenId })),
     );
+    onProgress?.();
+    const writes: PendingWrite[] = [];
 
     for (const row of rows) {
       stats.discovered++;
@@ -185,10 +235,9 @@ export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
         continue;
       }
 
-      // Upsert the base Market cache row (mirrors refresh-deck) so the poller can settle it.
-      const market = await upsertIndexedMarket(m, depth);
-
-      // Upsert the enrichment. asset from the parse when confident, else the tag's asset (coverage).
+      // Queue the base Market cache row (mirrors refresh-deck, so the poller can settle it) and the
+      // enrichment; both land in the chunked flush after the loop.
+      // Enrichment: asset from the parse when confident, else the tag's asset (coverage).
       const meta = {
         asset: parsed.asset ?? tag.asset,
         tagSlug: tag.slug,
@@ -202,16 +251,12 @@ export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
         volumeCents: rankCents(row.volumeNum),
         parseOk: parsed.parseOk,
       };
-      await prisma.marketMeta.upsert({
-        where: { marketId: market.id },
-        create: { marketId: market.id, ...meta },
-        update: meta,
-      });
-
-      stats.upserted++;
-      stats.parsed++;
-      a.parsed++;
+      writes.push({ m, depth, meta });
     }
+    await flushWrites(writes, onProgress);
+    stats.upserted += writes.length;
+    stats.parsed += writes.length;
+    a.parsed += writes.length;
   }
 
   // ── S2 sports/esports pass (life-event hedge index) ────────────────────────────────────────────────
@@ -227,9 +272,12 @@ export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
     fetchErrors.push(`sports: ${(e as Error).message}`);
   }
   stats.sports.discovered = sports.length;
+  onProgress?.();
   const sportsDepths = await evalMarketDepthBatch(
     sports.map((s) => ({ key: s.cache.polymarketId, yesTokenId: s.cache.yesTokenId, noTokenId: s.cache.noTokenId })),
   );
+  onProgress?.();
+  const sportsWrites: PendingWrite[] = [];
   // Every market that PASSES the band this run stays/becomes s2Eligible; anything previously eligible
   // but NOT re-affirmed here (dropped from the Gamma fetch, or fell out of the price band because the
   // match started/decided) is demoted below (F2) so it can never surface in a picker/search/accept.
@@ -264,8 +312,6 @@ export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
     const leagueLabel = s.league;
     const leagueSlug = leagueLabel ? slugify(leagueLabel) : null;
 
-    const market = await upsertIndexedMarket(m, depth);
-
     const meta = {
       s2Eligible: true,
       sportKind: s.category, // "sports" | "esports"
@@ -278,17 +324,13 @@ export async function refreshHedgeIndex(): Promise<HedgeIndexStats> {
       volumeCents: rankCents(s.volumeNum),
       parsedDeadline: new Date(m.resolutionDeadline),
     };
-    await prisma.marketMeta.upsert({
-      where: { marketId: market.id },
-      create: { marketId: market.id, ...meta },
-      update: meta,
-    });
-
-    eligibleMarketIds.push(market.id);
+    sportsWrites.push({ m, depth, meta });
     stats.sports.eligible++;
     const key = leagueLabel ?? "(unknown)";
     stats.sports.byLeague[key] = (stats.sports.byLeague[key] ?? 0) + 1;
   }
+
+  eligibleMarketIds.push(...(await flushWrites(sportsWrites, onProgress)));
 
   // 1b rejection stamp (both passes): rows the gate EVALUATED and found untradable get eff null /
   // capacity 0 / bookTsAt now, so every eff-consuming surface (deck/feed routes, the S2 candidates

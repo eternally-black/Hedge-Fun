@@ -71,7 +71,9 @@ const HEDGE_INDEX_EVERY_N_TICKS = 5;
 // The container only turns unhealthy after three 30 s checks in a row see the file older than 180 s,
 // so a restart needs 240 s without a beat. Beats land after the lease, after each successful upstream
 // subsystem, before the settle sweep and at the end of a clean tick, so the longest no-beat spans are
-// deck 45 + index 120 = 165 s (plus the index's DB upserts, which a budget cannot cut) and settle 60 +
+// deck 45 + index 120 = 165 s (the index's DB upserts, which a budget cannot cut, beat after every
+// committed chunk via onProgress — on 2026-10-08 ~7.3k autocommitted upserts at ~18 ms of fsync each
+// pushed the run to 200–280 s and the watchdog restarted a live poller) and settle 60 +
 // funding 30 + real-settle 45 + the 20 s reconcile call = 155 s (plus DB). The stocks pass adds at most
 // 10 s per tick (30 s on its catalog minute, which never coincides with the index; plus the 5 s
 // sponsor-balance read, which rides that same minute). A request under a
@@ -299,7 +301,7 @@ async function tick() {
   if ((tickCount - 1) % HEDGE_INDEX_EVERY_N_TICKS === 0) {
     t = Date.now();
     try {
-      const hs = await withDeadline(HEDGE_INDEX_GAMMA_BUDGET_MS, () => refreshHedgeIndex());
+      const hs = await withDeadline(HEDGE_INDEX_GAMMA_BUDGET_MS, () => refreshHedgeIndex({ onProgress: beat }));
       console.log(
         `[hedge-index] S1 parsed=${hs.parsed}/${hs.discovered} | S2 eligible=${hs.sports.eligible}/${hs.sports.discovered} cleared=${hs.sports.clearedStale}`,
       );
