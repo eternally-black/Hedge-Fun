@@ -75,7 +75,7 @@ const HEDGE_INDEX_EVERY_N_TICKS = 5;
 // committed chunk via onProgress — on 2026-10-08 ~7.3k autocommitted upserts at ~18 ms of fsync each
 // pushed the run to 200–280 s and the watchdog restarted a live poller) and settle 60 +
 // funding 30 + real-settle 45 + the 20 s reconcile call = 155 s (plus DB). The stocks pass adds at most
-// 10 s per tick (30 s on its catalog minute, which never coincides with the index; plus the 5 s
+// 10 s per tick (90 s on its catalog minute, which never coincides with the index; plus the 5 s
 // sponsor-balance read, which rides that same minute). A request under a
 // budget is clamped to what is left of it, so an in-flight request never extends the span. A budget hit is an
 // ordinary subsystem failure — the previous deck / index rows stay, nothing partial is written,
@@ -95,7 +95,11 @@ const PRUNE_EVERY_N_TICKS = 5;
 // full xStocks catalog + all ~800 prices every 5th tick on phase 1 — deliberately not the hedge
 // index's minute (phase 0) or the prune's (phase 2), so the heavy passes never stack on one tick.
 const STOCK_PRICES_BUDGET_MS = 10_000;
-const STOCK_CATALOG_BUDGET_MS = 30_000;
+// 90 s, not 30: the xStocks catalog grew to 13 pages of ~600 kB, ~28 s sequential from VPS1
+// (measured 2026-10-09), so a 30 s budget left nothing for the ~26 Jupiter price reads after it and
+// the catalog tick failed almost every time. The span is beaten on both sides (after books, after
+// stocks), so 90 + blurbs 20 + sponsor 5 = 115 s stays inside the 180 s heartbeat bound.
+const STOCK_CATALOG_BUDGET_MS = 90_000;
 const STOCK_CATALOG_EVERY_N_TICKS = 5;
 const STOCK_BLURB_BUDGET_MS = 20_000; // card copy: at most two LLM calls, on the catalog tick only
 const STOCK_SWEEP_BUDGET_MS = 15_000; // pending real-buy attempts: a few Helius reads, or nothing at all

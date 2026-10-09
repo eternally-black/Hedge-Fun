@@ -33,7 +33,7 @@ async function inChunks<T>(items: T[], write: (chunk: T[]) => Promise<unknown>):
 
 const XSTOCKS_BASE = process.env.XSTOCKS_API_BASE || "https://api.xstocks.fi/api/v2";
 const PAGE_SIZE = 100;
-const MAX_PAGES = 20; // ~9 pages today; the cap is a runaway guard, not a target
+const MAX_PAGES = 20; // 13 pages on 2026-10-09; the cap is a runaway guard, not a target
 const TIMEOUT_MS = 10_000;
 
 // Page through the public xStocks catalog until the API says there is no next page (or MAX_PAGES).
