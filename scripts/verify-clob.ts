@@ -15,6 +15,7 @@
 // there — that is the real contract. Imminent-expiry omissions are expected and NOT asserted.
 import assert from "node:assert";
 import { getBooks, postBooks } from "../src/lib/clob";
+import { canaryFail } from "./canary-exit";
 
 const GAMMA_BASE = process.env.POLYMARKET_API_BASE ?? "https://gamma-api.polymarket.com";
 // The canary's universe: markets resolving further out than this. Nearer in, book teardown ahead of
@@ -165,7 +166,4 @@ async function main() {
   console.log("\nclob: VERIFIED");
 }
 
-main().catch((e) => {
-  console.error("clob verify FAILED:", e);
-  process.exit(1);
-});
+main().catch((e) => canaryFail("clob verify", e));

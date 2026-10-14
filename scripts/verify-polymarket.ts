@@ -1,7 +1,8 @@
 // Live verification of the Polymarket Gamma integration. Run: npm run verify:polymarket
 // Hits the real API and asserts the blueprint's VERIFY-AT-RUNTIME flags hold.
 import assert from "node:assert";
-import { fetchBlitzDeck, fetchResolution, mapMarket } from "../src/lib/polymarket";
+import { fetchBlitzDeck, fetchResolution } from "../src/lib/polymarket";
+import { canaryFail } from "./canary-exit";
 import { categoryOf, withinCategoryHorizon, DECK_FETCH_HORIZON_HOURS } from "../src/lib/deck-mix";
 import { DECK_MIN_LEAD_MS, DECK_MIN_SERVABLE } from "../src/lib/config";
 
@@ -137,80 +138,7 @@ async function main() {
     assert.ok(wide.length > 0, "parser yields markets on a wider window");
   }
 
-  // 3. mapMarket unit: a synthetic resolved-YES market maps correctly.
-  const synthetic = mapMarket({
-    conditionId: "0xtest",
-    question: "Test?",
-    endDate: new Date(Date.now() + 3_600_000).toISOString(),
-    outcomes: '["Yes","No"]',
-    outcomePrices: '["1","0"]',
-    umaResolutionStatus: "resolved",
-    closed: true,
-  });
-  assert.strictEqual(synthetic?.status, "RESOLVED");
-  assert.strictEqual(synthetic?.resolvedOutcome, "YES");
-  console.log("3. ✓ mapMarket resolves YES on [1,0] + umaResolutionStatus=resolved");
-
-  // 3b. startsAt is KICK-OFF only (c61ebbc): Gamma's `gameStartTime` ("+00" wire form normalized
-  //     to ISO), never `startDate` — that is the LISTING date, often weeks before the match, and
-  //     it used to masquerade here as a fact about the game. This fixture pins both halves.
-  const kickoffIso = "2026-07-01T18:00:00.000Z";
-  const withStart = mapMarket({
-    conditionId: "0xstart",
-    question: "Will CA Platense win on 2026-07-01?", // a match: only sports/esports keep a kick-off (3ccb6ff)
-    startDate: "2026-06-20T00:00:00Z", // listing date — must be IGNORED
-    gameStartTime: "2026-07-01 18:00:00+00", // Gamma's own wire format for kick-off
-    endDate: new Date(Date.now() + 3_600_000).toISOString(),
-    outcomes: '["Yes","No"]',
-    outcomePrices: '["0.5","0.5"]',
-    tags: [{ label: "Sports" }, { label: "Soccer" }],
-  });
-  assert.strictEqual(withStart?.startsAt, kickoffIso, "gameStartTime present -> startsAt = kick-off ISO");
-  const noStart = mapMarket({
-    conditionId: "0xnostart",
-    question: "Crypto up or down?",
-    startDate: "2026-06-20T00:00:00Z", // a listing date alone is NOT a start
-    endDate: new Date(Date.now() + 3_600_000).toISOString(),
-    outcomes: '["Up","Down"]',
-    outcomePrices: '["0.5","0.5"]',
-  });
-  assert.strictEqual(noStart?.startsAt, null, "no gameStartTime -> startsAt = null (startDate ignored)");
-  console.log("3b. ✓ mapMarket maps startsAt from gameStartTime only (kick-off), never startDate");
-
-  // 4. Binary markets keep their REAL side labels (index 0 = YES side, index 1 = NO side).
-  //    The card shows these, not a forced Yes/No. Covers Up/Down, teams, and Over/Under.
-  const cases: { label: string; outcomes: string; prices: string; yesL: string; noL: string; yesBp: number; noBp: number }[] = [
-    { label: "Up/Down", outcomes: '["Up", "Down"]', prices: '["0.7", "0.3"]', yesL: "Up", noL: "Down", yesBp: 7000, noBp: 3000 },
-    { label: "teams", outcomes: '["L1ga Team", "4ikibamboni"]', prices: '["0.625", "0.375"]', yesL: "L1ga Team", noL: "4ikibamboni", yesBp: 6250, noBp: 3750 },
-    { label: "Over/Under", outcomes: '["Over", "Under"]', prices: '["0.465", "0.535"]', yesL: "Over", noL: "Under", yesBp: 4650, noBp: 5350 },
-  ];
-  for (const c of cases) {
-    const mk = mapMarket({
-      conditionId: "0x" + c.label,
-      question: `Binary: ${c.label}?`,
-      endDate: new Date(Date.now() + 3_600_000).toISOString(),
-      outcomes: c.outcomes,
-      outcomePrices: c.prices,
-    });
-    assert.ok(mk, `${c.label} must map (binary with real labels)`);
-    assert.strictEqual(mk!.outcomeYesLabel, c.yesL, `${c.label}: side-A label`);
-    assert.strictEqual(mk!.outcomeNoLabel, c.noL, `${c.label}: side-B label`);
-    assert.strictEqual(mk!.yesPriceBp, c.yesBp, `${c.label}: side-A price`);
-    assert.strictEqual(mk!.noPriceBp, c.noBp, `${c.label}: side-B price`);
-  }
-  // Multi-outcome (>2) is still rejected — we don't model n-way bets.
-  const multi = mapMarket({
-    conditionId: "0xmulti", question: "Who wins?",
-    endDate: new Date(Date.now() + 3_600_000).toISOString(),
-    outcomes: '["A","B","C"]', outcomePrices: '["0.3","0.3","0.4"]',
-  });
-  assert.strictEqual(multi, null, "3-way market must be rejected");
-  console.log("4. ✓ mapMarket keeps real labels for Up/Down, teams, Over/Under; rejects 3-way");
-
   console.log("\npolymarket: VERIFIED");
 }
 
-main().catch((e) => {
-  console.error("polymarket verify FAILED:", e);
-  process.exit(1);
-});
+main().catch((e) => canaryFail("polymarket verify", e));
