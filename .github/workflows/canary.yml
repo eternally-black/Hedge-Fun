@@ -1,8 +1,10 @@
 name: canary
 # Settlement canary: exercises the live Polymarket Gamma integration (fetchBlitzDeck per-category
-# horizon, fetchResolution closed=true lookup, mapMarket shapes). Runs on a schedule — NOT per
-# deploy — because it hits the real API. A red run = Polymarket API shape/behavior drifted and
-# settlement/deck could silently break (the 2026-06-25 "stuck in Awaiting resolution" class).
+# horizon, fetchResolution closed=true lookup) and the CLOB /books contract. Runs on a schedule —
+# NOT per deploy — because it hits the real API. A red "drift" run = Polymarket API shape/behavior
+# drifted and settlement/deck could silently break (the 2026-06-25 "stuck in Awaiting resolution"
+# class). The offline mapMarket fixtures live in `npm test` (scripts/test-map-market.ts), so our own
+# code changes fail at merge, not here the next day.
 on:
   schedule:
     - cron: "0 9 * * *" # daily 09:00 UTC
@@ -27,15 +29,50 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npm run verify:polymarket
-      - run: npm run verify:clob
+      # Retry upstream outages before paging. The 2026-10-13 red run was ONE runner-side Gamma
+      # timeout ("The operation was aborted due to timeout (after 4 attempts)") while prod read
+      # Gamma fine. Real drift reproduces on every attempt; an outage does not — so an exit 3
+      # (scripts/canary-exit.ts) is retried, and only a persistent one is alerted, as an outage.
+      - name: verify (retry upstream outages)
+        id: verify
+        run: |
+          for s in scripts/verify-polymarket.ts scripts/verify-clob.ts; do
+            for attempt in 1 2 3; do
+              set +e
+              npx tsx "$s"
+              code=$?
+              set -e
+              if [ "$code" -eq 0 ]; then
+                break
+              fi
+              if [ "$code" -eq 3 ] && [ "$attempt" -lt 3 ]; then
+                echo "::warning::$s: Polymarket unreachable (attempt $attempt/3), retrying in 5 min"
+                sleep 300
+                continue
+              fi
+              if [ "$code" -eq 3 ]; then
+                echo "kind=outage" >> "$GITHUB_OUTPUT"
+              else
+                echo "kind=drift" >> "$GITHUB_OUTPUT"
+              fi
+              exit "$code"
+            done
+          done
       - name: canary dead-man ping
         if: success()
         run: |
           if [ -n "${{ secrets.CANARY_HC_URL }}" ]; then curl -fsS --max-time 10 -o /dev/null "${{ secrets.CANARY_HC_URL }}"; fi
       - name: canary failure alert
         if: failure()
+        env:
+          KIND: ${{ steps.verify.outputs.kind }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          case "$KIND" in
+            drift)  msg="🚨 canary: Polymarket integration drifted — check before next deploy" ;;
+            outage) msg="⚠️ canary: Polymarket API unreachable from CI for ~10 min (3 tries) — outage, not drift; re-run canary later" ;;
+            *)      msg="🚨 canary: run failed before verification (setup) — see Actions" ;;
+          esac
           curl -sS --max-time 10 -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             --data-urlencode "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-            --data-urlencode "text=🚨 canary: Polymarket integration drifted — check before next deploy"
+            --data-urlencode "text=$msg"$'\n'"$RUN_URL"
