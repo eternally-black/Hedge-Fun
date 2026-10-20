@@ -324,10 +324,34 @@ export function HedgeScreen({
     <div className="hf-scroll" style={{ position: "absolute", inset: 0, overflowY: "auto", padding: "6px 16px 20px" }}>
       <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginTop: 4 }}>
         <div style={{ fontFamily: "var(--df)", fontSize: 26 }}>🛡 Hedge</div>
-        <div style={{ fontSize: 11, color: "var(--muted)" }}>Paper hedges for your Solana bag</div>
+        <div style={{ fontSize: 11, color: "var(--muted)" }}>Hedge your costs, your team, your bag</div>
         <div style={{ marginLeft: "auto" }}>
           <GhostButton onClick={() => setInfoOpen(true)}>ⓘ how this works</GhostButton>
         </div>
+      </div>
+
+      {/* S2 — the life-event surface, search-first at the top of the page. NOT gated on a linked
+          wallet (it hits its own endpoints), so it renders in every S1 state below: intro, loading,
+          linked, or an S1 feed outage. */}
+      <LifeHedgeSection
+        api={api}
+        accepted={accepted}
+        pending={pending}
+        nowMs={nowMs}
+        onAccept={accept}
+        onDismiss={dismiss}
+        onImpression={fireImpression}
+        isDismissed={isDismissed}
+        onBuyReal={onBuyReal}
+        buyRealBusy={real.busy}
+        realMode={realMode}
+      />
+
+      {/* S1 — the wallet hedge, below the search */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 26 }}>
+        <div style={{ height: 1, flex: 1, background: "var(--line)" }} />
+        <div style={{ fontSize: 10, letterSpacing: ".16em", color: "var(--muted)", textTransform: "uppercase", fontWeight: 700 }}>Wallet hedge</div>
+        <div style={{ height: 1, flex: 1, background: "var(--line)" }} />
       </div>
 
       {/* "Spotted today" — proactive cards from live 24h moves. Rendered above the wallet intro so a
@@ -423,22 +447,6 @@ export function HedgeScreen({
         </>
       )}
 
-      {/* S2 — the life-event surface. NOT gated on a linked wallet (it hits its own endpoints), so it
-          renders in every S1 state above: intro, loading, linked, or an S1 feed outage. */}
-      <LifeHedgeSection
-        api={api}
-        accepted={accepted}
-        pending={pending}
-        nowMs={nowMs}
-        onAccept={accept}
-        onDismiss={dismiss}
-        onImpression={fireImpression}
-        isDismissed={isDismissed}
-        onBuyReal={onBuyReal}
-        buyRealBusy={real.busy}
-        realMode={realMode}
-      />
-
       {/* The consent sheet doubles as the "how this works" text (the limitations live here only) —
           but in info mode: no checkbox to tick just to close a page of reading. A real consent
           takes priority, so the two can never be stacked on top of each other. */}
@@ -470,6 +478,10 @@ export function HedgeScreen({
 // ============================================================================
 type SearchState = "idle" | "loading" | "error" | "done";
 
+// The few popular picks shown above the search row (one line, max 4). Everything else is behind
+// "Browse all" so the search stays at the top of the page.
+const QUICK_CATEGORIES: readonly string[] = ["travel", "housing", "groceries", "crypto"];
+
 function LifeHedgeSection({
   api,
   accepted,
@@ -498,6 +510,7 @@ function LifeHedgeSection({
   const [pickers, setPickers] = useState<HedgePickerLeague[] | null>(null); // null = loading
   const [pickersError, setPickersError] = useState(false);
   const [openLeague, setOpenLeague] = useState<string | null>(null); // expanded league slug
+  const [browseOpen, setBrowseOpen] = useState(false); // the full cost + league lists, opt-in
 
   const [text, setText] = useState("");
   const [amount, setAmount] = useState(""); // optional $ / month, sent as amountCents
@@ -568,38 +581,73 @@ function LifeHedgeSection({
   const openTeams = openLeague ? leagues.find((l) => l.slug === openLeague)?.teams ?? [] : [];
   const noPickers = pickers !== null && leagues.length === 0;
 
-  return (
-    <div style={{ marginTop: 26 }}>
-      {/* section divider + heading */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
-        <div style={{ height: 1, flex: 1, background: "var(--line)" }} />
-        <div style={{ fontSize: 10, letterSpacing: ".16em", color: "var(--muted)", textTransform: "uppercase", fontWeight: 700 }}>Life hedge</div>
-        <div style={{ height: 1, flex: 1, background: "var(--line)" }} />
-      </div>
-      <div style={{ fontFamily: "var(--df)", fontSize: 22, lineHeight: 1.06 }}>🎟 Bet against the outcome you dread</div>
-      <p style={{ color: "var(--muted)", fontSize: 12, lineHeight: 1.5, marginTop: 5 }}>
-        Rooting for a team? Put a little on them losing — soften the sting either way. No wallet needed.
-      </p>
+  const quickRules = STOCK_RULES.filter((r) => QUICK_CATEGORIES.includes(r.category));
 
-      {/* life-situation chips — the stock-hedge entry point (STOCK_RULES is the product's opinion) */}
-      <div style={{ marginTop: 12 }}>
+  return (
+    <div style={{ marginTop: 14 }}>
+      {/* popular picks — ONE non-wrapping line; each fires a search directly, nothing expands */}
+      <div className="hf-scroll" style={{ display: "flex", gap: 7, overflowX: "auto", paddingBottom: 2 }}>
+        {quickRules.map((r) => (
+          <Chip key={r.category} accent onClick={() => { setText(r.chipQuery); void runSearch(r.chipQuery); }}>{r.emoji} {r.label}</Chip>
+        ))}
+      </div>
+
+      {/* the search row — the page's first input */}
+      <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+        <input
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") submitText(); }}
+          maxLength={200}
+          placeholder={'e.g. $800 on flights · "rooting for the Lakers"'}
+          aria-label="Describe a life cost or who you're rooting for"
+          style={{ flex: 1, minWidth: 0, background: "var(--panel2)", border: "1px solid var(--line)", borderRadius: 14, padding: "12px 14px", color: "var(--text)", fontFamily: "var(--nf)", fontSize: 12, outline: "none" }}
+        />
+        <input
+          type="number"
+          inputMode="decimal"
+          min={0}
+          value={amount}
+          onChange={(e) => setAmount(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") submitText(); }}
+          placeholder="$ / month"
+          aria-label="Optional monthly amount in dollars"
+          style={{ width: 96, background: "var(--panel2)", border: "1px solid var(--line)", borderRadius: 14, padding: "12px 12px", color: "var(--text)", fontFamily: "var(--nf)", fontSize: 12, outline: "none" }}
+        />
+        <button
+          type="button"
+          onClick={searchState === "loading" ? undefined : submitText}
+          disabled={searchState === "loading" || !text.trim()}
+          style={{ padding: "0 16px", borderRadius: 14, fontFamily: "var(--nf)", fontWeight: 700, fontSize: 13, cursor: searchState === "loading" || !text.trim() ? "default" : "pointer", border: "1px solid color-mix(in srgb,var(--energy) 50%,transparent)", background: "color-mix(in srgb,var(--energy) 16%,transparent)", color: "var(--energy)", opacity: searchState === "loading" || !text.trim() ? 0.5 : 1 }}
+        >
+          {searchState === "loading" ? "…" : "Find"}
+        </button>
+      </div>
+
+      {/* the full lists live behind an opt-in toggle, never above the search */}
+      <div style={{ marginTop: 8 }}>
+        <GhostButton onClick={() => setBrowseOpen((v) => !v)}>{browseOpen ? "▴ Hide lists" : "▾ Browse all costs & leagues"}</GhostButton>
+      </div>
+
+      {browseOpen && (
+      <>
+      <div style={{ marginTop: 10 }}>
         <div style={{ fontSize: 10, letterSpacing: ".12em", color: "var(--muted)", textTransform: "uppercase", marginBottom: 8 }}>Life costs</div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
           {STOCK_RULES.map((r) => (
-            <Chip key={r.category} accent onClick={() => void runSearch(r.chipQuery)}>{r.emoji} {r.label}</Chip>
+            <Chip key={r.category} accent onClick={() => { setText(r.chipQuery); void runSearch(r.chipQuery); }}>{r.emoji} {r.label}</Chip>
           ))}
         </div>
       </div>
 
-      {/* pickers — the PRIMARY path */}
       <div style={{ background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 18, padding: "14px 16px", marginTop: 12 }}>
         {pickers === null ? (
           <div style={{ fontSize: 12, color: "var(--muted)" }}>Loading pick lists…</div>
         ) : noPickers ? (
           <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.5 }}>
             {pickersError
-              ? "Couldn't load the pick lists right now — you can still describe it below."
-              : "No upcoming sports to pick from right now — describe who you're rooting for below."}
+              ? "Couldn't load the pick lists right now — you can still type it above."
+              : "No upcoming sports to pick from right now — type who you're rooting for above."}
             {pickersError && (
               <div style={{ marginTop: 10 }}><GhostButton onClick={loadPickers}>↻ Try again</GhostButton></div>
             )}
@@ -627,41 +675,8 @@ function LifeHedgeSection({
           </>
         )}
       </div>
-
-      {/* free-text — the SECONDARY path */}
-      <div style={{ marginTop: 10 }}>
-        <div style={{ fontSize: 10, letterSpacing: ".12em", color: "var(--muted)", textTransform: "uppercase", marginBottom: 6 }}>Or describe it</div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <input
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") submitText(); }}
-            maxLength={200}
-            placeholder={'e.g. $800 on flights this month · or "rooting for the Lakers"'}
-            aria-label="Describe a life cost or who you're rooting for"
-            style={{ flex: 1, minWidth: 0, background: "var(--panel2)", border: "1px solid var(--line)", borderRadius: 14, padding: "12px 14px", color: "var(--text)", fontFamily: "var(--nf)", fontSize: 12, outline: "none" }}
-          />
-          <input
-            type="number"
-            inputMode="decimal"
-            min={0}
-            value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") submitText(); }}
-            placeholder="$ / month"
-            aria-label="Optional monthly amount in dollars"
-            style={{ width: 96, background: "var(--panel2)", border: "1px solid var(--line)", borderRadius: 14, padding: "12px 12px", color: "var(--text)", fontFamily: "var(--nf)", fontSize: 12, outline: "none" }}
-          />
-          <button
-            type="button"
-            onClick={searchState === "loading" ? undefined : submitText}
-            disabled={searchState === "loading" || !text.trim()}
-            style={{ padding: "0 16px", borderRadius: 14, fontFamily: "var(--nf)", fontWeight: 700, fontSize: 13, cursor: searchState === "loading" || !text.trim() ? "default" : "pointer", border: "1px solid color-mix(in srgb,var(--energy) 50%,transparent)", background: "color-mix(in srgb,var(--energy) 16%,transparent)", color: "var(--energy)", opacity: searchState === "loading" || !text.trim() ? 0.5 : 1 }}
-          >
-            {searchState === "loading" ? "…" : "Find"}
-          </button>
-        </div>
-      </div>
+      </>
+      )}
 
       {/* results */}
       {searchState === "loading" ? (
@@ -732,7 +747,7 @@ function Chip({ active, accent, onClick, children }: { active?: boolean; accent?
       type="button"
       onClick={onClick}
       style={{
-        padding: "7px 12px", borderRadius: 999, font: "inherit", fontSize: 12, fontWeight: 700, cursor: "pointer",
+        padding: "7px 12px", borderRadius: 999, font: "inherit", fontSize: 12, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0,
         color: active ? "#0b0b12" : idle,
         background: active ? "var(--energy)" : accent ? "color-mix(in srgb,var(--energy) 14%,transparent)" : "var(--panel2)",
         border: `1px solid ${active ? "var(--energy)" : accent ? "color-mix(in srgb,var(--energy) 45%,transparent)" : "var(--line)"}`,
