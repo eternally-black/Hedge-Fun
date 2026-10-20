@@ -218,8 +218,8 @@ export function HedgeScreen({ active, me, api, onRefreshMe, onToast, onTopup }: 
       const res = (await api("/api/hedge/pickers")) as HedgePickersResponse;
       setLeagues(res.leagues);
       setPickersFailed(false);
-      // Keep the active league if it still exists; else fall to the first one.
-      setActiveLeague((cur) => (cur && res.leagues.some((l) => l.slug === cur) ? cur : (res.leagues[0]?.slug ?? null)));
+      // Keep the open league if it still exists; nothing auto-opens (no team wall above the fold).
+      setActiveLeague((cur) => (cur && res.leagues.some((l) => l.slug === cur) ? cur : null));
     } catch (e) {
       console.error(e);
       if (quiet) return; // a failed background re-read keeps the chips already on screen
@@ -408,13 +408,120 @@ export function HedgeScreen({ active, me, api, onRefreshMe, onToast, onTopup }: 
     >
       <View style={styles.headerRow}>
         <Text style={styles.title}>🛡 Hedge</Text>
-        <Text style={styles.subtitle}>Paper hedges for your bag & your team</Text>
+        <Text style={styles.subtitle}>Hedge your team, your trip, your bag</Text>
       </View>
       {/* Out of the header's flow, so it can never wrap the subtitle onto a second line. */}
       <View style={styles.tickSlot} pointerEvents="none"><UpdatingTick visible={revalidating} /></View>
 
+      {/* ─── S2 · life hedge — search-first at the top (works WITHOUT a linked wallet) ─── */}
+      {/* ONE line of league chips above the search row; a league's teams open only on tap, as one
+          more scrolling line under the search — never a wrapping wall above the input. */}
+      {leagues === null ? (
+        // The chip row's own box (31 px chips, same gaps), so the lists landing don't move the search row.
+        <View style={[styles.chipRow, { flexDirection: "row", marginTop: 12 }]}>
+          {[64, 84, 72, 90].map((w) => <SkeletonBar key={w} width={w} height={31} style={{ borderRadius: 16 }} />)}
+        </View>
+      ) : pickersFailed ? (
+        <View style={styles.inlineNoteRow}>
+          <Text style={[styles.inlineNote, { flex: 1 }]}>Couldn&apos;t load the team lists — type below instead.</Text>
+          <TouchableOpacity onPress={() => void loadPickers()} accessibilityRole="button">
+            <Text style={styles.inlineRetry}>↻ Retry</Text>
+          </TouchableOpacity>
+        </View>
+      ) : leagues.length === 0 ? null : (
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 12 }} contentContainerStyle={styles.chipRow}>
+          {leagues.map((l) => {
+            const on = l.slug === activeLeague;
+            return (
+              <TouchableOpacity
+                key={l.slug}
+                style={[styles.chip, on && styles.chipOn]}
+                onPress={() => setActiveLeague((cur) => (cur === l.slug ? null : l.slug))}
+                accessibilityRole="button"
+                accessibilityLabel={l.label}
+                accessibilityState={{ expanded: on }}
+              >
+                <Text style={[styles.chipText, on && styles.chipTextOn]}>{l.label}</Text>
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
+      )}
+
+      <View style={styles.searchRow}>
+        <TextInput
+          value={searchText}
+          onChangeText={setSearchText}
+          onSubmitEditing={submitSearch}
+          placeholder="Your club, a final, a trip…"
+          placeholderTextColor={colors.muted}
+          autoCapitalize="none"
+          autoCorrect={false}
+          returnKeyType="search"
+          maxLength={200}
+          editable={!searchBusy}
+          accessibilityLabel="What are you worried about?"
+          style={styles.searchInput}
+        />
+        <TouchableOpacity
+          style={[styles.searchBtn, (!searchText.trim() || searchBusy) && { opacity: 0.5 }]}
+          onPress={submitSearch}
+          disabled={!searchText.trim() || searchBusy}
+          accessibilityRole="button"
+          accessibilityLabel="Search"
+        >
+          <Text style={styles.searchBtnText}>{searchBusy ? "…" : "Search"}</Text>
+        </TouchableOpacity>
+      </View>
+      {searchError && <Text style={styles.searchError}>{searchError}</Text>}
+
+      {activeTeams.length > 0 && (
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 10 }} contentContainerStyle={styles.chipRow}>
+          {activeTeams.map((t) => (
+            <TouchableOpacity
+              key={t}
+              style={styles.teamChip}
+              onPress={() => { setSearchText(t); void runSearch(t); }}
+              disabled={searchBusy}
+              accessibilityRole="button"
+              accessibilityLabel={t}
+            >
+              <Text style={styles.teamChipText}>{t}</Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+      )}
+
+      {searchBusy && <ActivityIndicator color={colors.energy} style={{ marginTop: 14 }} />}
+      {searchResult && !searchBusy && (
+        <View style={styles.cardList}>
+          {searchResult.isDiscovery ? (
+            // The fallback, honestly flagged (spec §2): zero hedge framing anywhere near these cards.
+            <View style={styles.discoveryHeader}>
+              <Text style={styles.discoveryTitle}>Discovery — not a hedge</Text>
+              <Text style={styles.discoveryCopy}>
+                Hard to hedge your unique situation — nothing matched a live market. Here are contested
+                markets to explore instead; they are NOT hedges.
+              </Text>
+            </View>
+          ) : (
+            <View style={styles.resultHeader}>
+              <Text style={styles.resultTitle}>
+                Bets AGAINST <Text style={{ color: colors.text }}>{searchResult.matchedEntity}</Text>
+              </Text>
+              <Text style={styles.resultCopy}>You support them — these win if they lose.</Text>
+            </View>
+          )}
+          {searchResult.suggestions.length === 0 ? (
+            <Text style={styles.inlineNote}>Nothing live to show right now — try another team or wording.</Text>
+          ) : (
+            searchResult.suggestions.map(renderCard)
+          )}
+        </View>
+      )}
+
       {/* ─── S1 · wallet hedge ─── */}
-      <Text style={styles.sectionLabel}>Wallet hedge</Text>
+      <Text style={[styles.sectionLabel, { marginTop: 28 }]}>Wallet hedge</Text>
       {loadError ? (
         // Hoisted above the walletLinked branches: a FAILED first load leaves walletLinked null, and
         // the retry panel must stay reachable from there (and from a linked wallet's stale refresh).
@@ -471,122 +578,6 @@ export function HedgeScreen({ active, me, api, onRefreshMe, onToast, onTopup }: 
         </View>
       )}
 
-      {/* ─── S2 · life hedge (works WITHOUT a linked wallet — never gated behind S1) ─── */}
-      <Text style={[styles.sectionLabel, { marginTop: 28 }]}>Life hedge</Text>
-      <Text style={styles.sectionCopy}>
-        Back a team? Bet AGAINST them here — if they break your heart, the pot softens it. No wallet needed.
-      </Text>
-
-      {leagues === null ? (
-        // The chip rows' own boxes (31 px chips, same gaps), so the lists landing don't move the search row.
-        <View style={{ marginTop: 10 }}>
-          <View style={styles.chipRow}>
-            {[64, 84, 72, 90].map((w) => <SkeletonBar key={w} width={w} height={31} style={{ borderRadius: 16 }} />)}
-          </View>
-          <View style={styles.teamChips}>
-            {[96, 78, 110, 86].map((w) => <SkeletonBar key={w} width={w} height={31} style={{ borderRadius: 14 }} />)}
-          </View>
-        </View>
-      ) : pickersFailed ? (
-        <View style={styles.inlineNoteRow}>
-          <Text style={[styles.inlineNote, { flex: 1 }]}>Couldn&apos;t load the team lists — type below instead.</Text>
-          <TouchableOpacity onPress={() => void loadPickers()} accessibilityRole="button">
-            <Text style={styles.inlineRetry}>↻ Retry</Text>
-          </TouchableOpacity>
-        </View>
-      ) : leagues.length === 0 ? (
-        <Text style={styles.inlineNote}>
-          No open sports markets to pick from right now — type what you&apos;re worried about instead.
-        </Text>
-      ) : (
-        <View style={{ marginTop: 10 }}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
-            {leagues.map((l) => {
-              const on = l.slug === activeLeague;
-              return (
-                <TouchableOpacity
-                  key={l.slug}
-                  style={[styles.chip, on && styles.chipOn]}
-                  onPress={() => setActiveLeague(l.slug)}
-                  accessibilityRole="button"
-                  accessibilityLabel={l.label}
-                >
-                  <Text style={[styles.chipText, on && styles.chipTextOn]}>{l.label}</Text>
-                </TouchableOpacity>
-              );
-            })}
-          </ScrollView>
-          <View style={styles.teamChips}>
-            {activeTeams.map((t) => (
-              <TouchableOpacity
-                key={t}
-                style={styles.teamChip}
-                onPress={() => void runSearch(t)}
-                disabled={searchBusy}
-                accessibilityRole="button"
-                accessibilityLabel={t}
-              >
-                <Text style={styles.teamChipText}>{t}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        </View>
-      )}
-
-      <View style={styles.searchRow}>
-        <TextInput
-          value={searchText}
-          onChangeText={setSearchText}
-          onSubmitEditing={submitSearch}
-          placeholder="Or type it — your club, a final, a trip…"
-          placeholderTextColor={colors.muted}
-          autoCapitalize="none"
-          autoCorrect={false}
-          returnKeyType="search"
-          maxLength={200}
-          editable={!searchBusy}
-          accessibilityLabel="What are you worried about?"
-          style={styles.searchInput}
-        />
-        <TouchableOpacity
-          style={[styles.searchBtn, (!searchText.trim() || searchBusy) && { opacity: 0.5 }]}
-          onPress={submitSearch}
-          disabled={!searchText.trim() || searchBusy}
-          accessibilityRole="button"
-          accessibilityLabel="Search"
-        >
-          <Text style={styles.searchBtnText}>{searchBusy ? "…" : "Search"}</Text>
-        </TouchableOpacity>
-      </View>
-      {searchError && <Text style={styles.searchError}>{searchError}</Text>}
-
-      {searchBusy && <ActivityIndicator color={colors.energy} style={{ marginTop: 14 }} />}
-      {searchResult && !searchBusy && (
-        <View style={styles.cardList}>
-          {searchResult.isDiscovery ? (
-            // The fallback, honestly flagged (spec §2): zero hedge framing anywhere near these cards.
-            <View style={styles.discoveryHeader}>
-              <Text style={styles.discoveryTitle}>Discovery — not a hedge</Text>
-              <Text style={styles.discoveryCopy}>
-                Hard to hedge your unique situation — nothing matched a live market. Here are contested
-                markets to explore instead; they are NOT hedges.
-              </Text>
-            </View>
-          ) : (
-            <View style={styles.resultHeader}>
-              <Text style={styles.resultTitle}>
-                Bets AGAINST <Text style={{ color: colors.text }}>{searchResult.matchedEntity}</Text>
-              </Text>
-              <Text style={styles.resultCopy}>You support them — these win if they lose.</Text>
-            </View>
-          )}
-          {searchResult.suggestions.length === 0 ? (
-            <Text style={styles.inlineNote}>Nothing live to show right now — try another team or wording.</Text>
-          ) : (
-            searchResult.suggestions.map(renderCard)
-          )}
-        </View>
-      )}
     </ScrollView>
     </View>
   );
@@ -670,7 +661,6 @@ const styles = StyleSheet.create({
     marginTop: 16, fontSize: 10, letterSpacing: 1.4, textTransform: "uppercase",
     color: colors.muted, fontWeight: "700",
   },
-  sectionCopy: { marginTop: 6, fontSize: 12, color: colors.muted, lineHeight: 18 },
   notePanel: {
     marginTop: 10, backgroundColor: colors.panel, borderWidth: 1, borderColor: colors.line,
     borderRadius: 18, padding: 16, alignItems: "center",
@@ -705,7 +695,6 @@ const styles = StyleSheet.create({
   chipOn: { backgroundColor: "rgba(77,155,255,0.16)", borderColor: "rgba(77,155,255,0.5)" },
   chipText: { color: colors.muted, fontSize: 12, fontWeight: "700" },
   chipTextOn: { color: colors.skip },
-  teamChips: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 10 },
   teamChip: {
     paddingVertical: 7, paddingHorizontal: 12, borderRadius: 14,
     backgroundColor: colors.panel2, borderWidth: 1, borderColor: colors.line,
